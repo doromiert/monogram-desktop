@@ -1015,6 +1015,10 @@ impl Ui {
             let c = state.current_mut();
             c.unread = 0;
             c.unread_mark = false;
+            for m in &mut c.messages {
+                m.unread = false;
+            }
+            let _ = self.store.mark_read(&state.account, &state.current().jid);
         }
         self.clear_selection();
         self.attachments.borrow_mut().clear();
@@ -1179,7 +1183,12 @@ impl Ui {
         }
         let id = self.state.borrow_mut().send(value, kind)?;
         if live {
-            let state = self.state.borrow();
+            let mut state = self.state.borrow_mut();
+            if let Some(m) = state.current_mut().messages.iter_mut().find(|m| m.id == id) {
+                if m.encrypted {
+                    m.fingerprint = self.crypto.borrow().fingerprint.clone();
+                }
+            }
             let message = state.message(&id).unwrap().clone();
             let peer = state.current().jid.clone();
             drop(state);
@@ -1229,6 +1238,9 @@ impl Ui {
                 .iter_mut()
                 .find(|m| m.id == id)
                 .unwrap();
+            if live && message.encrypted {
+                message.fingerprint = self.crypto.borrow().fingerprint.clone();
+            }
             if let Some(ref r) = reply {
                 message.reply = format!(
                     "{} · {}",
@@ -1440,6 +1452,21 @@ impl Ui {
                         }
                     }
                 }
+                if !online {
+                    let _ = self.store.interrupt_actions(owner);
+                    let peers: Vec<_> = self
+                        .state
+                        .borrow()
+                        .chats
+                        .iter()
+                        .map(|c| c.jid.clone())
+                        .collect();
+                    for peer in peers {
+                        if self.store.reconcile_actions(owner, &peer).unwrap_or(false) {
+                            self.sync_actions(owner, &peer);
+                        }
+                    }
+                }
                 self.update_mode();
                 if online {
                     self.load_history(true)
@@ -1475,7 +1502,17 @@ impl Ui {
                 id,
                 aliases,
             } => {
-                let _ = self.store.merge_aliases(owner, &peer, own, &id, &aliases);
+                if self
+                    .store
+                    .merge_aliases(owner, &peer, own, &id, &aliases)
+                    .and_then(|_| self.store.reconcile_actions(owner, &peer).map(|_| ()))
+                    .is_ok()
+                {
+                    self.sync_actions(owner, &peer);
+                    if self.state.borrow().current().jid == peer {
+                        self.render_messages(false);
+                    }
+                }
             }
             BackendEvent::EncryptedMessage {
                 peer,
@@ -1567,13 +1604,52 @@ impl Ui {
         historical: bool,
         receipt_to: Option<String>,
     ) -> bool {
+        if message.action.is_some() {
+            message.author = if message.own {
+                "You".into()
+            } else {
+                self.state.borrow_mut().chat_for(&peer).name.clone()
+            };
+            let visible = self.state.borrow().current().jid == peer
+                && self.window.is_active()
+                && self.pages.visible_child_name().as_deref() == Some("chat");
+            message.unread = matches!(
+                message.action,
+                Some(crate::message_actions::Action::Correct { .. })
+            ) && !message.own
+                && !historical
+                && !visible;
+            let saved = self
+                .store
+                .record_action(owner, &peer, &message, &message.delivery)
+                .and_then(|_| self.store.reconcile_actions(owner, &peer).map(|_| ()))
+                .is_ok();
+            if saved {
+                self.sync_actions(owner, &peer);
+                if self.state.borrow().current().jid == peer {
+                    self.render_messages(!historical);
+                }
+                if let Some(to) = receipt_to {
+                    if self.preference("delivery_receipts", false) {
+                        self.command(Command::Receipt {
+                            peer: to,
+                            id: message.wire_id,
+                        });
+                    }
+                }
+            } else {
+                self.notice("Message change could not be saved");
+            }
+            return saved;
+        }
         let visible = self.state.borrow().current().jid == peer
             && self.window.is_active()
             && self.pages.visible_child_name().as_deref() == Some("chat");
+        let incoming_id = message.id.clone();
         let incoming_aliases = message.aliases.clone();
         let known = self
             .store
-            .known(owner, &peer, message.own, &message.aliases)
+            .known_message(owner, &peer, &message)
             .or_else(|| {
                 self.state
                     .borrow()
@@ -1582,7 +1658,7 @@ impl Ui {
                     .find(|c| c.jid == peer)
                     .and_then(|c| {
                         c.messages.iter().find(|m| {
-                            m.own == message.own
+                            crate::storage::same_source(m, &message)
                                 && m.aliases
                                     .iter()
                                     .any(|alias| message.aliases.contains(alias))
@@ -1611,6 +1687,7 @@ impl Ui {
                     message.author = old.author;
                     message.timestamp = old.timestamp;
                     message.time = old.time;
+                    message.unread = old.unread;
                     for alias in old.aliases {
                         if !message.aliases.contains(&alias) {
                             message.aliases.push(alias);
@@ -1654,7 +1731,8 @@ impl Ui {
                 }
             }
             if !visible && !message.own && !historical {
-                c.unread += 1
+                c.unread += 1;
+                message.unread = true;
             }
             c.messages.push(message);
             c.messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
@@ -1680,7 +1758,24 @@ impl Ui {
                 }
             }
         }
-        if saved && notify && self.preference("notifications", true) {
+        if saved {
+            match self.store.reconcile_actions(owner, &peer) {
+                Ok(true) => self.sync_actions(owner, &peer),
+                Ok(false) => {}
+                Err(_) => {
+                    self.notice("Message changes could not be reconciled");
+                    saved = false;
+                }
+            }
+        }
+        if saved
+            && notify
+            && self
+                .store
+                .message(owner, &peer, &incoming_id)
+                .is_some_and(|m| !m.retracted)
+            && self.preference("notifications", true)
+        {
             if let Some(app) = self.window.application() {
                 let notification = gio::Notification::new(&notification_title);
                 notification.set_body(Some(if self.preference("message_previews", false) {
@@ -1697,6 +1792,23 @@ impl Ui {
         saved
     }
     pub fn delivery(self: &Rc<Self>, peer: &str, id: &str, status: &str) {
+        let owner = self.state.borrow().account.clone();
+        match self.store.action_delivery(&owner, peer, id, status) {
+            Ok(true) => {
+                self.sync_actions(&owner, peer);
+                if matches!(status, "failed" | "uncertain") {
+                    self.notice("Message change failed or delivery is uncertain. Reopen Edit to recover its text.");
+                }
+                self.render_messages(false);
+                self.refresh_chats(None);
+                return;
+            }
+            Err(_) => {
+                self.notice("Message change status could not be saved");
+                return;
+            }
+            Ok(false) => {}
+        }
         let mut s = self.state.borrow_mut();
         if let Some(c) = s.chats.iter_mut().find(|c| c.jid == peer) {
             if let Some(m) = c.messages.iter_mut().find(|m| m.own && m.wire_id == id) {

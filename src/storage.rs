@@ -1,5 +1,5 @@
 use crate::model::*;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 pub struct Store {
     pub db: Connection,
@@ -23,7 +23,9 @@ impl Store {
             db
         };
         db.execute_batch("PRAGMA foreign_keys=ON;CREATE TABLE IF NOT EXISTS accounts(jid TEXT PRIMARY KEY,config TEXT NOT NULL);CREATE TABLE IF NOT EXISTS chats(account TEXT NOT NULL REFERENCES accounts(jid) ON DELETE CASCADE,peer TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(account,peer));CREATE TABLE IF NOT EXISTS messages(account TEXT NOT NULL,peer TEXT NOT NULL,id TEXT NOT NULL,timestamp TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(account,peer,id),FOREIGN KEY(account,peer) REFERENCES chats(account,peer) ON DELETE CASCADE);CREATE INDEX IF NOT EXISTS message_order ON messages(account,peer,timestamp,id);CREATE TABLE IF NOT EXISTS aliases(account TEXT NOT NULL,peer TEXT NOT NULL,own INTEGER NOT NULL,alias TEXT NOT NULL,message TEXT NOT NULL,PRIMARY KEY(account,peer,own,alias));CREATE TABLE IF NOT EXISTS preferences(key TEXT PRIMARY KEY,value TEXT NOT NULL);")?;
-        Ok(Self { db })
+        let store = Self { db };
+        store.init_actions()?;
+        Ok(store)
     }
     pub fn accounts(&self) -> Vec<Account> {
         let mut stmt = self
@@ -63,7 +65,11 @@ impl Store {
             body.as_object_mut().unwrap().remove("messages");
             tx.execute("INSERT INTO chats VALUES (?,?,?) ON CONFLICT(account,peer) DO UPDATE SET body=excluded.body",params![s.account,c.jid,body.to_string()])?;
             for m in &c.messages {
-                tx.execute("INSERT INTO messages VALUES (?,?,?,?,?) ON CONFLICT(account,peer,id) DO UPDATE SET body=excluded.body,timestamp=excluded.timestamp",params![s.account,c.jid,m.id,m.timestamp,serde_json::to_string(m).unwrap()])?;
+                if m.action.is_some() {
+                    continue;
+                }
+                self.save_base(&s.account, &c.jid, m)?;
+                tx.execute("INSERT INTO messages VALUES (?,?,?,?,COALESCE((SELECT CASE WHEN json_extract(body,'$.retracted')=1 THEN body END FROM message_bases WHERE account=? AND peer=? AND id=?),?)) ON CONFLICT(account,peer,id) DO UPDATE SET body=excluded.body,timestamp=excluded.timestamp",params![s.account,c.jid,m.id,m.timestamp,s.account,c.jid,m.id,serde_json::to_string(m).unwrap()])?;
                 for alias in &m.aliases {
                     tx.execute(
                         "INSERT OR IGNORE INTO aliases VALUES (?,?,?,?,?)",
@@ -80,6 +86,17 @@ impl Store {
         tx.commit()
     }
     pub fn load(&self, a: &str) -> State {
+        let _ = self.interrupt_actions(a);
+        let peers: Vec<String> = {
+            let mut q = self
+                .db
+                .prepare("SELECT DISTINCT peer FROM action_events WHERE account=?")
+                .unwrap();
+            q.query_map([a], |r| r.get(0)).unwrap().flatten().collect()
+        };
+        for peer in peers {
+            let _ = self.reconcile_actions(a, &peer);
+        }
         let mut stmt = self
             .db
             .prepare("SELECT peer,body FROM chats WHERE account=? ORDER BY rowid")
@@ -121,11 +138,15 @@ impl Store {
         limit: u32,
     ) -> Vec<Message> {
         let (time, id) = before.unwrap_or(("~", "~"));
-        let mut stmt=self.db.prepare("SELECT body FROM messages WHERE account=? AND peer=? AND (timestamp,id)<(?,?) ORDER BY timestamp DESC,id DESC LIMIT ?").unwrap();
+        let mut stmt=self.db.prepare("SELECT body FROM messages WHERE account=? AND peer=? AND (timestamp,id)<(?,?) AND COALESCE(json_extract(body,'$.retracted'),0)=0 ORDER BY timestamp DESC,id DESC LIMIT ?").unwrap();
         let mut rows: Vec<_> = stmt
             .query_map(params![a, peer, time, id, limit], |r| r.get::<_, String>(0))
             .unwrap()
-            .filter_map(|r| r.ok().and_then(|s| serde_json::from_str(&s).ok()))
+            .filter_map(|r| {
+                r.ok()
+                    .and_then(|s| serde_json::from_str::<Message>(&s).ok())
+                    .filter(|m| !m.retracted)
+            })
             .collect();
         rows.reverse();
         rows
@@ -141,11 +162,61 @@ impl Store {
                 .ok()
         })
     }
+    // A client stanza ID is not unique across the author's resources.
+    pub fn known_message(&self, a: &str, peer: &str, message: &Message) -> Option<String> {
+        let mut aliases = message.aliases.clone();
+        aliases.sort_by_key(|v| {
+            !v.starts_with("omemo2:") && !v.starts_with("server:") && !v.starts_with("archive:")
+        });
+        for alias in aliases {
+            let Some(id) = self.known(a, peer, message.own, &[alias.clone()]) else {
+                continue;
+            };
+            let Some(old) = self
+                .action_base(a, peer, &id)
+                .ok()
+                .or_else(|| self.message(a, peer, &id))
+            else {
+                return Some(id);
+            };
+            if alias.starts_with("omemo2:")
+                || alias.starts_with("server:")
+                || alias.starts_with("archive:")
+                || same_source(&old, message)
+            {
+                return Some(id);
+            }
+        }
+        if message.wire_id.is_empty() {
+            return None;
+        }
+        let mut q = self.db.prepare("SELECT body FROM messages WHERE account=? AND peer=? AND json_extract(body,'$.own')=? AND json_extract(body,'$.wire_id')=?").ok()?;
+        q.query_map(params![a, peer, message.own, message.wire_id], |r| {
+            r.get::<_, String>(0)
+        })
+        .ok()?
+        .flatten()
+        .filter_map(|body| serde_json::from_str::<Message>(&body).ok())
+        .find(|m| same_source(m, message))
+        .map(|m| m.id)
+    }
     pub fn delete(&self, a: &str, peer: &str, id: &str) -> rusqlite::Result<()> {
-        self.db.execute(
-            "DELETE FROM messages WHERE account=? AND peer=? AND id=?",
+        let tx = self.db.unchecked_transaction()?;
+        for table in ["messages", "message_bases"] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE account=? AND peer=? AND id=?"),
+                params![a, peer, id],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM action_refs WHERE account=? AND peer=? AND message=?",
             params![a, peer, id],
         )?;
+        tx.execute(
+            "DELETE FROM action_events WHERE account=? AND peer=? AND resolved=?",
+            params![a, peer, id],
+        )?;
+        tx.commit()?;
         Ok(())
     }
     pub fn message(&self, a: &str, peer: &str, id: &str) -> Option<Message> {
@@ -173,6 +244,28 @@ impl Store {
                 params![a, peer, own, alias, id],
             )?;
         }
+        if let Some(mut m) = self.message(a, peer, id) {
+            for alias in aliases {
+                if !m.aliases.contains(alias) {
+                    m.aliases.push(alias.clone());
+                }
+            }
+            self.save_base(a, peer, &m)?;
+            tx.execute(
+                "UPDATE messages SET body=? WHERE account=? AND peer=? AND id=?",
+                params![serde_json::to_string(&m).unwrap(), a, peer, id],
+            )?;
+        } else if let Some(local) = id.strip_prefix("event:") {
+            let body:Option<String>=tx.query_row("SELECT body FROM action_events WHERE account=? AND peer=? AND own=? AND local=?",params![a,peer,own,local],|r|r.get(0)).optional()?;
+            if let Some(mut m) = body.and_then(|body| serde_json::from_str::<Message>(&body).ok()) {
+                for alias in aliases {
+                    if !m.aliases.contains(alias) {
+                        m.aliases.push(alias.clone());
+                    }
+                }
+                tx.execute("UPDATE action_events SET body=? WHERE account=? AND peer=? AND own=? AND local=?",params![serde_json::to_string(&m).unwrap(),a,peer,own,local])?;
+            }
+        }
         tx.commit()
     }
     pub fn forget(&self, a: &str) -> rusqlite::Result<()> {
@@ -185,6 +278,12 @@ impl Store {
         )?;
         tx.commit()
     }
+}
+pub fn same_source(old: &Message, new: &Message) -> bool {
+    old.own == new.own
+        && (old.sender == new.sender
+            || (!old.sender.contains('/') || !new.sender.contains('/'))
+                && (old.unavailable || new.unavailable || old.text == new.text))
 }
 #[cfg(test)]
 mod tests {

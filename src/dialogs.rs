@@ -1480,6 +1480,21 @@ impl Ui {
                     .build(),
             );
         }
+        if m.edited {
+            for (index, content) in m.edit_history.iter().enumerate() {
+                g.add(
+                    &adw::ActionRow::builder()
+                        .title(if index == 0 {
+                            "Original".into()
+                        } else {
+                            format!("Edit {index}")
+                        })
+                        .subtitle(content)
+                        .use_markup(false)
+                        .build(),
+                );
+            }
+        }
         page.add(&g);
         self.dialog("Message Details", &page, 520, 440);
     }

@@ -142,7 +142,7 @@ def run_checks(root, server_port, cert):
             subprocess.run([args.crypto_test_binary, "--ignored", "--exact", "crypto::tests::live_pep_encrypted_roundtrip", "--nocapture"], env=env, check=True, timeout=110)
             subprocess.run(["bash", "tests/keyring_fixture.sh", args.crypto_test_binary, args.bus_config, "crypto::service::tests::live_service_roundtrip"], env=env, check=True, timeout=150)
         if args.app_binary:
-            subprocess.run([args.app_binary, "--live-smoke-test"], env=env, check=True, timeout=50)
+            subprocess.run(["bash", "tests/keyring_fixture.sh", args.app_binary, args.bus_config, "--live-smoke-test"], env=env, check=True, timeout=60)
             subprocess.run(["bash", "tests/keyring_fixture.sh", args.app_binary, args.bus_config, "--crypto-smoke-test"], env=env, check=True, timeout=150)
         empty = root / "empty-ca.pem"
         empty.write_text("")

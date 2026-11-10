@@ -15,6 +15,12 @@ fn yes() -> bool {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Message {
+    pub action: Option<crate::message_actions::Action>,
+    pub sender: String,
+    pub edited: bool,
+    pub edit_history: Vec<String>,
+    pub retracted: bool,
+    pub unread: bool,
     pub id: String,
     pub author: String,
     pub text: String,
@@ -41,6 +47,12 @@ pub struct Message {
 impl Default for Message {
     fn default() -> Self {
         Self {
+            action: None,
+            sender: String::new(),
+            edited: false,
+            edit_history: vec![],
+            retracted: false,
+            unread: false,
             id: new_id(),
             author: String::new(),
             text: String::new(),
@@ -270,6 +282,7 @@ impl State {
         }
         let mut m = Message {
             author: "You".into(),
+            sender: self.account.clone(),
             text: text.trim().into(),
             own: true,
             kind: kind.into(),

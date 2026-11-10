@@ -32,7 +32,7 @@ pub fn reply_content(xml: &Element, body: &str) -> (String, String, String, Stri
     }
     let r = replies[0];
     let id = r.attr("id").unwrap_or("");
-    if id.is_empty() || id.len() > 4096 {
+    if !crate::message_actions::valid_id(id) {
         return empty_reply(body);
     }
     let author = bare_of(r.attr("to").unwrap_or(""));
@@ -100,6 +100,12 @@ pub fn normalize(
     {
         return None;
     }
+    if xml
+        .get_child("x", "http://jabber.org/protocol/muc#user")
+        .is_some()
+    {
+        return None;
+    }
     let from = bare_of(xml.attr("from")?);
     let to = bare_of(xml.attr("to")?);
     let own = from == account;
@@ -112,17 +118,33 @@ pub fn normalize(
             || c.is("encrypted", "eu.siacs.conversations.axolotl")
             || c.is("encryption", "urn:xmpp:eme:0")
     });
+    let action = if unavailable {
+        None
+    } else {
+        crate::message_actions::parse(xml).ok()?
+    };
+    let control = matches!(
+        action,
+        Some(
+            crate::message_actions::Action::React { .. }
+                | crate::message_actions::Action::Retract { .. }
+        )
+    );
     let raw = if unavailable {
         "Encrypted message — this encryption format is unavailable or needs device review.".into()
+    } else if control {
+        String::new()
     } else {
         xml.get_child("body", NS)?.text()
     };
-    let (reply_id, reply_to, quote, text) = if unavailable {
+    let (reply_id, reply_to, quote, text) = if unavailable || control {
         empty_reply(&raw)
     } else {
         reply_content(xml, &raw)
     };
     let mut m = Message {
+        action,
+        sender: xml.attr("from").unwrap_or("").into(),
         own,
         text,
         encrypted: false,
@@ -135,7 +157,7 @@ pub fn normalize(
     };
     m.wire_id = xml
         .attr("id")
-        .filter(|id| id.len() <= 4096)
+        .filter(|id| crate::message_actions::valid_id(id))
         .unwrap_or("")
         .into();
     if !m.wire_id.is_empty() {
@@ -145,14 +167,14 @@ pub fn normalize(
         if child.is("origin-id", SID) {
             if let Some(id) = child
                 .attr("id")
-                .filter(|id| !id.is_empty() && id.len() <= 4096)
+                .filter(|id| crate::message_actions::valid_id(id))
             {
                 m.aliases.push(format!("origin:{id}"))
             }
         } else if child.is("stanza-id", SID) && child.attr("by") == Some(account) {
             if let Some(id) = child
                 .attr("id")
-                .filter(|id| !id.is_empty() && id.len() <= 4096)
+                .filter(|id| crate::message_actions::valid_id(id))
             {
                 m.aliases.push(format!("server:{id}"))
             }
@@ -174,8 +196,17 @@ pub fn normalize(
                 .to_string()
         }
     }
-    if let Some((id, _)) = archive.filter(|(id, _)| !id.is_empty() && id.len() <= 4096) {
+    if let Some((id, _)) = archive.filter(|(id, _)| crate::message_actions::valid_id(id)) {
         m.aliases.push(format!("archive:{id}"))
+    }
+    if m.action.is_some() && m.aliases.is_empty() {
+        let mut raw = Vec::new();
+        xml.write_to(&mut raw).ok()?;
+        raw.extend(m.timestamp.as_bytes());
+        m.aliases.push(format!(
+            "control:{}",
+            crate::crypto::lifecycle::hex(&openssl::sha::sha256(&raw))
+        ));
     }
     Some((peer, m, archive.is_some() || stamp.is_some()))
 }
@@ -228,6 +259,26 @@ pub fn text_stanza(peer: &str, text: &str, id: &str, reply: Option<(&str, &str, 
             .build(),
     );
     root.append_child(el("request", "urn:xmpp:receipts"));
+    root
+}
+pub fn outgoing(peer: &str, message: &Message, quote: &str) -> Element {
+    let body = if matches!(
+        message.action,
+        Some(crate::message_actions::Action::Retract { .. })
+    ) {
+        "A previous message was retracted."
+    } else {
+        &message.text
+    };
+    let mut root = text_stanza(
+        peer,
+        body,
+        &message.wire_id,
+        (!message.reply_id.is_empty()).then_some((&message.reply_id, &message.reply_to, quote)),
+    );
+    if let Some(action) = &message.action {
+        crate::message_actions::decorate(&mut root, action);
+    }
     root
 }
 #[derive(Debug, Clone)]
@@ -373,7 +424,7 @@ impl Session {
                         Some(Command::Send{peer,message,quote})=>{
                             if !online || message.unavailable{emit(BackendEvent::Failed{peer,id:message.wire_id});continue}
                             if message.encrypted{crypto.send(crate::crypto::service::Request::Send{peer,message,quote});continue}
-                            let root=text_stanza(&peer,&message.text,&message.wire_id,(!message.reply_id.is_empty()).then_some((message.reply_id.as_str(),message.reply_to.as_str(),quote.as_str())));
+                            let root=outgoing(&peer,&message,&quote);
                             let ok=send(&mut client,root).await;emit(if ok{BackendEvent::Sent{peer,id:message.wire_id}}else{BackendEvent::Failed{peer,id:message.wire_id}});
                         },
                         Some(Command::History{peer,before})=>{
@@ -405,7 +456,7 @@ impl Session {
                             }else if root.is("iq",NS){let id=root.attr("id").unwrap_or("");let trusted=from.is_empty()||from==owner;
                                 if trusted{if let Some(query)=root.get_child("query","jabber:iq:roster"){let contacts=query.children().filter(|c|c.is("item","jabber:iq:roster")).filter_map(|c|Some((c.attr("jid")?.into(),c.attr("name").unwrap_or("").into(),c.attr("subscription").unwrap_or("none").into()))).collect();emit(BackendEvent::Roster(contacts));if root.attr("type")==Some("set"){send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).build()).await;}}}
                                 if !trusted && mam.contains_key(id) { continue } if let Some((peer,_))=mam.remove(id){let fin=root.get_child("fin","urn:xmpp:mam:2");let before=fin.and_then(|f|f.get_child("set","http://jabber.org/protocol/rsm")).and_then(|s|s.get_child("first","http://jabber.org/protocol/rsm")).map(|f|f.text()).unwrap_or_default();let complete=fin.is_some_and(|f|matches!(f.attr("complete"),Some("true"|"1")))||before.is_empty();emit(BackendEvent::History{peer,before,complete,error:fin.is_none()});}
-                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in ["urn:xmpp:receipts",REPLY,SID,"http://jabber.org/protocol/chatstates"]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
+                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in ["urn:xmpp:receipts",REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
                             }
                         }
                     }},

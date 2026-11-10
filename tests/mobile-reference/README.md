@@ -32,3 +32,10 @@ The Nix package builds/runs the JNI comparison with JDK 21 explicitly; a plain
 `cargo test` run without `MONOGRAM_MOBILE_CRYPTO_FIXTURE` does not establish JNI
 interoperability. Live PEP/wire tests additionally require the disposable Prosody
 fixture; these comparisons alone do not establish complete encryption UI parity.
+
+`vectors/ReactionEmojiReference.java` generates `assets/reaction-emoji.tsv` by
+compiling the baseline mobile `EmojiData.java` and walking its actual data/colored
+data/alias arrays with mobile's canonicalization rule. To regenerate, compile
+those two sources with JDK 21 and run `ReactionEmojiReference`, capturing stdout.
+The table is included at compile time; no JVM or mobile checkout is needed at
+runtime. Input attribution/license is recorded in `assets/NOTICE.md`.

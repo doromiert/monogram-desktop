@@ -390,16 +390,7 @@ impl Worker {
             let owner = self.owner.clone();
             recipients.insert(owner.clone(), self.targets(&owner, true).await?);
         }
-        let root = protocol::text_stanza(
-            peer,
-            &message.text,
-            &message.wire_id,
-            (!message.reply_id.is_empty()).then_some((
-                message.reply_id.as_str(),
-                message.reply_to.as_str(),
-                quote,
-            )),
-        );
+        let root = protocol::outgoing(peer, message, quote);
         let mut plain = Element::builder("message", payload::CLIENT)
             .attr("from".try_into().unwrap(), &self.owner)
             .attr("to".try_into().unwrap(), peer)
@@ -416,7 +407,9 @@ impl Worker {
             .engine
             .encrypt(&plain, &recipients)?;
         for child in root.children().filter(|c| !payload::allowed(c)) {
-            encrypted.append_child(child.clone());
+            if !child.is("store", "urn:xmpp:hints") {
+                encrypted.append_child(child.clone());
+            }
         }
         if !self.wire(encrypted).await {
             return Err(Error::Uncertain);

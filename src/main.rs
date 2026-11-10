@@ -1,9 +1,12 @@
 use adw::prelude::*;
+mod action_store;
 mod crypto;
 mod dialogs;
 mod folders;
 mod iq;
+mod live_actions;
 mod media;
+mod message_actions;
 mod messages;
 mod model;
 mod protocol;

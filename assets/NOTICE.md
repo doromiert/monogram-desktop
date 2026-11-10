@@ -26,3 +26,10 @@ The XEP-0461/0428 reply fallback validation in src/protocol.rs follows Monogram'
 ReplyReference.java (GPL-3.0-or-later), preserving Unicode code-point slicing and
 the rule that malformed fallback ranges must not hide message text:
 https://github.com/doromiert/monogram/blob/be6876c045163e32fe07a84416621770b0964b30/xmpp-core/src/main/java/com/negzero/monogram/xmpp/ReplyReference.java
+
+`reaction-emoji.tsv` is generated from Monogram mobile's `EmojiData.java`
+(Android baseline be6876c045163e32fe07a84416621770b0964b30, originally Telegram,
+copyright Nikolai Kudashov 2013–2018, GPL-2.0-or-later). The generator lives at
+`tests/mobile-reference/vectors/ReactionEmojiReference.java`. This table preserves
+mobile's accepted emoji and variation-selector normalization for XEP-0444.
+Source: https://github.com/doromiert/monogram/blob/be6876c045163e32fe07a84416621770b0964b30/TMessagesProj/src/main/java/org/telegram/messenger/EmojiData.java

@@ -71,7 +71,7 @@ unavailable; their outer fallback bodies never appear as decrypted content.
 
 Live mode disables the fictional media, poll/article, wallet, story, group and call
 actions. Their offline demo surfaces remain available through Open Offline Demo.
-Live edits, reactions, retractions, MUC/MIX, transfers, legacy/PQ, complete OMEMO 2 policies, stream resumption,
+MUC/MIX, transfers, legacy/PQ, complete OMEMO 2 policies, stream resumption,
 proxy configuration, certificate exceptions, keyring-backed credentials and
 simultaneous connected accounts remain outstanding. Unsupported discovery/archive
 features report their absence without fabricating successful results.
@@ -109,3 +109,6 @@ References: [tokio-xmpp](https://docs.rs/tokio-xmpp/6.0.0/tokio_xmpp/),
 [replies](https://xmpp.org/extensions/xep-0461.html).
 The Android behavior reference remains the pinned source index; this code does
 not embed Android, Telegram services or the Android JVM adapter.
+
+Live [direct-message actions](MESSAGE_ACTIONS.md) now include inline corrections,
+reaction replacement sets and best-effort retractions, with durable event replay.

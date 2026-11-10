@@ -57,6 +57,26 @@ fn button(widget: &gtk::Widget, title: &str) -> Option<gtk::Button> {
     }
     None
 }
+fn edit_control(ui: &Rc<Ui>, id: &str, value: &str) {
+    ui.edit_message(id);
+    let bubble = ui.bubbles.borrow()[id].clone();
+    let mut child = bubble.first_child();
+    let mut edited = false;
+    while let Some(w) = child {
+        child = w.next_sibling();
+        if let Some(scroll) = w.downcast_ref::<gtk::ScrolledWindow>() {
+            if let Some(editor) = scroll.child().and_downcast::<gtk::TextView>() {
+                editor.buffer().set_text(value);
+                edited = true;
+            }
+        }
+    }
+    assert!(edited, "inline edit control missing");
+    button(&bubble, "Save")
+        .expect("inline Save button")
+        .emit_clicked();
+}
+
 fn crypto_history_failures(ui: &Rc<Ui>) {
     let owner = ui.state.borrow().account.clone();
     let peer = ui.state.borrow().current().jid.clone();
@@ -204,17 +224,80 @@ pub fn run_crypto(ui: Rc<Ui>) {
                 }
                 BackendEvent::EncryptedMessage { message, token, .. } => {
                     assert!(message.encrypted && !message.unavailable);
-                    let mut state = ui.store.load("frank@localhost");
-                    state
-                        .chat_for("erin@localhost")
-                        .messages
-                        .push(message.clone());
-                    ui.store.save(&state).unwrap();
+                    if message.action.is_some() {
+                        ui.store
+                            .record_action(
+                                "frank@localhost",
+                                "erin@localhost",
+                                &message,
+                                "received",
+                            )
+                            .unwrap();
+                        ui.store
+                            .reconcile_actions("frank@localhost", "erin@localhost")
+                            .unwrap();
+                    } else {
+                        let mut state = ui.store.load("frank@localhost");
+                        state
+                            .chat_for("erin@localhost")
+                            .messages
+                            .push(message.clone());
+                        ui.store.save(&state).unwrap();
+                    }
                     frank
                         .borrow()
                         .as_ref()
                         .unwrap()
                         .send(Command::Crypto(Request::Accepted(token)));
+                    if let Some(action) = &message.action {
+                        use crate::message_actions::Action;
+                        match (stage.get(), action) {
+                            (8, Action::Correct { target }) => {
+                                assert_eq!(message.text, "Encrypted native edit");
+                                frank.borrow().as_ref().unwrap().send(Command::Send {
+                                    peer: "erin@localhost".into(),
+                                    message: Message {
+                                        wire_id: new_id(),
+                                        action: Some(Action::React {
+                                            target: target.clone(),
+                                            emojis: ["👍".into()].into(),
+                                        }),
+                                        encrypted: true,
+                                        ..Default::default()
+                                    },
+                                    quote: String::new(),
+                                });
+                                stage.set(9);
+                            }
+                            (10, Action::React { target, emojis }) => {
+                                assert!(emojis.contains("❤️"));
+                                let m = ui
+                                    .state
+                                    .borrow()
+                                    .current()
+                                    .messages
+                                    .iter()
+                                    .find(|m| {
+                                        m.wire_id == *target
+                                            || m.aliases.contains(&format!("origin:{target}"))
+                                    })
+                                    .unwrap()
+                                    .clone();
+                                assert!(ui.send_action(
+                                    &m.id,
+                                    Action::Retract {
+                                        target: m.wire_id,
+                                        legacy: false
+                                    },
+                                    ""
+                                ));
+                                stage.set(11);
+                            }
+                            (11, Action::Retract { .. }) => stage.set(12),
+                            _ => {}
+                        }
+                        continue;
+                    }
                     if message.text == "Native encrypted composer 🌿" {
                         frank.borrow().as_ref().unwrap().send(Command::Send {
                             peer: "erin@localhost".into(),
@@ -230,12 +313,19 @@ pub fn run_crypto(ui: Rc<Ui>) {
                         });
                     } else if message.text == "Encrypted after restoration" {
                         assert_eq!(stage.get(), 6);
-                        println!(
-                            "Native encrypted Rust composer: explicit setup, fingerprint review, protected reply, durable history, reconnect identity/trust and encrypted choice passed"
-                        );
-                        frank.borrow_mut().take();
-                        ui.window.close();
-                        return glib::ControlFlow::Break;
+                        let id = ui
+                            .state
+                            .borrow()
+                            .current()
+                            .messages
+                            .iter()
+                            .find(|m| m.wire_id == message.wire_id)
+                            .unwrap()
+                            .id
+                            .clone();
+                        ui.composer.buffer().set_text("Preserve encrypted draft");
+                        edit_control(&ui, &id, "Encrypted native edit");
+                        stage.set(8);
                     }
                 }
                 _ => {}
@@ -315,6 +405,49 @@ pub fn run_crypto(ui: Rc<Ui>) {
                 ui.connect_account(config.clone(), "fixture-password".into());
                 ui.select_chat(&chat);
                 stage.set(7);
+            }
+            9 => {
+                let m = ui
+                    .state
+                    .borrow()
+                    .current()
+                    .messages
+                    .iter()
+                    .find(|m| {
+                        m.text == "Encrypted native edit" && m.reactions.iter().any(|r| r == "👍 1")
+                    })
+                    .cloned();
+                if let Some(m) = m {
+                    assert!(m.edited && m.encrypted);
+                    ui.react(&m.id, "❤️");
+                    stage.set(10);
+                }
+            }
+            12 => {
+                if !ui
+                    .state
+                    .borrow()
+                    .current()
+                    .messages
+                    .iter()
+                    .any(|m| m.text == "Encrypted native edit")
+                {
+                    assert_eq!(ui.composer_text(), "Preserve encrypted draft");
+                    let loaded = ui.store.load(&config.jid);
+                    assert!(
+                        !loaded
+                            .chats
+                            .iter()
+                            .flat_map(|c| &c.messages)
+                            .any(|m| m.text == "Encrypted native edit")
+                    );
+                    println!(
+                        "Native encrypted controls: explicit setup/trust, composer/reply, durable recovery, protected inline edit, reactions, original-device retraction and reload passed"
+                    );
+                    frank.borrow_mut().take();
+                    ui.window.close();
+                    return glib::ControlFlow::Break;
+                }
             }
             7 if ui.online.get()
                 && ui.crypto.borrow().ready
@@ -565,6 +698,56 @@ pub fn run_live(ui: Rc<Ui>) {
                     historical: false,
                     ..
                 } if !message.own => {
+                    if let Some(action) = &message.action {
+                        use crate::message_actions::Action;
+                        match (stage.get(), action) {
+                            (5, Action::Correct { target }) => {
+                                assert_eq!(message.text, "Edited native message");
+                                bob.borrow().as_ref().unwrap().send(Command::Send {
+                                    peer: "alice@localhost".into(),
+                                    message: Message {
+                                        wire_id: new_id(),
+                                        action: Some(Action::React {
+                                            target: target.clone(),
+                                            emojis: ["👍".into()].into(),
+                                        }),
+                                        ..Default::default()
+                                    },
+                                    quote: String::new(),
+                                });
+                                stage.set(6);
+                            }
+                            (7, Action::React { target, emojis }) => {
+                                assert!(emojis.contains("❤️"));
+                                let original = ui
+                                    .state
+                                    .borrow()
+                                    .current()
+                                    .messages
+                                    .iter()
+                                    .find(|m| {
+                                        m.wire_id == *target
+                                            || m.aliases.contains(&format!("origin:{target}"))
+                                    })
+                                    .unwrap()
+                                    .clone();
+                                assert!(ui.send_action(
+                                    &original.id,
+                                    Action::Retract {
+                                        target: original.wire_id,
+                                        legacy: false
+                                    },
+                                    ""
+                                ));
+                                stage.set(8);
+                            }
+                            (8, Action::Retract { .. }) => {
+                                stage.set(9);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                     if stage.get() == 1 && message.text == "Native Rust composer 🌿" {
                         let reply = Message {
                             text: "Native fixture reply 🦊".into(),
@@ -584,12 +767,22 @@ pub fn run_live(ui: Rc<Ui>) {
                         });
                         stage.set(2);
                     } else if stage.get() == 4 && message.text == "After restoration" {
-                        println!(
-                            "Native live Rust composer: TLS send/reply, delivery state, draft/reply restoration, account isolation, stale callback rejection and MAM dedup passed"
-                        );
-                        bob.borrow_mut().take();
-                        ui.window.close();
-                        return glib::ControlFlow::Break;
+                        ui.composer
+                            .buffer()
+                            .set_text("Keep this draft while editing");
+                        let id = ui
+                            .state
+                            .borrow()
+                            .current()
+                            .messages
+                            .iter()
+                            .find(|m| m.wire_id == message.wire_id)
+                            .unwrap()
+                            .id
+                            .clone();
+                        edit_control(&ui, &id, "Edited native message");
+                        assert_eq!(ui.composer_text(), "Keep this draft while editing");
+                        stage.set(5);
                     }
                 }
                 _ => {}
@@ -645,6 +838,68 @@ pub fn run_live(ui: Rc<Ui>) {
                     assert_eq!(ui.composer_text(), "Durable draft 🌿");
                     assert_eq!(ui.replying.borrow().as_deref(), Some(reply.id.as_str()));
                     stage.set(3);
+                }
+            }
+            6 => {
+                let original = ui
+                    .state
+                    .borrow()
+                    .current()
+                    .messages
+                    .iter()
+                    .find(|m| {
+                        m.text == "Edited native message" && m.reactions.iter().any(|r| r == "👍 1")
+                    })
+                    .cloned();
+                if let Some(m) = original {
+                    assert!(m.edited);
+                    assert_eq!(
+                        m.edit_history,
+                        vec!["After restoration", "Edited native message"]
+                    );
+                    let bubble = ui.bubbles.borrow()[&m.id]
+                        .clone()
+                        .downcast::<gtk::Box>()
+                        .unwrap();
+                    ui.message_menu(&bubble, &m.id, 0., 0.);
+                    let mut child = bubble.first_child();
+                    let mut chosen = false;
+                    while let Some(w) = child {
+                        child = w.next_sibling();
+                        if let Some(b) = button(&w, "❤️") {
+                            b.emit_clicked();
+                            chosen = true;
+                            break;
+                        }
+                    }
+                    assert!(chosen, "live reaction menu missing");
+                    stage.set(7);
+                }
+            }
+            9 => {
+                if !ui
+                    .state
+                    .borrow()
+                    .current()
+                    .messages
+                    .iter()
+                    .any(|m| m.text == "Edited native message")
+                {
+                    let loaded = ui.store.load(&config.jid);
+                    assert!(
+                        !loaded
+                            .chats
+                            .iter()
+                            .flat_map(|c| &c.messages)
+                            .any(|m| m.text == "Edited native message")
+                    );
+                    assert_eq!(ui.composer_text(), "Keep this draft while editing");
+                    println!(
+                        "Native live Rust controls: inline correction, preserved composer, remote reaction, narrow message menu, local reaction and confirmed retraction/reload passed"
+                    );
+                    bob.borrow_mut().take();
+                    ui.window.close();
+                    return glib::ControlFlow::Break;
                 }
             }
             3 if ui.online.get() && !ui.history_pending.borrow().contains("bob@localhost") => {

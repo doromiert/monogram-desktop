@@ -5,6 +5,10 @@ mod crypto;
 mod iq;
 #[path = "../src/model.rs"]
 mod model;
+#[path = "../src/action_store.rs"]
+mod action_store;
+#[path = "../src/message_actions.rs"]
+mod message_actions;
 #[path = "../src/protocol.rs"]
 mod protocol;
 #[path = "../src/storage.rs"]

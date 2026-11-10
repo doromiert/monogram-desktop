@@ -13,7 +13,7 @@ impl Ui {
         let live = !state.account.is_empty();
         drop(state);
         let mut last = String::new();
-        for m in messages {
+        for m in messages.into_iter().filter(|m| !m.retracted) {
             let day = if m.timestamp.is_empty() {
                 "Today"
             } else {
@@ -71,6 +71,9 @@ impl Ui {
                 let image = gtk::Image::from_icon_name("channel-secure-symbolic");
                 image.set_pixel_size(11);
                 meta.append(&image)
+            }
+            if m.edited {
+                meta.append(&label("edited", ""));
             }
             meta.append(&label(&m.time, ""));
             if m.own {
@@ -448,16 +451,50 @@ impl Ui {
         let owner = self.state.borrow().account.clone();
         let chat = self.state.borrow().active.clone();
         let d=adw::AlertDialog::builder().heading(format!("Delete {} messages?",ids.len())).body("This removes the messages locally. Server history and other devices are unaffected.").build();
-        d.add_responses(&[("cancel", "Cancel"), ("delete", "Delete")]);
+        d.add_responses(&[("cancel", "Cancel"), ("delete", "Delete Locally")]);
+        let peer = self.state.borrow().current().jid.clone();
+        if !owner.is_empty()
+            && !ids.is_empty()
+            && ids.iter().all(|id| {
+                self.store
+                    .action_target(&owner, &peer, id, "retract")
+                    .is_ok()
+            })
+        {
+            d.set_body("Delete from this device, or request removal on other clients. A retraction cannot guarantee remote deletion or undo copies already made.");
+            d.add_response("retract", "Request Retraction");
+            d.set_response_appearance("retract", adw::ResponseAppearance::Destructive);
+        }
         d.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
         let weak = Rc::downgrade(self);
         d.connect_response(None, move |_, response| {
-            if response == "delete" {
+            if matches!(response, "delete" | "retract") {
                 if let Some(ui) = weak.upgrade() {
                     if ui.state.borrow().account != owner || ui.state.borrow().active != chat {
                         return;
                     }
-                    ui.delete_messages(&ids);
+                    if response == "retract" {
+                        for id in &ids {
+                            let target = ui
+                                .store
+                                .action_base(&owner, &peer, id)
+                                .ok()
+                                .and_then(|m| crate::message_actions::original_wire(&m));
+                            let Some(target) = target else { break };
+                            if !ui.send_action(
+                                id,
+                                crate::message_actions::Action::Retract {
+                                    target,
+                                    legacy: false,
+                                },
+                                "",
+                            ) {
+                                break;
+                            }
+                        }
+                    } else {
+                        ui.delete_messages(&ids);
+                    }
                 }
             }
         });
@@ -484,7 +521,33 @@ impl Ui {
     }
     pub fn react(self: &Rc<Self>, id: &str, emoji: &str) {
         if !self.state.borrow().account.is_empty() {
-            self.notice("Live reactions are not available yet");
+            let state = self.state.borrow();
+            let peer = state.current().jid.clone();
+            let owner = state.account.clone();
+            drop(state);
+            let Ok(message) = self.store.action_target(&owner, &peer, id, "react") else {
+                self.notice("This message cannot be reacted to");
+                return;
+            };
+            let Some(emoji) = crate::message_actions::canonical_emoji(emoji) else {
+                return;
+            };
+            let Some(target) = crate::message_actions::reaction_reference(&message) else {
+                return;
+            };
+            let mut emojis = message.my_reactions;
+            if !emojis.remove(&emoji) {
+                if emojis.len() >= 32 {
+                    self.notice("Use at most 32 reactions");
+                    return;
+                }
+                emojis.insert(emoji);
+            }
+            self.send_action(
+                id,
+                crate::message_actions::Action::React { target, emojis },
+                "",
+            );
             return;
         }
         let mut s = self.state.borrow_mut();
@@ -525,8 +588,8 @@ impl Ui {
         pop.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
         pop.add_css_class("message-menu");
         let content = bx(true, 8);
-        content.set_width_request(if live { 208 } else { 260 });
-        if !live {
+        content.set_width_request(260);
+        if !message.unavailable && !message.retracted {
             let reactions = bx(false, 0);
             reactions.set_homogeneous(true);
             reactions.add_css_class("message-menu-panel");
@@ -555,7 +618,20 @@ impl Ui {
         items.set_width_request(208);
         items.add_css_class("message-menu-panel");
         let mut choices = vec![];
-        if message.own && !live {
+        if message.own
+            && !message.unavailable
+            && message.kind == "text"
+            && (!live
+                || self
+                    .store
+                    .action_target(
+                        &self.state.borrow().account,
+                        &self.state.borrow().current().jid,
+                        id,
+                        "correct",
+                    )
+                    .is_ok())
+        {
             choices.push(("document-edit-symbolic", "Edit", "edit"))
         }
         if message.own && matches!(message.delivery.as_str(), "failed" | "uncertain") {
@@ -668,8 +744,18 @@ impl Ui {
         });
     }
     pub fn edit_message(self: &Rc<Self>, id: &str) {
-        if !self.state.borrow().account.is_empty() {
-            self.notice("Live corrections are not available yet");
+        let live = !self.state.borrow().account.is_empty();
+        let owner = self.state.borrow().account.clone();
+        let peer = self.state.borrow().current().jid.clone();
+        let chat = self.state.borrow().active.clone();
+        let generation = self.generation.get();
+        if live
+            && self
+                .store
+                .action_target(&owner, &peer, id, "correct")
+                .is_err()
+        {
+            self.notice("This message cannot be edited");
             return;
         }
         let Some(m) = self.state.borrow().message(id).cloned() else {
@@ -688,7 +774,14 @@ impl Ui {
         let editor = gtk::TextView::builder()
             .wrap_mode(gtk::WrapMode::WordChar)
             .build();
-        editor.buffer().set_text(&m.text);
+        let draft = if live {
+            self.store
+                .failed_edit(&owner, &peer, &m.wire_id)
+                .unwrap_or_else(|| m.text.clone())
+        } else {
+            m.text.clone()
+        };
+        editor.buffer().set_text(&draft);
         let scroll = scroll(&editor);
         scroll.set_min_content_height(60);
         bubble.append(&scroll);
@@ -703,9 +796,30 @@ impl Ui {
         let id = id.to_string();
         save.connect_clicked(move |_| {
             if let Some(ui) = weak.upgrade() {
+                if ui.generation.get() != generation
+                    || ui.state.borrow().account != owner
+                    || ui.state.borrow().active != chat
+                {
+                    return;
+                }
                 let b = editor.buffer();
                 let value = b.text(&b.start_iter(), &b.end_iter(), true);
                 if value.trim().is_empty() {
+                    return;
+                }
+                if live {
+                    if value.len() > 64 * 1024 {
+                        ui.notice("Edited message is too long");
+                        return;
+                    }
+                    let Some(target) = crate::message_actions::original_wire(&m) else {
+                        return;
+                    };
+                    ui.send_action(
+                        &id,
+                        crate::message_actions::Action::Correct { target },
+                        &value,
+                    );
                     return;
                 }
                 if let Some(m) = ui
