@@ -731,7 +731,7 @@ impl Ui {
         });
     }
     pub fn remove_account(self: &Rc<Self>, owner: &str) {
-        let d=adw::AlertDialog::builder().heading("Remove Account?").body("This removes its local history and drafts. Encryption identity and trust are retained for reconnecting safely. Messages stored by the server are unaffected.").build();
+        let d=adw::AlertDialog::builder().heading("Remove Account?").body("This removes its local history, drafts and cached attachments. Encryption identity and trust are retained for reconnecting safely. Messages stored by the server are unaffected.").build();
         d.add_responses(&[("cancel", "Cancel"), ("remove", "Remove")]);
         d.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
         let owner = owner.to_string();
@@ -746,6 +746,9 @@ impl Ui {
                     if ui.store.forget(&owner).is_err() {
                         ui.notice("Local account removal failed");
                         return;
+                    }
+                    if let Err(reason) = crate::downloads::forget(&owner) {
+                        ui.notice(reason);
                     }
                     ui.accounts_dialog();
                 }

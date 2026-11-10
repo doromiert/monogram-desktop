@@ -1,7 +1,11 @@
 use adw::prelude::*;
 mod action_store;
+mod attachment_ui;
 mod crypto;
 mod dialogs;
+mod download_smoke;
+mod downloads;
+mod file_share;
 mod folders;
 mod forwarding;
 mod iq;

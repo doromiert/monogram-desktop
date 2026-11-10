@@ -71,3 +71,7 @@ remain open. Full desktop/mobile parity is not claimed by this milestone.
 
 See [forwarding](FORWARDING.md) for native attributed text/poll copies, Hide Sender,
 standalone XEP-0297 quote reception and the remaining attachment/rich-content gaps.
+
+Received file metadata is retained and scrubbed on retraction. Caption corrections
+remain unresolved rather than replacing an attachment with unverified text. Active
+file transfer/cache lifecycle is documented in [file transfers](FILE_TRANSFERS.md).

@@ -389,6 +389,7 @@ impl PollSmoke {
 
 #[derive(Default)]
 struct ForwardSmoke {
+    sender: std::cell::RefCell<String>,
     stage: Cell<u8>,
     original: std::cell::RefCell<String>,
     first_copy: std::cell::RefCell<String>,
@@ -433,6 +434,7 @@ impl ForwardSmoke {
         if message.text != Self::BODY {
             return false;
         }
+        self.sender.replace(message.sender.clone());
         assert_eq!(message.encrypted, encrypted);
         assert!(message.action.is_none());
         assert!(message.reply_id.is_empty());
@@ -598,7 +600,7 @@ impl ForwardSmoke {
     }
 }
 
-fn button(widget: &gtk::Widget, title: &str) -> Option<gtk::Button> {
+pub(crate) fn button(widget: &gtk::Widget, title: &str) -> Option<gtk::Button> {
     if let Some(button) = widget.downcast_ref::<gtk::Button>() {
         if button.label().as_deref() == Some(title)
             || button.tooltip_text().as_deref() == Some(title)
@@ -742,6 +744,7 @@ pub fn run_crypto(ui: Rc<Ui>) {
     let stage = Cell::new(0);
     let poll_smoke = PollSmoke::default();
     let forward_smoke = ForwardSmoke::default();
+    let download_smoke = crate::download_smoke::DownloadSmoke::default();
     let frank_online = Cell::new(false);
     let frank_ready = Cell::new(false);
     let frank_trusted = Cell::new(false);
@@ -902,6 +905,14 @@ pub fn run_crypto(ui: Rc<Ui>) {
             forward_smoke.start(&ui, frank.borrow().as_ref().unwrap(), true);
         }
         if forward_smoke.tick(&ui, true) {
+            download_smoke.start(
+                &ui,
+                frank.borrow().as_ref().unwrap(),
+                true,
+                &forward_smoke.sender.borrow(),
+            );
+        }
+        if download_smoke.tick(&ui, true) {
             frank.borrow_mut().take();
             ui.window.close();
             return glib::ControlFlow::Break;
@@ -1258,6 +1269,7 @@ pub fn run_live(ui: Rc<Ui>) {
     let stage = Cell::new(0);
     let poll_smoke = PollSmoke::default();
     let forward_smoke = ForwardSmoke::default();
+    let download_smoke = crate::download_smoke::DownloadSmoke::default();
     let bob_online = Cell::new(false);
     let started = Instant::now();
     glib::timeout_add_local(Duration::from_millis(50), move || {
@@ -1374,6 +1386,14 @@ pub fn run_live(ui: Rc<Ui>) {
             forward_smoke.start(&ui, bob.borrow().as_ref().unwrap(), false);
         }
         if forward_smoke.tick(&ui, false) {
+            download_smoke.start(
+                &ui,
+                bob.borrow().as_ref().unwrap(),
+                false,
+                &forward_smoke.sender.borrow(),
+            );
+        }
+        if download_smoke.tick(&ui, false) {
             bob.borrow_mut().take();
             ui.window.close();
             return glib::ControlFlow::Break;

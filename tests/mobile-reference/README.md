@@ -74,3 +74,14 @@ messages, annotations, translated bodies and inner-ID/action isolation. Eight
 also contain deterministic protected SCE vectors (fixture key bytes 0 through 31).
 Reference XML with a language-specific-only body explicitly declares its default
 language so the fixture does not depend on the test runner's desktop locale.
+
+
+`file-vectors.json` and `file-cipher-vectors.json` are exported by the actual mobile
+`GenerateFileVectors` test helper (default mode and `cipher` argument). After
+`mvn -f xmpp-core/pom.xml -Dtest=FileShareTest,FileLinkTest test`, use that test's
+runtime classpath and capture the generator stdout. The 32 wire/model cases cover
+clear/protected SFS and OOB, body-only encrypted files, bodyless descriptions,
+Unicode reply/caption fallbacks, forwarded captions and malformed metadata. Four
+cipher cases call the actual mobile `FileTransfer` cipher/copy implementation,
+with 12/16-byte nonces, empty/binary files and SHA-256/SHA3-256/BLAKE2b-256 hashes.
+All bytes and keys are public deterministic fixture data, never real file keys.

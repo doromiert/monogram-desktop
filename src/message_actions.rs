@@ -314,6 +314,10 @@ pub fn project(
             continue;
         }
         let base = candidates[0];
+        // Caption edits need an unchanged attachment identity; text replacement is insufficient.
+        if base.attachment.is_some() || m.attachment.is_some() {
+            continue;
+        }
         if *floors.get(&base.id).unwrap() && !m.encrypted {
             continue;
         }
@@ -514,6 +518,7 @@ pub fn project(
     }
 }
 pub fn scrub(message: &mut Message) {
+    message.attachment = None;
     message.forwarded = None;
     message.unsupported_attachment = false;
     message.retracted = true;

@@ -15,6 +15,7 @@ fn yes() -> bool {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Message {
+    pub attachment: Option<crate::file_share::Attachment>,
     pub forwarded: Option<crate::forwarding::Attribution>,
     pub unsupported_attachment: bool,
     pub action: Option<crate::message_actions::Action>,
@@ -54,6 +55,7 @@ pub struct Message {
 impl Default for Message {
     fn default() -> Self {
         Self {
+            attachment: None,
             forwarded: None,
             unsupported_attachment: false,
             action: None,
@@ -154,6 +156,13 @@ impl Message {
         Ok(message)
     }
     pub fn preview(&self) -> String {
+        if let Some(file) = &self.attachment {
+            return if self.text.is_empty() {
+                format!("📎 {}", file.name)
+            } else {
+                self.text.clone()
+            };
+        }
         self.poll
             .as_ref()
             .map(|p| format!("📊 {}", p.question))

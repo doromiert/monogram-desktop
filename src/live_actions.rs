@@ -10,8 +10,22 @@ impl Ui {
     pub fn sync_actions(&self, owner: &str, peer: &str) {
         let mut state = self.state.borrow_mut();
         let c = state.chat_for(peer);
+        let attachments: Vec<_> = c
+            .messages
+            .iter()
+            .filter_map(|m| m.attachment.clone().map(|file| (m.id.clone(), file)))
+            .collect();
         let count = c.messages.len().max(200).min(u32::MAX as usize) as u32;
         c.messages = self.store.history(owner, peer, None, count);
+        for (id, file) in attachments {
+            if self
+                .store
+                .message(owner, peer, &id)
+                .is_none_or(|m| m.retracted)
+            {
+                self.downloads.borrow_mut().cancel(owner, &file);
+            }
+        }
         c.unread = self.store.unread_count(owner, peer);
         let snapshot = c.messages.clone();
         for m in &mut c.messages {

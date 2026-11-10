@@ -4,7 +4,7 @@ in rustPlatform.buildRustPackage {
   pname = "monogram-desktop";
   version = "0.2.0";
   src = lib.cleanSource ./.;
-  cargoHash = "sha256-qi9ScWnbV9YlP/iHtG7Ds2Qi4ujH3houBKp/VN/J7ks=";
+  cargoHash = "sha256-xgg3aNJEywGo819ZCoSRoVoZfDRPPHEENj9R3rgkN4E=";
   nativeBuildInputs = [ pkg-config wrapGAppsHook4 ];
   buildInputs = [ gtk4 libadwaita libepoxy sqlite libomemo-c openssl librsvg gsettings-desktop-schemas ];
   nativeCheckInputs = [ xorg-server dbus prosody openssl python3 jdk21 gnome-keyring ];
@@ -22,9 +22,17 @@ in rustPlatform.buildRustPackage {
     export DISPLAY=:87 GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=none G_DEBUG=fatal-criticals
     export FONTCONFIG_FILE=${fontConfig}
     export GSETTINGS_SCHEMA_DIR=${gsettings-desktop-schemas}/share/gsettings-schemas/${gsettings-desktop-schemas.name}/glib-2.0/schemas
+    export XDG_DATA_DIRS=${gtk4}/share/gsettings-schemas/${gtk4.name}:''${XDG_DATA_DIRS:-}
     export JAVA_HOME=${jdk21}/lib/openjdk
     bash tests/mobile-reference/build.sh "$TMPDIR/mobile-crypto"
-    crypto_test=$(find target -path '*/release/deps/monogram_desktop-*' -type f -executable | head -n 1)
+    crypto_test=
+    for candidate in target/${stdenv.hostPlatform.rust.rustcTarget}/release/deps/monogram_desktop-*; do
+      if [ -f "$candidate" ] && [ -x "$candidate" ] && "$candidate" --list 2>/dev/null | grep -Fqx 'crypto::tests::native_mobile_jvm_interoperability: test'; then
+        crypto_test=$candidate
+        break
+      fi
+    done
+    test -n "$crypto_test"
     MONOGRAM_MOBILE_CRYPTO_FIXTURE="$TMPDIR/mobile-crypto" "$crypto_test" --ignored --exact crypto::tests::native_mobile_jvm_interoperability
     bash tests/keyring_fixture.sh "$crypto_test" ${dbus}/share/dbus-1/session.conf
     bash tests/keyring_fixture.sh "$crypto_test" ${dbus}/share/dbus-1/session.conf crypto::lifecycle::tests::isolated_identity_lifecycle

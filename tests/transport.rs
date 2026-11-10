@@ -3,6 +3,8 @@
 mod action_store;
 #[path = "../src/crypto/mod.rs"]
 mod crypto;
+#[path = "../src/file_share.rs"]
+mod file_share;
 #[path = "../src/forwarding.rs"]
 mod forwarding;
 #[path = "../src/iq.rs"]

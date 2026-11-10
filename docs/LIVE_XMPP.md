@@ -71,9 +71,10 @@ unavailable; their outer fallback bodies never appear as decrypted content.
 
 Live mode implements [direct polls](STRUCTURED_POLLS.md) and
 [attributed text/poll forwarding](FORWARDING.md), including explicit OMEMO 2.
-It disables fictional media, article, wallet, story, group and call actions.
+Received files use [real manual downloads](FILE_TRANSFERS.md); upload/attach and
+fictional media, article, wallet, story, group and call actions remain disabled.
 Their offline demo surfaces remain available through Open Offline Demo.
-MUC/MIX, transfers, legacy/PQ, complete OMEMO 2 policies, stream resumption,
+MUC/MIX, uploads/complete media transfers, legacy/PQ, complete OMEMO 2 policies, stream resumption,
 proxy configuration, certificate exceptions, keyring-backed credentials and
 simultaneous connected accounts remain outstanding. Unsupported discovery/archive
 features report their absence without fabricating successful results.
@@ -81,7 +82,9 @@ features report their absence without fabricating successful results.
 The database is `XDG_STATE_HOME/monogram-desktop/history.sqlite3` (normally
 `~/.local/state/monogram-desktop/history.sqlite3`), with mode 0600 inside a private
 directory. It contains plaintext local message/draft content and account endpoint
-details, never passwords or encryption keys. Removing an account deletes its
+details. Attachment URLs/file keys belong to that plaintext message content;
+downloaded attachments are also plaintext in an account-scoped cache. Login
+passwords and OMEMO identity/ratchet keys are not stored in this history database. Removing an account deletes its
 local rows and leaves the server untouched; this is not a forensic secure erase.
 Storage-at-rest encryption is a later milestone.
 

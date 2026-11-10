@@ -15,6 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 pub struct Ui {
+    pub downloads: RefCell<crate::downloads::Downloads>,
     pub window: adw::ApplicationWindow,
     pub toast: adw::ToastOverlay,
     pub overlay: gtk::Overlay,
@@ -136,6 +137,7 @@ impl Ui {
         window.add_breakpoint(bp);
         let (tx, rx) = mpsc::channel();
         let ui = Rc::new(Self {
+            downloads: RefCell::new(Default::default()),
             window,
             toast,
             overlay,
@@ -324,6 +326,7 @@ impl Ui {
         ui.window.connect_close_request(move |_| {
             if let Some(u) = weak.upgrade() {
                 u.save_draft();
+                u.downloads.borrow_mut().clear();
                 u.session.borrow_mut().take();
                 u.generation.set(u.generation.get() + 1);
             }
@@ -1412,6 +1415,7 @@ impl Ui {
         }
     }
     pub fn activate_state(self: &Rc<Self>, state: State) {
+        self.downloads.borrow_mut().clear();
         self.save_draft();
         if self.state.borrow().account.is_empty() {
             self.demo.replace(self.state.borrow().clone());

@@ -373,6 +373,11 @@ impl Worker {
         });
     }
     async fn send_message(&mut self, peer: &str, message: &Message, quote: &str) -> Result<()> {
+        if message.attachment.as_ref().is_some_and(|file| {
+            !file.valid_outgoing(true) || message.poll.is_some() || message.action.is_some()
+        }) {
+            return Err(Error::Invalid("attachment encryption"));
+        }
         if !self.ready || !self.online {
             return Err(Error::Unavailable(
                 "OMEMO 2 is not ready; reconnect or retry setup in Conversation Security",
@@ -548,7 +553,7 @@ impl Worker {
                 .map(|(id, stamp)| (id.as_str(), stamp.as_str()));
             let (peer, mut metadata, historical) = protocol::normalize(outer, &self.owner, archive)
                 .ok_or(Error::Invalid("encrypted metadata"))?;
-            let (_, mut message, _) = protocol::normalize(&content, &self.owner, None)
+            let (_, mut message, _) = protocol::normalize_protected(&content, &self.owner, None)
                 .ok_or(Error::Invalid("unsupported encrypted message"))?;
             message.encrypted = true;
             message.unavailable = false;

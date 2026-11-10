@@ -219,6 +219,12 @@ impl Ui {
                     l.set_margin_top(6);
                     bubble.append(&l)
                 }
+                "file" if m.attachment.is_some() => {
+                    bubble.append(&self.attachment_content(&m));
+                    if !m.text.is_empty() {
+                        bubble.append(&wrap(&m.text, ""));
+                    }
+                }
                 "file" => {
                     let file = bx(false, 10);
                     let image = gtk::Image::from_icon_name("application-pdf-symbolic");
@@ -535,6 +541,9 @@ impl Ui {
                     drop(s);
                     self.notice("Local deletion failed");
                     return;
+                }
+                if let Some(file) = s.message(id).and_then(|m| m.attachment.as_ref()) {
+                    self.downloads.borrow_mut().cancel(&s.account, file);
                 }
             }
         }

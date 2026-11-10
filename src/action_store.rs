@@ -425,6 +425,58 @@ mod tests {
         assert_eq!(db.history(OWNER, PEER, None, 200).len(), 3);
     }
     #[test]
+    fn file_metadata_survives_reload_refuses_unchecked_caption_edits_and_is_scrubbed() {
+        let (db, mut state) = setup();
+        let mut original = base("file", "file-wire", false);
+        original.kind = "file".into();
+        original.attachment =
+            crate::file_share::Attachment::bare("https://files.example.org/fixture");
+        original.unsupported_attachment = true;
+        save(&db, &mut state, original.clone());
+        let restored = db
+            .load(OWNER)
+            .chats
+            .into_iter()
+            .flat_map(|c| c.messages)
+            .find(|m| m.id == "file")
+            .unwrap();
+        assert_eq!(restored.attachment, original.attachment);
+        let edit = event(
+            "file-edit",
+            Action::Correct {
+                target: "file-wire".into(),
+            },
+            false,
+            1,
+        );
+        record(&db, &edit, "received");
+        let unchanged = db.message(OWNER, PEER, "file").unwrap();
+        assert_eq!(unchanged.text, original.text);
+        assert_eq!(unchanged.attachment, original.attachment);
+        let retract = event(
+            "file-retract",
+            Action::Retract {
+                target: "file-wire".into(),
+                legacy: false,
+            },
+            false,
+            2,
+        );
+        record(&db, &retract, "received");
+        assert!(
+            db.message(OWNER, PEER, "file")
+                .unwrap()
+                .attachment
+                .is_none()
+        );
+        assert!(
+            db.action_base(OWNER, PEER, "file")
+                .unwrap()
+                .attachment
+                .is_none()
+        );
+    }
+    #[test]
     fn sender_scope_encryption_floor_and_exact_retraction_fingerprint() {
         let (db, mut s) = setup();
         let mut original = base("first", "wire", false);

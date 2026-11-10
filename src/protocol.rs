@@ -96,6 +96,21 @@ pub fn normalize(
     account: &str,
     archive: Option<(&str, &str)>,
 ) -> Option<(String, Message, bool)> {
+    normalize_content(xml, account, archive, false)
+}
+pub fn normalize_protected(
+    xml: &Element,
+    account: &str,
+    archive: Option<(&str, &str)>,
+) -> Option<(String, Message, bool)> {
+    normalize_content(xml, account, archive, true)
+}
+fn normalize_content(
+    xml: &Element,
+    account: &str,
+    archive: Option<(&str, &str)>,
+    encrypted: bool,
+) -> Option<(String, Message, bool)> {
     if !xml.is("message", NS) || !matches!(xml.attr("type").unwrap_or("normal"), "chat" | "normal")
     {
         return None;
@@ -139,6 +154,17 @@ pub fn normalize(
     } else {
         crate::forwarding::standalone(xml)
     };
+    let attachment = if unavailable || control || poll_present {
+        None
+    } else {
+        crate::file_share::Attachment::incoming(
+            xml,
+            &xml.get_child("body", NS)
+                .map(|b| b.text())
+                .unwrap_or_default(),
+            encrypted,
+        )
+    };
     let poll = if unavailable {
         None
     } else {
@@ -154,7 +180,7 @@ pub fn normalize(
         String::new()
     } else if poll_present {
         "Unsupported poll".into()
-    } else if quoted.is_some() {
+    } else if quoted.is_some() || attachment.is_some() {
         String::new()
     } else {
         return None;
@@ -164,7 +190,9 @@ pub fn normalize(
     } else {
         reply_content(xml, &raw)
     };
-    let text = if poll.is_some() {
+    let text = if let Some(file) = &attachment {
+        file.caption(xml, &raw)
+    } else if poll.is_some() {
         let namespaces = if reply_id.is_empty() {
             vec![crate::polls::NS]
         } else {
@@ -175,6 +203,7 @@ pub fn normalize(
         text
     };
     let mut m = Message {
+        attachment,
         unsupported_attachment: xml.get_child("file-sharing", "urn:xmpp:sfs:0").is_some()
             || xml.get_child("x", "jabber:x:oob").is_some(),
         poll_source: if poll_present {
@@ -191,7 +220,7 @@ pub fn normalize(
         sender: xml.attr("from").unwrap_or("").into(),
         own,
         text,
-        encrypted: false,
+        encrypted: encrypted && !unavailable,
         unavailable,
         delivery: if own { "sent" } else { "received" }.into(),
         reply_id,
@@ -199,6 +228,10 @@ pub fn normalize(
         reply: quote,
         ..Default::default()
     };
+    if m.attachment.is_some() {
+        m.kind = "file".into();
+        m.unsupported_attachment = true;
+    }
     if crate::forwarding::parse(&m.text).is_none()
         && let Some((attribution, body)) = quoted
     {
@@ -325,6 +358,22 @@ pub fn outgoing(peer: &str, message: &Message, quote: &str) -> Element {
         .as_ref()
         .map(|a| a.wire_body(&message.text))
         .unwrap_or_else(|| message.text.clone());
+    if let Some(file) = &message.attachment {
+        let body = if accompanied.is_empty() {
+            file.wire_url.clone()
+        } else {
+            format!("{accompanied}\n{}", file.wire_url)
+        };
+        let mut root = text_stanza(
+            peer,
+            &body,
+            &message.wire_id,
+            (!message.reply_id.is_empty()).then_some((&message.reply_id, &message.reply_to, quote)),
+        );
+        file.add_to(&mut root);
+        root.append_child(el("store", "urn:xmpp:hints"));
+        return root;
+    }
     if message.poll_source() == crate::polls::Source::Legacy {
         let mut root = text_stanza(
             peer,
@@ -548,7 +597,7 @@ impl Session {
                             if let Some(root)=iq.start(to,kind,payload,reply){let id=root.attr("id").unwrap().to_string();if !send(&mut client,root).await{iq.fail(&id)}}
                         },
                         Some(Command::Send{peer,message,quote})=>{
-                            if !online || message.unavailable{emit(BackendEvent::Failed{peer,id:message.wire_id});continue}
+                            if !online || message.unavailable || message.attachment.as_ref().is_some_and(|file|!file.valid_outgoing(message.encrypted)||message.poll.is_some()||message.action.is_some()){emit(BackendEvent::Failed{peer,id:message.wire_id});continue}
                             if message.encrypted{crypto.send(crate::crypto::service::Request::Send{peer,message,quote});continue}
                             let root=outgoing(&peer,&message,&quote);
                             let ok=send(&mut client,root).await;emit(if ok{BackendEvent::Sent{peer,id:message.wire_id}}else{BackendEvent::Failed{peer,id:message.wire_id}});
@@ -582,7 +631,7 @@ impl Session {
                             }else if root.is("iq",NS){let id=root.attr("id").unwrap_or("");let trusted=from.is_empty()||from==owner;
                                 if trusted{if let Some(query)=root.get_child("query","jabber:iq:roster"){let contacts=query.children().filter(|c|c.is("item","jabber:iq:roster")).filter_map(|c|Some((c.attr("jid")?.into(),c.attr("name").unwrap_or("").into(),c.attr("subscription").unwrap_or("none").into()))).collect();emit(BackendEvent::Roster(contacts));if root.attr("type")==Some("set"){send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).build()).await;}}}
                                 if !trusted && mam.contains_key(id) { continue } if let Some((peer,_))=mam.remove(id){let fin=root.get_child("fin","urn:xmpp:mam:2");let before=fin.and_then(|f|f.get_child("set","http://jabber.org/protocol/rsm")).and_then(|s|s.get_child("first","http://jabber.org/protocol/rsm")).map(|f|f.text()).unwrap_or_default();let complete=fin.is_some_and(|f|matches!(f.attr("complete"),Some("true"|"1")))||before.is_empty();emit(BackendEvent::History{peer,before,complete,error:fin.is_none()});}
-                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in ["urn:xmpp:receipts",REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT,crate::polls::NS,crate::forwarding::NS]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
+                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in ["urn:xmpp:receipts",REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT,crate::polls::NS,crate::forwarding::NS,crate::file_share::NS]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
                             }
                         }
                     }},

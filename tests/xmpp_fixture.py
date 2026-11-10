@@ -8,6 +8,10 @@ import time
 import threading
 import select
 import argparse
+import http.server
+import ssl
+import json
+import base64
 
 
 def free_port():
@@ -71,7 +75,41 @@ authentication = "internal_hashed"
                         time.sleep(.05)
                 else:
                     raise RuntimeError("Prosody did not start")
-                run_checks(root, port, ca)
+                vectors = json.loads(Path("tests/mobile-reference/file-cipher-vectors.json").read_text())
+                encrypted = base64.b64decode(vectors[1]["ciphertext"])
+                plain = base64.b64decode(vectors[1]["plain"])
+                class Files(http.server.BaseHTTPRequestHandler):
+                    def log_message(self, *_):
+                        pass
+                    def do_GET(self):
+                        assert "#" not in self.path and "aesgcm" not in self.path
+                        data = encrypted if self.path.startswith("/encrypted") else plain
+                        if self.path.endswith("bad"):
+                            data = data[:-1] + bytes([data[-1] ^ 1])
+                        self.send_response(200)
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        try:
+                            if self.path.endswith("slow"):
+                                self.wfile.write(data[:1])
+                                self.wfile.flush()
+                                time.sleep(.8)
+                                data = data[1:]
+                            self.wfile.write(data)
+                        except (BrokenPipeError, ConnectionResetError, ssl.SSLError):
+                            pass
+                files = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Files)
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                context.load_cert_chain(cert, key)
+                files.socket = context.wrap_socket(files.socket, server_side=True)
+                file_thread = threading.Thread(target=files.serve_forever)
+                file_thread.start()
+                try:
+                    run_checks(root, port, ca, f"https://localhost:{files.server_port}")
+                finally:
+                    files.shutdown()
+                    file_thread.join()
+                    files.server_close()
             finally:
                 server.terminate()
                 try:
@@ -81,7 +119,7 @@ authentication = "internal_hashed"
                     server.wait()
 
 
-def run_checks(root, server_port, cert):
+def run_checks(root, server_port, cert, file_url):
     parser = argparse.ArgumentParser()
     parser.add_argument("--test-binary", required=True)
     parser.add_argument("--app-binary")
@@ -133,7 +171,7 @@ def run_checks(root, server_port, cert):
                 sock.close()
     thread = threading.Thread(target=proxy)
     thread.start()
-    env = dict(os.environ, MONOGRAM_IT_PORT=str(listener.getsockname()[1]), MONOGRAM_IT_RECONNECT=str(marker), SSL_CERT_FILE=str(cert))
+    env = dict(os.environ, MONOGRAM_IT_PORT=str(listener.getsockname()[1]), MONOGRAM_IT_RECONNECT=str(marker), SSL_CERT_FILE=str(cert), MONOGRAM_FILE_URL=file_url)
     def run(name, environment):
         subprocess.run([args.test_binary, "--ignored", "--exact", name, "--nocapture"], env=environment, check=True, timeout=110)
     try:

@@ -1,8 +1,7 @@
 //! Bounded, account-scoped IQ requests. A guessed ID cannot authorize a peer reply.
-use crate::{
-    model::new_id,
-    protocol::{self, Command},
-};
+#[cfg(test)]
+use crate::protocol;
+use crate::{model::new_id, protocol::Command};
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
@@ -11,6 +10,11 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_xmpp::minidom::Element;
 const CLIENT: &str = "jabber:client";
 const STANZAS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
+fn valid_to(to: &str) -> bool {
+    to.parse::<tokio_xmpp::jid::Jid>()
+        .ok()
+        .is_some_and(|jid| jid.to_string() == to)
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     Closed,
@@ -37,7 +41,7 @@ impl Client {
         Self { tx }
     }
     pub async fn request(&self, to: &str, kind: Kind, payload: Element) -> Reply {
-        if protocol::bare(to).ok().as_deref() != Some(to) {
+        if !valid_to(to) {
             return Err(Error::Invalid);
         }
         let (reply, received) = oneshot::channel();
@@ -72,7 +76,7 @@ impl Pending {
         payload: Element,
         reply: oneshot::Sender<Reply>,
     ) -> Option<Element> {
-        if protocol::bare(&to).ok().as_deref() != Some(&to) {
+        if !valid_to(&to) {
             let _ = reply.send(Err(Error::Invalid));
             return None;
         }
@@ -222,6 +226,33 @@ mod tests {
         assert!(pending.receive(&reply, "alice@example.org"));
         assert_eq!(rx.try_recv().unwrap(), Ok(None));
         assert!(!pending.receive(&reply, "alice@example.org"));
+    }
+    #[test]
+    fn full_resource_and_service_requests_keep_exact_response_authority() {
+        let mut pending = Pending::default();
+        let (request, mut received) = request(&mut pending, "bob@example.org/phone");
+        let mut reply = Element::builder("iq", CLIENT)
+            .attr("type".try_into().unwrap(), "result")
+            .attr("id".try_into().unwrap(), request.attr("id").unwrap())
+            .build();
+        for wrong in [
+            "bob@example.org",
+            "bob@example.org/laptop",
+            "eve@example.org/phone",
+        ] {
+            reply.set_attr("".into(), "from".try_into().unwrap(), wrong);
+            assert!(!pending.receive(&reply, "alice@example.org"));
+        }
+        reply.set_attr(
+            "".into(),
+            "from".try_into().unwrap(),
+            "bob@example.org/phone",
+        );
+        assert!(pending.receive(&reply, "alice@example.org"));
+        assert_eq!(received.try_recv().unwrap(), Ok(None));
+        assert!(valid_to("upload.example.org"));
+        assert!(!valid_to(" bob@example.org"));
+        assert!(!valid_to(""));
     }
     #[test]
     fn disconnect_expiry_and_cancel_are_terminal() {

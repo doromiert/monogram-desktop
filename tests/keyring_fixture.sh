@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 fixture_test=${1:?Rust unit-test binary required}
+fixture_test=$(realpath "$fixture_test")
 fixture_bus_config=${2:-/etc/dbus-1/session.conf}
 fixture_filter=${3:-crypto::vault::tests::isolated_secret_service}
 fixture_root=$(mktemp -d)
@@ -26,6 +27,7 @@ env HOME="$fixture_root/home" XDG_CONFIG_HOME="$fixture_root/config" \
   GIO_USE_VFS=local GSETTINGS_BACKEND=memory GTK_USE_PORTAL=0 \
   MONOGRAM_KEYRING_FIXTURE=1 dbus-run-session --config-file="$fixture_root/session.conf" -- bash -c '
     set -euo pipefail
+    cd "$HOME"
     unset GNOME_KEYRING_CONTROL GNOME_KEYRING_PID SSH_AUTH_SOCK
     printf "%s" "fictional fixture password" | gnome-keyring-daemon --foreground --unlock --components=secrets --control-directory="$XDG_RUNTIME_DIR/keyring" >"$XDG_RUNTIME_DIR/keyring.log" 2>&1 &
     fixture_daemon=$!
