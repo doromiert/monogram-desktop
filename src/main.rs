@@ -3,6 +3,7 @@ mod action_store;
 mod crypto;
 mod dialogs;
 mod folders;
+mod forwarding;
 mod iq;
 mod legacy_polls;
 mod live_actions;

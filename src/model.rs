@@ -15,6 +15,8 @@ fn yes() -> bool {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Message {
+    pub forwarded: Option<crate::forwarding::Attribution>,
+    pub unsupported_attachment: bool,
     pub action: Option<crate::message_actions::Action>,
     pub poll: Option<crate::polls::Poll>,
     pub poll_source: crate::polls::Source,
@@ -52,6 +54,8 @@ pub struct Message {
 impl Default for Message {
     fn default() -> Self {
         Self {
+            forwarded: None,
+            unsupported_attachment: false,
             action: None,
             poll: None,
             poll_source: crate::polls::Source::None,
@@ -96,10 +100,35 @@ impl Message {
             self.poll_source
         }
     }
-    pub fn hydrate_legacy_poll(&mut self) {
+    pub fn hydrate_compatibility(&mut self) {
+        if !self.unavailable
+            && !self.retracted
+            && self.forwarded.is_none()
+            && !matches!(
+                self.action,
+                Some(
+                    crate::message_actions::Action::React { .. }
+                        | crate::message_actions::Action::Retract { .. }
+                )
+            )
+            && let Some((attribution, body)) = crate::forwarding::parse(&self.text)
+        {
+            self.forwarded = Some(attribution);
+            self.text = body;
+            if self.poll.is_none()
+                && self.poll_source == crate::polls::Source::Text
+                && !self.unsupported_attachment
+            {
+                self.poll_source = crate::polls::Source::None;
+            }
+        }
+        if self.poll.is_none() && crate::forwarding::key_uri(&self.text) {
+            self.unsupported_attachment = true;
+        }
         if self.poll_source() != crate::polls::Source::None
             || self.unavailable
             || self.retracted
+            || self.unsupported_attachment
             || !matches!(self.kind.as_str(), "text" | "correct")
             || matches!(
                 self.action,
@@ -121,7 +150,7 @@ impl Message {
     }
     pub fn decode(body: &str) -> Result<Self, serde_json::Error> {
         let mut message: Self = serde_json::from_str(body)?;
-        message.hydrate_legacy_poll();
+        message.hydrate_compatibility();
         Ok(message)
     }
     pub fn preview(&self) -> String {
@@ -366,7 +395,7 @@ impl State {
             m.wire_id = m.id.clone();
             m.aliases = vec![format!("wire:{}", m.id), format!("origin:{}", m.id)]
         }
-        m.hydrate_legacy_poll();
+        m.hydrate_compatibility();
         let id = m.id.clone();
         self.current_mut().messages.push(m);
         Some(id)

@@ -206,6 +206,9 @@ impl PollSmoke {
                 assert_eq!(message.poll_source(), crate::polls::Source::Structured);
                 assert!(!message.poll.as_ref().unwrap().closed);
                 assert!(message.text.is_empty());
+                let attribution = message.forwarded.as_ref().unwrap();
+                assert_eq!(attribution.name, owner);
+                assert!(attribution.date > 0);
                 assert!(
                     message
                         .poll
@@ -375,6 +378,218 @@ impl PollSmoke {
                 println!(
                     "Native historical poll: canonical body, votes/voters, legacy closure/cutoff/reload and fresh structured forwarding passed (encrypted={encrypted})"
                 );
+                self.stage.set(11);
+                return true;
+            }
+            _ => {}
+        }
+        false
+    }
+}
+
+#[derive(Default)]
+struct ForwardSmoke {
+    stage: Cell<u8>,
+    original: std::cell::RefCell<String>,
+    first_copy: std::cell::RefCell<String>,
+    copied: Rc<Cell<bool>>,
+}
+impl ForwardSmoke {
+    const BODY: &str = "  Forwarded text 😀\n\nwith trailing space  ";
+    const FILE: &str = "aesgcm://files.example.invalid/fixture#not-a-real-key";
+    fn attribution() -> crate::forwarding::Attribution {
+        crate::forwarding::Attribution::new(
+            &format!("{}@long-server.example.invalid/device", "a".repeat(120)),
+            0,
+        )
+        .unwrap()
+    }
+    fn start(&self, ui: &Rc<Ui>, session: &crate::protocol::Session, encrypted: bool) {
+        assert_eq!(self.stage.get(), 0);
+        for (body, forwarded) in [(Self::FILE, None), (Self::BODY, Some(Self::attribution()))] {
+            session.send(crate::protocol::Command::Send {
+                peer: ui.state.borrow().account.clone(),
+                message: Message {
+                    text: body.into(),
+                    wire_id: new_id(),
+                    encrypted,
+                    forwarded,
+                    ..Default::default()
+                },
+                quote: String::new(),
+            });
+        }
+        self.stage.set(1);
+    }
+    fn incoming(&self, message: &Message, encrypted: bool) -> bool {
+        if self.stage.get() == 0 {
+            return false;
+        }
+        assert_ne!(
+            message.text,
+            Self::FILE,
+            "An old attachment key was forwarded"
+        );
+        if message.text != Self::BODY {
+            return false;
+        }
+        assert_eq!(message.encrypted, encrypted);
+        assert!(message.action.is_none());
+        assert!(message.reply_id.is_empty());
+        assert!(!message.wire_id.is_empty());
+        match self.stage.get() {
+            2 => {
+                assert_eq!(message.forwarded, Some(Self::attribution()));
+                self.stage.set(3);
+            }
+            5 => {
+                assert!(message.forwarded.is_none());
+                self.stage.set(6);
+            }
+            stage => panic!("Unexpected forwarded copy at stage {stage}"),
+        }
+        true
+    }
+    fn forward(ui: &Rc<Ui>, id: &str) {
+        let bubble = ui.bubbles.borrow()[id]
+            .clone()
+            .downcast::<gtk::Box>()
+            .unwrap();
+        ui.message_menu(&bubble, id, 0., 0.);
+        button(bubble.upcast_ref(), "Forward")
+            .unwrap()
+            .emit_clicked();
+    }
+    fn tick(&self, ui: &Rc<Ui>, encrypted: bool) -> bool {
+        fn choose(widget: &gtk::Widget, title: &str) -> bool {
+            if let Some(row) = widget.downcast_ref::<adw::ActionRow>()
+                && row.title() == title
+            {
+                row.emit_by_name::<()>("activated", &[]);
+                return true;
+            }
+            let mut child = widget.first_child();
+            while let Some(w) = child {
+                child = w.next_sibling();
+                if choose(&w, title) {
+                    return true;
+                }
+            }
+            false
+        }
+        fn hide(widget: &gtk::Widget) -> Option<adw::SwitchRow> {
+            if let Some(row) = widget.downcast_ref::<adw::SwitchRow>()
+                && row.title() == "Hide Sender"
+            {
+                return Some(row.clone());
+            }
+            let mut child = widget.first_child();
+            while let Some(w) = child {
+                child = w.next_sibling();
+                if let Some(row) = hide(&w) {
+                    return Some(row);
+                }
+            }
+            None
+        }
+        let find = |own: bool, attributed: bool| {
+            ui.state
+                .borrow()
+                .current()
+                .messages
+                .iter()
+                .find(|m| {
+                    m.own == own && m.text == Self::BODY && m.forwarded.is_some() == attributed
+                })
+                .cloned()
+        };
+        match self.stage.get() {
+            1 => {
+                let file = ui
+                    .state
+                    .borrow()
+                    .current()
+                    .messages
+                    .iter()
+                    .find(|m| !m.own && m.text == Self::FILE)
+                    .cloned();
+                let Some(file) = file else {
+                    return false;
+                };
+                let Some(source) = find(false, true) else {
+                    return false;
+                };
+                assert!(file.unsupported_attachment);
+                let dialogs = ui.dialogs.borrow().len();
+                Self::forward(ui, &file.id);
+                assert_eq!(ui.dialogs.borrow().len(), dialogs);
+                self.original.replace(source.wire_id);
+                Self::forward(ui, &source.id);
+                let dialog = ui.dialogs.borrow().last().unwrap().child().unwrap();
+                assert!(!hide(&dialog).unwrap().is_active());
+                let name = ui.state.borrow().current().name.clone();
+                self.stage.set(2);
+                assert!(choose(&dialog, &name));
+            }
+            3 => {
+                let copy = find(true, true).unwrap();
+                assert_ne!(copy.wire_id, *self.original.borrow());
+                self.first_copy.replace(copy.id.clone());
+                let bubble = ui.bubbles.borrow()[&copy.id].clone();
+                button(
+                    &bubble,
+                    &format!("Forwarded from {}", Self::attribution().name),
+                )
+                .unwrap()
+                .emit_clicked();
+                let dialog = ui.dialogs.borrow().last().unwrap().child().unwrap();
+                assert!(has_label(&dialog, &Self::attribution().name));
+                assert!(has_label(&dialog, "Unknown date"));
+                button(&dialog, "Copy Sender").unwrap().emit_clicked();
+                let copied = self.copied.clone();
+                ui.window.clipboard().read_text_async(
+                    None::<&gtk::gio::Cancellable>,
+                    move |value| {
+                        assert_eq!(value.unwrap().unwrap().as_str(), Self::attribution().name);
+                        copied.set(true);
+                    },
+                );
+                self.stage.set(4);
+            }
+            4 if self.copied.get() => {
+                close_dialogs(ui);
+                Self::forward(ui, &self.first_copy.borrow());
+                let dialog = ui.dialogs.borrow().last().unwrap().child().unwrap();
+                hide(&dialog).unwrap().set_active(true);
+                let name = ui.state.borrow().current().name.clone();
+                self.stage.set(5);
+                assert!(choose(&dialog, &name));
+            }
+            6 => {
+                let state = ui.store.load(&ui.state.borrow().account);
+                let chat = state
+                    .chats
+                    .iter()
+                    .find(|c| c.id == ui.state.borrow().active)
+                    .unwrap();
+                let messages = &chat.messages;
+                let first = messages
+                    .iter()
+                    .find(|m| m.id == *self.first_copy.borrow())
+                    .unwrap();
+                assert_eq!(first.forwarded, Some(Self::attribution()));
+                assert_eq!(first.text, Self::BODY);
+                let hidden = messages
+                    .iter()
+                    .find(|m| m.own && m.text == Self::BODY && m.forwarded.is_none())
+                    .unwrap();
+                assert_ne!(first.wire_id, hidden.wire_id);
+                assert_eq!(ui.composer_text(), "Keep the ordinary poll draft");
+                assert_eq!(chat.draft, "Keep the ordinary poll draft");
+                println!(
+                    "Native forwarding: full sender claim, unknown date, sender details/copy, re-forward/hide sender, whitespace, fresh IDs, draft/reload and attachment-key rejection passed (encrypted={encrypted})"
+                );
+                self.stage.set(7);
                 return true;
             }
             _ => {}
@@ -386,6 +601,7 @@ impl PollSmoke {
 fn button(widget: &gtk::Widget, title: &str) -> Option<gtk::Button> {
     if let Some(button) = widget.downcast_ref::<gtk::Button>() {
         if button.label().as_deref() == Some(title)
+            || button.tooltip_text().as_deref() == Some(title)
             || button.child().is_some_and(|child| has_label(&child, title))
         {
             return Some(button.clone());
@@ -525,6 +741,7 @@ pub fn run_crypto(ui: Rc<Ui>) {
     )));
     let stage = Cell::new(0);
     let poll_smoke = PollSmoke::default();
+    let forward_smoke = ForwardSmoke::default();
     let frank_online = Cell::new(false);
     let frank_ready = Cell::new(false);
     let frank_trusted = Cell::new(false);
@@ -593,6 +810,9 @@ pub fn run_crypto(ui: Rc<Ui>) {
                         .as_ref()
                         .unwrap()
                         .send(Command::Crypto(Request::Accepted(token)));
+                    if forward_smoke.incoming(&message, true) {
+                        continue;
+                    }
                     if poll_smoke.incoming(&ui, frank.borrow().as_ref().unwrap(), &message, true) {
                         continue;
                     }
@@ -679,6 +899,9 @@ pub fn run_crypto(ui: Rc<Ui>) {
             }
         }
         if poll_smoke.tick(&ui, frank.borrow().as_ref().unwrap(), true) {
+            forward_smoke.start(&ui, frank.borrow().as_ref().unwrap(), true);
+        }
+        if forward_smoke.tick(&ui, true) {
             frank.borrow_mut().take();
             ui.window.close();
             return glib::ControlFlow::Break;
@@ -1034,6 +1257,7 @@ pub fn run_live(ui: Rc<Ui>) {
     ui.select_chat(&peer);
     let stage = Cell::new(0);
     let poll_smoke = PollSmoke::default();
+    let forward_smoke = ForwardSmoke::default();
     let bob_online = Cell::new(false);
     let started = Instant::now();
     glib::timeout_add_local(Duration::from_millis(50), move || {
@@ -1050,6 +1274,9 @@ pub fn run_live(ui: Rc<Ui>) {
                     historical: false,
                     ..
                 } if !message.own => {
+                    if forward_smoke.incoming(&message, false) {
+                        continue;
+                    }
                     if poll_smoke.incoming(&ui, bob.borrow().as_ref().unwrap(), &message, false) {
                         continue;
                     }
@@ -1144,6 +1371,9 @@ pub fn run_live(ui: Rc<Ui>) {
             }
         }
         if poll_smoke.tick(&ui, bob.borrow().as_ref().unwrap(), false) {
+            forward_smoke.start(&ui, bob.borrow().as_ref().unwrap(), false);
+        }
+        if forward_smoke.tick(&ui, false) {
             bob.borrow_mut().take();
             ui.window.close();
             return glib::ControlFlow::Break;

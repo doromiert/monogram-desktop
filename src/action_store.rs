@@ -322,6 +322,7 @@ impl Store {
             || current.unavailable
             || base.unavailable
             || base.action.is_some()
+            || kind == "correct" && (base.unsupported_attachment || current.unsupported_attachment)
             || kind != "react" && !base.own
         {
             return Err(rusqlite::Error::InvalidQuery);
@@ -427,6 +428,7 @@ mod tests {
     fn sender_scope_encryption_floor_and_exact_retraction_fingerprint() {
         let (db, mut s) = setup();
         let mut original = base("first", "wire", false);
+        original.forwarded = crate::forwarding::Attribution::new("Original claim", 0);
         original.encrypted = true;
         original.fingerprint = "device-one".into();
         save(&db, &mut s, original.clone());
@@ -450,8 +452,13 @@ mod tests {
         );
         secure.encrypted = true;
         secure.fingerprint = "device-two".into();
+        secure.forwarded = crate::forwarding::Attribution::new("Edited claim", 1700000000);
         record(&db, &secure, "received");
         assert_eq!(db.message(OWNER, PEER, "first").unwrap().text, "corrected");
+        assert_eq!(
+            db.message(OWNER, PEER, "first").unwrap().forwarded,
+            secure.forwarded
+        );
         let mut deletion = event(
             "delete",
             Action::Retract {
@@ -474,6 +481,7 @@ mod tests {
         assert!(wiped.retracted);
         assert!(wiped.text.is_empty());
         assert!(wiped.edit_history.is_empty());
+        assert!(wiped.forwarded.is_none());
         db.save(&s).unwrap();
         assert!(db.message(OWNER, PEER, "first").unwrap().text.is_empty());
         assert!(
@@ -486,6 +494,12 @@ mod tests {
                 .unwrap()
                 .text
                 .is_empty()
+        );
+        assert!(
+            db.action_base(OWNER, PEER, "first")
+                .unwrap()
+                .forwarded
+                .is_none()
         );
         let mut spoof = secure;
         spoof.sender = "attacker@example.org".into();

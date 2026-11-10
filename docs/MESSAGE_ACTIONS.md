@@ -68,3 +68,6 @@ This implements direct text actions. Room permissions/actor identities, caption
 edits with unchanged attachment identity, full reaction/poll UI, event rejection
 UI, server moderation/tombstones and complete provider/mobile-app interoperability
 remain open. Full desktop/mobile parity is not claimed by this milestone.
+
+See [forwarding](FORWARDING.md) for native attributed text/poll copies, Hide Sender,
+standalone XEP-0297 quote reception and the remaining attachment/rich-content gaps.

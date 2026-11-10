@@ -1375,14 +1375,22 @@ impl Ui {
         }
         let owner = self.state.borrow().account.clone();
         if !owner.is_empty()
-            && messages
-                .iter()
-                .any(|m| (m.kind != "text" && m.poll.is_none()) || m.unavailable)
+            && messages.iter().any(|m| {
+                (m.kind != "text" && m.poll.is_none()) || m.unavailable || m.unsupported_attachment
+            })
         {
-            self.notice("Only decrypted text and polls can be forwarded in this build");
+            self.notice("Only decrypted text and polls can be forwarded here. Attachments need a fresh upload.");
             return;
         }
         let page = adw::PreferencesPage::new();
+        let source_group = self.state.borrow().current().group;
+        let options = adw::PreferencesGroup::new();
+        let hide = adw::SwitchRow::builder()
+            .title("Hide Sender")
+            .subtitle("Send a copy without the original sender and date.")
+            .build();
+        options.add(&hide);
+        page.add(&options);
         let g = adw::PreferencesGroup::builder()
             .title("Choose a Conversation")
             .build();
@@ -1399,6 +1407,7 @@ impl Ui {
             let owner = owner.clone();
             let weak = Rc::downgrade(self);
             let d = d.clone();
+            let hide = hide.clone();
             row.connect_activated(move |_| {
                 if let Some(ui) = weak.upgrade() {
                     if ui.state.borrow().account != owner {
@@ -1406,9 +1415,11 @@ impl Ui {
                     }
                     ui.select_chat(&c.id);
                     for m in &messages {
+                        let attribution = (!hide.is_active())
+                            .then(|| crate::forwarding::original(m, &owner, source_group));
                         if let Some(mut poll) = m.poll.clone() {
                             poll.closed = false;
-                            if !ui.send_poll_text(
+                            if !ui.send_poll_text_attribution(
                                 poll,
                                 m.poll_fallback,
                                 if m.poll_source() == crate::polls::Source::Legacy {
@@ -1416,15 +1427,14 @@ impl Ui {
                                 } else {
                                     &m.text
                                 },
+                                attribution,
                             ) {
                                 return;
                             }
                             continue;
                         }
-                        if let Some(id) = ui.send_content(
-                            &format!("↪ Forwarded from {}\n\n{}", m.author, m.text),
-                            &m.kind,
-                        ) {
+                        if let Some(id) = ui.send_content_attribution(&m.text, &m.kind, attribution)
+                        {
                             if let Some(sent) = ui
                                 .state
                                 .borrow_mut()
@@ -1446,6 +1456,38 @@ impl Ui {
             });
             g.add(&row)
         }
+    }
+    pub fn forwarded_details(self: &Rc<Self>, attribution: &crate::forwarding::Attribution) {
+        let page = adw::PreferencesPage::new();
+        let group = adw::PreferencesGroup::builder()
+            .description("Attribution provided by the person who forwarded this message.")
+            .build();
+        let row = adw::ActionRow::builder()
+            .title("Original Sender")
+            .subtitle(&attribution.name)
+            .use_markup(false)
+            .build();
+        let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
+        copy.set_tooltip_text(Some("Copy Sender"));
+        copy.set_valign(gtk::Align::Center);
+        let name = attribution.name.clone();
+        let clipboard = self.window.clipboard();
+        copy.connect_clicked(move |_| clipboard.set_text(&name));
+        row.add_suffix(&copy);
+        group.add(&row);
+        group.add(
+            &adw::ActionRow::builder()
+                .title("Original Date")
+                .subtitle(if attribution.date == 0 {
+                    "Unknown date".into()
+                } else {
+                    attribution.stamp()
+                })
+                .use_markup(false)
+                .build(),
+        );
+        page.add(&group);
+        self.dialog("Forwarded Message", &page, 480, 300);
     }
     pub fn message_details(self: &Rc<Self>, m: &Message) {
         let page = adw::PreferencesPage::new();

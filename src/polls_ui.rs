@@ -202,9 +202,18 @@ impl Ui {
     }
     pub fn send_poll_text(
         self: &Rc<Self>,
+        poll: Poll,
+        fallback: bool,
+        accompaniment: &str,
+    ) -> bool {
+        self.send_poll_text_attribution(poll, fallback, accompaniment, None)
+    }
+    pub fn send_poll_text_attribution(
+        self: &Rc<Self>,
         mut poll: Poll,
         fallback: bool,
         accompaniment: &str,
+        attribution: Option<crate::forwarding::Attribution>,
     ) -> bool {
         let Ok(canonical) = poll.canonicalized() else {
             self.notice(
@@ -233,6 +242,7 @@ impl Ui {
                 m.text = accompaniment.into();
                 m.poll = Some(poll);
                 m.poll_fallback = fallback;
+                m.forwarded = attribution;
             }
             self.render_messages(true);
             self.refresh_chats(None);
@@ -251,6 +261,7 @@ impl Ui {
         drop(state);
         let wire = new_id();
         let message = Message {
+            forwarded: attribution,
             id: wire.clone(),
             wire_id: wire.clone(),
             aliases: vec![format!("wire:{wire}"), format!("origin:{wire}")],

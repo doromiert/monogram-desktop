@@ -1172,6 +1172,14 @@ impl Ui {
         self.session.borrow().as_ref().is_some_and(|s| s.send(c))
     }
     pub fn send_content(self: &Rc<Self>, value: &str, kind: &str) -> Option<String> {
+        self.send_content_attribution(value, kind, None)
+    }
+    pub fn send_content_attribution(
+        self: &Rc<Self>,
+        value: &str,
+        kind: &str,
+        attribution: Option<crate::forwarding::Attribution>,
+    ) -> Option<String> {
         let live = !self.state.borrow().account.is_empty();
         if live && (kind != "text" || !self.online.get()) {
             self.notice(if kind != "text" {
@@ -1181,7 +1189,32 @@ impl Ui {
             });
             return None;
         }
-        let id = self.state.borrow_mut().send(value, kind)?;
+        if live && self.state.borrow().current().encryption && !self.crypto.borrow().ready {
+            self.notice("Enable OMEMO 2 and review devices before forwarding here");
+            return None;
+        }
+        let wire = attribution
+            .as_ref()
+            .map(|a| a.wire_body(value))
+            .unwrap_or_else(|| value.into());
+        let id = self.state.borrow_mut().send(&wire, kind)?;
+        {
+            let mut state = self.state.borrow_mut();
+            let message = state
+                .current_mut()
+                .messages
+                .iter_mut()
+                .find(|m| m.id == id)
+                .unwrap();
+            message.text = value.into();
+            message.forwarded = attribution;
+            if kind == "text" {
+                message.poll = None;
+                message.poll_source = crate::polls::Source::None;
+                message.poll_tally = None;
+            }
+            message.hydrate_compatibility();
+        }
         if live {
             let mut state = self.state.borrow_mut();
             if let Some(m) = state.current_mut().messages.iter_mut().find(|m| m.id == id) {
@@ -1200,11 +1233,16 @@ impl Ui {
                     .retain(|m| m.id != id);
                 return None;
             }
-            self.command(Command::Send {
+            let wire = message.wire_id.clone();
+            if !self.command(Command::Send {
                 peer,
                 message,
                 quote: String::new(),
-            });
+            }) {
+                let peer = self.state.borrow().current().jid.clone();
+                self.delivery(&peer, &wire, "failed");
+                return None;
+            }
         }
         self.render_messages(true);
         self.refresh_chats(None);

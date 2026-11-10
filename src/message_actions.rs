@@ -282,10 +282,10 @@ pub fn project(
     peer: &str,
 ) -> Projection {
     for base in &mut bases {
-        base.hydrate_legacy_poll();
+        base.hydrate_compatibility();
     }
     for event in &mut events {
-        event.message.hydrate_legacy_poll();
+        event.message.hydrate_compatibility();
     }
     events.sort_by(|a, b| {
         a.message
@@ -346,6 +346,8 @@ pub fn project(
         value.poll = m.poll.clone();
         value.poll_source = m.poll_source;
         value.text = m.text.clone();
+        value.forwarded = m.forwarded.clone();
+        value.unsupported_attachment = m.unsupported_attachment;
         value.reply = m.reply.clone();
         value.reply_id = m.reply_id.clone();
         value.reply_to = m.reply_to.clone();
@@ -512,6 +514,8 @@ pub fn project(
     }
 }
 pub fn scrub(message: &mut Message) {
+    message.forwarded = None;
+    message.unsupported_attachment = false;
     message.retracted = true;
     message.text.clear();
     message.poll = None;

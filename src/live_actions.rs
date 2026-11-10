@@ -131,6 +131,11 @@ impl Ui {
         }
         let wire = new_id();
         let message = Message {
+            forwarded: if kind == "correct" {
+                current.forwarded.clone()
+            } else {
+                None
+            },
             poll_source: if legacy_body.is_some() {
                 crate::polls::Source::Legacy
             } else {

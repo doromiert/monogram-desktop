@@ -3,6 +3,8 @@
 mod action_store;
 #[path = "../src/crypto/mod.rs"]
 mod crypto;
+#[path = "../src/forwarding.rs"]
+mod forwarding;
 #[path = "../src/iq.rs"]
 mod iq;
 #[path = "../src/legacy_polls.rs"]

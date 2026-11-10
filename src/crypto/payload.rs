@@ -119,6 +119,7 @@ pub fn allowed(child: &Element) -> bool {
             | ("replace", "urn:xmpp:message-correct:0")
             | ("reactions", "urn:xmpp:reactions:0")
             | ("poll", "urn:xmpp:polls:0")
+            | ("forwarded", "urn:xmpp:forward:0")
             | ("reference", "urn:xmpp:reference:0")
             | ("content", "urn:xmpp:content")
             | ("markup", "urn:xmpp:markup:0")

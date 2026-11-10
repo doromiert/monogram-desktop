@@ -134,6 +134,11 @@ pub fn normalize(
     if poll_present && control {
         return None;
     }
+    let quoted = if unavailable || control {
+        None
+    } else {
+        crate::forwarding::standalone(xml)
+    };
     let poll = if unavailable {
         None
     } else {
@@ -149,6 +154,8 @@ pub fn normalize(
         String::new()
     } else if poll_present {
         "Unsupported poll".into()
+    } else if quoted.is_some() {
+        String::new()
     } else {
         return None;
     };
@@ -168,6 +175,8 @@ pub fn normalize(
         text
     };
     let mut m = Message {
+        unsupported_attachment: xml.get_child("file-sharing", "urn:xmpp:sfs:0").is_some()
+            || xml.get_child("x", "jabber:x:oob").is_some(),
         poll_source: if poll_present {
             crate::polls::Source::Structured
         } else {
@@ -190,10 +199,20 @@ pub fn normalize(
         reply: quote,
         ..Default::default()
     };
+    if crate::forwarding::parse(&m.text).is_none()
+        && let Some((attribution, body)) = quoted
+    {
+        m.text = if m.text.is_empty() {
+            body
+        } else {
+            format!("{}\n\n{body}", m.text)
+        };
+        m.forwarded = Some(attribution);
+    }
     if xml.get_child("file-sharing", "urn:xmpp:sfs:0").is_some() && !poll_present {
         m.poll_source = crate::polls::Source::Text;
     }
-    m.hydrate_legacy_poll();
+    m.hydrate_compatibility();
     m.wire_id = xml
         .attr("id")
         .filter(|id| crate::message_actions::valid_id(id))
@@ -301,10 +320,15 @@ pub fn text_stanza(peer: &str, text: &str, id: &str, reply: Option<(&str, &str, 
     root
 }
 pub fn outgoing(peer: &str, message: &Message, quote: &str) -> Element {
+    let accompanied = message
+        .forwarded
+        .as_ref()
+        .map(|a| a.wire_body(&message.text))
+        .unwrap_or_else(|| message.text.clone());
     if message.poll_source() == crate::polls::Source::Legacy {
         let mut root = text_stanza(
             peer,
-            &message.text,
+            &accompanied,
             &message.wire_id,
             (!message.reply_id.is_empty()).then_some((&message.reply_id, &message.reply_to, quote)),
         );
@@ -320,13 +344,13 @@ pub fn outgoing(peer: &str, message: &Message, quote: &str) -> Element {
         .filter(|_| message.poll_fallback)
         .map(|p| p.readable_body());
     let authored = if let Some(fallback) = &poll_body {
-        if message.text.is_empty() {
+        if accompanied.is_empty() {
             fallback.clone()
         } else {
-            format!("{}\n\n{fallback}", message.text)
+            format!("{accompanied}\n\n{fallback}")
         }
     } else {
-        message.text.clone()
+        accompanied.clone()
     };
     let body = if matches!(
         message.action,
@@ -355,7 +379,7 @@ pub fn outgoing(peer: &str, message: &Message, quote: &str) -> Element {
                                 "start".try_into().unwrap(),
                                 (wire_body.chars().count()
                                     - poll_body.as_ref().unwrap().chars().count()
-                                    - if message.text.is_empty() { 0 } else { 2 })
+                                    - if accompanied.is_empty() { 0 } else { 2 })
                                 .to_string(),
                             )
                             .attr(
@@ -558,7 +582,7 @@ impl Session {
                             }else if root.is("iq",NS){let id=root.attr("id").unwrap_or("");let trusted=from.is_empty()||from==owner;
                                 if trusted{if let Some(query)=root.get_child("query","jabber:iq:roster"){let contacts=query.children().filter(|c|c.is("item","jabber:iq:roster")).filter_map(|c|Some((c.attr("jid")?.into(),c.attr("name").unwrap_or("").into(),c.attr("subscription").unwrap_or("none").into()))).collect();emit(BackendEvent::Roster(contacts));if root.attr("type")==Some("set"){send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).build()).await;}}}
                                 if !trusted && mam.contains_key(id) { continue } if let Some((peer,_))=mam.remove(id){let fin=root.get_child("fin","urn:xmpp:mam:2");let before=fin.and_then(|f|f.get_child("set","http://jabber.org/protocol/rsm")).and_then(|s|s.get_child("first","http://jabber.org/protocol/rsm")).map(|f|f.text()).unwrap_or_default();let complete=fin.is_some_and(|f|matches!(f.attr("complete"),Some("true"|"1")))||before.is_empty();emit(BackendEvent::History{peer,before,complete,error:fin.is_none()});}
-                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in ["urn:xmpp:receipts",REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT,crate::polls::NS]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
+                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in ["urn:xmpp:receipts",REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT,crate::polls::NS,crate::forwarding::NS]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
                             }
                         }
                     }},

@@ -96,6 +96,25 @@ impl Ui {
             }
             heading.append(&meta);
             bubble.append(&heading);
+            if let Some(attribution) = m.forwarded.clone() {
+                let header = gtk::Button::new();
+                header.add_css_class("flat");
+                header.set_halign(gtk::Align::Start);
+                header.set_margin_bottom(4);
+                let title = text(&format!("Forwarded from {}", attribution.name), "caption");
+                title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                title.set_max_width_chars(36);
+                title.set_single_line_mode(true);
+                header.set_child(Some(&title));
+                header.set_tooltip_text(Some(&attribution.name));
+                let weak = Rc::downgrade(self);
+                header.connect_clicked(move |_| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.forwarded_details(&attribution);
+                    }
+                });
+                bubble.append(&header);
+            }
             if !m.reply.is_empty() {
                 let reply = gtk::Button::new();
                 reply.add_css_class("message-reply");
@@ -242,7 +261,7 @@ impl Ui {
                     tile.append(&label("Location preview", "caption dim-label"));
                     bubble.append(&tile)
                 }
-                _ => {
+                _ if !m.text.is_empty() => {
                     let css = if self.big_emoji.get()
                         && m.text.chars().count() < 5
                         && m.text.chars().any(|c| c as u32 > 0x2000)
@@ -255,6 +274,7 @@ impl Ui {
                     l.set_selectable(true);
                     bubble.append(&l)
                 }
+                _ => {}
             }
             if !m.reactions.is_empty() {
                 let row = bx(false, 4);

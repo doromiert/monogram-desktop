@@ -84,7 +84,7 @@ votes and complete closure. Native checks cover outbox serialization, forwarding
 and scheduled retries/repeats. Separate native-backend checks verify protected PQ
 bodyless direct/MUC polls, closure and absence of exposed poll/fallback XML.
 
-A native mobile fallback toggle, historical forward attribution, desktop room
+A native mobile fallback toggle, desktop room
 transport, complete legacy/PQ encryption and physical mobile/desktop UI
 exchange remain open. These checks do not establish exactly once delivery after
 an uncertain send, full poll parity or full client parity.
@@ -111,5 +111,6 @@ Twenty fixtures exported by the actual mobile legacy codec check valid/malformed
 bodies, all mappings, multiline text, UTF-16 boundaries and the maximum body size.
 Native plaintext/OMEMO 2 checks operate the card, voting/voters, closure, reload and
 fresh forwarding. Empty voter dialogs also open correctly. Historical polls with
-a forwarding-text prefix remain readable text until forward attribution is ported;
-this does not establish complete historical forwarding or room parity.
+a canonical forwarding-text prefix are recognized after removing the original
+claim; [forwarding](FORWARDING.md) preserves that claim and creates a fresh poll.
+This does not establish complete historical media forwarding or room parity.
