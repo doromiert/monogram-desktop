@@ -99,12 +99,14 @@ refused, and only HTTP 200/201/204 after complete body generation permits sendin
 A pending placeholder is never an immutable wire-message base and cannot be
 submitted by the XMPP or crypto send path. After a successful upload, owner,
 session generation, encryption mode and local fingerprint must still match;
-otherwise the pending message fails and requires explicit retry. Final attachment
+otherwise the pending message fails and requires explicit retry. The crypto
+worker rechecks the selected fingerprint immediately before encryption, covering
+identity changes queued ahead of a send while GTK status is stale. Final attachment
 metadata is persisted before sending its stanza. The snapshot then moves into the
 verified download cache. Cancellation, closing the window or changing account
 stops workers. Restart recovers pending messages as interrupted, without automatic
-retransmission. Retrying a pending upload requests a fresh slot and encryption key. Retrying an
-already uploaded message under changed encryption requires selecting the file
+retransmission. Retrying a pending upload requests a fresh slot and encryption key.
+Retrying an already uploaded message under changed encryption requires selecting the file
 again. Forwarding to a different recipient still requires its own verified fresh
 upload flow and remains unavailable.
 

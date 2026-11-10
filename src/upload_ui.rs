@@ -7,7 +7,7 @@ use crate::{
     widgets::*,
 };
 use adw::prelude::*;
-use gtk::{gio, glib};
+use gtk::glib;
 use std::{
     collections::VecDeque,
     rc::Rc,
@@ -187,7 +187,8 @@ impl Ui {
             .iter()
             .find(|c| c.jid == peer)
             .is_some_and(|c| c.encryption);
-        if encrypted && !self.crypto.borrow().ready {
+        if encrypted && (!self.crypto.borrow().ready || self.crypto.borrow().fingerprint.is_empty())
+        {
             self.notice("Enable OMEMO 2 and review devices before uploading");
             return;
         }
@@ -305,7 +306,8 @@ impl Ui {
             return false;
         }
         let encrypted = self.state.borrow().current().encryption;
-        if encrypted && !self.crypto.borrow().ready {
+        if encrypted && (!self.crypto.borrow().ready || self.crypto.borrow().fingerprint.is_empty())
+        {
             self.notice("Enable OMEMO 2 and review devices before uploading");
             return false;
         }

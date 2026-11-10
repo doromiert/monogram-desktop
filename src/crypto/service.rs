@@ -385,6 +385,20 @@ impl Worker {
                 "OMEMO 2 is not ready; reconnect or retry setup in Conversation Security",
             ));
         }
+        // UI state can lag an identity replacement queued ahead of this send.
+        if !message.fingerprint.is_empty()
+            && lifecycle::hex(
+                &self
+                    .local
+                    .as_mut()
+                    .ok_or(Error::Incomplete)?
+                    .fingerprint()?,
+            ) != message.fingerprint
+        {
+            return Err(Error::Unavailable(
+                "Encryption identity changed. Select the file again or retry the message.",
+            ));
+        }
         address(peer, 1)?;
         let targets = self.targets(peer, false).await?;
         if targets.is_empty() {
@@ -927,6 +941,22 @@ mod tests {
             |e| matches!(e,BackendEvent::Failed{id,..} if id==&blocked_id),
         );
         decide(&alice, &a, "dave@localhost", arows, true);
+        let stale_id = new_id();
+        alice.send(Command::Send {
+            peer: "dave@localhost".into(),
+            message: Message {
+                text: "Must not use a replacement local identity".into(),
+                wire_id: stale_id.clone(),
+                encrypted: true,
+                fingerprint: "stale selected fingerprint".into(),
+                ..Default::default()
+            },
+            quote: String::new(),
+        });
+        wait(
+            &a,
+            |e| matches!(e,BackendEvent::Failed{id,..} if id==&stale_id),
+        );
         let id = new_id();
         alice.send(Command::Send {
             peer: "dave@localhost".into(),
