@@ -69,8 +69,10 @@ Conversations without that selection remain plaintext over verified TLS and are
 labelled accordingly. Unsupported or untrusted encrypted payloads remain
 unavailable; their outer fallback bodies never appear as decrypted content.
 
-Live mode disables the fictional media, poll/article, wallet, story, group and call
-actions. Their offline demo surfaces remain available through Open Offline Demo.
+Live mode implements [direct polls](STRUCTURED_POLLS.md) and
+[attributed text/poll forwarding](FORWARDING.md), including explicit OMEMO 2.
+It disables fictional media, article, wallet, story, group and call actions.
+Their offline demo surfaces remain available through Open Offline Demo.
 MUC/MIX, transfers, legacy/PQ, complete OMEMO 2 policies, stream resumption,
 proxy configuration, certificate exceptions, keyring-backed credentials and
 simultaneous connected accounts remain outstanding. Unsupported discovery/archive
