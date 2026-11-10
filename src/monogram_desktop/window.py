@@ -6,7 +6,7 @@ from .panels import Panels
 
 class MonogramWindow(Adw.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app,title="Monogram",default_width=1380,default_height=900)
+        super().__init__(application=app,title="Monogram",default_width=1380,default_height=900,width_request=430,height_request=480)
         self.state=PreviewState();self.big_emoji=True;self.folder="All";self.utility_mode="media"
         self.panels=Panels(self)
         self.toast=Adw.ToastOverlay();self.set_content(self.toast)
@@ -20,16 +20,16 @@ class MonogramWindow(Adw.ApplicationWindow):
         self.pages.remove(self.utility)
         self.pages.add_named(self.chat.root,"chat")
         self.toast.set_child(None)
-        self.utility.set_content(self.split)
+        self.navigation_bin=Adw.BreakpointBin(child=self.split,width_request=375,height_request=360)
+        self.utility.set_content(self.navigation_bin)
         self.viewer_layer=Gtk.Overlay(child=self.utility)
         self.toast.set_child(self.viewer_layer)
         self.make_actions()
         breakpoint=Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 760sp"))
         breakpoint.add_setter(self.split,"collapsed",True)
         breakpoint.add_setter(self.split,"show-sidebar",False)
-        breakpoint.add_setter(self.utility,"collapsed",True)
-        self.add_breakpoint(breakpoint)
-        narrow=Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 1120sp"))
+        self.navigation_bin.add_breakpoint(breakpoint)
+        narrow=Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 1240sp"))
         narrow.add_setter(self.utility,"collapsed",True)
         self.add_breakpoint(narrow)
         self.select_chat(self.state.active)
@@ -44,7 +44,7 @@ class MonogramWindow(Adw.ApplicationWindow):
             "security":self.panels.security,"poll":self.panels.poll,"payment":lambda:self.panels.payment(True),
             "location":self.panels.location,"article":self.panels.article,"developer":self.panels.developer,
             "attach-file":lambda:self.choose_files(False),"attach-media":lambda:self.choose_files(True),
-            "search":lambda:self.search.grab_focus(),"media":self.toggle_media,"info":self.show_info,
+            "search":self.show_search,"media":self.toggle_media,"info":self.show_info,
             "saved":lambda:self.select_chat(next(c for c in self.state.chats if c.id=="saved")),
             "shortcuts":self.shortcuts,"setup":self.panels.setup,
             "mute":lambda:self.notice("Notifications muted for this preview conversation"),
@@ -53,6 +53,11 @@ class MonogramWindow(Adw.ApplicationWindow):
         for name,callback in actions.items():
             action=Gio.SimpleAction.new(name,None)
             action.connect("activate",lambda a,param,cb=callback:cb());self.add_action(action)
+        notification=Gio.SimpleAction.new_stateful("notifications",GLib.VariantType.new("s"),GLib.Variant("s","all"))
+        def notifications(action,value):
+            action.set_state(value);self.state.active.notifications=value.get_string()
+            self.notice("Notifications: "+{"all":"All messages","mentions":"Mentions only","1h":"Muted for 1 hour","8h":"Muted for 8 hours","2d":"Muted for 2 days","forever":"Muted until turned on"}[value.get_string()])
+        notification.connect("activate",notifications);self.add_action(notification)
         for action,keys in {"attach-file":["<Control>o"],"new-chat":["<Control>n"],"search":["<Control>f"],"media":["F9"],"preferences":["<Control>comma"],"shortcuts":["<Control>question"]}.items():self.get_application().set_accels_for_action("win."+action,keys)
 
     def make_sidebar(self):
@@ -66,7 +71,9 @@ class MonogramWindow(Adw.ApplicationWindow):
         menu.append_section(None,section)
         primary=Gtk.MenuButton(icon_name="open-menu-symbolic",menu_model=menu,tooltip_text="Main menu")
         header.pack_end(primary)
-        header.pack_start(button("system-search-symbolic","Search conversations",lambda:self.search.grab_focus()))
+        self.sidebar_header=header
+        self.search_button=Gtk.ToggleButton(icon_name="system-search-symbolic",tooltip_text="Search chats and messages")
+        self.search_button.connect("toggled",lambda b:self.set_search_mode(b.get_active()));header.pack_start(self.search_button)
         requests=Gtk.Button(tooltip_text="Requests and invitations · 2 pending")
         request_icon=Gtk.Overlay(child=Gtk.Image(icon_name="contact-new-symbolic"))
         badge=label(str(len(self.state.requests)),"request-badge",halign=Gtk.Align.END,valign=Gtk.Align.START);request_icon.add_overlay(badge)
@@ -75,30 +82,89 @@ class MonogramWindow(Adw.ApplicationWindow):
 
         header.pack_end(requests);view.add_top_bar(header)
         content=box(True,6)
-        self.search=Gtk.SearchEntry(placeholder_text="Search chats and messages",margin_start=12,margin_end=12,margin_top=6,margin_bottom=6)
-        self.search.connect("search-changed",lambda _:self.refresh_chats());content.append(self.search)
-        folders=box(False,4);folders.add_css_class("folder-bar");self.folder_bar=folders
+        self.search=Gtk.SearchEntry(placeholder_text="Search chats and messages",hexpand=True)
+        self.search.connect("search-changed",lambda _:self.search_changed())
+        self.search.connect("stop-search",lambda _:self.search_button.set_active(False))
+        from .folders import FolderBar
+        folders=FolderBar(self);folders.add_css_class("folder-bar");self.folder_bar=folders
         first=None
-        for name in ["All","Unread","Groups"]:
+        for name in self.state.folder_order:
             b=Gtk.ToggleButton(label=name);b.add_css_class("flat")
             if first:b.set_group(first)
             else:first=b;b.set_active(True)
-            b.connect("toggled",lambda widget,n=name:self.set_folder(n) if widget.get_active() else None)
-            self.context_actions(b,[("Edit folder…",lambda n=name:self.edit_folder(n)),("New folder…",lambda:self.edit_folder(""))])
+            self.connect_folder(b)
             folders.append(b)
-        content.append(folders)
-        monero=Gtk.Button(label="Monero",icon_name="wallet-symbolic",halign=Gtk.Align.FILL,margin_start=12,margin_end=12)
-        monero.set_child(label("◈   Monero",xalign=0,margin_start=8));monero.add_css_class("flat")
-        monero.connect("clicked",lambda _:self.panels.wallet());content.append(monero)
+        folder_scroll=Gtk.ScrolledWindow(child=folders,hscrollbar_policy=Gtk.PolicyType.EXTERNAL,vscrollbar_policy=Gtk.PolicyType.NEVER,propagate_natural_height=True)
+        content.append(folder_scroll)
+        from .stories import StoryStrip,person
+        self.story_strip=StoryStrip(self)
         self.list=Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.list.add_css_class("chat-list");self.list.connect("row-activated",lambda _,row:self.select_chat(row.chat))
-        content.append(scrolled(self.list,vexpand=True))
-        footer=box(False,10);footer.add_css_class("sidebar-footer")
-        who=type("Person",(),{"id":"","name":"Alex Morgan","color":"purple"})
-        footer.append(avatar(who,32))
-        words=box(True,2,hexpand=True);words.append(label("Alex Morgan","heading",xalign=0));words.append(label("Offline prototype","caption dim-label",xalign=0));footer.append(words)
+        sidebar_body=box(True);sidebar_body.append(self.story_strip);sidebar_body.append(self.list)
+        self.chat_scroll=scrolled(sidebar_body,vexpand=True);content.append(self.chat_scroll)
+        self.sidebar_titles=Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE,transition_duration=150)
+        self.sidebar_titles.add_named(label("Monogram","heading"),"title")
+        mini=Gtk.Button(tooltip_text="Show stories");mini.add_css_class("flat");mini.connect("clicked",lambda _:self.reveal_stories())
+        people=box(False,2)
+        for name in ["Mira","Sam","Alex"]:people.append(avatar(person(name),22))
+        mini.set_child(people);self.sidebar_titles.add_named(mini,"stories");header.set_title_widget(self.sidebar_titles)
+        self.chat_scroll.get_vadjustment().connect("value-changed",lambda a:self.sidebar_titles.set_visible_child_name("stories" if self.story_strip.get_visible() and a.get_value()>=80 else "title"))
+        view.set_content(content);self.split.set_sidebar(view)
 
-        content.append(footer);view.set_content(content);self.split.set_sidebar(view)
+    def reveal_stories(self):
+        self.search_button.set_active(False);self.split.set_show_sidebar(True)
+        adjustment=self.chat_scroll.get_vadjustment()
+        self.story_reveal=Adw.TimedAnimation.new(self.chat_scroll,adjustment.get_value(),0,180,Adw.CallbackAnimationTarget.new(adjustment.set_value));self.story_reveal.play()
+
+    def show_search(self):
+        self.search_button.set_active(True);self.search.grab_focus()
+
+    def set_search_mode(self,active):
+        self.story_strip.set_visible(not active)
+        if active:
+            self.page_before_search=self.pages.get_visible_child_name()
+            self.title_button.set_visible(False);self.header_titles.set_visible_child_name("search");self.pages.set_visible_child_name("search");self.refresh_search();self.search.grab_focus()
+        else:
+            self.pages.set_visible_child_name(self.page_before_search)
+            self.header_titles.set_visible_child_name("normal")
+            self.title_button.set_visible(self.pages.get_visible_child_name()=="chat")
+            self.search.set_text("")
+
+    def search_changed(self):
+        self.refresh_chats()
+        if self.search_button.get_active():self.refresh_search()
+
+    def refresh_search(self):
+        query=self.search.get_text().strip().casefold()
+        if not query:
+            self.search_page.set_child(Adw.StatusPage(icon_name="system-search-symbolic",title="Search Chats and Messages"));return
+        from .widgets import group,action_row
+        content=margins(box(True,24),24);chats=group("Conversations");messages=group("Messages");count=0
+        for chat in self.state.chats:
+            if query in chat.name.casefold():chats.add(action_row(chat.name,chat.subtitle,callback=lambda c=chat:self.select_chat(c)));count+=1
+            for message in chat.messages:
+                if query not in message.text.casefold():continue
+                def jump(c=chat,m=message):
+                    self.select_chat(c);GLib.timeout_add(50,lambda:(self.chat.highlight(m),False)[1])
+                row=action_row(message.text[:160],chat.name+" · "+message.author+" · "+message.time,callback=jump);row.set_title_lines(2);messages.add(row);count+=1
+        if not count:self.search_page.set_child(Adw.StatusPage(icon_name="system-search-symbolic",title="No Results",description="Try another search."));return
+        content.append(chats);content.append(messages);self.search_page.set_child(scrolled(Adw.Clamp(child=content,maximum_size=800)))
+
+    def connect_folder(self,button):
+        button.connect("toggled",lambda widget:self.set_folder(widget.get_label()) if widget.get_active() else None)
+        self.context_actions(button,[("Edit folder…",lambda:self.edit_folder(button.get_label())),("Move Left",lambda:self.shift_folder(button.get_label(),-1)),("Move Right",lambda:self.shift_folder(button.get_label(),1)),("New folder…",lambda:self.edit_folder(""))])
+        self.folder_bar.enable_drag(button)
+
+    def shift_folder(self,name,direction):
+        index=self.state.folder_order.index(name);target=index+direction
+        if 0<=target<len(self.state.folder_order):self.state.reorder_folder(name,self.state.folder_order[target],direction>0);self.order_folder_buttons()
+
+    def order_folder_buttons(self):
+        buttons={};child=self.folder_bar.get_first_child()
+        while child:buttons[child.get_label()]=child;child=child.get_next_sibling()
+        previous=None
+        for name in self.state.folder_order:
+            self.folder_bar.reorder_child_after(buttons[name],previous);previous=buttons[name]
 
     def set_folder(self,name):self.folder=name;self.refresh_chats()
 
@@ -118,27 +184,36 @@ class MonogramWindow(Adw.ApplicationWindow):
             if chat.unread:bottom.append(label(str(chat.unread),"unread-badge"))
             elif chat.id=="saved":bottom.append(Gtk.Image(icon_name="view-pin-symbolic",pixel_size=12))
             words.append(bottom);line.append(words);row.set_child(line);self.list.append(row)
-            self.context_actions(row,[("Open",lambda c=chat:self.select_chat(c)),("Mark unread",lambda c=chat:(setattr(c,"unread",1),self.refresh_chats())),("Mute",lambda:self.notice("Muted locally")),("Archive",lambda c=chat:(self.state.chats.remove(c),self.refresh_chats()))])
+            self.context_actions(row,[("Open",lambda c=chat:self.select_chat(c)),("Mark unread",lambda c=chat:(setattr(c,"unread",1),self.refresh_chats())),("Mute",lambda c=chat:(setattr(c,"notifications","forever"),self.refresh_chats())),("Archive",lambda c=chat:(setattr(c,"archived",True),self.refresh_chats()))])
             if chat is self.state.active:self.list.select_row(row)
 
     def make_content(self):
-        view=Adw.ToolbarView()
+        view=Adw.ToolbarView();view.add_css_class("conversation-view")
         header=Adw.HeaderBar(show_start_title_buttons=False)
         sidebar_button=button("sidebar-show-symbolic","Show conversations",lambda:self.split.set_show_sidebar(not self.split.get_show_sidebar()))
         sidebar_button.set_visible(False)
         self.split.connect("notify::collapsed",lambda *_:sidebar_button.set_visible(self.split.get_collapsed()))
         header.pack_start(sidebar_button)
-        self.title_button=Gtk.Button(valign=Gtk.Align.CENTER);self.title_button.add_css_class("flat")
-        self.title_button.connect("clicked",lambda _:self.show_info());header.pack_start(self.title_button);header.set_title_widget(Gtk.Box())
-        self.call_button=button("call-start-symbolic","Call",self.panels.call);header.pack_end(self.call_button)
-        header.pack_end(button("face-smile-symbolic","Emoji, stickers and GIFs · F9",self.toggle_media))
-        header.pack_end(button("system-search-symbolic","Search this conversation",lambda:self.search.grab_focus()))
+        self.title_button=Gtk.Button(valign=Gtk.Align.CENTER);self.title_button.add_css_class("flat");self.title_button.add_css_class("conversation-title")
+        self.title_button.connect("clicked",lambda _:self.show_info());header.pack_start(self.title_button)
+        self.header_titles=Gtk.Stack(hhomogeneous=False,transition_type=Gtk.StackTransitionType.CROSSFADE,transition_duration=150,valign=Gtk.Align.CENTER,hexpand=True)
+        self.section_title=label("","heading");self.header_titles.add_named(self.section_title,"normal");self.header_titles.add_named(self.search,"search");header.set_title_widget(self.header_titles)
         menu=Gio.Menu()
-        for title,action in [("Conversation Security","security"),("Conversation Info","info"),("Mute","mute"),("Shared Media","info"),("Archive Conversation","archive")]:menu.append(title,"win."+action)
+        for title,action in [("Conversation Security","security"),("Conversation Info","info")]:menu.append(title,"win."+action)
+        notifications=Gio.Menu()
+        for title,value in [("All Messages","all"),("Mentions Only","mentions")]:
+            item=Gio.MenuItem.new(title,None);item.set_action_and_target_value("win.notifications",GLib.Variant("s",value));notifications.append_item(item)
+        muted=Gio.Menu()
+        for title,value in [("For 1 Hour","1h"),("For 8 Hours","8h"),("For 2 Days","2d"),("Until I Turn It On","forever")]:
+            item=Gio.MenuItem.new(title,None);item.set_action_and_target_value("win.notifications",GLib.Variant("s",value));muted.append_item(item)
+        notifications.append_section("Mute",muted);menu.append_submenu("Mute",notifications)
+        for title,action in [("Shared Media","info"),("Call","call"),("Archive Conversation","archive")]:menu.append(title,"win."+action)
         header.pack_end(Gtk.MenuButton(icon_name="view-more-symbolic",menu_model=menu,tooltip_text="Conversation menu"))
         view.add_top_bar(header)
-        self.pages=Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE,transition_duration=160)
-        self.utility=Adw.OverlaySplitView(sidebar_position=Gtk.PackType.END,min_sidebar_width=280,max_sidebar_width=320,sidebar_width_fraction=.3,show_sidebar=False)
+        self.pages=Gtk.Stack(hhomogeneous=False,vhomogeneous=False,transition_type=Gtk.StackTransitionType.CROSSFADE,transition_duration=160)
+        self.search_page=Adw.Bin();self.pages.add_named(self.search_page,"search")
+        self.utility=Adw.OverlaySplitView(sidebar_position=Gtk.PackType.END,min_sidebar_width=360,max_sidebar_width=400,sidebar_width_fraction=.3,show_sidebar=False,pin_sidebar=True)
+        self.utility.connect("notify::show-sidebar",self.sidebar_visibility)
         self.utility.set_sidebar_width_unit(Adw.LengthUnit.PX)
         self.chat=Conversation(self);self.chat.root.add_css_class("conversation");self.utility.set_content(self.chat.root)
         self.make_media_pane();self.pages.add_named(self.utility,"chat")
@@ -146,17 +221,16 @@ class MonogramWindow(Adw.ApplicationWindow):
         self.content_view=view;self.content_header=header
 
     def make_media_pane(self):
-        pane=box(True,8);pane.add_css_class("utility-pane")
-        toolbar=Adw.ToolbarView()
+        pane=box(True,12);pane.add_css_class("utility-pane");pane.set_margin_top(12)
+        toolbar=Adw.ToolbarView();toolbar.add_css_class("utility-sidebar")
         header=Adw.HeaderBar(show_start_title_buttons=False)
-        header.set_title_widget(label("Media","heading"))
-        header.pack_end(button("window-close-symbolic","Close media pane",lambda:self.utility.set_show_sidebar(False)))
+        header.pack_start(button("sidebar-show-symbolic","Close media pane",lambda:self.utility.set_show_sidebar(False)))
         toolbar.add_top_bar(header)
-        self.media_stack=Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE,transition_duration=150)
-        switcher=Adw.ToggleGroup(homogeneous=True,can_shrink=True,margin_start=12,margin_end=12)
+        self.media_stack=Gtk.Stack(hhomogeneous=False,vhomogeneous=False,transition_type=Gtk.StackTransitionType.CROSSFADE,transition_duration=150)
+        switcher=Adw.ToggleGroup(homogeneous=False,can_shrink=False)
         for name,title in [("emoji","Emoji"),("stickers","Stickers"),("gifs","GIFs"),("monero","Monero")]:switcher.add(Adw.Toggle(name=name,label=title))
         switcher.connect("notify::active-name",lambda group,*_:self.media_stack.set_visible_child_name(group.get_active_name()))
-        pane.append(switcher)
+        header.set_title_widget(switcher)
         search=Gtk.SearchEntry(placeholder_text="Search",margin_start=12,margin_end=12);pane.append(search)
         self.media_widgets=[]
         for name,title,items in [
@@ -164,30 +238,38 @@ class MonogramWindow(Adw.ApplicationWindow):
             ("stickers","Stickers",["🦊","🐻","🐸","🐈","☕","🎉","🌸","🚀"]),
             ("gifs","GIFs",["Happy dance","Good morning","High five","You got this","Weekend mood","Well done"])
         ]:
-            area=box(True,10);margins(area,12)
+            area=box(True,8);margins(area,12);area.set_margin_top(0)
             area.append(label("Recently used" if name=="emoji" else "Favorites","caption dim-label",xalign=0))
-            flow=Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE,column_spacing=4,row_spacing=4,max_children_per_line=5 if name=="emoji" else 2,min_children_per_line=2)
+            columns=6 if name=="emoji" else 4 if name=="stickers" else 2
+            flow=Gtk.Grid(column_homogeneous=True,column_spacing=4,row_spacing=4) if name=="gifs" else Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE,column_spacing=4,row_spacing=4,max_children_per_line=columns,min_children_per_line=columns)
+            if name=="gifs":self.gif_grid=flow
+            flow.add_css_class("media-grid")
             for index,item in enumerate(items):
                 b=Gtk.Button(tooltip_text=item)
                 if name=="gifs":
                     from .gif_preview import GifPreview
-                    b.set_child(GifPreview(index));b.add_css_class("flat");b.set_size_request(110,100)
+                    b.set_child(GifPreview(index));b.add_css_class("gif-button")
                 else:b.set_label(item);b.add_css_class("emoji-item" if name=="emoji" else "sticker-item");b.add_css_class("flat")
                 def choose(value=item,kind=name,asset=index):
                     if kind=="emoji":self.chat.insert(value)
                     elif kind=="gifs":
                         message=self.state.send(value,"gif");message.gif_index=asset;self.chat.render();self.refresh_chats()
                     else:self.state.send(value,"sticker");self.chat.render();self.refresh_chats()
-                b.connect("clicked",lambda _,cb=choose:cb());flow.insert(b,-1);self.media_widgets.append((b,item,name))
+                b.connect("clicked",lambda _,cb=choose:cb())
+                if name=="gifs":flow.attach(b,index%2,index//2,1,1);target=b
+                else:flow.insert(b,-1);target=b.get_parent();target.set_focusable(False)
+                self.media_widgets.append((target,item,name))
             area.append(flow);self.media_stack.add_titled(scrolled(area,vexpand=True),name,title)
         from .wallet_card import WalletCard
         money=box(True,12);margins(money,12)
-        card=WalletCard("Everyday","1.2048 XMR");card.set_content_width(220);card.set_content_height(170);money.append(card)
+        card=WalletCard("Everyday","1.2048 XMR",compact=True);card.set_content_width(320);card.set_content_height(224);card.set_halign(Gtk.Align.CENTER);card.set_hexpand(False);money.append(card)
         mode=Adw.ToggleGroup(homogeneous=True);mode.add(Adw.Toggle(name="send",label="Send"));mode.add(Adw.Toggle(name="request",label="Request"));money.append(mode)
         amount=Gtk.Entry(placeholder_text="Amount",input_purpose=Gtk.InputPurpose.NUMBER);money.append(amount)
         currency=Gtk.DropDown.new_from_strings(["XMR","USD","EUR","PLN"]);money.append(currency)
         note=Gtk.Entry(placeholder_text="Add a note");money.append(note)
         review=Gtk.Button(label="Review");review.add_css_class("suggested-action")
+        from .amounts import bind
+        bind(amount,review)
         def payment_preview():
             value=amount.get_text() or "0"
             code=currency.get_selected_item().get_string()
@@ -206,21 +288,35 @@ class MonogramWindow(Adw.ApplicationWindow):
         pane.append(self.media_stack);self.media_stack.set_vexpand(True)
         pane.append(label("Local preview collection","caption dim-label",margin_bottom=12))
         toolbar.set_content(pane)
-        self.media_pane=toolbar;self.utility.set_sidebar(toolbar)
+        self.media_pane=toolbar;self.track_sidebar(toolbar);self.utility.set_sidebar(toolbar)
+
+    def sidebar_visibility(self,*_):
+        sidebar=self.utility.get_sidebar()
+        if sidebar and (self.utility.get_show_sidebar() or not sidebar.get_mapped()):sidebar.set_visible(self.utility.get_show_sidebar())
+
+    def track_sidebar(self,widget):
+        # libadwaita 1.9 still allocates a hidden docked sidebar at narrow widths.
+        # Hide its content after the native close animation finishes.
+        widget.set_visible(self.utility.get_show_sidebar())
+        widget.connect("unmap",lambda sidebar:sidebar.set_visible(False) if not self.utility.get_show_sidebar() else None)
 
     def filter_media(self,query):
-        for widget,text,kind in self.media_widgets:widget.get_parent().set_visible(not query or query.casefold() in text.casefold())
+        gif_index=0
+        for widget,text,kind in self.media_widgets:
+            visible=not query or query.casefold() in text.casefold();widget.set_visible(visible)
+            if kind=="gifs" and visible:
+                self.gif_grid.remove(widget);self.gif_grid.attach(widget,gif_index%2,gif_index//2,1,1);gif_index+=1
 
     def toggle_media(self):
         if self.utility_mode!="media":
-            self.utility.set_sidebar(None);self.utility.set_sidebar(self.media_pane);self.utility_mode="media";self.utility.set_show_sidebar(True)
+            self.utility.set_sidebar(None);self.utility.set_sidebar(self.media_pane);self.media_pane.set_visible(True);self.utility_mode="media";self.utility.set_show_sidebar(True)
         else:self.utility.set_show_sidebar(not self.utility.get_show_sidebar())
 
     def show_info(self):
         pane=box(True,16);pane.add_css_class("utility-pane")
         header=box(False,6);margins(header,12);header.append(label("Conversation Info","heading",hexpand=True,xalign=0));header.append(button("window-close-symbolic","Close info",lambda:self.utility.set_show_sidebar(False)));pane.append(header)
         pane.remove(header)
-        toolbar=Adw.ToolbarView()
+        toolbar=Adw.ToolbarView();toolbar.add_css_class("utility-sidebar")
         native_header=Adw.HeaderBar(show_start_title_buttons=False,title_widget=label("Conversation Info","heading"))
         native_header.pack_start(button("window-close-symbolic","Close info",lambda:self.utility.set_show_sidebar(False)));toolbar.add_top_bar(native_header)
         pane.append(avatar(self.state.active,76));pane.append(label(self.state.active.name,"title-2"));pane.append(label(self.state.active.subtitle,"dim-label"))
@@ -231,32 +327,34 @@ class MonogramWindow(Adw.ApplicationWindow):
         if self.state.active.group:
             pane.append(label("Members","heading",xalign=0,margin_start=16))
             for name in ["Alex · Owner","Sam","Mira","Robin"]:pane.append(label(name,xalign=0,margin_start=20))
-        toolbar.set_content(scrolled(pane));self.utility.set_sidebar(None);self.utility.set_sidebar(toolbar);self.utility_mode="info";self.utility.set_show_sidebar(True)
+        toolbar.set_content(scrolled(pane));self.track_sidebar(toolbar);self.utility.set_sidebar(None);self.utility.set_sidebar(toolbar);toolbar.set_visible(True);self.utility_mode="info";self.utility.set_show_sidebar(True)
 
     def select_chat(self,chat):
+        self.chat.clear_selection()
         self.state.notes[self.state.active.id]=self.chat.text()
         if chat is not self.state.active:
             self.chat.attachments.clear()
             while self.chat.chips.get_first_child():self.chat.chips.remove(self.chat.chips.get_first_child())
         self.state.active=chat;chat.unread=0
-        title=box(False,10);title.append(avatar(chat,32));words=box(True,1)
-        words.append(label(chat.name,"heading",xalign=0));words.append(label(chat.subtitle,"caption dim-label",xalign=0));title.append(words);self.title_button.set_child(title)
         self.chat.cancel_context();self.chat.entry.get_buffer().set_text(self.state.notes.get(chat.id,""))
         self.chat.render();self.refresh_chats();self.show_chat()
         if self.split.get_collapsed():self.split.set_show_sidebar(False)
 
     def show_chat(self):
+        self.search_button.set_active(False)
         self.pages.set_visible_child_name("chat")
         chat=self.state.active
-        title=box(False,10);title.append(avatar(chat,32));words=box(True,1)
-        words.append(label(chat.name,"heading",xalign=0));words.append(label(chat.subtitle,"caption dim-label",xalign=0));title.append(words)
-        self.title_button.set_child(title);self.title_button.set_visible(True);self.content_header.set_title_widget(Gtk.Box())
+        self.lookup_action("notifications").set_state(GLib.Variant("s",getattr(chat,"notifications","all")))
+        title=box(False,8);title.append(avatar(chat,28));words=box(True,0)
+        words.append(label(chat.name,"chat-title",xalign=0));words.append(label(chat.subtitle,"chat-subtitle dim-label",xalign=0));title.append(words)
+        self.title_button.set_child(title);self.title_button.set_visible(True);self.section_title.set_text("")
 
     def show_page(self,title,widget):
+        self.search_button.set_active(False)
         old=self.pages.get_child_by_name("section")
         if old:self.pages.remove(old)
         self.pages.add_named(widget,"section");self.pages.set_visible_child(widget)
-        self.title_button.set_visible(False);self.content_header.set_title_widget(label(title,"heading"))
+        self.title_button.set_visible(False);self.section_title.set_text(title)
 
     def set_big_emoji(self,value):self.big_emoji=value;self.chat.render()
 
@@ -293,29 +391,51 @@ class MonogramWindow(Adw.ApplicationWindow):
         click=Gtk.GestureClick(button=3);click.connect("pressed",show);parent.add_controller(click)
 
     def edit_folder(self,name):
-        content=self.panels.body();entry=Adw.EntryRow(title="Folder name");entry.set_text(name);content.append(entry)
-        selected={c.id for c in self.state.filtered(folder=name)} if name else set()
-        choices=[]
-        for chat in self.state.chats:
-            check=Gtk.CheckButton(label=chat.name,active=chat.id in selected);choices.append((chat.id,check));content.append(check)
+        from .fixtures import FolderRules
+        rule=self.state.custom_folders.get(name,FolderRules())
+        content=Adw.PreferencesPage()
+        details=Adw.PreferencesGroup();entry=Adw.EntryRow(title="Folder name");entry.set_text(name);details.add(entry);content.add(details)
+        included=Adw.PreferencesGroup(title="Included Chats",description="Matching chats are added automatically.");content.add(included)
+        types={}
+        for key,title in [("contacts","Contacts"),("non_contacts","Non-Contacts"),("groups","Groups"),("channels","Channels"),("bots","Bots")]:
+            row=Adw.SwitchRow(title=title,active=key in rule.types);types[key]=row;included.add(row)
+        excluded=Adw.PreferencesGroup(title="Excluded Chats");content.add(excluded)
+        flags={}
+        for key,title in [("exclude_muted","Muted Chats"),("exclude_read","Read Chats"),("exclude_archived","Archived Chats")]:
+            row=Adw.SwitchRow(title=title,active=getattr(rule,key));flags[key]=row;excluded.add(row)
+        exceptions=Adw.PreferencesGroup(title="Exceptions",description="Chosen chats override the rules above.");content.add(exceptions)
+        choices={}
+        for key,title,selected in [("include","Always Include",rule.include),("exclude","Never Include",rule.exclude)]:
+            expander=Adw.ExpanderRow(title=title);exceptions.add(expander);choices[key]={}
+            for chat in self.state.chats:
+                check=Gtk.CheckButton(active=chat.id in selected,valign=Gtk.Align.CENTER);choices[key][chat.id]=check
+                row=Adw.ActionRow(title=chat.name,activatable_widget=check);row.add_prefix(avatar(chat,32));row.add_suffix(check);expander.add_row(row)
+        for key,other in [("include","exclude"),("exclude","include")]:
+            for chat_id,check in choices[key].items():check.connect("toggled",lambda b,c=choices[other][chat_id]:c.set_active(False) if b.get_active() else None)
         save=Gtk.Button(label="Save",halign=Gtk.Align.END);save.add_css_class("suggested-action")
         def commit():
             new=entry.get_text().strip()
             if not new:return
-            self.state.custom_folders[new]={key for key,check in choices if check.get_active()}
+            self.state.custom_folders[new]=FolderRules(types={key for key,row in types.items() if row.get_active()},**{key:row.get_active() for key,row in flags.items()},**{key:{chat_id for chat_id,check in checks.items() if check.get_active()} for key,checks in choices.items()})
             if name and name!=new:
+                self.state.custom_folders.pop(name,None)
+                self.state.folder_order[self.state.folder_order.index(name)]=new
                 child=self.folder_bar.get_first_child()
                 while child:
                     if child.get_label()==name:child.set_label(new);break
                     child=child.get_next_sibling()
             elif not name:
+                self.state.folder_order.append(new)
                 b=Gtk.ToggleButton(label=new);b.add_css_class("flat");b.set_group(self.folder_bar.get_first_child());self.folder_bar.append(b)
-                self.context_actions(b,[("Edit folder…",lambda:self.edit_folder(new))])
+                self.connect_folder(b)
             child=self.folder_bar.get_first_child()
             while child:
                 if child.get_label()==new:
-                    child.connect("toggled",lambda w:self.set_folder(new) if w.get_active() else None);child.set_active(True);break
+                    child.set_active(True);break
                 child=child.get_next_sibling()
             self.folder=new;self.refresh_chats();dialog.close()
-        save.connect("clicked",lambda _:commit());content.append(save)
-        dialog=self.panels.dialog("Edit Folder" if name else "New Folder",scrolled(content))
+        save.connect("clicked",lambda _:commit())
+        def validate(*_):save.set_sensitive(bool(entry.get_text().strip()) and (entry.get_text().strip()==name or entry.get_text().strip() not in self.state.custom_folders))
+        entry.connect("changed",validate);validate()
+        dialog=self.panels.dialog("Edit Folder" if name else "New Folder",content)
+        dialog.header.pack_end(save)

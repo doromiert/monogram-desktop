@@ -39,11 +39,20 @@ def scrolled(child, **kw):
 def ellipsis(text, **kw):
     return label(text, ellipsize=Pango.EllipsizeMode.END, xalign=0, **kw)
 
+class AspectPicture(Gtk.Picture):
+    """A timeline photo may shrink horizontally, but keeps its measured aspect height."""
+    def do_get_request_mode(self):return Gtk.SizeRequestMode.HEIGHT_FOR_WIDTH
+    def do_measure(self,orientation,for_size):
+        if orientation==Gtk.Orientation.HORIZONTAL:return 0,420,-1,-1
+        paintable=self.get_paintable();ratio=paintable.get_intrinsic_aspect_ratio() if paintable else 2
+        height=round((for_size if for_size>=0 else 420)/(ratio or 2))
+        return (height if for_size>=0 else 0),height,-1,-1
+
 def group(title, description=None):
     return Adw.PreferencesGroup(title=title, description=description)
 
 def action_row(title, subtitle="", icon=None, callback=None):
-    row = Adw.ActionRow(title=title, subtitle=subtitle)
+    row = Adw.ActionRow(title=title, subtitle=subtitle,use_markup=False)
     if icon: row.add_prefix(Gtk.Image(icon_name=icon))
     if callback:
         row.set_activatable(True)

@@ -10,13 +10,13 @@
         let pkgs = import nixpkgs { inherit system; };
         in { default = pkgs.callPackage ./default.nix { }; });
       apps = eachSystem (system: {
-        default = { type = "app"; program = "${self.packages.${system}.default}/bin/monogram-desktop"; };
+        default = { type = "app"; program = "${self.packages.${system}.default}/bin/monogram-desktop"; meta.description = "Native Monogram Desktop prototype"; };
       });
       devShells = eachSystem (system:
         let pkgs = import nixpkgs { inherit system; };
         in { default = pkgs.mkShell {
           inputsFrom = [ self.packages.${system}.default ];
-          packages = with pkgs; [ (python3.withPackages (ps: [ ps.pygobject3 ps.pycairo ])) gtk4 libadwaita gobject-introspection xorg-server xdotool imagemagick ];
+          packages = with pkgs; [ (python3.withPackages (ps: [ ps.pygobject3 ps.pycairo ps.pyopengl ps.numpy ps.qrcode ])) gtk4 libadwaita gobject-introspection xorg-server xdotool imagemagick ];
           shellHook = ''export PYTHONPATH="$PWD/src''${PYTHONPATH:+:$PYTHONPATH}"'';
         }; });
       checks = eachSystem (system: {

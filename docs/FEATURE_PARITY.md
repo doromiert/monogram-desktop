@@ -36,7 +36,7 @@ an in-memory interaction or surface; "planned" means it is still absent.
 | Send/request and fiat pricing | Local amount/currency/note/request-card forms | Exact atomic amounts, online fiat list/formatting/rates, address reservation, fees, confirmation and transaction history |
 | Payment/claim links | No real link parsing or wallet material | Compatible formats, protected bearer secrets, external restore path, multi-wallet deposits, readiness/claimed status and independent verification |
 | Background deposits / fee graph | Planned | Explicit fee approval/ASAP, configured-node history, job cancellation/uncertain broadcast safety and desktop background lifecycle |
-| Preferences and appearance | Searchable native pages; light/dark/system, call visibility and large emoji controls | Complete settings, themes/icons/layout, font/accessibility, translation, media/power controls and persistence |
+| Preferences and appearance | Searchable native pages; light/dark/system, large emoji controls | Complete settings, themes/icons/layout, font/accessibility, translation, media/power controls and persistence |
 | Privacy/storage/history | Switch previews | Honest cache/history clearing, retention, local encryption and backups as actually supported by Android |
 | Developer/diagnostics/crashes | Discovery/ad-hoc form previews and message-detail dialog | Real disco/commands, sanitized diagnostics, crash handling, version updates and protocol test vectors |
 | Desktop integration | Native window/menu/clipboard, portal-aware chooser, Nix package | Desktop sharing, drag/drop, search, notifications, MPRIS/media keys, accessibility/keyboard acceptance and distribution updates |

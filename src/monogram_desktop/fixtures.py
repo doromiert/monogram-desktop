@@ -12,6 +12,8 @@ class Message:
     encrypted: bool = True
     reply: str = ""
     reactions: list = field(default_factory=list)
+    my_reactions: set = field(default_factory=set)
+    pinned: bool = False
 
 @dataclass
 class Chat:
@@ -23,6 +25,44 @@ class Chat:
     unread: int = 0
     group: bool = False
     messages: list = field(default_factory=list)
+    contact: bool = True
+    bot: bool = False
+    channel: bool = False
+    archived: bool = False
+    notifications: str = "all"
+    unread_mentions: int = 0
+    unread_mark: bool = False
+
+CHAT_TYPES={"contacts","non_contacts","groups","channels","bots"}
+
+@dataclass
+class FolderRules:
+    types: set = field(default_factory=set)
+    exclude_muted: bool = False
+    exclude_read: bool = False
+    exclude_archived: bool = False
+    include: set = field(default_factory=set)
+    exclude: set = field(default_factory=set)
+
+    def matches(self,chat):
+        # Same override order as Android MessagesController.DialogFilter.
+        if chat.id in self.exclude:return False
+        if chat.id in self.include:return True
+        if self.exclude_archived and chat.archived:return False
+        if not chat.unread_mentions:
+            if self.exclude_muted and chat.notifications not in ("all","mentions"):return False
+            if self.exclude_read and not chat.unread and not chat.unread_mark:return False
+        kind="channels" if chat.channel else "groups" if chat.group else "bots" if chat.bot else "contacts" if chat.contact else "non_contacts"
+        return kind in self.types
+
+@dataclass
+class Story:
+    owner: str
+    asset: str
+    caption: str = ""
+    seen: bool = False
+    own: bool = False
+    liked: bool = False
 
 CHATS = [
     Chat("design", "Design room", "8 members · 3 online", "D", "purple", 3, True, [
@@ -54,15 +94,21 @@ class PreviewState:
         self.wallets = ["Everyday", "Savings"]
         self.wallet_index = 0
         self.notes = {}
-        self.custom_folders={}
+        self.custom_folders={"All":FolderRules(CHAT_TYPES.copy(),exclude_archived=True),"Unread":FolderRules(CHAT_TYPES.copy(),exclude_read=True,exclude_archived=True),"Groups":FolderRules({"groups"},exclude_archived=True)}
+        self.folder_order=list(self.custom_folders)
+        self.stories=[Story("Mira","landscape.svg","A little time outdoors."),Story("Mira","sunset.svg","Worth staying for sunset."),Story("Sam","city.svg","The long way home."),Story("Alex","landscape.svg","Weekend plans.")]
         self.requests = [("Jules", "Contact request · jules@example.org"), ("Photography club", "Room invitation · 12 members")]
 
     def filtered(self, query="", folder="All"):
         query = query.casefold()
-        if folder in self.custom_folders:return [c for c in self.filtered(query,"All") if c.id in self.custom_folders[folder]]
-        return [c for c in self.chats if (folder != "Unread" or c.unread) and
-                (folder != "Groups" or c.group) and
+        rule=self.custom_folders.get(folder,FolderRules(CHAT_TYPES))
+        return [c for c in self.chats if rule.matches(c) and
                 (not query or query in c.name.casefold() or any(query in m.text.casefold() for m in c.messages))]
+
+    def reorder_folder(self,name,target,after=False):
+        if name==target:return
+        self.folder_order.remove(name)
+        self.folder_order.insert(self.folder_order.index(target)+int(after),name)
 
     def send(self, text, kind="text"):
         if not text.strip():

@@ -9,6 +9,7 @@ class Panels:
         d = Adw.Dialog(content_width=width, content_height=height, title=title)
         view = Adw.ToolbarView()
         header = Adw.HeaderBar(title_widget=Adw.WindowTitle(title=title))
+        d.header=header
         view.add_top_bar(header)
         view.set_content(child)
         d.set_child(view)
@@ -107,8 +108,6 @@ class Panels:
         appearance.add(theme)
         emojis=Adw.SwitchRow(title="Large emoji",subtitle="Enlarge messages containing only emoji",active=self.w.big_emoji)
         emojis.connect("notify::active",lambda r,*_:self.w.set_big_emoji(r.get_active()));appearance.add(emojis)
-        calls=Adw.SwitchRow(title="Show call button",active=self.w.call_button.get_visible())
-        calls.connect("notify::active",lambda r,*_:self.w.call_button.set_visible(r.get_active()));appearance.add(calls)
         appearance.add(Adw.SwitchRow(title="Use system emoji",active=True))
         appearance.add(action_row("UI icon packs","Import and manage ZIP packs",callback=lambda:self.w.choose_files(False)))
         page.add(appearance)
@@ -203,7 +202,7 @@ class Panels:
 
     def payment(self,request=False):
         content=self.body();g=group("Request Monero" if request else "Send Monero", "Preview only · no real wallet or funds")
-        amount=Adw.EntryRow(title="Amount");g.add(amount)
+        amount=Adw.EntryRow(title="Amount",input_purpose=Gtk.InputPurpose.NUMBER);g.add(amount)
         currency=Adw.ComboRow(title="Currency",model=Gtk.StringList.new(["XMR","USD","EUR","PLN"]));g.add(currency)
         g.add(Adw.EntryRow(title="Note"))
         if not request:g.add(Adw.EntryRow(title="Receiving address"))
@@ -214,17 +213,23 @@ class Panels:
             else:self.w.notice("Payment review preview · nothing was sent")
             d.close()
         b=Gtk.Button(label="Create Preview Request" if request else "Review Preview Payment");b.add_css_class("suggested-action");b.connect("clicked",lambda _:done());content.append(b)
+        from .amounts import bind
+        bind(amount,b)
         d=self.dialog("Request Payment" if request else "Send Payment",content)
 
     def wallet(self):
-        content=self.body();content.set_halign(Gtk.Align.CENTER);content.set_size_request(540,-1)
+        content=self.body()
         title=box(False,8);title.append(label("Your wallets", "title-2",hexpand=True,xalign=0));title.append(button("list-add-symbolic","Add or create another wallet",self.add_wallet));content.append(title)
         from .wallet_card import WalletCard
         switch=box(False,4,halign=Gtk.Align.FILL)
         card_stack=Gtk.Stack(transition_duration=320,hexpand=True)
+        cards={};self.wallet_stack=card_stack
         def fill():
-            card=WalletCard(self.w.state.wallets[self.w.state.wallet_index],"1.2048 XMR" if self.w.state.wallet_index==0 else "0.4659 XMR")
-            card_stack.add_child(card);card_stack.set_visible_child(card)
+            index=self.w.state.wallet_index
+            if index not in cards:
+                cards[index]=WalletCard(self.w.state.wallets[index],"1.2048 XMR" if index==0 else "0.4659 XMR",self.wallet_qr)
+                card_stack.add_child(cards[index])
+            card_stack.set_visible_child(cards[index])
         def change(direction):
             self.w.state.wallet_index=(self.w.state.wallet_index+direction)%len(self.w.state.wallets)
             card_stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT if direction>0 else Gtk.StackTransitionType.SLIDE_RIGHT);fill()
@@ -232,9 +237,6 @@ class Panels:
         switch.append(card_stack)
         switch.append(button("go-next-symbolic","Next wallet",lambda:change(1)))
         fill();content.append(switch)
-        precise=Gtk.ToggleButton(label="Show precise amount",halign=Gtk.Align.CENTER)
-        precise.connect("toggled",lambda b:(setattr(card_stack.get_visible_child(),"balance","1.204812345678" if b.get_active() else "1.2048 XMR"),card_stack.get_visible_child().queue_draw(),b.set_label("Back" if b.get_active() else "Show precise amount")))
-        content.append(precise)
         actions=box(False,12,homogeneous=True)
         for text,icon,cb in [("Send","mail-send-symbolic",lambda:self.payment()),("Request","insert-link-symbolic",lambda:self.payment(True)),("Wallets","view-grid-symbolic",self.manage_wallets)]:
             b=Gtk.Button(label=text);b.connect("clicked",lambda _,f=cb:f());actions.append(b)
@@ -244,7 +246,26 @@ class Panels:
             row=action_row(title,sub);row.add_suffix(label(value,"heading"));g.add(row)
         content.append(g);content.append(label("Offline wallet preview. No keys, scanning or transactions.","caption dim-label",wrap=True))
         self.w.utility.set_show_sidebar(False)
-        self.w.show_page("Wallet",scrolled(content))
+        self.w.show_page("Wallet",scrolled(Adw.Clamp(child=content,maximum_size=640,tightening_threshold=540)))
+
+    def wallet_qr(self,name):
+        import qrcode,cairo
+        qr=qrcode.QRCode(border=4);qr.add_data("Monogram Desktop wallet preview: "+name+" (no receiving address)");qr.make(fit=True)
+        matrix=qr.get_matrix()
+        content=self.body()
+        canvas=Gtk.DrawingArea(content_width=280,content_height=280,halign=Gtk.Align.CENTER)
+        def draw(area,c,width,height):
+            cell=max(1,int(min(width,height)/len(matrix)));side=cell*len(matrix)
+            c.set_source_rgb(1,1,1);c.rectangle((width-side)/2,(height-side)/2,side,side);c.fill()
+            c.translate((width-side)/2,(height-side)/2);c.set_antialias(cairo.ANTIALIAS_NONE);c.set_source_rgb(0,0,0)
+            for y,row in enumerate(matrix):
+                for x,filled in enumerate(row):
+                    if filled:c.rectangle(x*cell,y*cell,cell,cell)
+            c.fill()
+        canvas.set_draw_func(draw);canvas.update_property([Gtk.AccessibleProperty.LABEL],["Scannable QR preview for "+name]);content.append(canvas)
+        content.append(label(name,"title-2"))
+        content.append(label("Offline preview · no receiving address", "dim-label",wrap=True))
+        self.dialog("Receive Monero",content,360,410)
 
     def add_wallet(self):
         content=self.body();g=group("Another wallet");name=Adw.EntryRow(title="Wallet name");g.add(name);content.append(g)
@@ -272,9 +293,31 @@ class Panels:
         self.dialog("Spaces and Channels",content)
 
     def stories(self):
-        content=self.body();content.append(label("Stories", "title-1",xalign=0));g=group("From your contacts")
-        for name in ["Mira","Sam","Alex"]:g.add(action_row(name,"Photo story · Today",icon="image-x-generic-symbolic",callback=self.media_viewer))
-        content.append(g);self.w.show_page("Stories",scrolled(content))
+        self.w.reveal_stories()
+
+    def story_editor(self):
+        chooser=Gtk.FileDialog(title="Add Story",modal=True)
+        filt=Gtk.FileFilter(name="Photos");filt.add_mime_type("image/*");filters=Gio.ListStore.new(Gtk.FileFilter);filters.append(filt);chooser.set_filters(filters)
+        def chosen(dialog,result):
+            try:file=dialog.open_finish(result)
+            except GLib.Error as error:
+                if not error.matches(Gtk.DialogError.quark(),Gtk.DialogError.DISMISSED):self.w.notice("Photo selection unavailable")
+                return
+            if not file.get_path():self.w.notice("This preview needs a local photo");return
+            content=Adw.PreferencesPage()
+            photo=Gtk.Picture.new_for_file(file);photo.set_size_request(280,200);photo.set_content_fit(Gtk.ContentFit.CONTAIN);photo.set_can_shrink(True)
+            preview=group("Photo");preview.add(photo);content.add(preview)
+            details=group("Story");caption=Adw.EntryRow(title="Caption");details.add(caption)
+            details.add(Adw.ComboRow(title="Expires after",model=Gtk.StringList.new(["24 hours"])))
+            details.add(Adw.ComboRow(title="Visible to",model=Gtk.StringList.new(["Contacts","Everyone"])))
+            details.set_description("Local preview. Nothing will be published.");content.add(details)
+            d=self.dialog("New Story",content,480,600)
+            post=Gtk.Button(label="Post Preview");post.add_css_class("suggested-action");d.header.pack_end(post)
+            def save():
+                from .fixtures import Story
+                self.w.state.stories.insert(0,Story("You",file.get_path(),caption.get_text(),own=True));self.w.story_strip.refresh();d.close();self.w.reveal_stories()
+            post.connect("clicked",lambda _:save())
+        chooser.open(self.w,None,chosen)
 
     def call(self):
         content=self.body();content.append(avatar(self.w.state.active,88));content.append(label(self.w.state.active.name,"title-1"));content.append(label("Call preview · no call will be placed","dim-label"))
@@ -292,10 +335,20 @@ class Panels:
         viewer.open()
 
     def forward(self,message):
+        self.forward_many([message])
+
+    def forward_many(self,messages):
+        if not messages:return
         content=self.body();g=group("Choose a conversation")
         for chat in self.w.state.chats:
             def send(c=chat):
-                self.w.select_chat(c);self.w.state.send("↪ Forwarded from "+message.author+"\n\n"+message.text);self.w.chat.render();d.close()
+                import copy
+                self.w.select_chat(c)
+                for message in messages:
+                    sent=self.w.state.send("↪ Forwarded from "+message.author+"\n\n"+message.text,message.kind)
+                    for key in ("options","gif_index"):
+                        if hasattr(message,key):setattr(sent,key,copy.deepcopy(getattr(message,key)))
+                self.w.chat.render();self.w.refresh_chats();d.close()
             g.add(action_row(chat.name,callback=send))
         content.append(g);d=self.dialog("Forward Message",scrolled(content))
 
@@ -303,3 +356,8 @@ class Panels:
         content=self.body();g=group("Message")
         for title,sub in [("Sender",message.author),("Time",message.time),("Encryption","Encrypted fixture" if message.encrypted else "Unencrypted fixture"),("Delivery","Stored only in this in-memory preview")]:g.add(action_row(title,sub))
         content.append(g);self.dialog("Message Details",content)
+
+    def report_message(self,message):
+        dialog=Adw.AlertDialog(heading="Report Message",body="Choose a reason. This preview will not send a report.")
+        for name,title in [("cancel","Cancel"),("spam","Spam"),("abuse","Abuse"),("other","Other")]:dialog.add_response(name,title)
+        dialog.connect("response",lambda _,reason:setattr(message,"report_reason",reason) if reason!="cancel" else None);dialog.present(self.w)
