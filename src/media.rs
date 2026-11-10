@@ -454,16 +454,11 @@ impl Ui {
             let owner = s.account.clone();
             let peer = s.current().jid.clone();
             drop(s);
-            let id = source.as_ref().map(|w| w.widget_name().to_string());
-            let Some(window) = id.and_then(|id| self.store.media_window(&owner, &peer, &id).ok())
-            else {
-                self.notice("Shared media could not be loaded");
-                return;
-            };
-            (
-                window.messages.into_iter().map(MediaItem::live).collect(),
-                window.index,
-            )
+            let selected = source
+                .as_ref()
+                .and_then(|widget| self.store.message(&owner, &peer, &widget.widget_name()))
+                .filter(|message| !message.retracted && message.attachment.is_some());
+            (selected.into_iter().map(MediaItem::live).collect(), 0)
         };
         if items.is_empty() {
             self.notice("No shared media in this conversation");
@@ -737,6 +732,7 @@ pub struct MediaViewer {
     pictures: RefCell<Vec<gtk::Picture>>,
     source: Option<glib::WeakRef<gtk::Widget>>,
     index: Cell<usize>,
+    pub(crate) neighbours_pending: Cell<bool>,
     initial_id: String,
     items: RefCell<Vec<MediaItem>>,
     owner: String,
@@ -839,6 +835,7 @@ impl MediaViewer {
             pictures: RefCell::new(pictures),
             source: source.map(|w| w.downgrade()),
             index: Cell::new(initial),
+            neighbours_pending: Cell::new(false),
             initial_id: items[initial].id.clone(),
             owner: ui.state.borrow().account.clone(),
             peer: ui.state.borrow().current().jid.clone(),
@@ -975,68 +972,29 @@ impl MediaViewer {
         self.animation.replace(Some(a));
     }
     fn move_by(self: &Rc<Self>, delta: i32) {
-        let id = {
-            let items = self.items.borrow();
-            let index = (self.index.get() as i32 + delta).clamp(0, items.len() as i32 - 1) as usize;
-            items[index].id.clone()
-        };
+        if self.closing.get() {
+            return;
+        }
+        let previous = self.index.get();
+        let index =
+            (previous as i32 + delta).clamp(0, self.items.borrow().len() as i32 - 1) as usize;
+        if index == previous && delta != 0 {
+            return;
+        }
+        self.index.set(index);
+        self.update_position(delta);
         if !self.owner.is_empty() {
-            let Some(ui) = self.ui.upgrade() else {
-                return;
-            };
-            let Ok(window) = ui.store.media_window(&self.owner, &self.peer, &id) else {
-                ui.notice("Shared media could not be loaded");
-                return;
-            };
-            if window.messages.is_empty() {
+            let Some(ui) = self.ui.upgrade() else { return };
+            clear(&self.footer);
+            let id = self.items.borrow()[index].id.clone();
+            let Some(message) = ui
+                .store
+                .message(&self.owner, &self.peer, &id)
+                .filter(|m| !m.retracted && m.attachment.is_some())
+            else {
                 self.close();
                 return;
-            }
-            self.index.set(window.index);
-            let items: Vec<_> = window.messages.into_iter().map(MediaItem::live).collect();
-            let mut frames = vec![];
-            let mut pictures = vec![];
-            for item in &items {
-                if let Some(frame) = self
-                    .stack
-                    .child_by_name(&item.id)
-                    .and_downcast::<FlyFrame>()
-                {
-                    let pic = frame.first_child().and_downcast::<gtk::Picture>().unwrap();
-                    frames.push(frame);
-                    pictures.push(pic);
-                } else {
-                    let pic = gtk::Picture::builder()
-                        .can_shrink(true)
-                        .content_fit(gtk::ContentFit::Contain)
-                        .hexpand(true)
-                        .vexpand(true)
-                        .build();
-                    let frame: FlyFrame = glib::Object::new();
-                    frame.set_hexpand(true);
-                    frame.set_vexpand(true);
-                    frame.imp().overlay.set(Some(&self.root));
-                    frame.imp().progress.set(self.progress.get());
-                    frame.append(&pic);
-                    self.stack.add_named(&frame, Some(&item.id));
-                    self.watch_image(item.id.clone(), &pic);
-                    frames.push(frame);
-                    pictures.push(pic);
-                }
-            }
-            let old = self.frames.replace(frames);
-            self.pictures.replace(pictures);
-            self.items.replace(items);
-            for frame in old {
-                if !self.frames.borrow().iter().any(|f| f == &frame) {
-                    self.stack.remove(&frame);
-                }
-            }
-            clear(&self.footer);
-            let message = self.items.borrow()[self.index.get()]
-                .message
-                .clone()
-                .unwrap();
+            };
             let file = message.attachment.as_ref().unwrap();
             let state = ui.downloads.borrow().status(&self.owner, file);
             if !matches!(
@@ -1048,12 +1006,91 @@ impl MediaViewer {
                 }
             }
             self.footer.append(&ui.file_controls(&message, false));
-            self.fullscreen_changed();
-        } else {
-            let i = (self.index.get() as i32 + delta).clamp(0, self.items.borrow().len() as i32 - 1)
-                as usize;
-            self.index.set(i);
+            self.refresh_neighbours();
         }
+    }
+    fn refresh_neighbours(self: &Rc<Self>) {
+        if self.neighbours_pending.replace(true) {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        let id = self.items.borrow()[self.index.get()].id.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let Some(viewer) = weak.upgrade() else { return };
+            let Some(ui) = viewer.ui.upgrade() else {
+                return;
+            };
+            let owner = viewer.owner.clone();
+            let peer = viewer.peer.clone();
+            let target = id.clone();
+            let result = ui
+                .store
+                .read_snapshot(move |store| store.media_window(&owner, &peer, &target))
+                .await;
+            viewer.neighbours_pending.set(false);
+            if viewer.closing.get()
+                || ui.generation.get() != viewer.generation
+                || ui.state.borrow().account != viewer.owner
+                || ui.state.borrow().current().jid != viewer.peer
+            {
+                return;
+            }
+            if viewer.items.borrow()[viewer.index.get()].id != id {
+                viewer.refresh_neighbours();
+                return;
+            }
+            match result {
+                Ok(window) if !window.messages.is_empty() => viewer.apply_media_window(window),
+                Ok(_) => viewer.close(),
+                Err(_) => ui.notice("Adjacent photos could not be loaded"),
+            }
+        });
+    }
+    fn apply_media_window(self: &Rc<Self>, window: crate::media_store::MediaWindow) {
+        self.index.set(window.index);
+        let items: Vec<_> = window.messages.into_iter().map(MediaItem::live).collect();
+        let mut frames = vec![];
+        let mut pictures = vec![];
+        for item in &items {
+            if let Some(frame) = self
+                .stack
+                .child_by_name(&item.id)
+                .and_downcast::<FlyFrame>()
+            {
+                let pic = frame.first_child().and_downcast::<gtk::Picture>().unwrap();
+                frames.push(frame);
+                pictures.push(pic);
+            } else {
+                let pic = gtk::Picture::builder()
+                    .can_shrink(true)
+                    .content_fit(gtk::ContentFit::Contain)
+                    .hexpand(true)
+                    .vexpand(true)
+                    .build();
+                let frame: FlyFrame = glib::Object::new();
+                frame.set_hexpand(true);
+                frame.set_vexpand(true);
+                frame.imp().overlay.set(Some(&self.root));
+                frame.imp().progress.set(self.progress.get());
+                frame.append(&pic);
+                self.stack.add_named(&frame, Some(&item.id));
+                self.watch_image(item.id.clone(), &pic);
+                frames.push(frame);
+                pictures.push(pic);
+            }
+        }
+        let old = self.frames.replace(frames);
+        self.pictures.replace(pictures);
+        self.items.replace(items);
+        for frame in old {
+            if !self.frames.borrow().iter().any(|f| f == &frame) {
+                self.stack.remove(&frame);
+            }
+        }
+        self.fullscreen_changed();
+        self.update_position(0);
+    }
+    fn update_position(&self, delta: i32) {
         let i = self.index.get();
         let items = self.items.borrow();
         self.stack.set_transition_type(if delta > 0 {
@@ -1099,8 +1136,15 @@ impl MediaViewer {
             let Some(index) = viewer.items.borrow().iter().position(|item| item.id == id) else {
                 return glib::ControlFlow::Break;
             };
-            let current = index == viewer.index.get();
+            let active = viewer.index.get();
+            if active.abs_diff(index) > 10 {
+                return glib::ControlFlow::Continue;
+            }
+            let current = index == active;
             let edge = if current { 4096 } else { 384 };
+            if !current && loaded_edge.get() == edge {
+                return glib::ControlFlow::Continue;
+            }
             if !current
                 && viewer.pictures.borrow()[viewer.index.get()]
                     .paintable()

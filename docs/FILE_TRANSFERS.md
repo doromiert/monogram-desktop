@@ -126,8 +126,9 @@ budgets for thumbnails and viewer images.
 
 Conversation Info → Shared Media opens a three-by-three photo grid. Further pages
 use a cursor ordered by timestamp and ID. Choosing a tile opens the viewer. It
-keeps the current image and up to ten older and ten newer images. It prepares
-neighbor thumbnails from cached files and can download the selected image.
+shows the selected image immediately and looks up up to ten older and ten newer
+images outside GTK. It prepares neighbor thumbnails from cached files and can
+download the selected image.
 
 ## Verification and remaining work
 

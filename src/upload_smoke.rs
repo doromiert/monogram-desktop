@@ -16,6 +16,7 @@ pub struct UploadSmoke {
     id: RefCell<String>,
     file: RefCell<Option<crate::file_share::Attachment>>,
     received: Cell<bool>,
+    photo_steps: Cell<u8>,
 }
 impl UploadSmoke {
     fn capture(ui: &Ui, tag: &str, encrypted: bool) {
@@ -385,7 +386,7 @@ impl UploadSmoke {
             }
             21 => {
                 let viewer = ui.active_media.borrow().clone().unwrap();
-                if viewer.root.opacity() > 0.99 {
+                if viewer.root.opacity() > 0.99 && !viewer.neighbours_pending.get() {
                     Self::capture(ui, "viewer", encrypted);
                     assert!(
                         crate::smoke::button(&viewer.root.clone().upcast(), "Next media")
@@ -412,31 +413,37 @@ impl UploadSmoke {
             }
             22 => {
                 let viewer = ui.active_media.borrow().clone().unwrap();
-                let next =
-                    crate::smoke::button(&viewer.root.clone().upcast(), "Next media").unwrap();
-                for _ in 0..11 {
+                if viewer.neighbours_pending.get() {
+                    return false;
+                }
+                let steps = self.photo_steps.get();
+                let root = viewer.root.clone().upcast();
+                let next = crate::smoke::button(&root, "Next media").unwrap();
+                if steps < 11 {
+                    assert!(next.is_sensitive());
                     next.emit_clicked();
-                }
-                assert!(!next.is_sensitive());
-                let previous =
-                    crate::smoke::button(&viewer.root.clone().upcast(), "Previous media").unwrap();
-                for _ in 0..12 {
+                } else if steps < 23 {
+                    if steps == 11 {
+                        assert!(!next.is_sensitive());
+                    }
+                    let previous = crate::smoke::button(&root, "Previous media").unwrap();
+                    assert!(previous.is_sensitive());
                     previous.emit_clicked();
+                } else {
+                    assert_eq!(
+                        viewer
+                            .root
+                            .child()
+                            .and_downcast::<gtk::Stack>()
+                            .unwrap()
+                            .visible_child_name()
+                            .as_deref(),
+                        Some(self.id.borrow().as_str())
+                    );
+                    crate::smoke::button(&root, "Back").unwrap().emit_clicked();
+                    self.stage.set(23);
                 }
-                assert_eq!(
-                    viewer
-                        .root
-                        .child()
-                        .and_downcast::<gtk::Stack>()
-                        .unwrap()
-                        .visible_child_name()
-                        .as_deref(),
-                    Some(self.id.borrow().as_str())
-                );
-                crate::smoke::button(&viewer.root.clone().upcast(), "Back")
-                    .unwrap()
-                    .emit_clicked();
-                self.stage.set(23);
+                self.photo_steps.set(steps + 1);
             }
             23 => {
                 if let Some(viewer) = ui.active_media.borrow().clone() {
