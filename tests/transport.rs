@@ -1,6 +1,8 @@
 //! Disposable loopback-only transport checks; launched by xmpp_fixture.py.
 #[path = "../src/model.rs"]
 mod model;
+#[path = "../src/iq.rs"]
+mod iq;
 #[path = "../src/protocol.rs"]
 mod protocol;
 #[path = "../src/transport.rs"]
@@ -74,6 +76,9 @@ fn live_roundtrip() {
         wait(rx, |e| matches!(e, BackendEvent::Roster(_)));
     }
     std::thread::sleep(Duration::from_millis(300));
+    let encrypted_id=new_id();
+    alice.send(Command::Send{peer:"bob@localhost".into(),message:Message{text:"Must never leak as plaintext".into(),wire_id:encrypted_id.clone(),encrypted:true,..Default::default()},quote:String::new()});
+    wait(&a,|event|matches!(event,BackendEvent::Failed{id,..} if id==&encrypted_id));
     let message = Message {
         text: "Hello 🌿 from Rust".into(),
         wire_id: new_id(),
@@ -86,7 +91,7 @@ fn live_roundtrip() {
     }));
     let received = wait(
         &b,
-        |e| matches!(e, BackendEvent::Message{message:m,..} if m.wire_id == message.wire_id),
+        |e| {if let BackendEvent::Message{message:m,..}=e {assert_ne!(m.wire_id,encrypted_id,"Encrypted selection leaked through plaintext transport");} matches!(e, BackendEvent::Message{message:m,..} if m.wire_id == message.wire_id)},
     );
     if let BackendEvent::Message {
         message: m,

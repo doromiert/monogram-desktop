@@ -1,4 +1,6 @@
 use adw::prelude::*;
+mod crypto;
+mod iq;
 mod dialogs;
 mod folders;
 mod media;

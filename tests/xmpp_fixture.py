@@ -46,7 +46,7 @@ https_ports = {{}}
 allow_registration = false
 c2s_require_encryption = true
 ssl = {{ key = "{key}"; certificate = "{cert}" }}
-modules_enabled = {{ "roster"; "saslauth"; "tls"; "disco"; "carbons"; "mam"; "ping" }}
+modules_enabled = {{ "roster"; "saslauth"; "tls"; "disco"; "carbons"; "mam"; "ping"; "pep" }}
 log = {{ {{ levels = {{ min = "warn" }}; to = "console" }} }}
 VirtualHost "localhost"
 authentication = "internal_hashed"
@@ -85,6 +85,7 @@ def run_checks(root, server_port, cert):
     parser = argparse.ArgumentParser()
     parser.add_argument("--test-binary", required=True)
     parser.add_argument("--app-binary")
+    parser.add_argument("--crypto-test-binary")
     args = parser.parse_args()
     marker = root / "drop-proxy"
     stop = threading.Event()
@@ -136,6 +137,8 @@ def run_checks(root, server_port, cert):
         subprocess.run([args.test_binary, "--ignored", "--exact", name, "--nocapture"], env=environment, check=True, timeout=110)
     try:
         run("live_roundtrip", env)
+        if args.crypto_test_binary:
+            subprocess.run([args.crypto_test_binary, "--ignored", "--exact", "crypto::tests::live_pep_encrypted_roundtrip", "--nocapture"], env=env, check=True, timeout=110)
         if args.app_binary:
             subprocess.run([args.app_binary, "--live-smoke-test"], env=env, check=True, timeout=50)
         empty = root / "empty-ca.pem"

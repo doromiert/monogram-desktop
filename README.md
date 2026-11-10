@@ -93,7 +93,9 @@ This is real GTK: no WebView, browser shell, Android emulator, Telegram account
 or embedded Android backend is involved. The desktop transport uses tokio-xmpp for verified TLS, SASL and XML/stanza handling.
 
 The prototype code is GPL-2.0-or-later. The imported Monero rendering components
-are GPL-3.0-or-later; the combined build is distributed under GPL-3.0-or-later.
+are GPL-3.0-or-later; libomemo-c is GPL-3.0-only. The combined build uses GPL-3.0.
+The OMEMO 2 backend also reuses mobile's GPL-3.0-or-later native adapter/provider;
+see [native component notices](native/NOTICE.md) and its [integration status](docs/OMEMO2.md).
 See [LICENSE](LICENSE), [GPL-3.0](LICENSES/GPL-3.0-or-later.txt), and
 [asset notices](assets/NOTICE.md).
 

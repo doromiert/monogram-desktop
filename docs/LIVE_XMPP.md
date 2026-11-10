@@ -79,6 +79,10 @@ details, never passwords or encryption keys. Removing an account deletes its
 local rows and leaves the server untouched; this is not a forensic secure erase.
 Storage-at-rest encryption is a later milestone.
 
+An independently tested [OMEMO 2 backend](OMEMO2.md) now exists. It is not invoked
+by the live composer or account login; the limits above still apply. Its encrypted
+record store protects only crypto state, not the existing plaintext chat database.
+
 ## Verification
 
 `nix build` / `nix flake check` run model checks, native GTK checks, and an isolated

@@ -264,6 +264,7 @@ pub enum BackendEvent {
 }
 #[derive(Debug)]
 pub enum Command {
+    Iq { to: String, kind: crate::iq::Kind, payload: Element, reply: tokio::sync::oneshot::Sender<crate::iq::Reply> },
     Send {
         peer: String,
         message: Message,
@@ -306,13 +307,18 @@ impl Session {
                 let owner=config.jid.clone();let emit=|e|{let _=events.send((generation,owner.clone(),e));};
                 let Ok(_jid)=bare(&config.jid)else{emit(BackendEvent::Status{online:false,error:true,text:"Invalid XMPP address".into()});return};
                 let mut client = Client::new(config, password);
+                let mut iq=crate::iq::Pending::default();
                 let mut online=false;let mut mam:HashMap<String,(String,std::time::Instant)>=HashMap::new();let mut resources:HashMap<String,std::collections::HashSet<String>>=HashMap::new();let mut timer=tokio::time::interval(Duration::from_secs(1));let mut handshake=std::time::Instant::now();
                 emit(BackendEvent::Status{online:false,error:false,text:"Connecting…".into()});
                 loop{tokio::select!{
                     command=rx.recv()=>{match command{
                         None=>break,
+                        Some(Command::Iq{to,kind,payload,reply})=>{
+                            if !online{let _=reply.send(Err(crate::iq::Error::Closed));continue}
+                            if let Some(root)=iq.start(to,kind,payload,reply){let id=root.attr("id").unwrap().to_string();if !send(&mut client,root).await{iq.fail(&id)}}
+                        },
                         Some(Command::Send{peer,message,quote})=>{
-                            if !online{emit(BackendEvent::Failed{peer,id:message.wire_id});continue}
+                            if !online || message.encrypted || message.unavailable{emit(BackendEvent::Failed{peer,id:message.wire_id});continue}
                             let root=text_stanza(&peer,&message.text,&message.wire_id,(!message.reply_id.is_empty()).then_some((message.reply_id.as_str(),message.reply_to.as_str(),quote.as_str())));
                             let ok=send(&mut client,root).await;emit(if ok{BackendEvent::Sent{peer,id:message.wire_id}}else{BackendEvent::Failed{peer,id:message.wire_id}});
                         },
@@ -327,10 +333,10 @@ impl Session {
                     }},
                     event=client.next()=>{match event{
                         Some(Event::Online)=>{online=true;emit(BackendEvent::Status{online:true,error:false,text:"Connected · TLS".into()});send(&mut client,el("presence",NS)).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"get").attr("id".try_into().expect("static XML attribute"),"roster").append(el("query","jabber:iq:roster")).build()).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"set").attr("id".try_into().expect("static XML attribute"),"carbons").append(el("enable","urn:xmpp:carbons:2")).build()).await;},
-                        Some(Event::Disconnected(error))=>{#[cfg(test)] eprintln!("fixture disconnect: {error:?}");online=false;resources.clear();handshake=std::time::Instant::now();let fatal = fatal_error(&error);emit(BackendEvent::Status{online:false,error:fatal,text:if fatal{"Sign-in failed. Check credentials, TLS certificate and server configuration."}else{"Disconnected. Reconnecting…"}.into()});if fatal{break}},
+                        Some(Event::Disconnected(error))=>{#[cfg(test)] eprintln!("fixture disconnect: {error:?}");online=false;iq.disconnect();resources.clear();handshake=std::time::Instant::now();let fatal = fatal_error(&error);emit(BackendEvent::Status{online:false,error:fatal,text:if fatal{"Sign-in failed. Check credentials, TLS certificate and server configuration."}else{"Disconnected. Reconnecting…"}.into()});if fatal{break}},
                         None=>break,
                         Some(Event::Stanza(stanza))=>{
-                            let root:Element=stanza.into();let from=root.attr("from").unwrap_or("");
+                            let root:Element=stanza.into();if iq.receive(&root,&owner){continue}let from=root.attr("from").unwrap_or("");
                             if root.is("message",NS){
                                 if root.attr("type")==Some("error"){emit(BackendEvent::Failed{peer:bare_of(from),id:root.attr("id").unwrap_or("").into()});continue}
                                 if let Some(r)=root.get_child("received","urn:xmpp:receipts"){emit(BackendEvent::Receipt{peer:bare_of(from),id:r.attr("id").unwrap_or("").into()})}
@@ -349,8 +355,9 @@ impl Session {
                             }
                         }
                     }},
-                    _=timer.tick()=>{if !online&&handshake.elapsed()>Duration::from_secs(45){emit(BackendEvent::Status{online:false,error:true,text:"Connection timed out. Check the account settings.".into()});break}let expired:Vec<_>=mam.iter().filter(|(_,(_,start))|start.elapsed()>Duration::from_secs(20)).map(|(id,_)|id.clone()).collect();for id in expired{if let Some((peer,_))=mam.remove(&id){emit(BackendEvent::History{peer,before:String::new(),complete:false,error:true})}}}
+                    _=timer.tick()=>{iq.expire();if !online&&handshake.elapsed()>Duration::from_secs(45){emit(BackendEvent::Status{online:false,error:true,text:"Connection timed out. Check the account settings.".into()});break}let expired:Vec<_>=mam.iter().filter(|(_,(_,start))|start.elapsed()>Duration::from_secs(20)).map(|(id,_)|id.clone()).collect();for id in expired{if let Some((peer,_))=mam.remove(&id){emit(BackendEvent::History{peer,before:String::new(),complete:false,error:true})}}}
                 }}
+                iq.disconnect();
                 let _=tokio::time::timeout(Duration::from_secs(2),client.send_end()).await;
             } => {} } });
         }).expect("network thread");

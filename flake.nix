@@ -16,7 +16,8 @@
         let pkgs = import nixpkgs { inherit system; };
         in { default = pkgs.mkShell {
           inputsFrom = [ self.packages.${system}.default ];
-          packages = with pkgs; [ cargo rustc rustfmt clippy pkg-config sqlite libepoxy python3 gtk4 libadwaita gobject-introspection xorg-server xdotool imagemagick prosody openssl ];
+          JAVA_HOME = "${pkgs.jdk21}/lib/openjdk";
+          packages = with pkgs; [ cargo rustc rustfmt clippy pkg-config sqlite libepoxy python3 jdk21 gnome-keyring gtk4 libadwaita gobject-introspection xorg-server xdotool imagemagick prosody openssl ];
         }; });
       checks = eachSystem (system: {
         prototype = self.packages.${system}.default;
