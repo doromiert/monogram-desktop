@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Monogram Desktop
+Comment=Native messaging UI prototype
+Exec=monogram-desktop
+Icon=com.negzero.MonogramDesktop
+Categories=Network;InstantMessaging;GTK;
+StartupNotify=true

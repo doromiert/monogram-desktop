@@ -1,0 +1,65 @@
+/* Native Adwaita colors and metrics remain in charge of window chrome. */
+.chat-sidebar { background: @sidebar_bg_color; }
+.chat-list { background: transparent; }
+.chat-list row { border-radius: 10px; margin: 1px 8px; padding: 10px 8px; }
+.chat-list row:selected { background: alpha(@accent_bg_color, .15); color: @window_fg_color; }
+.chat-list row:hover { background: alpha(@window_fg_color, .05); }
+.chat-preview { font-size: 12px; opacity: .65; }
+.chat-time { font-size: 11px; opacity: .55; }
+.chat-name { font-weight: 650; }
+.unread-badge { background: @accent_bg_color; color: @accent_fg_color; border-radius: 20px; padding: 2px 6px; font-size: 10px; font-weight: bold; min-width: 10px; }
+.sidebar-footer { border-top: 1px solid alpha(@borders, .45); padding: 12px 16px; }
+.folder-bar { margin: 0 12px 8px; }
+.folder-bar button { padding: 5px 12px; border-radius: 18px; min-height: 22px; }
+.folder-bar button:checked { background: alpha(@accent_bg_color,.17); color: @accent_color; }
+.conversation { background: mix(@view_bg_color,@window_fg_color,.025); }
+.messages { padding: 20px 28px 12px; }
+.message-bubble { background: @card_bg_color; border-radius: 16px 16px 16px 5px; padding: 10px 13px 7px; box-shadow: 0 1px 2px alpha(black,.08); }
+.message-bubble.own { background: mix(@card_bg_color,@accent_bg_color,.16); border-radius: 16px 16px 5px 16px; }
+.message-author { color: @accent_color; font-weight: bold; font-size: 12px; margin-bottom: 4px; }
+.message-text { font-size: 14px; }
+.message-meta { opacity: .55; font-size: 10px; margin-top: 4px; }
+.message-reply { border-left: 3px solid @accent_bg_color; padding: 4px 8px; margin-bottom: 7px; background: alpha(@accent_bg_color,.08); border-radius: 4px; font-size: 12px; }
+.date-pill { background: alpha(@window_fg_color,.06); border-radius: 20px; padding: 4px 12px; font-size: 11px; opacity: .65; }
+.reaction { background: alpha(@accent_bg_color,.12); border-radius: 16px; padding: 2px 8px; font-size: 11px; min-height: 20px; }
+.composer-shell { background: @view_bg_color; border-top: 1px solid alpha(@borders,.4); padding: 12px 20px 16px; }
+.composer { background: @card_bg_color; border-radius: 16px; padding: 4px 8px; border: 1px solid alpha(@borders,.5); }
+.composer textview, .composer textview text { background: transparent; }
+.composer textview { padding: 7px 4px; }
+.send { border-radius: 50%; min-width: 36px; min-height: 36px; padding: 0; }
+.utility-pane { background: @window_bg_color; border-left: 1px solid alpha(@borders,.6); }
+.utility-heading { padding: 16px 16px 8px; }
+.emoji-item { font-size: 26px; padding: 7px; border-radius: 9px; min-width: 28px; min-height: 28px; }
+.sticker-item { font-size: 52px; padding: 16px; min-width: 70px; min-height: 70px; }
+.gif-tile { border-radius: 12px; min-height: 90px; padding: 8px; background: linear-gradient(135deg,alpha(@accent_bg_color,.2),alpha(@accent_bg_color,.05)); }
+.photo-tile { border-radius: 10px; }
+.file-chip { background: alpha(@accent_bg_color,.1); border-radius: 10px; padding: 5px 10px; }
+.poll-answer { background: alpha(@window_fg_color,.05); border-radius: 8px; padding: 6px 8px; min-height: 24px; }
+.poll-answer:checked { background: alpha(@accent_bg_color,.2); }
+.wallet-card { background: linear-gradient(120deg,#ff8a16,#f45100); color: white; border-radius: 22px; padding: 28px; min-height: 180px; box-shadow: 0 8px 20px alpha(#bf3600,.16); }
+.wallet-balance { font-size: 44px; font-weight: 700; }
+.wallet-muted { color: alpha(white,.8); }
+.wallet-card button { color: white; background: alpha(white,.14); box-shadow: none; border: none; }
+.payment-card { background: linear-gradient(120deg,#ff8a16,#f45100); color: white; border-radius: 12px; padding: 20px 26px; min-width: 210px; }
+.payment-card .title-1 { color: white; }
+.large-emoji { font-size: 56px; padding: 8px; }
+.preview-label { font-size: 10px; letter-spacing: 1px; opacity: .5; }
+
+.utility-pane stackswitcher button { min-width: 60px; padding: 6px 10px; }
+headerbar { min-height: 44px; }
+headerbar button { min-height: 30px; padding-top: 2px; padding-bottom: 2px; }
+headerbar menubutton { min-height: 30px; }
+.request-badge { background: @accent_bg_color; color: @accent_fg_color; font-size: 8px; min-width: 9px; min-height: 9px; border-radius: 9px; padding: 0 2px; margin-top: -3px; margin-right: -4px; }
+.message-reply { color: @window_fg_color; background: alpha(@window_fg_color,.10); padding: 7px 9px; border-left: 3px solid @accent_color; }
+.message-reply label { color: @window_fg_color; }
+.reply-target { outline: 2px solid @accent_color; }
+.reaction { color: @window_fg_color; background: alpha(@window_fg_color,.12); margin-top: 5px; }
+.reaction:checked { background: @accent_bg_color; color: @accent_fg_color; }
+.composer-shell { padding: 8px 16px; }
+.composer { padding: 1px 6px; border-radius: 12px; }
+.composer textview { padding: 2px; }
+.message-bubble .message-author { margin-bottom: 4px; }
+.media-viewer { background: #161619; color: white; }
+.media-viewer headerbar { background: transparent; color: white; }
+.media-viewer button { color: white; }
+.gif-preview { border-radius: 10px; }
