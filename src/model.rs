@@ -1,3 +1,4 @@
+use crate::encryption_policy::{Mode, Preference, Selection};
 use chrono::{Local, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,6 +38,7 @@ pub struct Message {
     pub own: bool,
     pub kind: String,
     pub encrypted: bool,
+    pub encryption_mode: Option<Mode>,
     pub ciphertext: String,
     pub fingerprint: String,
     pub reply: String,
@@ -78,6 +80,7 @@ impl Default for Message {
             own: false,
             kind: "text".into(),
             encrypted: false,
+            encryption_mode: None,
             ciphertext: String::new(),
             fingerprint: String::new(),
             reply: String::new(),
@@ -97,6 +100,20 @@ impl Default for Message {
     }
 }
 impl Message {
+    pub fn mode(&self) -> Mode {
+        if !self.encrypted {
+            Mode::Plain
+        } else if self.encryption_mode == Some(Mode::Legacy) {
+            Mode::Legacy
+        } else {
+            Mode::Omemo2
+        }
+    }
+    pub fn set_encryption(&mut self, mode: Mode, fingerprint: String) {
+        self.encrypted = mode.encrypted();
+        self.encryption_mode = Some(mode);
+        self.fingerprint = fingerprint;
+    }
     pub fn poll_source(&self) -> crate::polls::Source {
         if self.poll_source == crate::polls::Source::None && self.poll.is_some() {
             crate::polls::Source::Structured
@@ -197,6 +214,8 @@ impl Message {
 #[serde(default)]
 pub struct Chat {
     pub encryption: bool,
+    pub sending_preference: Option<Preference>,
+    pub automatic_encryption: Option<Selection>,
     pub id: String,
     pub name: String,
     pub subtitle: String,
@@ -217,6 +236,21 @@ pub struct Chat {
     pub pinned: bool,
     pub draft: String,
     pub draft_reply: String,
+}
+impl Chat {
+    pub fn encryption_preference(&self) -> Preference {
+        self.sending_preference.unwrap_or(if self.encryption {
+            Preference::Omemo2
+        } else {
+            Preference::Automatic
+        })
+    }
+    pub fn selected_encryption(&self) -> Option<Mode> {
+        self.encryption_preference().forced().or_else(|| {
+            self.automatic_encryption
+                .and_then(|selection| selection.current(Utc::now().timestamp_millis()))
+        })
+    }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]

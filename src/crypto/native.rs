@@ -20,9 +20,10 @@ unsafe extern "C" {
     fn mg_buffer_data(p: *mut Buffer) -> *const u8;
     fn mg_buffer_len(p: *mut Buffer) -> usize;
     fn mg_buffer_free(p: *mut Buffer);
-    fn mg_identity(record: *mut *mut Buffer, public: *mut *mut Buffer) -> i32;
+    fn mg_identity(legacy: u8, record: *mut *mut Buffer, public: *mut *mut Buffer) -> i32;
     fn mg_pre_key(id: u32, record: *mut *mut Buffer, public: *mut *mut Buffer) -> i32;
     fn mg_signed_key(
+        legacy: u8,
         identity: *const u8,
         length: usize,
         id: u32,
@@ -31,7 +32,9 @@ unsafe extern "C" {
         public: *mut *mut Buffer,
         signature: *mut *mut Buffer,
     ) -> i32;
+    fn mg_verify_legacy(identity: *const u8, key: *const u8, signature: *const u8) -> i32;
     fn mg_build(
+        legacy: u8,
         store: *const Callbacks,
         local: u32,
         peer: *const c_char,
@@ -45,6 +48,7 @@ unsafe extern "C" {
         identity: *const u8,
     ) -> i32;
     fn mg_encrypt(
+        legacy: u8,
         store: *const Callbacks,
         local: u32,
         peer: *const c_char,
@@ -56,6 +60,7 @@ unsafe extern "C" {
         out: *mut *mut Buffer,
     ) -> i32;
     fn mg_decrypt(
+        legacy: u8,
         store: *const Callbacks,
         local: u32,
         peer: *const c_char,
@@ -99,10 +104,10 @@ impl Drop for Owned {
 fn checked(r: i32) -> Result<()> {
     if r < 0 { Err(Error::Native(r)) } else { Ok(()) }
 }
-pub fn identity() -> Result<(Secret, [u8; 32])> {
+pub(super) fn identity_for(legacy: bool) -> Result<(Secret, [u8; 32])> {
     let (mut r, mut p) = (Owned::empty(), Owned::empty());
     unsafe {
-        checked(mg_identity(&mut r.0, &mut p.0))?;
+        checked(mg_identity(legacy.into(), &mut r.0, &mut p.0))?;
     }
     Ok((
         r.bytes()?,
@@ -125,10 +130,16 @@ pub fn pre_key(id: u32) -> Result<(Secret, [u8; 32])> {
             .map_err(|_| Error::Invalid("prekey"))?,
     ))
 }
-pub fn signed_key(identity: &[u8], id: u32, time: u64) -> Result<(Secret, [u8; 32], [u8; 64])> {
+pub(super) fn signed_key_for(
+    legacy: bool,
+    identity: &[u8],
+    id: u32,
+    time: u64,
+) -> Result<(Secret, [u8; 32], [u8; 64])> {
     let (mut r, mut p, mut s) = (Owned::empty(), Owned::empty(), Owned::empty());
     unsafe {
         checked(mg_signed_key(
+            legacy.into(),
             identity.as_ptr(),
             identity.len(),
             id,
@@ -219,7 +230,28 @@ unsafe extern "C" fn save(p: *mut c_void, kind: i32, id: u32, data: *const u8, n
         Err(_) => ctx.fail(Error::Invalid("store callback")),
     }
 }
+pub(super) fn verify_legacy(bundle: &super::bundle::Bundle) -> Result<()> {
+    unsafe {
+        checked(mg_verify_legacy(
+            bundle.identity.as_ptr(),
+            bundle.signed.as_ptr(),
+            bundle.signature.as_ptr(),
+        ))
+    }
+}
 pub fn build(
+    tx: &Tx<'_>,
+    local: u32,
+    peer: &str,
+    device: u32,
+    pre_id: u32,
+    pre: &[u8; 32],
+    bundle: &super::bundle::Bundle,
+) -> Result<()> {
+    build_for(false, tx, local, peer, device, pre_id, pre, bundle)
+}
+pub(super) fn build_for(
+    legacy: bool,
     tx: &Tx<'_>,
     local: u32,
     peer: &str,
@@ -236,6 +268,7 @@ pub fn build(
     };
     let r = unsafe {
         mg_build(
+            legacy.into(),
             &ctx.callbacks(),
             local,
             peer.as_ptr().cast(),
@@ -258,6 +291,16 @@ pub fn encrypt(
     device: u32,
     plaintext: &[u8],
 ) -> Result<(bool, Vec<u8>)> {
+    encrypt_for(false, tx, local, peer, device, plaintext)
+}
+pub(super) fn encrypt_for(
+    legacy: bool,
+    tx: &Tx<'_>,
+    local: u32,
+    peer: &str,
+    device: u32,
+    plaintext: &[u8],
+) -> Result<(bool, Vec<u8>)> {
     address(peer, device)?;
     if plaintext.is_empty() || plaintext.len() > 1024 * 1024 {
         return Err(Error::Invalid("plaintext size"));
@@ -271,6 +314,7 @@ pub fn encrypt(
     let mut flag = 0;
     let r = unsafe {
         mg_encrypt(
+            legacy.into(),
             &ctx.callbacks(),
             local,
             peer.as_ptr().cast(),
@@ -293,6 +337,17 @@ pub fn decrypt(
     ciphertext: &[u8],
     pre_key: bool,
 ) -> Result<Secret> {
+    decrypt_for(false, tx, local, peer, device, ciphertext, pre_key)
+}
+pub(super) fn decrypt_for(
+    legacy: bool,
+    tx: &Tx<'_>,
+    local: u32,
+    peer: &str,
+    device: u32,
+    ciphertext: &[u8],
+    pre_key: bool,
+) -> Result<Secret> {
     address(peer, device)?;
     if ciphertext.is_empty() || ciphertext.len() > 1024 * 1024 {
         return Err(Error::Invalid("ciphertext size"));
@@ -305,6 +360,7 @@ pub fn decrypt(
     let mut out = Owned::empty();
     let r = unsafe {
         mg_decrypt(
+            legacy.into(),
             &ctx.callbacks(),
             local,
             peer.as_ptr().cast(),

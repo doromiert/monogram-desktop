@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Thin binding to the system's upstream sandboxed image loader. The fd is consumed.
+// Thin binding to the system's upstream sandboxed image loader.
 #include <glycin-gtk4.h>
 #include <gio/gunixinputstream.h>
 
@@ -11,10 +11,8 @@ GInputStream *monogram_verified_stream_new(int fd) {
     return g_unix_input_stream_new(fd, TRUE);
 }
 
-GlyImage *monogram_image_open(int fd, GCancellable *cancel, GError **error) {
-    GInputStream *stream = monogram_verified_stream_new(fd);
+GlyImage *monogram_image_open(GInputStream *stream, GCancellable *cancel, GError **error) {
     GlyLoader *loader = gly_loader_new_for_stream(stream);
-    g_object_unref(stream);
     g_object_set(loader, "cancellable", cancel, NULL);
     // This Linux package never silently selects an unsandboxed development mode.
     gly_loader_set_sandbox_selector(loader, GLY_SANDBOX_SELECTOR_BWRAP);

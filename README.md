@@ -57,12 +57,13 @@ checks were run on x86_64-linux.
   Enter sends; Shift+Enter adds a line.
 - Pin/archive/mark unread from a chat's menu; open Archived Chats to unarchive.
   Live text drafts and reply targets survive switching chats and restarting.
-- Open **Conversation Security** to enable OMEMO 2, review exact device
-  fingerprints and choose encrypted sending for a direct conversation. Its
-  identity and trust survive reconnect; encrypted sending never falls back to
-  plaintext. See [encryption support and limits](docs/OMEMO2.md).
-- The remaining controls below describe the offline demo; live transfers,
-  editing/reactions, groups, stories, calls and wallet operations are outstanding.
+- Open **Conversation Security** to set the sending policy and review Legacy
+  OMEMO and OMEMO 2 fingerprints separately. Automatic checks OMEMO 2, then
+  Legacy OMEMO, and uses plaintext only when both are definitively unavailable.
+  Incoming ciphertext uses its own protocol regardless of the sending setting.
+  See [desktop encryption](docs/OMEMO2.md) and [Legacy OMEMO](docs/LEGACY_OMEMO.md).
+- The controls below include the separate offline demo. Live stories, groups,
+  calls and wallet operations remain outstanding.
 - Press **F9** for emoji, stickers, GIFs and Monero controls in a **right-hand utility pane**.
   Emoji insert into the composer; sticker/GIF tiles create local fixture messages.
   The grids show six emoji/four stickers per row; GIF tiles use bundled

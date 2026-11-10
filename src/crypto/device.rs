@@ -9,6 +9,9 @@ pub enum Trust {
     Rejected,
 }
 pub fn prepare(store: &mut Store, now: u64) -> Result<Bundle> {
+    prepare_for(store, now, false)
+}
+pub(super) fn prepare_for(store: &mut Store, now: u64, legacy: bool) -> Result<Bundle> {
     if now > i64::MAX as u64 {
         return Err(Error::Invalid("key timestamp"));
     }
@@ -39,7 +42,7 @@ pub fn prepare(store: &mut Store, now: u64) -> Result<Bundle> {
                 {
                     return Err(Error::Incomplete);
                 }
-                let (record, public) = native::identity()?;
+                let (record, public) = native::identity_for(legacy)?;
                 tx.save(IDENTITY, "", 0, Some(&record))?;
                 tx.save(IDENTITY, "", 1, Some(&public))?;
                 (record, 1, 1, 0)
@@ -63,7 +66,8 @@ pub fn prepare(store: &mut Store, now: u64) -> Result<Bundle> {
             }
             current = next_signed as u32;
             next_signed += 1;
-            let (record, public, signature) = native::signed_key(&identity, current, now)?;
+            let (record, public, signature) =
+                native::signed_key_for(legacy, &identity, current, now)?;
             tx.save(SIGNED_PRE_KEY, "", current, Some(&record))?;
             let mut info = Secret::new(Vec::with_capacity(104));
             info.extend(public);
@@ -131,7 +135,11 @@ pub fn prepare(store: &mut Store, now: u64) -> Result<Bundle> {
             signature: signed[32..96].try_into().unwrap(),
             prekeys,
         };
-        result.validate()?;
+        if legacy {
+            native::verify_legacy(&result)?;
+        } else {
+            result.validate()?;
+        }
         let mut meta = Secret::new(Vec::with_capacity(24));
         meta.extend(1u32.to_be_bytes());
         meta.extend(next_pre.to_be_bytes());

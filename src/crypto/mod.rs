@@ -3,6 +3,7 @@ pub mod bundle;
 pub mod device;
 pub mod engine;
 pub mod journal;
+pub mod legacy;
 pub mod lifecycle;
 pub mod native;
 pub mod payload;

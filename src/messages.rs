@@ -78,9 +78,12 @@ impl Ui {
             let meta = bx(false, 4);
             meta.add_css_class("message-meta");
             meta.set_valign(gtk::Align::Center);
-            if m.encrypted {
+            if m.encrypted
+                && (!m.own || !matches!(m.delivery.as_str(), "sending" | "failed" | "uncertain"))
+            {
                 let image = gtk::Image::from_icon_name("channel-secure-symbolic");
                 image.set_pixel_size(11);
+                image.set_tooltip_text(Some(m.mode().name()));
                 meta.append(&image)
             }
             if m.edited {

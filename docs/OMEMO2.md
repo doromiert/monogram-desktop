@@ -1,21 +1,16 @@
 # Live OMEMO 2 direct messages
 
-Desktop now connects the Rust OMEMO 2 backend to explicit account setup, native
-fingerprint review, per-conversation encrypted sending and authenticated receiving.
-This is direct text/reply support; full mobile encryption parity remains open in
-[FEATURE_PARITY.md](FEATURE_PARITY.md).
+Desktop initializes an OMEMO 2 receive identity in the background after a
+verified sign-in. Open **Conversation Security → OMEMO 2** to review contact
+and own-device fingerprints. Compare them through a trusted channel before
+approving. **Sending Encryption** affects outgoing messages only. Automatic
+checks OMEMO 2 first and then [Legacy OMEMO](LEGACY_OMEMO.md). Explicit OMEMO 2
+never falls back to plaintext. Incoming `urn:xmpp:omemo:2` and its fingerprints
+remain available under any sending choice.
 
-## Use and persistence
+## Persistence
 
-Connect an account, open **Conversation Security**, and choose **Enable**. This
-creates a separate OMEMO 2 identity, stores the master key in Secret Service and
-publishes the public device/bundle through PEP. Review the full fingerprints of
-contacts and your other devices, compare them through a trusted channel, and
-choose Trust Shown or Deny Shown. Enable **Encrypt Messages** for that conversation.
-Other clients must implement `urn:xmpp:omemo:2`; legacy/PQ selection is not yet
-available. Encryption never silently falls back to plaintext.
-
-Setup is explicit and survives restarting/reconnecting. A per-account file lock
+A per-account file lock
 serializes identity initialization. A durable device manifest and an independent
 keyring fingerprint binding detect missing databases, missing keys, incomplete
 initialization and changed identities. Recovery preserves the original device;
@@ -79,13 +74,14 @@ The package runs Rust tests, the unchanged mobile Java/JNI ratchet comparison,
 fixed payload vectors from freshly compiled mobile Java, and real GNOME Secret
 Service tests on disposable private D-Bus/keyring/state directories. Lifecycle
 checks cover process locking, reconnect identity preservation, missing/deleted
-stores and initialization recovery. No real account or user keyring is tested.
+stores and initialization recovery. The packaged fixtures use disposable accounts and keyrings.
 
 Disposable Prosody checks cover public PEP setup, preserved auxiliary devices,
 actual encrypted wire text/replies, own-device copies and heartbeat exchange.
 The integrated service checks unreviewed-send rejection, saved-ciphertext retry
 following approval, crash recovery, preserved trust/identity, MAM digest aliases
-and denial. Native GTK checks activate the real setup/review/encryption controls,
+and denial. A separate real desktop-to-mobile Java/JNI fixture received a sent
+carbon on a second resource and decrypted it after approving the sender fingerprint. Native GTK checks activate the real setup/review/encryption controls,
 send from the composer, receive a protected reply, persist/reconnect and send again.
 [Structured direct polls](STRUCTURED_POLLS.md), including bodyless definitions,
 are also inside authenticated SCE. Native controls verify protected inline corrections, reaction replacement
@@ -93,10 +89,9 @@ sets and original-device retraction/reload; see [message actions](MESSAGE_ACTION
 History failure/replay checks exercise the real receive/persistence path. Prior
 native layout/composer and transport/TLS rejection checks remain required.
 
-Remaining encryption parity includes automatic version selection and default-off
-automatic-trust policy, PEP watch/invalidation lifecycle and richer cached review,
+Remaining encryption parity includes the complete PEP watch/invalidation lifecycle and richer cached review,
 receive-only restore/migration and explicit revocation/reset, complete rich-content
-and formatting recovery, encrypted attachments, legacy/PQ and group encryption.
+and formatting recovery, PQ and group encryption.
 Ciphertext retry currently processes a bounded 128-row batch after setup or trust
 changes; complete background pagination/retry remains open. Provider/federation
 coverage, a mobile app UI exchange and an independent security audit are not

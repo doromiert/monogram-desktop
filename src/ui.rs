@@ -15,6 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 pub struct Ui {
+    pub avatars: RefCell<crate::avatar_ui::Avatars>,
     pub images: RefCell<crate::image_ui::Images>,
     pub uploads: RefCell<crate::upload_ui::Uploads>,
     pub downloads: RefCell<crate::downloads::Downloads>,
@@ -72,8 +73,11 @@ pub struct Ui {
     pub generation: Cell<u64>,
     pub online: Cell<bool>,
     pub crypto: RefCell<crate::crypto::service::Status>,
+    pub legacy_crypto: RefCell<crate::crypto::service::Status>,
+    pub encryption_checks: RefCell<HashMap<String, String>>,
+    pub encryption_revision: Cell<u64>,
     pub security_widgets: RefCell<Option<crate::dialogs::SecurityControls>>,
-    pub review_request: RefCell<Option<String>>,
+    pub review_request: RefCell<Option<(String, crate::encryption_policy::Mode)>>,
     pub status: RefCell<String>,
     pub event_tx: mpsc::Sender<Envelope>,
     pub event_rx: RefCell<mpsc::Receiver<Envelope>>,
@@ -188,6 +192,7 @@ impl Ui {
         window.add_breakpoint(bp);
         let (tx, rx) = mpsc::channel();
         let ui = Rc::new(Self {
+            avatars: RefCell::new(Default::default()),
             images: RefCell::new(Default::default()),
             uploads: RefCell::new(Default::default()),
             downloads: RefCell::new(Default::default()),
@@ -296,6 +301,9 @@ impl Ui {
             generation: Cell::new(0),
             online: Cell::new(false),
             crypto: RefCell::new(Default::default()),
+            legacy_crypto: RefCell::new(Default::default()),
+            encryption_checks: RefCell::new(HashMap::new()),
+            encryption_revision: Cell::new(0),
             security_widgets: RefCell::new(None),
             review_request: RefCell::new(None),
             status: RefCell::new("Not connected".into()),
@@ -343,6 +351,14 @@ impl Ui {
                 _ => adw::ColorScheme::Default,
             },
         );
+        let weak = Rc::downgrade(&ui);
+        glib::timeout_add_local(Duration::from_millis(220), move || {
+            let Some(ui) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            ui.poll_avatars();
+            glib::ControlFlow::Continue
+        });
         let weak = Rc::downgrade(&ui);
         glib::timeout_add_local(Duration::from_millis(30), move || {
             let Some(ui) = weak.upgrade() else {
@@ -400,6 +416,7 @@ impl Ui {
                 u.save_draft();
                 u.stop_uploads();
                 u.images.borrow_mut().clear();
+                u.avatars.borrow_mut().clear();
                 let media = u.active_media.borrow().clone();
                 if let Some(media) = media {
                     media.close_immediate();
@@ -729,7 +746,7 @@ impl Ui {
             let row = gtk::ListBoxRow::new();
             row.set_widget_name(&chat.id);
             let line = bx(false, 11);
-            line.append(&avatar(&chat, 44));
+            line.append(&self.chat_avatar(&chat, 44));
             let words = bx(true, 5);
             words.set_hexpand(true);
             let top = bx(false, 8);
@@ -1134,6 +1151,7 @@ impl Ui {
             .replace((!chat.draft_reply.is_empty()).then_some(chat.draft_reply));
         self.loading.set(false);
         self.update_reply();
+        self.update_encryption_check();
         self.render_messages(true);
         self.show_chat();
     }
@@ -1145,7 +1163,7 @@ impl Ui {
         let state = self.state.borrow();
         let chat = state.current();
         let title = bx(false, 8);
-        title.append(&avatar(chat, 28));
+        title.append(&self.chat_avatar(chat, 28));
         let words = bx(true, 0);
         words.append(&text(&chat.name, "chat-title"));
         let subtitle = if self
@@ -1281,10 +1299,15 @@ impl Ui {
             });
             return None;
         }
-        if live && self.state.borrow().current().encryption && !self.crypto.borrow().ready {
-            self.notice("Enable OMEMO 2 and review devices before forwarding here");
+        let mode = if live {
+            self.sending_mode(self.state.borrow().current())?
+        } else {
+            crate::encryption_policy::Mode::Plain
+        };
+        let Some(fingerprint) = self.fingerprint_for_send(mode) else {
+            self.notice("The selected OMEMO version is not ready");
             return None;
-        }
+        };
         let wire = attribution
             .as_ref()
             .map(|a| a.wire_body(value))
@@ -1300,6 +1323,9 @@ impl Ui {
                 .unwrap();
             message.text = value.into();
             message.forwarded = attribution;
+            if live {
+                message.set_encryption(mode, fingerprint);
+            }
             if kind == "text" {
                 message.poll = None;
                 message.poll_source = crate::polls::Source::None;
@@ -1308,12 +1334,7 @@ impl Ui {
             message.hydrate_compatibility();
         }
         if live {
-            let mut state = self.state.borrow_mut();
-            if let Some(m) = state.current_mut().messages.iter_mut().find(|m| m.id == id) {
-                if m.encrypted {
-                    m.fingerprint = self.crypto.borrow().fingerprint.clone();
-                }
-            }
+            let state = self.state.borrow();
             let message = state.message(&id).unwrap().clone();
             let peer = state.current().jid.clone();
             drop(state);
@@ -1345,6 +1366,18 @@ impl Ui {
         if value.trim().is_empty() && self.attachments.borrow().is_empty() {
             return;
         }
+        let files = self.attachments.borrow().clone();
+        let reply = self.replying.borrow().clone();
+        self.choose_sending(move |ui, mode| {
+            if ui.composer_text() == value
+                && *ui.replying.borrow() == reply
+                && *ui.attachments.borrow() == files
+            {
+                ui.send_with_mode(&value, mode);
+            }
+        });
+    }
+    fn send_with_mode(self: &Rc<Self>, value: &str, mode: crate::encryption_policy::Mode) {
         let reply = self
             .replying
             .borrow()
@@ -1355,12 +1388,25 @@ impl Ui {
             self.notice("Connect before sending. Your draft is kept.");
             return;
         }
+        let fingerprint = if live {
+            let Some(fingerprint) = self.fingerprint_for_send(mode) else {
+                self.notice("The selected OMEMO version is not ready. Your draft is kept.");
+                return;
+            };
+            fingerprint
+        } else {
+            String::new()
+        };
         let files_sent = live && !self.attachments.borrow().is_empty();
-        if files_sent && !self.send_files(&value) {
+        if files_sent && mode == crate::encryption_policy::Mode::Legacy {
+            self.notice("Legacy OMEMO file sending is unavailable. Choose OMEMO 2 to send an encrypted file.");
+            return;
+        }
+        if files_sent && !self.send_files(value) {
             return;
         }
         if !files_sent && !value.trim().is_empty() {
-            let Some(id) = self.state.borrow_mut().send(&value, "text") else {
+            let Some(id) = self.state.borrow_mut().send(value, "text") else {
                 return;
             };
             let mut state = self.state.borrow_mut();
@@ -1372,8 +1418,8 @@ impl Ui {
                 .iter_mut()
                 .find(|m| m.id == id)
                 .unwrap();
-            if live && message.encrypted {
-                message.fingerprint = self.crypto.borrow().fingerprint.clone();
+            if live {
+                message.set_encryption(mode, fingerprint);
             }
             if let Some(ref r) = reply {
                 message.reply = format!(
@@ -1520,6 +1566,7 @@ impl Ui {
     pub fn activate_state(self: &Rc<Self>, mut state: State) {
         self.stop_uploads();
         self.images.borrow_mut().clear();
+        self.avatars.borrow_mut().clear();
         for chat in &mut state.chats {
             for m in &mut chat.messages {
                 if let Some(draft) = &mut m.upload {
@@ -1539,6 +1586,8 @@ impl Ui {
         self.generation.set(self.generation.get() + 1);
         self.online.set(false);
         self.crypto.replace(Default::default());
+        self.legacy_crypto.replace(Default::default());
+        self.encryption_checks.borrow_mut().clear();
         self.security_widgets.borrow_mut().take();
         self.review_request.borrow_mut().take();
         self.status.replace("Disconnected".into());
@@ -1636,6 +1685,14 @@ impl Ui {
                 error,
                 text,
             } => {
+                if !online {
+                    self.encryption_checks.borrow_mut().clear();
+                    self.update_encryption_check();
+                    self.encryption_revision
+                        .set(self.encryption_revision.get().wrapping_add(1));
+                    self.legacy_crypto.borrow_mut().ready = false;
+                    self.history_pages.borrow_mut().clear();
+                }
                 self.online.set(online);
                 self.status.replace(text.clone());
                 if !online {
@@ -1689,11 +1746,29 @@ impl Ui {
                 self.update_crypto_controls();
                 self.update_mode();
             }
+            BackendEvent::AvatarChanged { peer, hint } => {
+                self.avatars.borrow_mut().invalidate(&peer, hint);
+                return;
+            }
+            BackendEvent::LegacyStatus(status) => {
+                self.legacy_crypto.replace(status);
+                self.update_crypto_controls();
+            }
+            BackendEvent::LegacyReview { peer, rows, errors } => {
+                self.handle_device_review(
+                    &peer,
+                    crate::encryption_policy::Mode::Legacy,
+                    rows,
+                    errors,
+                );
+            }
             BackendEvent::CryptoReview { peer, rows, errors } => {
-                if self.review_request.borrow().as_deref() == Some(&peer) {
-                    self.review_request.borrow_mut().take();
-                    self.review_devices(&peer, rows, errors);
-                }
+                self.handle_device_review(
+                    &peer,
+                    crate::encryption_policy::Mode::Omemo2,
+                    rows,
+                    errors,
+                );
             }
             BackendEvent::CryptoError { peer, text } => self.notice(&format!("{peer}: {text}")),
             BackendEvent::CryptoAliases {
@@ -1725,6 +1800,19 @@ impl Ui {
                     self.command(Command::Crypto(crate::crypto::service::Request::Accepted(
                         token,
                     )));
+                }
+            }
+            BackendEvent::LegacyEncryptedMessage {
+                peer,
+                message,
+                historical,
+                receipt_to,
+                token,
+            } => {
+                if self.receive_message(owner, peer, message, historical, receipt_to) {
+                    self.command(Command::Legacy(
+                        crate::crypto::legacy::service::Request::Accepted(token),
+                    ));
                 }
             }
             BackendEvent::Message {

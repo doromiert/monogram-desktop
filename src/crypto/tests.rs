@@ -144,6 +144,48 @@ fn no_implicit_trust_and_stale_batch_decisions_are_atomic() {
     assert!(encrypt(&mut a, B, 202, &bb, b"Still blocked").is_err());
 }
 #[test]
+fn contact_blind_trust_replaces_only_the_approved_ratchet_and_preserves_blocks() {
+    let (mut a, _b, ab, old) = fixtures();
+    assert!(encrypt(&mut a, B, 202, &old, b"Before rotation").unwrap().0);
+    let mut replacement = store(B, 202);
+    let next = device::prepare(&mut replacement, 1).unwrap();
+    assert_ne!(next.identity, old.identity);
+    device::observe(&mut a, B, 202, &next, true).unwrap();
+    approve(&mut replacement, A, 101, &ab);
+    let message = encrypt(&mut a, B, 202, &next, b"After rotation").unwrap();
+    assert!(message.0);
+    assert_eq!(
+        decrypt(&mut replacement, A, 101, &message)
+            .unwrap()
+            .as_slice(),
+        b"After rotation"
+    );
+
+    device::decide(
+        &mut a,
+        &BTreeMap::from([(B.into(), BTreeMap::from([(202, next.identity)]))]),
+        false,
+    )
+    .unwrap();
+    device::observe(&mut a, B, 202, &next, true).unwrap();
+    assert!(matches!(
+        encrypt(&mut a, B, 202, &next, b"Blocked"),
+        Err(Error::TrustRequired)
+    ));
+    device::observe(&mut a, B, 202, &old, true).unwrap();
+    assert!(matches!(
+        encrypt(&mut a, B, 202, &old, b"Reused device ID"),
+        Err(Error::TrustRequired)
+    ));
+
+    let own_copy = device::prepare(&mut store(A, 303), 1).unwrap();
+    device::observe(&mut a, A, 303, &own_copy, true).unwrap();
+    assert!(matches!(
+        encrypt(&mut a, A, 303, &own_copy, b"Own device needs review"),
+        Err(Error::TrustRequired)
+    ));
+}
+#[test]
 fn rotation_and_incomplete_state_preserve_identity() {
     let mut a = store(A, 101);
     let original = device::prepare(&mut a, 1).unwrap();
@@ -541,11 +583,11 @@ fn live_pep_encrypted_roundtrip() {
     use crate::{
         iq,
         model::Account,
-        protocol::{BackendEvent, Session},
+        protocol::Command,
         transport::{Client, Event},
     };
     use engine::Engine;
-    use std::{sync::mpsc, time::Duration};
+    use std::time::Duration;
     use tokio_xmpp::{minidom::Element, parsers::stanza::Stanza};
     let _ = tokio_xmpp::rustls::crypto::aws_lc_rs::default_provider().install_default();
     let config = |user: &str| Account {
@@ -554,27 +596,48 @@ fn live_pep_encrypted_roundtrip() {
         port: std::env::var("MONOGRAM_IT_PORT").unwrap().parse().unwrap(),
         direct_tls: false,
     };
-    let connect = |user: &str| {
-        let (tx, rx) = mpsc::channel();
-        let session = Session::start(config(user), "fixture-password".into(), 9, tx);
-        loop {
-            let (_, _, event) = rx.recv_timeout(Duration::from_secs(25)).unwrap();
-            if matches!(event, BackendEvent::Status { online: true, .. }) {
-                break;
+    async fn iq_transport(config: Account) -> iq::Client {
+        // This fixture publishes manually generated keys, so its IQ client has no automatic crypto setup.
+        let owner = config.jid.clone();
+        let mut client = Client::new(config, "fixture-password".into());
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(20), client.next())
+                .await
+                .unwrap(),
+            Some(Event::Online)
+        ));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::task::spawn_local(async move {
+            let mut pending = iq::Pending::default();
+            loop {
+                tokio::select! {
+                    command = rx.recv() => {
+                        let Some(Command::Iq { to, kind, payload, reply }) = command else { break };
+                        if let Some(xml) = pending.start(to, kind, payload, reply) {
+                            let stanza = Stanza::try_from(xml).unwrap();
+                            if client.send_stanza(stanza).await.is_err() { break; }
+                        }
+                    }
+                    event = client.next() => match event {
+                        Some(Event::Stanza(stanza)) => { pending.receive(&stanza.into(), &owner); }
+                        _ => break,
+                    }
+                }
             }
-        }
-        session
-    };
-    let alice = connect("alice");
-    let bob = connect("bob");
+            pending.disconnect();
+        });
+        iq::Client::new(tx)
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-    runtime.block_on(async {
+    tokio::task::LocalSet::new().block_on(&runtime, async {
+        let aiq = iq_transport(config("alice")).await;
+        let biq = iq_transport(config("bob")).await;
         let(mut a,mut b,mut auxiliary)=(store("alice@localhost",101),store("bob@localhost",202),store("alice@localhost",303));
         let ab=device::prepare(&mut a,1).unwrap();let bb=device::prepare(&mut b,1).unwrap();let aux=device::prepare(&mut auxiliary,1).unwrap();
-        let aiq=iq::Client::new(alice.tx.clone());let ap=pep::Pep::new(aiq.clone(),"alice@localhost",101).unwrap();let bp=pep::Pep::new(iq::Client::new(bob.tx.clone()),"bob@localhost",202).unwrap();let auxp=pep::Pep::new(aiq.clone(),"alice@localhost",303).unwrap();
+        let ap=pep::Pep::new(aiq.clone(),"alice@localhost",101).unwrap();let bp=pep::Pep::new(biq,"bob@localhost",202).unwrap();let auxp=pep::Pep::new(aiq.clone(),"alice@localhost",303).unwrap();
         auxp.initialize(&aux).await.unwrap();
         // Preserve a different client's labels/unknown children when adding our device.
         let list:Element="<pubsub xmlns='http://jabber.org/protocol/pubsub'><publish node='urn:xmpp:omemo:2:devices'><item id='current'><devices xmlns='urn:xmpp:omemo:2' marker='retain'><device id='303' label='Mobile'/><metadata xmlns='urn:fixture:metadata'>keep</metadata></devices></item></publish></pubsub>".parse().unwrap();
@@ -601,6 +664,4 @@ fn live_pep_encrypted_roundtrip() {
         b.journal.acknowledge(&mut b.store,received.token.as_ref().unwrap()).unwrap();assert!(b.journal.pending(&mut b.store).unwrap().is_empty());
         sender.send_end().await.unwrap();receiver.send_end().await.unwrap();
     });
-    drop(alice);
-    drop(bob);
 }

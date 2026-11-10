@@ -17,6 +17,17 @@ pub enum Error {
     Request(iq::Error),
     PublicAccess,
 }
+impl Error {
+    pub fn access_denied(&self) -> bool {
+        matches!(self, Self::Request(iq::Error::Rejected { condition, pubsub })
+            if matches!(condition.as_str(), "forbidden" | "not-authorized" | "subscription-required")
+                || pubsub.as_deref() == Some("presence-subscription-required"))
+    }
+    pub fn unsupported(&self) -> bool {
+        matches!(self, Self::Request(iq::Error::Rejected { condition, .. })
+            if condition == "feature-not-implemented")
+    }
+}
 impl From<super::Error> for Error {
     fn from(e: super::Error) -> Self {
         Self::Crypto(e)
@@ -98,7 +109,12 @@ impl Pep {
         address(peer, 1)?;
         Ok(self.requests.request(peer, kind, payload).await?)
     }
-    async fn item(&self, peer: &str, node: &str, id: Option<&str>) -> Result<Option<Element>> {
+    pub(super) async fn item(
+        &self,
+        peer: &str,
+        node: &str,
+        id: Option<&str>,
+    ) -> Result<Option<Element>> {
         let mut items = attr(element("items", PUBSUB), "node", node);
         if let Some(id) = id {
             items.append_child(attr(element("item", PUBSUB), "id", id));
@@ -110,13 +126,9 @@ impl Pep {
         let root = match self.request(peer, Kind::Get, query).await {
             Ok(Some(root)) => root,
             Ok(None) => return Err(invalid()),
-            Err(Error::Request(iq::Error::Rejected { condition, .. }))
+            Err(Error::Request(iq::Error::Rejected { condition, pubsub }))
                 if condition == "item-not-found"
-                    || (!(peer == self.owner && node == DEVICES)
-                        && matches!(
-                            condition.as_str(),
-                            "feature-not-implemented" | "service-unavailable"
-                        )) =>
+                    && pubsub.as_deref() != Some("presence-subscription-required") =>
             {
                 return Ok(None);
             }
@@ -176,6 +188,15 @@ impl Pep {
             return Err(invalid());
         }
         let maximum = if node == DEVICES { "1" } else { "max" };
+        self.publish_item(node, id, value, maximum).await
+    }
+    pub(super) async fn publish_item(
+        &self,
+        node: &str,
+        id: &str,
+        value: Element,
+        maximum: &str,
+    ) -> Result<()> {
         let fields = [
             ("pubsub#access_model", "open"),
             ("pubsub#persist_items", "true"),
@@ -252,7 +273,7 @@ impl Pep {
         }
         Ok(values.get("pubsub#access_model").map(String::as_str) == Some("open"))
     }
-    async fn ensure_open_access(&self, node: &str) -> Result<()> {
+    pub(super) async fn ensure_open_access(&self, node: &str) -> Result<()> {
         if !self.open_access(node).await? {
             self.configure(node, &[("pubsub#access_model", "open")])
                 .await?;

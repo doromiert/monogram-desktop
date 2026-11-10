@@ -1,6 +1,7 @@
 //! Account-local initialization is serialized; a missing store never rotates a pinned identity.
 use super::{
     engine::Engine,
+    journal::Journal,
     records::{IDENTITY, Store},
     *,
 };
@@ -38,7 +39,16 @@ fn directory(root: &Path, owner: &str) -> PathBuf {
         .join(hex(&openssl::sha::sha256(owner.as_bytes())))
 }
 pub fn exists(root: &Path, owner: &str) -> bool {
-    directory(root, owner).join("device.json").exists()
+    exists_for(root, owner, false)
+}
+pub(super) fn exists_for(root: &Path, owner: &str, legacy: bool) -> bool {
+    protocol_directory(root, owner, legacy)
+        .join("device.json")
+        .exists()
+}
+fn protocol_directory(root: &Path, owner: &str, legacy: bool) -> PathBuf {
+    let dir = directory(root, owner);
+    if legacy { dir.join("legacy") } else { dir }
 }
 fn private(root: &Path) -> Result<()> {
     fs::create_dir_all(root).map_err(|_| Error::Incomplete)?;
@@ -61,106 +71,121 @@ fn save(path: &Path, profile: &Profile) -> Result<()> {
         .and_then(|dir| dir.sync_all())
         .map_err(|_| Error::Incomplete)
 }
+pub(super) async fn open_profile(
+    root: &Path,
+    owner: &str,
+    create: bool,
+    legacy: bool,
+    published: &std::collections::BTreeSet<u32>,
+) -> Result<(Store, Journal, File)> {
+    address(owner, 1)?;
+    private(root)?;
+    private(&root.join("crypto"))?;
+    let account_dir = directory(root, owner);
+    private(&account_dir)?;
+    let dir = protocol_directory(root, owner, legacy);
+    private(&dir)?;
+    let database = dir.join(if legacy {
+        "legacy.sqlite3"
+    } else {
+        "omemo2.sqlite3"
+    });
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(dir.join("lock"))
+        .map_err(|_| Error::Incomplete)?;
+    lock.try_lock().map_err(|_| {
+        Error::Unavailable(
+            "Another Monogram session is using this identity; disconnect it before retrying",
+        )
+    })?;
+    let path = dir.join("device.json");
+    let mut profile = if path.exists() {
+        let mut bytes = Vec::new();
+        File::open(&path)
+            .map_err(|_| Error::Incomplete)?
+            .take(8193)
+            .read_to_end(&mut bytes)
+            .map_err(|_| Error::Incomplete)?;
+        if bytes.len() > 8192 {
+            return Err(Error::Incomplete);
+        }
+        let profile: Profile = serde_json::from_slice(&bytes).map_err(|_| Error::Incomplete)?;
+        address(&profile.owner, profile.device)?;
+        if profile.version != 1 || profile.owner != owner {
+            return Err(Error::Incomplete);
+        }
+        profile
+    } else {
+        if !create || database.exists() || !vault::existing_devices(owner, legacy).await?.is_empty()
+        {
+            return Err(Error::Incomplete);
+        }
+        let device = loop {
+            let id = u32::from_ne_bytes(random::<4>()?) & i32::MAX as u32;
+            if id != 0 && !published.contains(&id) {
+                break id;
+            }
+        };
+        let profile = Profile {
+            version: 1,
+            owner: owner.into(),
+            device,
+            identity: None,
+        };
+        save(&path, &profile)?;
+        profile
+    };
+    // A ready profile must never recreate a master key or database after deletion.
+    if profile.identity.is_some() && !database.exists() {
+        return Err(Error::Incomplete);
+    }
+    let master = vault::master_key_for(
+        owner,
+        profile.device,
+        profile.identity.is_none() && !database.exists(),
+        legacy,
+    )
+    .await?;
+    let pin = vault::identity_pin(owner, profile.device, None, legacy).await?;
+    let mut store = Store::open(Some(&database), owner, profile.device, master)?;
+    let public = store.transaction(|tx| tx.load(IDENTITY, "", 1))?;
+    if let Some(expected) = pin {
+        if public.as_ref().is_none_or(|key| key.as_slice() != expected)
+            || profile.identity.is_some_and(|key| key != expected)
+        {
+            return Err(Error::Incomplete);
+        }
+    } else if profile.identity.is_some() {
+        return Err(Error::Incomplete);
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    if now < 0 {
+        return Err(Error::Incomplete);
+    }
+    let public = device::prepare_for(&mut store, now as u64, legacy)?.identity;
+    let journal = Journal::new(&mut store)?;
+    if vault::identity_pin(owner, profile.device, Some(&public), legacy).await? != Some(public) {
+        return Err(Error::Incomplete);
+    }
+    if profile.identity != Some(public) {
+        profile.identity = Some(public);
+        save(&path, &profile)?;
+    }
+    Ok((store, journal, lock))
+}
 impl Local {
     pub async fn open(root: &Path, owner: &str, create: bool) -> Result<Self> {
-        address(owner, 1)?;
-        private(root)?;
-        private(&root.join("crypto"))?;
-        let dir = directory(root, owner);
-        private(&dir)?;
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(dir.join("lock"))
-            .map_err(|_| Error::Incomplete)?;
-        lock.try_lock().map_err(|_| {
-            Error::Unavailable(
-                "Another Monogram session is using this identity; disconnect it before retrying",
-            )
-        })?;
-        let path = dir.join("device.json");
-        let mut profile = if path.exists() {
-            let mut bytes = Vec::new();
-            File::open(&path)
-                .map_err(|_| Error::Incomplete)?
-                .take(8193)
-                .read_to_end(&mut bytes)
-                .map_err(|_| Error::Incomplete)?;
-            if bytes.len() > 8192 {
-                return Err(Error::Incomplete);
-            }
-            let profile: Profile = serde_json::from_slice(&bytes).map_err(|_| Error::Incomplete)?;
-            address(&profile.owner, profile.device)?;
-            if profile.version != 1 || profile.owner != owner {
-                return Err(Error::Incomplete);
-            }
-            profile
-        } else {
-            if !create
-                || dir.join("omemo2.sqlite3").exists()
-                || !vault::existing_devices(owner).await?.is_empty()
-            {
-                return Err(Error::Incomplete);
-            }
-            let device = loop {
-                let id = u32::from_ne_bytes(random::<4>()?) & i32::MAX as u32;
-                if id != 0 {
-                    break id;
-                }
-            };
-            let profile = Profile {
-                version: 1,
-                owner: owner.into(),
-                device,
-                identity: None,
-            };
-            save(&path, &profile)?;
-            profile
-        };
-        let database = dir.join("omemo2.sqlite3");
-        // A ready profile must never recreate a master key or database after deletion.
-        if profile.identity.is_some() && !database.exists() {
-            return Err(Error::Incomplete);
-        }
-        let master = vault::master_key(
-            owner,
-            profile.device,
-            profile.identity.is_none() && !database.exists(),
-        )
-        .await?;
-        let pin = vault::identity_pin(owner, profile.device, None).await?;
-        let mut store = Store::open(Some(&database), owner, profile.device, master)?;
-        let public = store.transaction(|tx| tx.load(IDENTITY, "", 1))?;
-        if let Some(expected) = pin {
-            if public.as_ref().is_none_or(|key| key.as_slice() != expected)
-                || profile.identity.is_some_and(|key| key != expected)
-            {
-                return Err(Error::Incomplete);
-            }
-        } else if profile.identity.is_some() {
-            return Err(Error::Incomplete);
-        }
-        let now = chrono::Utc::now().timestamp_millis();
-        if now < 0 {
-            return Err(Error::Incomplete);
-        }
-        let engine = Engine::new(store, now as u64)?;
-        let mut local = Self {
-            engine,
+        let (store, journal, lock) =
+            open_profile(root, owner, create, false, &Default::default()).await?;
+        Ok(Self {
+            engine: Engine { store, journal },
             _lock: lock,
-        };
-        let public = local.fingerprint()?;
-        if vault::identity_pin(owner, profile.device, Some(&public)).await? != Some(public) {
-            return Err(Error::Incomplete);
-        }
-        if profile.identity != Some(public) {
-            profile.identity = Some(public);
-            save(&path, &profile)?;
-        }
-        Ok(local)
+        })
     }
     pub fn fingerprint(&mut self) -> Result<[u8; 32]> {
         self.engine.store.transaction(|tx| {

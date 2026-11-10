@@ -1,4 +1,11 @@
-use crate::{model::*, protocol, ui::Ui, wallet::WalletCard, widgets::*};
+use crate::{
+    encryption_policy::{Mode, Preference},
+    model::*,
+    protocol,
+    ui::Ui,
+    wallet::WalletCard,
+    widgets::*,
+};
 use adw::prelude::*;
 use gtk::{gio, glib};
 use std::{
@@ -8,10 +15,13 @@ use std::{
 };
 pub struct SecurityControls {
     generation: u64,
-    peer: String,
+    pub(crate) sending: adw::ComboRow,
+    pub(crate) modern: DeviceControls,
+    legacy: DeviceControls,
+}
+pub(crate) struct DeviceControls {
     row: adw::ActionRow,
     pub(crate) enable: gtk::Button,
-    pub(crate) encrypted: adw::SwitchRow,
     pub(crate) review: gtk::Button,
     fingerprint: gtk::Label,
 }
@@ -22,46 +32,48 @@ impl Ui {
         if w.generation != self.generation.get() {
             return;
         }
-        let status = self.crypto.borrow();
-        w.row.set_subtitle(&status.text);
-        w.enable
-            .set_label(if status.enabled { "Retry" } else { "Enable" });
-        w.enable.set_visible(!status.ready);
-        w.enable.set_sensitive(self.online.get() && !status.ready);
-        w.encrypted.set_sensitive(
-            status.enabled
-                && self
-                    .state
-                    .borrow()
-                    .chats
-                    .iter()
-                    .find(|c| c.jid == w.peer)
-                    .is_some_and(|c| !c.group),
-        );
-        w.review.set_sensitive(status.ready && self.online.get());
-        w.fingerprint.set_text(&if status.fingerprint.is_empty() {
-            "No local identity yet".into()
-        } else {
-            format!(
-                "Device {}\n{}",
-                status.device,
-                status
-                    .fingerprint
-                    .as_bytes()
-                    .chunks(8)
-                    .map(|c| std::str::from_utf8(c).unwrap())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            )
-        });
+        for (controls, status) in [
+            (&w.modern, self.crypto.borrow()),
+            (&w.legacy, self.legacy_crypto.borrow()),
+        ] {
+            controls.row.set_subtitle(&status.text);
+            controls
+                .enable
+                .set_label(if status.enabled { "Retry" } else { "Enable" });
+            controls.enable.set_visible(!status.ready);
+            controls
+                .enable
+                .set_sensitive(self.online.get() && !status.ready);
+            controls
+                .review
+                .set_sensitive(status.ready && self.online.get());
+            let fingerprint = if status.fingerprint.is_empty() {
+                "No local identity yet".into()
+            } else {
+                format!(
+                    "Device {}\n{}",
+                    status.device,
+                    status
+                        .fingerprint
+                        .as_bytes()
+                        .chunks(8)
+                        .map(|c| std::str::from_utf8(c).unwrap())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            };
+            controls.fingerprint.set_text(&fingerprint);
+        }
     }
-    pub fn live_security(self: &Rc<Self>) {
-        use crate::crypto::service::Request;
-        let page = adw::PreferencesPage::new();
-        let group=adw::PreferencesGroup::builder().title("OMEMO 2").description("Compare device fingerprints through a trusted channel before approving them. Unreviewed or blocked devices cannot decrypt your outgoing messages.").build();
+    fn fingerprint_group(
+        self: &Rc<Self>,
+        mode: Mode,
+        peer: &str,
+    ) -> (adw::PreferencesGroup, DeviceControls) {
+        use crate::crypto::{legacy::service::Request as Legacy, service::Request as Modern};
+        let group = adw::PreferencesGroup::builder().title(mode.name()).build();
         let row = adw::ActionRow::builder()
             .title("This Device")
-            .subtitle(&self.crypto.borrow().text)
             .use_markup(false)
             .build();
         let enable = gtk::Button::with_label("Enable");
@@ -76,30 +88,86 @@ impl Ui {
         margins(&fingerprint, 12);
         identity.add_row(&fingerprint);
         group.add(&identity);
-        page.add(&group);
-        let peer = self.state.borrow().current().jid.clone();
-        let generation = self.generation.get();
-        let choices=adw::PreferencesGroup::builder().title("This Conversation").description("Encrypted sending never falls back to plaintext. Legacy/PQ and group encryption remain unavailable.").build();
-        let encrypted = adw::SwitchRow::builder()
-            .title("Encrypt Messages")
-            .subtitle("OMEMO 2")
-            .active(self.state.borrow().current().encryption)
-            .build();
-        choices.add(&encrypted);
         let devices = adw::ActionRow::builder()
             .title("Devices and Fingerprints")
-            .subtitle(&peer)
+            .subtitle(peer)
             .use_markup(false)
             .build();
         let review = gtk::Button::with_label("Review");
         review.set_valign(gtk::Align::Center);
         devices.add_suffix(&review);
-        choices.add(&devices);
+        group.add(&devices);
+        let generation = self.generation.get();
+        let weak = Rc::downgrade(self);
+        enable.connect_clicked(move |button| {
+            if let Some(ui) = weak
+                .upgrade()
+                .filter(|ui| ui.generation.get() == generation)
+            {
+                button.set_sensitive(false);
+                ui.command(if mode == Mode::Legacy {
+                    protocol::Command::Legacy(Legacy::Enable)
+                } else {
+                    protocol::Command::Crypto(Modern::Enable)
+                });
+            }
+        });
+        let weak = Rc::downgrade(self);
+        let target = peer.to_string();
+        review.connect_clicked(move |_| {
+            if let Some(ui) = weak
+                .upgrade()
+                .filter(|ui| ui.generation.get() == generation)
+            {
+                ui.review_request.replace(Some((target.clone(), mode)));
+                ui.notice(&format!("Looking up {} fingerprints…", mode.name()));
+                ui.command(if mode == Mode::Legacy {
+                    protocol::Command::Legacy(Legacy::Review(target.clone()))
+                } else {
+                    protocol::Command::Crypto(Modern::Review(target.clone()))
+                });
+            }
+        });
+        (
+            group,
+            DeviceControls {
+                row,
+                enable,
+                review,
+                fingerprint,
+            },
+        )
+    }
+    pub fn live_security(self: &Rc<Self>) {
+        let page = adw::PreferencesPage::new();
+        let peer = self.state.borrow().current().jid.clone();
+        let generation = self.generation.get();
+        let choices = adw::PreferencesGroup::builder()
+            .title("This Conversation")
+            .build();
+        let sending = adw::ComboRow::builder()
+            .title("Sending Encryption")
+            .subtitle("Incoming messages use the version they were sent with")
+            .model(&gtk::StringList::new(&[
+                "Automatic",
+                "OMEMO 2",
+                "Legacy OMEMO",
+                "Unencrypted",
+            ]))
+            .build();
+        let preference = self.state.borrow().current().encryption_preference();
+        sending.set_selected(
+            Preference::OPTIONS
+                .iter()
+                .position(|option| *option == preference)
+                .unwrap_or_default() as u32,
+        );
+        choices.add(&sending);
         let owner = self.state.borrow().account.clone();
         if peer != owner && !self.state.borrow().current().group {
             let trust = adw::ActionRow::builder()
                 .title("Blindly Trust This Contact")
-                .subtitle("Automatically approve new OMEMO 2 fingerprints for this contact")
+                .subtitle("Applies to Legacy OMEMO and OMEMO 2")
                 .build();
             let toggle = gtk::Button::with_label(
                 if self.store.blind_trust(&owner, &peer).unwrap_or(false) {
@@ -142,52 +210,28 @@ impl Ui {
             choices.add(&trust);
         }
         page.add(&choices);
+        let (modern_group, modern) = self.fingerprint_group(Mode::Omemo2, &peer);
+        let (legacy_group, legacy) = self.fingerprint_group(Mode::Legacy, &peer);
+        page.add(&modern_group);
+        page.add(&legacy_group);
         let weak = Rc::downgrade(self);
-        enable.connect_clicked(move |button| {
-            if let Some(ui) = weak.upgrade() {
-                if generation == ui.generation.get() {
-                    button.set_sensitive(false);
-                    ui.command(protocol::Command::Crypto(Request::Enable));
-                }
-            }
-        });
-        let weak = Rc::downgrade(self);
-        let target = peer.clone();
-        encrypted.connect_active_notify(move |row| {
-            if let Some(ui) = weak.upgrade() {
-                if generation == ui.generation.get() {
-                    if let Some(chat) = ui
-                        .state
-                        .borrow_mut()
-                        .chats
-                        .iter_mut()
-                        .find(|c| c.jid == target)
-                    {
-                        chat.encryption = row.is_active();
-                    }
-                    ui.persist();
-                    ui.update_mode();
-                }
-            }
-        });
-        let weak = Rc::downgrade(self);
-        let target = peer.clone();
-        review.connect_clicked(move |_| {
-            if let Some(ui) = weak.upgrade() {
-                if generation == ui.generation.get() {
-                    ui.review_request.replace(Some(target.clone()));
-                    ui.command(protocol::Command::Crypto(Request::Review(target.clone())));
-                }
+        let target = peer;
+        sending.connect_selected_notify(move |row| {
+            let Some(ui) = weak
+                .upgrade()
+                .filter(|ui| ui.generation.get() == generation)
+            else {
+                return;
+            };
+            if let Some(preference) = Preference::OPTIONS.get(row.selected() as usize) {
+                ui.set_sending_preference(&target, *preference);
             }
         });
         self.security_widgets.replace(Some(SecurityControls {
             generation,
-            peer,
-            row,
-            enable,
-            encrypted,
-            review,
-            fingerprint,
+            sending,
+            modern,
+            legacy,
         }));
         self.update_crypto_controls();
         let (d, _) = self.dialog("Conversation Security", &page, 560, 520);
@@ -206,19 +250,35 @@ impl Ui {
             return;
         }
         button.set_label(if enabled { "Disable" } else { "Enable…" });
+        self.invalidate_sending_choice(peer);
         if enabled {
+            self.command(protocol::Command::Legacy(
+                crate::crypto::legacy::service::Request::RefreshTrust(peer.into()),
+            ));
             self.command(protocol::Command::Crypto(
                 crate::crypto::service::Request::RefreshTrust(peer.into()),
             ));
         }
     }
-    pub fn review_devices(
+    pub fn handle_device_review(
         self: &Rc<Self>,
         peer: &str,
+        mode: Mode,
         rows: Vec<crate::crypto::service::Review>,
         errors: Vec<String>,
     ) {
-        use crate::crypto::{lifecycle::hex, service::Request};
+        if !self
+            .review_request
+            .borrow()
+            .as_ref()
+            .is_some_and(|(target, version)| target == peer && *version == mode)
+        {
+            return;
+        }
+        self.review_request.borrow_mut().take();
+        use crate::crypto::{
+            legacy::service::Request as Legacy, lifecycle::hex, service::Request as Modern,
+        };
         use std::collections::BTreeMap;
         let page = adw::PreferencesPage::new();
         let group=adw::PreferencesGroup::builder().title("Devices and Fingerprints").description("Trust only fingerprints you have verified. Decisions apply to exactly the keys shown here; changed keys require a fresh review.").build();
@@ -266,7 +326,7 @@ impl Ui {
             }
             page.add(&group);
         }
-        let (d, header) = self.dialog(&format!("Review {peer}"), &page, 600, 600);
+        let (d, header) = self.dialog(&format!("{} Fingerprints", mode.name()), &page, 600, 600);
         let generation = self.generation.get();
         for (approve, title, style) in [
             (false, "Deny Shown", "destructive-action"),
@@ -278,13 +338,22 @@ impl Ui {
             let weak = Rc::downgrade(self);
             let dialog = d.downgrade();
             let keys = keys.clone();
+            let target = peer.to_string();
             button.connect_clicked(move |_| {
                 if let Some(ui) = weak.upgrade() {
                     if generation == ui.generation.get() {
-                        ui.command(protocol::Command::Crypto(Request::Decide {
-                            keys: keys.clone(),
-                            approve,
-                        }));
+                        ui.command(if mode == Mode::Legacy {
+                            protocol::Command::Legacy(Legacy::Decide {
+                                keys: keys.clone(),
+                                approve,
+                            })
+                        } else {
+                            protocol::Command::Crypto(Modern::Decide {
+                                keys: keys.clone(),
+                                approve,
+                            })
+                        });
+                        ui.invalidate_sending_choice(&target);
                     }
                     if let Some(d) = dialog.upgrade() {
                         d.close();
@@ -1489,44 +1558,58 @@ impl Ui {
                         return;
                     }
                     ui.select_chat(&c.id);
-                    for m in &messages {
-                        let attribution = (!hide.is_active())
-                            .then(|| crate::forwarding::original(m, &owner, source_group));
-                        if let Some(mut poll) = m.poll.clone() {
-                            poll.closed = false;
-                            if !ui.send_poll_text_attribution(
-                                poll,
-                                m.poll_fallback,
-                                if m.poll_source() == crate::polls::Source::Legacy {
-                                    ""
-                                } else {
-                                    &m.text
-                                },
-                                attribution,
-                            ) {
-                                return;
-                            }
-                            continue;
-                        }
-                        if let Some(id) = ui.send_content_attribution(&m.text, &m.kind, attribution)
-                        {
-                            if let Some(sent) = ui
-                                .state
-                                .borrow_mut()
-                                .current_mut()
-                                .messages
-                                .iter_mut()
-                                .find(|m| m.id == id)
-                            {
-                                sent.options = m.options.clone();
-                                sent.gif_index = m.gif_index
-                            }
-                        } else {
+                    let hide_sender = hide.is_active();
+                    let messages = messages.clone();
+                    let owner = owner.clone();
+                    let dialog = d.downgrade();
+                    ui.choose_sending(move |ui, mode| {
+                        let Some(dialog) = dialog.upgrade() else {
+                            return;
+                        };
+                        if mode == Mode::Legacy && messages.iter().any(|m| m.poll.is_some()) {
+                            ui.notice("Structured encrypted polls require OMEMO 2");
                             return;
                         }
-                    }
-                    ui.render_messages(true);
-                    d.close();
+                        for m in &messages {
+                            let attribution = (!hide_sender)
+                                .then(|| crate::forwarding::original(m, &owner, source_group));
+                            if let Some(mut poll) = m.poll.clone() {
+                                poll.closed = false;
+                                if !ui.send_poll_text_attribution(
+                                    poll,
+                                    m.poll_fallback,
+                                    if m.poll_source() == crate::polls::Source::Legacy {
+                                        ""
+                                    } else {
+                                        &m.text
+                                    },
+                                    attribution,
+                                ) {
+                                    return;
+                                }
+                                continue;
+                            }
+                            if let Some(id) =
+                                ui.send_content_attribution(&m.text, &m.kind, attribution)
+                            {
+                                if let Some(sent) = ui
+                                    .state
+                                    .borrow_mut()
+                                    .current_mut()
+                                    .messages
+                                    .iter_mut()
+                                    .find(|m| m.id == id)
+                                {
+                                    sent.options = m.options.clone();
+                                    sent.gif_index = m.gif_index
+                                }
+                            } else {
+                                return;
+                            }
+                        }
+                        ui.render_messages(true);
+                        dialog.close();
+                    });
                 }
             });
             g.add(&row)
@@ -1580,21 +1663,20 @@ impl Ui {
             (
                 "Encryption",
                 if m.unavailable {
-                    "Not decrypted"
+                    "Not decrypted".into()
                 } else if m.encrypted {
                     if self.state.borrow().account.is_empty() {
-                        "Encrypted fixture"
+                        "Encrypted fixture".into()
                     } else if m.own
                         && matches!(m.delivery.as_str(), "sending" | "failed" | "uncertain")
                     {
-                        "OMEMO 2 selected; delivery not confirmed"
+                        format!("{} selected · delivery not confirmed", m.mode().name())
                     } else {
-                        "OMEMO 2"
+                        m.mode().name().into()
                     }
                 } else {
-                    "Not end-to-end encrypted"
-                }
-                .into(),
+                    "Unencrypted".into()
+                },
             ),
             ("Delivery", m.delivery.clone()),
             ("Message ID", m.wire_id.clone()),
@@ -1641,15 +1723,22 @@ impl Ui {
             .message(id)
             .is_some_and(|m| m.upload.is_some())
         {
-            let peer = self.state.borrow().current().jid.clone();
-            self.start_upload(&peer, id);
+            let id = id.to_string();
+            self.choose_sending(move |ui, _| {
+                let peer = ui.state.borrow().current().jid.clone();
+                ui.start_upload(&peer, &id);
+            });
             return;
         }
-        if self.state.borrow().message(id).is_some_and(|m| {
-            m.attachment.is_some()
-                && (m.encrypted != self.state.borrow().current().encryption
-                    || (m.encrypted && m.fingerprint != self.crypto.borrow().fingerprint))
-        }) {
+        let state = self.state.borrow();
+        let file_mode_changed = state.message(id).is_some_and(|message| {
+            message.attachment.is_some()
+                && (self.sending_mode(state.current()) != Some(message.mode())
+                    || self.fingerprint_for_send(message.mode()).as_deref()
+                        != Some(&message.fingerprint))
+        });
+        drop(state);
+        if file_mode_changed {
             self.notice("Encryption changed. Select the file again to send a fresh copy.");
             return;
         }
@@ -1811,9 +1900,15 @@ impl Ui {
                     multiple: multiple.is_active(),
                     closed: false,
                 };
-                if ui.send_poll(poll, fallback.is_active()) {
-                    dialog.close();
-                }
+                let fallback = fallback.is_active();
+                let dialog = dialog.downgrade();
+                ui.choose_sending(move |ui, _| {
+                    if let Some(dialog) = dialog.upgrade() {
+                        if ui.send_poll(poll, fallback) {
+                            dialog.close();
+                        }
+                    }
+                });
             }
         });
     }

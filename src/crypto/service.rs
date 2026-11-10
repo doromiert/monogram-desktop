@@ -4,7 +4,7 @@ use super::{
     device::{self, Trust},
     journal::Token,
     lifecycle::{self, Local},
-    pep::Pep,
+    pep::{self, Pep},
     *,
 };
 use crate::{
@@ -51,6 +51,10 @@ pub struct Frame {
 pub enum Request {
     Online(bool),
     Enable,
+    Probe {
+        peer: String,
+        reply: oneshot::Sender<Result<bool>>,
+    },
     Review(String),
     RefreshTrust(String),
     Decide {
@@ -183,6 +187,51 @@ struct Worker {
     ready: bool,
     reviews: BTreeMap<(String, u32), Review>,
 }
+enum PreparationError {
+    Crypto(Error),
+    Pep(pep::Error),
+    NoDevices,
+}
+impl From<Error> for PreparationError {
+    fn from(error: Error) -> Self {
+        Self::Crypto(error)
+    }
+}
+impl From<pep::Error> for PreparationError {
+    fn from(error: pep::Error) -> Self {
+        Self::Pep(error)
+    }
+}
+impl PreparationError {
+    fn fallback(&self) -> bool {
+        match self {
+            Self::NoDevices | Self::Crypto(Error::TrustRequired | Error::InvalidBundle) => true,
+            Self::Pep(error) => error.access_denied() || error.unsupported(),
+            Self::Crypto(_) => false,
+        }
+    }
+    fn into_error(self) -> Error {
+        match self {
+            Self::Crypto(error) | Self::Pep(pep::Error::Crypto(error)) => error,
+            Self::NoDevices => Error::Unavailable(
+                "No eligible OMEMO 2 devices. Review fingerprints and contact authorization.",
+            ),
+            Self::Pep(error) if error.access_denied() => {
+                Error::Unavailable("Access to OMEMO 2 keys was denied")
+            }
+            Self::Pep(error) if error.unsupported() => {
+                Error::Unavailable("The server does not support OMEMO 2 public keys")
+            }
+            Self::Pep(pep::Error::PublicAccess) => {
+                Error::Unavailable("Could not verify public access to your OMEMO 2 keys")
+            }
+            Self::Pep(_) => Error::Unavailable(
+                "Could not look up or publish OMEMO 2 keys. Check the connection.",
+            ),
+        }
+    }
+}
+type Prepared<T> = std::result::Result<T, PreparationError>;
 impl Worker {
     fn emit(&self, event: BackendEvent) {
         let _ = self
@@ -223,25 +272,25 @@ impl Worker {
             local.engine.store.device,
         )
     }
-    async fn initialize(&mut self, create: bool) -> Result<()> {
+    async fn initialize(&mut self) -> Prepared<()> {
         if !self.online {
-            return Err(Error::Unavailable("Connect before enabling OMEMO 2"));
+            return Err(Error::Unavailable("Connect before enabling OMEMO 2").into());
+        }
+        if self.ready {
+            self.status(None);
+            return Ok(());
         }
         self.ready = false;
         self.status(Some("Preparing OMEMO 2…".into()));
         if self.local.is_none() {
-            self.local = Some(Local::open(&self.root, &self.owner, create).await?);
+            self.local = Some(Local::open(&self.root, &self.owner, true).await?);
         }
         let local = self.local.as_mut().unwrap();
         let bundle = device::prepare(
             &mut local.engine.store,
             chrono::Utc::now().timestamp_millis() as u64,
         )?;
-        self.pep()?.initialize(&bundle).await.map_err(|_| {
-            Error::Unavailable(
-                "Could not publish OMEMO 2 keys; check the server’s PEP support and permissions",
-            )
-        })?;
+        self.pep()?.initialize(&bundle).await?;
         self.recover().await?;
         self.ready = true;
         self.status(None);
@@ -257,10 +306,21 @@ impl Worker {
             .await
             .is_ok_and(|v| v.unwrap_or(false))
     }
-    async fn observe(&mut self, peer: &str, id: u32) -> Result<Bundle> {
-        let bundle = self.pep()?.bundle(peer, id).await.map_err(|error|match error {super::pep::Error::Crypto(Error::Invalid(_)|Error::Crypto(_))=>Error::InvalidBundle,super::pep::Error::Crypto(error)=>error,_=>Error::Unavailable("A device bundle could not be fetched; check the connection and contact authorization")})?;
+    async fn observe(&mut self, peer: &str, id: u32) -> Prepared<Bundle> {
+        let bundle = self
+            .pep()?
+            .bundle(peer, id)
+            .await
+            .map_err(|error| match error {
+                pep::Error::Crypto(Error::Invalid(_) | Error::Crypto(_)) => {
+                    PreparationError::Crypto(Error::InvalidBundle)
+                }
+                _ => error.into(),
+            })?;
         let blind_trust = if let Some(history) = self.history()? {
-            history.blind_trust(&self.owner, peer)?
+            history
+                .blind_trust(&self.owner, peer)
+                .map_err(Error::from)?
         } else {
             false
         };
@@ -273,10 +333,8 @@ impl Worker {
         )?;
         Ok(bundle)
     }
-    async fn targets(&mut self, peer: &str, optional: bool) -> Result<BTreeMap<u32, Bundle>> {
-        let root = self.pep()?.devices(peer).await.map_err(|_| {
-            Error::Unavailable("The device list is unavailable; check contact authorization")
-        })?;
+    async fn targets(&mut self, peer: &str, optional: bool) -> Prepared<BTreeMap<u32, Bundle>> {
+        let root = self.pep()?.devices(peer).await?;
         let ids = super::pep::ids(root.as_ref())?;
         let local = self
             .local
@@ -299,7 +357,8 @@ impl Worker {
                         targets.insert(id, bundle);
                     }
                 }
-                Err(Error::InvalidBundle) if optional && peer == self.owner => {}
+                Err(PreparationError::Crypto(Error::InvalidBundle))
+                    if optional && peer == self.owner => {}
                 Err(error) => return Err(error),
             }
         }
@@ -379,18 +438,24 @@ impl Worker {
             errors,
         });
     }
-    async fn send_message(&mut self, peer: &str, message: &Message, quote: &str) -> Result<()> {
+    async fn prepare_message(
+        &mut self,
+        peer: &str,
+        message: &Message,
+        quote: &str,
+    ) -> Prepared<Element> {
         if message.upload.is_some()
             || message.attachment.as_ref().is_some_and(|file| {
                 !file.valid_outgoing(true) || message.poll.is_some() || message.action.is_some()
             })
         {
-            return Err(Error::Invalid("attachment encryption"));
+            return Err(Error::Invalid("attachment encryption").into());
         }
         if !self.ready || !self.online {
             return Err(Error::Unavailable(
                 "OMEMO 2 is not ready; reconnect or retry setup in Conversation Security",
-            ));
+            )
+            .into());
         }
         // UI state can lag an identity replacement queued ahead of this send.
         if !message.fingerprint.is_empty()
@@ -404,14 +469,13 @@ impl Worker {
         {
             return Err(Error::Unavailable(
                 "Encryption identity changed. Select the file again or retry the message.",
-            ));
+            )
+            .into());
         }
         address(peer, 1)?;
         let targets = self.targets(peer, false).await?;
         if targets.is_empty() {
-            return Err(Error::Unavailable(
-                "No eligible OMEMO 2 devices. Review fingerprints and contact authorization.",
-            ));
+            return Err(PreparationError::NoDevices);
         }
         let mut recipients = BTreeMap::from([(peer.to_string(), targets)]);
         if peer != self.owner {
@@ -439,10 +503,50 @@ impl Worker {
                 encrypted.append_child(child.clone());
             }
         }
+        Ok(encrypted)
+    }
+    async fn send_message(&mut self, peer: &str, message: &Message, quote: &str) -> Result<()> {
+        let encrypted = self
+            .prepare_message(peer, message, quote)
+            .await
+            .map_err(PreparationError::into_error)?;
         if !self.wire(encrypted).await {
             return Err(Error::Uncertain);
         }
         Ok(())
+    }
+    async fn probe(&mut self, peer: &str) -> Result<bool> {
+        async fn prepare(worker: &mut Worker, peer: &str) -> Prepared<()> {
+            if !worker.online {
+                return Err(Error::Unavailable("Connect before checking encryption").into());
+            }
+            if !worker.ready {
+                let requests = crate::iq::Client::new(worker.network.clone());
+                let pep = Pep::new(requests, &worker.owner, 1)?;
+                if pep::ids(pep.devices(peer).await?.as_ref())?.is_empty() {
+                    return Err(PreparationError::NoDevices);
+                }
+                worker.initialize().await?;
+            }
+            worker
+                .prepare_message(
+                    peer,
+                    &Message {
+                        text: "Monogram encryption check".into(),
+                        wire_id: crate::model::new_id(),
+                        encrypted: true,
+                        ..Default::default()
+                    },
+                    "",
+                )
+                .await?;
+            Ok(())
+        }
+        match prepare(self, peer).await {
+            Ok(()) => Ok(true),
+            Err(error) if error.fallback() => Ok(false),
+            Err(error) => Err(error.into_error()),
+        }
     }
     fn history(&self) -> Result<Option<crate::storage::Store>> {
         let path = self.root.join("history.sqlite3");
@@ -471,7 +575,14 @@ impl Worker {
         }
         let local = self.local.as_ref().ok_or(Error::Incomplete)?;
         let id = local.engine.store.device;
-        let digest = super::engine::Engine::digest(&frame.xml, &self.owner, id)?;
+        let digest =
+            super::engine::Engine::digest(&frame.xml, &self.owner, id).map_err(|error| {
+                if matches!(error, Error::Invalid("not addressed to this device")) {
+                    Error::Unavailable("This OMEMO 2 message has no key for this device")
+                } else {
+                    error
+                }
+            })?;
         let alias = format!("omemo2:{}", lifecycle::hex(&digest));
         let outer = protocol::normalize(
             &frame.xml,
@@ -521,7 +632,10 @@ impl Worker {
                     && matches!(k.attr("kex"), Some("true" | "1"))
             });
         if prekey {
-            let bundle = self.observe(&peer, sender).await?;
+            let bundle = self
+                .observe(&peer, sender)
+                .await
+                .map_err(PreparationError::into_error)?;
             if self
                 .local
                 .as_mut()
@@ -704,15 +818,18 @@ impl Worker {
                 if !online {
                     self.ready = false;
                     self.status(None)
-                } else if lifecycle::exists(&self.root, &self.owner) {
-                    if let Err(error) = self.initialize(false).await {
-                        self.status(Some(error.to_string()));
-                    }
+                } else if let Err(error) = self.initialize().await {
+                    self.status(Some(error.into_error().to_string()));
                 }
             }
             Request::Enable => {
-                if let Err(error) = self.initialize(true).await {
-                    self.status(Some(error.to_string()));
+                if let Err(error) = self.initialize().await {
+                    self.status(Some(error.into_error().to_string()));
+                }
+            }
+            Request::Probe { peer, reply } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(self.probe(&peer).await);
                 }
             }
             Request::Review(peer) => self.review(&peer).await,
@@ -783,6 +900,61 @@ impl Worker {
 mod tests {
     use super::*;
     #[test]
+    fn probing_cannot_downgrade_after_an_ambiguous_iq_failure() {
+        use crate::iq;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let rejected = |condition: &str| iq::Error::Rejected {
+                condition: condition.into(),
+                pubsub: None,
+            };
+            for (failure, may_fallback) in [
+                (rejected("item-not-found"), true),
+                (rejected("feature-not-implemented"), true),
+                (rejected("forbidden"), true),
+                (rejected("service-unavailable"), false),
+                (iq::Error::Timeout, false),
+                (iq::Error::Closed, false),
+            ] {
+                let (network, mut requests) = channel::unbounded_channel();
+                let (events, _) = mpsc::channel();
+                let mut worker = Worker {
+                    root: PathBuf::new(),
+                    owner: "a@example.invalid".into(),
+                    generation: 1,
+                    network,
+                    events,
+                    local: None,
+                    online: true,
+                    ready: false,
+                    reviews: BTreeMap::new(),
+                };
+                let answer = async {
+                    let Some(Command::Iq {
+                        kind: iq::Kind::Get,
+                        reply,
+                        ..
+                    }) = requests.recv().await
+                    else {
+                        panic!("The probe should only request peer key metadata");
+                    };
+                    reply.send(Err(failure)).unwrap();
+                };
+                let (result, ()) = tokio::join!(worker.probe("b@example.invalid"), answer);
+                if may_fallback {
+                    assert!(!result.unwrap());
+                } else {
+                    assert!(result.is_err());
+                }
+                assert!(worker.local.is_none());
+                assert!(requests.try_recv().is_err());
+            }
+        });
+    }
+    #[test]
     fn idless_ciphertext_retains_an_alias_before_device_approval() {
         let (mut a, mut b) = (
             records::Store::open(None, "a@example.invalid", 101, MasterKey::new([1; 32])).unwrap(),
@@ -831,11 +1003,13 @@ mod tests {
     use crate::{
         model::{Account, State, new_id},
         protocol::Session,
+        transport::{Client, Event},
     };
     use std::{
         sync::mpsc::{Receiver, RecvTimeoutError},
         time::{Duration, Instant},
     };
+    use tokio_xmpp::parsers::stanza::Stanza;
     #[track_caller]
     fn wait(rx: &Receiver<Envelope>, predicate: impl Fn(&BackendEvent) -> bool) -> BackendEvent {
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -851,23 +1025,46 @@ mod tests {
             }
         }
     }
+    fn config(user: &str) -> Account {
+        Account {
+            jid: format!("{user}@localhost"),
+            host: "127.0.0.1".into(),
+            port: std::env::var("MONOGRAM_IT_PORT").unwrap().parse().unwrap(),
+            direct_tls: false,
+        }
+    }
     fn start(user: &str) -> (Session, Receiver<Envelope>) {
         let (tx, rx) = mpsc::channel();
-        let session = Session::start(
-            Account {
-                jid: format!("{user}@localhost"),
-                host: "127.0.0.1".into(),
-                port: std::env::var("MONOGRAM_IT_PORT").unwrap().parse().unwrap(),
-                direct_tls: false,
-            },
-            "fixture-password".into(),
-            17,
-            tx,
-        );
+        let session = Session::start(config(user), "fixture-password".into(), 17, tx);
         wait(&rx, |e| {
             matches!(e, BackendEvent::Status { online: true, .. })
         });
         (session, rx)
+    }
+    async fn probe(session: &Session, peer: &str) -> Result<bool> {
+        let (reply, result) = oneshot::channel();
+        assert!(session.send(Command::Crypto(Request::Probe {
+            peer: peer.into(),
+            reply
+        })));
+        tokio::time::timeout(Duration::from_secs(30), result)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+    async fn next_xml(client: &mut Client, predicate: impl Fn(&Element) -> bool) -> Element {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(Event::Stanza(stanza)) = client.next().await {
+                    let xml: Element = stanza.into();
+                    if predicate(&xml) {
+                        return xml;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("fixture stanza deadline")
     }
     fn keys(rows: Vec<Review>) -> BTreeMap<String, BTreeMap<u32, [u8; 32]>> {
         let mut keys: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
@@ -928,10 +1125,18 @@ mod tests {
         }
         let (alice, a) = start("carol");
         let (bob, b) = start("dave");
-        for (session, rx) in [(&alice, &a), (&bob, &b)] {
-            session.send(Command::Crypto(Request::Enable));
-            wait(rx, |e| matches!(e,BackendEvent::CryptoStatus(s) if s.ready));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for rx in [&a, &b] {
+            wait(
+                rx,
+                |e| matches!(e, BackendEvent::CryptoStatus(s) if s.ready),
+            );
         }
+        assert!(!runtime.block_on(probe(&alice, "frank@localhost")).unwrap());
+        assert!(!runtime.block_on(probe(&alice, "dave@localhost")).unwrap());
         let arows = review(&alice, &a, "dave@localhost");
         let bob_fingerprint = lifecycle::hex(&arows[0].key);
         let brows = review(&bob, &b, "carol@localhost");
@@ -954,6 +1159,7 @@ mod tests {
             |e| matches!(e,BackendEvent::Failed{id,..} if id==&blocked_id),
         );
         decide(&alice, &a, "dave@localhost", arows, true);
+        assert!(runtime.block_on(probe(&alice, "dave@localhost")).unwrap());
         let stale_id = new_id();
         alice.send(Command::Send {
             peer: "dave@localhost".into(),
@@ -1064,22 +1270,85 @@ mod tests {
             |e| matches!(e,BackendEvent::CryptoAliases{aliases,..} if aliases.iter().any(|v|v.starts_with("archive:"))),
         );
         // An invalid auxiliary bundle is optional; an own-device storage failure is not.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let own_ids=runtime.block_on(async {let requests=crate::iq::Client::new(alice.tx.clone());let pep=super::super::pep::Pep::new(requests.clone(),"carol@localhost",1).unwrap();let original=pep.devices("carol@localhost").await.unwrap().unwrap();let merged=super::super::pep::add_own(Some(&original),999).unwrap();let mut publish=Element::builder("publish","http://jabber.org/protocol/pubsub").attr("node".try_into().unwrap(),super::super::pep::DEVICES).append(Element::builder("item","http://jabber.org/protocol/pubsub").attr("id".try_into().unwrap(),"current").append(merged).build()).build();let query=Element::builder("pubsub","http://jabber.org/protocol/pubsub").append(publish.clone()).build();requests.request("carol@localhost",crate::iq::Kind::Set,query).await.unwrap();
-            let probe=new_id();alice.send(Command::Send{peer:"dave@localhost".into(),message:Message{text:"Optional invalid auxiliary copy".into(),wire_id:probe.clone(),encrypted:true,..Default::default()},quote:String::new()});wait(&a,|e|matches!(e,BackendEvent::Sent{id,..} if id==&probe));
-            let mut aux=records::Store::open(None,"carol@localhost",999,MasterKey::new([8;32])).unwrap();let bundle=device::prepare(&mut aux,1).unwrap();super::super::pep::Pep::new(requests.clone(),"carol@localhost",999).unwrap().replenish(&bundle).await.unwrap();
-            let path=lifecycle::root().join("crypto").join(lifecycle::hex(&openssl::sha::sha256(b"carol@localhost"))).join("omemo2.sqlite3");let database=rusqlite::Connection::open(path).unwrap();database.execute_batch("CREATE TRIGGER fixture_own_seen BEFORE INSERT ON omemo2_records WHEN NEW.peer='carol@localhost' AND NEW.kind=9 BEGIN SELECT RAISE(ABORT,'fixture own-device persistence');END;").unwrap();
-            let blocked=new_id();alice.send(Command::Send{peer:"dave@localhost".into(),message:Message{text:"Own storage failure must block".into(),wire_id:blocked.clone(),encrypted:true,..Default::default()},quote:String::new()});wait(&a,|e|matches!(e,BackendEvent::Failed{id,..} if id==&blocked));database.execute_batch("DROP TRIGGER fixture_own_seen;").unwrap();
-            publish=Element::builder("publish","http://jabber.org/protocol/pubsub").attr("node".try_into().unwrap(),super::super::pep::DEVICES).append(Element::builder("item","http://jabber.org/protocol/pubsub").attr("id".try_into().unwrap(),"current").append(original.clone()).build()).build();requests.request("carol@localhost",crate::iq::Kind::Set,Element::builder("pubsub","http://jabber.org/protocol/pubsub").append(publish).build()).await.unwrap();original
+        runtime.block_on(async {
+            use crate::iq::{Client as Iq, Kind};
+            let owner = "carol@localhost";
+            let peer = "dave@localhost";
+            let requests = Iq::new(alice.tx.clone());
+            let own_pep = Pep::new(requests.clone(), owner, 999).unwrap();
+            let original = own_pep.devices(owner).await.unwrap().unwrap();
+            let sender = *pep::ids(Some(&original)).unwrap().first().unwrap();
+            let publish_list = |list| {
+                const PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+                Element::builder("pubsub", PUBSUB)
+                    .append(Element::builder("publish", PUBSUB)
+                        .attr("node".try_into().unwrap(), pep::DEVICES)
+                        .append(Element::builder("item", PUBSUB)
+                            .attr("id".try_into().unwrap(), "current").append(list).build()).build()).build()
+            };
+            let merged = pep::add_own(Some(&original), 999).unwrap();
+            requests.request(owner, Kind::Set, publish_list(merged)).await.unwrap();
+            let send = |body: &str| {
+                let wire_id = new_id();
+                assert!(alice.send(Command::Send {
+                    peer: peer.into(),
+                    message: Message { text: body.into(), wire_id: wire_id.clone(), encrypted: true, ..Default::default() },
+                    quote: String::new(),
+                }));
+                wire_id
+            };
+            let id = send("Optional invalid auxiliary copy");
+            wait(&a, |e| matches!(e, BackendEvent::Sent { id: sent, .. } if sent == &id));
+
+            let mut aux = records::Store::open(None, owner, 999, MasterKey::new([8; 32])).unwrap();
+            let aux_bundle = device::prepare(&mut aux, 1).unwrap();
+            own_pep.replenish(&aux_bundle).await.unwrap();
+            let path = lifecycle::root().join("crypto").join(lifecycle::hex(&openssl::sha::sha256(owner.as_bytes()))).join("omemo2.sqlite3");
+            let database = rusqlite::Connection::open(path).unwrap();
+            database.execute_batch("CREATE TRIGGER fixture_own_seen BEFORE INSERT ON omemo2_records WHEN NEW.peer='carol@localhost' AND NEW.kind=9 BEGIN SELECT RAISE(ABORT,'fixture own-device persistence');END;").unwrap();
+            assert!(matches!(probe(&alice, peer).await, Err(Error::Storage(_))));
+            let id = send("Own storage failure must block");
+            wait(&a, |e| matches!(e, BackendEvent::Failed { id: failed, .. } if failed == &id));
+            database.execute_batch("DROP TRIGGER fixture_own_seen;").unwrap();
+
+            let aux_rows = review(&alice, &a, owner);
+            assert_eq!(aux_rows.len(), 1);
+            assert_eq!(aux_rows[0].key, aux_bundle.identity);
+            assert_eq!(aux_rows[0].trust, "Undecided");
+            assert!(!probe(&alice, peer).await.unwrap());
+            decide(&alice, &a, owner, aux_rows, true);
+
+            let mut other_resource = Client::new(config("carol"), "fixture-password".into());
+            assert!(matches!(tokio::time::timeout(Duration::from_secs(20), other_resource.next()).await.unwrap(), Some(Event::Online)));
+            let enable: Element = "<iq xmlns='jabber:client' type='set' id='own-carbon'><enable xmlns='urn:xmpp:carbons:2'/></iq>".parse().unwrap();
+            other_resource.send_stanza(Stanza::try_from(enable).unwrap()).await.unwrap();
+            let response = next_xml(&mut other_resource, |xml| xml.is("iq", payload::CLIENT) && xml.attr("id") == Some("own-carbon")).await;
+            assert_eq!(response.attr("type"), Some("result"));
+            assert!(probe(&alice, peer).await.unwrap());
+            let id = send("Private outgoing copy to my second device");
+            wait(&a, |e| matches!(e, BackendEvent::Sent { id: sent, .. } if sent == &id));
+            let carbon = next_xml(&mut other_resource, |xml| xml.get_child("sent", "urn:xmpp:carbons:2").is_some()).await;
+            assert_eq!(carbon.attr("from"), Some(owner));
+            let wire = carbon.get_child("sent", "urn:xmpp:carbons:2").unwrap()
+                .get_child("forwarded", "urn:xmpp:forward:0").unwrap()
+                .get_child("message", payload::CLIENT).unwrap();
+            // The first carbon is the real send. The preceding successful probe emitted no chat stanza.
+            assert_eq!(wire.attr("id"), Some(id.as_str()));
+            assert!(wire.get_child("body", payload::CLIENT).is_none());
+            let original_sender = own_pep.bundle(owner, sender).await.unwrap();
+            let mut aux = super::super::engine::Engine::new(aux, 2).unwrap();
+            assert!(aux.receive(wire, 2).is_err(), "Own devices still require exact sender trust");
+            device::observe(&mut aux.store, owner, sender, &original_sender, false).unwrap();
+            device::decide(&mut aux.store, &BTreeMap::from([(owner.into(), BTreeMap::from([(sender, original_sender.identity)]))]), true).unwrap();
+            let decrypted = aux.receive(wire, 2).unwrap().content.unwrap();
+            let (received_peer, decoded, _) = protocol::normalize_protected(&decrypted, owner, None).unwrap();
+            assert_eq!(received_peer, peer);
+            assert!(decoded.own);
+            assert_eq!(decoded.text, "Private outgoing copy to my second device");
+            other_resource.send_end().await.unwrap();
+            requests.request(owner, Kind::Set, publish_list(original)).await.unwrap();
+            eprintln!("OMEMO 2 direct send and sent carbon decrypt on separate resource with independent trusted identity");
         });
-        assert!(
-            !super::super::pep::ids(Some(&own_ids))
-                .unwrap()
-                .contains(&999)
-        );
         let rows = review(&alice, &a, "dave@localhost");
         decide(&alice, &a, "dave@localhost", rows, false);
         let failed = new_id();

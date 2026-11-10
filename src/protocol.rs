@@ -1,4 +1,6 @@
 //! Standards-only XMPP boundary. No GTK, database access, or implicit plaintext fallback.
+use crate::crypto::{legacy, service as modern};
+use crate::encryption_policy::Mode;
 use crate::model::{Account, Message, new_id};
 use crate::transport::{Client, Event};
 use chrono::{DateTime, Utc};
@@ -485,6 +487,19 @@ pub enum BackendEvent {
         receipt_to: Option<String>,
         token: crate::crypto::journal::Token,
     },
+    LegacyStatus(crate::crypto::service::Status),
+    LegacyReview {
+        peer: String,
+        rows: Vec<crate::crypto::service::Review>,
+        errors: Vec<String>,
+    },
+    LegacyEncryptedMessage {
+        peer: String,
+        message: Message,
+        historical: bool,
+        receipt_to: Option<String>,
+        token: crate::crypto::journal::Token,
+    },
     Status {
         online: bool,
         error: bool,
@@ -494,6 +509,10 @@ pub enum BackendEvent {
     Presence {
         peer: String,
         online: bool,
+    },
+    AvatarChanged {
+        peer: String,
+        hint: Option<String>,
     },
     Typing {
         peer: String,
@@ -528,7 +547,20 @@ pub enum BackendEvent {
 #[derive(Debug)]
 pub enum Command {
     CryptoReady(bool),
+    LegacyReady(bool),
+    ChooseEncryption {
+        peer: String,
+        reply: tokio::sync::oneshot::Sender<crate::crypto::Result<crate::encryption_policy::Mode>>,
+    },
     Crypto(crate::crypto::service::Request),
+    Legacy(crate::crypto::legacy::service::Request),
+    Avatar {
+        peer: String,
+        source: crate::avatar::Source,
+        reply: tokio::sync::oneshot::Sender<
+            Result<Option<crate::avatar::Avatar>, crate::avatar::Error>,
+        >,
+    },
     Wire {
         xml: Element,
         reply: tokio::sync::oneshot::Sender<bool>,
@@ -582,15 +614,47 @@ impl Session {
                 let owner=config.jid.clone();let emit=|e|{let _=events.send((generation,owner.clone(),e));};
                 let Ok(_jid)=bare(&config.jid)else{emit(BackendEvent::Status{online:false,error:true,text:"Invalid XMPP address".into()});return};
                 let mut client = Client::new(config, password);
-                let crypto=crate::crypto::service::Handle::start(owner.clone(),generation,network,events.clone());
+                let crypto=modern::Handle::start(owner.clone(),generation,network.clone(),events.clone());
+                let legacy=legacy::service::Handle::start(owner.clone(),generation,network.clone(),events.clone());
                 let mut iq=crate::iq::Pending::default();
-                let mut crypto_ready=false;let mut online=false;let mut mam:HashMap<String,(String,std::time::Instant)>=HashMap::new();let mut resources:HashMap<String,std::collections::HashSet<String>>=HashMap::new();let mut timer=tokio::time::interval(Duration::from_secs(1));let mut handshake=std::time::Instant::now();
+                let mut crypto_ready=false;let mut legacy_ready=false;let mut online=false;let mut mam:HashMap<String,(String,std::time::Instant)>=HashMap::new();let mut resources:HashMap<String,std::collections::HashSet<String>>=HashMap::new();let mut timer=tokio::time::interval(Duration::from_secs(1));let mut handshake=std::time::Instant::now();
                 emit(BackendEvent::Status{online:false,error:false,text:"Connecting…".into()});
                 loop{tokio::select!{
                     command=rx.recv()=>{match command{
                         None=>break,
                         Some(Command::CryptoReady(ready))=>crypto_ready=ready,
+                        Some(Command::LegacyReady(ready))=>legacy_ready=ready,
                         Some(Command::Crypto(request))=>crypto.send(request),
+                        Some(Command::Legacy(request))=>legacy.send(request),
+                        Some(Command::Avatar { peer, source, reply })=>{
+                            let client = crate::iq::Client::new(network.clone());
+                            tokio::spawn(async move {
+                                let result = if online { crate::avatar::fetch(&client, &peer, source).await }
+                                    else { Err(crate::avatar::Error::Request(crate::iq::Error::Closed)) };
+                                let _ = reply.send(result);
+                            });
+                        },
+                        Some(Command::ChooseEncryption{peer,reply})=>{
+                            if !online {
+                                let _ = reply.send(Err(crate::crypto::Error::Unavailable("Connection interrupted")));
+                                continue;
+                            }
+                            let (checked, first) = tokio::sync::oneshot::channel();
+                            crypto.send(modern::Request::Probe{peer:peer.clone(),reply:checked});
+                            let legacy_tx = legacy.sender();
+                            tokio::spawn(async move {
+                                let result = crate::encryption_policy::select(
+                                    async { first.await.unwrap_or(Err(crate::crypto::Error::Unavailable("OMEMO 2 check interrupted"))) },
+                                    async {
+                                        let (checked, response) = tokio::sync::oneshot::channel();
+                                        legacy_tx.send(legacy::service::Request::Probe{peer,reply:checked})
+                                            .map_err(|_| crate::crypto::Error::Unavailable("Legacy OMEMO check interrupted"))?;
+                                        response.await.unwrap_or(Err(crate::crypto::Error::Unavailable("Legacy OMEMO check interrupted")))
+                                    },
+                                ).await;
+                                let _ = reply.send(result);
+                            });
+                        },
                         Some(Command::Wire{xml,reply})=>{let ok=online && send(&mut client,xml).await;let _=reply.send(ok);},
                         Some(Command::Iq{to,kind,payload,reply})=>{
                             if !online{let _=reply.send(Err(crate::iq::Error::Closed));continue}
@@ -598,7 +662,11 @@ impl Session {
                         },
                         Some(Command::Send{peer,message,quote})=>{
                             if !online || message.unavailable || message.upload.is_some() || message.attachment.as_ref().is_some_and(|file|!file.valid_outgoing(message.encrypted)||message.poll.is_some()||message.action.is_some()){emit(BackendEvent::Failed{peer,id:message.wire_id});continue}
-                            if message.encrypted{crypto.send(crate::crypto::service::Request::Send{peer,message,quote});continue}
+                            match message.mode() {
+                                Mode::Legacy => { legacy.send(legacy::service::Request::Send{peer,message,quote}); continue; },
+                                Mode::Omemo2 => { crypto.send(modern::Request::Send{peer,message,quote}); continue; },
+                                Mode::Plain => {},
+                            }
                             let root=outgoing(&peer,&message,&quote);
                             let ok=send(&mut client,root).await;emit(if ok{BackendEvent::Sent{peer,id:message.wire_id}}else{BackendEvent::Failed{peer,id:message.wire_id}});
                         },
@@ -612,26 +680,29 @@ impl Session {
                         Some(Command::Receipt{peer,id})=>{if online{send(&mut client,Element::builder("message",NS).attr("to".try_into().expect("static XML attribute"),peer).attr("type".try_into().expect("static XML attribute"),"chat").append(Element::builder("received","urn:xmpp:receipts").attr("id".try_into().expect("static XML attribute"),id).build()).build()).await;}},
                     }},
                     event=client.next()=>{match event{
-                        Some(Event::Online)=>{online=true;crypto.send(crate::crypto::service::Request::Online(true));emit(BackendEvent::Status{online:true,error:false,text:"Connected · TLS".into()});send(&mut client,el("presence",NS)).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"get").attr("id".try_into().expect("static XML attribute"),"roster").append(el("query","jabber:iq:roster")).build()).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"set").attr("id".try_into().expect("static XML attribute"),"carbons").append(el("enable","urn:xmpp:carbons:2")).build()).await;},
-                        Some(Event::Disconnected(error))=>{#[cfg(test)] eprintln!("fixture disconnect: {error:?}");online=false;crypto_ready=false;crypto.send(crate::crypto::service::Request::Online(false));iq.disconnect();resources.clear();handshake=std::time::Instant::now();let fatal = fatal_error(&error);emit(BackendEvent::Status{online:false,error:fatal,text:if fatal{"Sign-in failed. Check credentials, TLS certificate and server configuration."}else{"Disconnected. Reconnecting…"}.into()});if fatal{break}},
+                        Some(Event::Online)=>{online=true;crypto.send(modern::Request::Online(true));legacy.send(legacy::service::Request::Online(true));emit(BackendEvent::Status{online:true,error:false,text:"Connected · TLS".into()});send(&mut client,el("presence",NS)).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"get").attr("id".try_into().expect("static XML attribute"),"roster").append(el("query","jabber:iq:roster")).build()).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"set").attr("id".try_into().expect("static XML attribute"),"carbons").append(el("enable","urn:xmpp:carbons:2")).build()).await;},
+                        Some(Event::Disconnected(error))=>{#[cfg(test)] eprintln!("fixture disconnect: {error:?}");online=false;crypto_ready=false;legacy_ready=false;crypto.send(modern::Request::Online(false));legacy.send(legacy::service::Request::Online(false));iq.disconnect();resources.clear();handshake=std::time::Instant::now();let fatal = fatal_error(&error);emit(BackendEvent::Status{online:false,error:fatal,text:if fatal{"Sign-in failed. Check credentials, TLS certificate and server configuration."}else{"Disconnected. Reconnecting…"}.into()});if fatal{break}},
                         None=>break,
                         Some(Event::Stanza(stanza))=>{
                             let root:Element=stanza.into();if iq.receive(&root,&owner){continue}let from=root.attr("from").unwrap_or("");
                             if root.is("message",NS){
+                                if crate::avatar::pep_changed(&root) && bare(from).ok().as_deref()==Some(from) {
+                                    emit(BackendEvent::AvatarChanged{peer:from.into(),hint:None});
+                                }
                                 if root.attr("type")==Some("error"){emit(BackendEvent::Failed{peer:bare_of(from),id:root.attr("id").unwrap_or("").into()});continue}
                                 if let Some(r)=root.get_child("received","urn:xmpp:receipts"){emit(BackendEvent::Receipt{peer:bare_of(from),id:r.attr("id").unwrap_or("").into()})}
                                 if let Some(wrapper)=root.get_child("result","urn:xmpp:mam:2"){
-                                    if !(from.is_empty()||from==owner){continue}let query=wrapper.attr("queryid").unwrap_or("");let Some((expected,_))=mam.get(query)else{continue};let Some(forwarded)=wrapper.get_child("forwarded","urn:xmpp:forward:0")else{continue};let Some(inner)=forwarded.get_child("message",NS)else{continue};let stamp=forwarded.get_child("delay","urn:xmpp:delay").and_then(|d|d.attr("stamp")).unwrap_or("");if let Some((peer,_message,_))=normalize(inner,&owner,Some((wrapper.attr("id").unwrap_or(""),stamp))){if &peer==expected{deliver(&crypto,&emit,inner,&owner,Some((wrapper.attr("id").unwrap_or(""),stamp)),true,None)}}continue
+                                    if !(from.is_empty()||from==owner){continue}let query=wrapper.attr("queryid").unwrap_or("");let Some((expected,_))=mam.get(query)else{continue};let Some(forwarded)=wrapper.get_child("forwarded","urn:xmpp:forward:0")else{continue};let Some(inner)=forwarded.get_child("message",NS)else{continue};let stamp=forwarded.get_child("delay","urn:xmpp:delay").and_then(|d|d.attr("stamp")).unwrap_or("");if let Some((peer,_message,_))=normalize(inner,&owner,Some((wrapper.attr("id").unwrap_or(""),stamp))){if &peer==expected{deliver(&crypto,&legacy,&emit,inner,&owner,Some((wrapper.attr("id").unwrap_or(""),stamp)),true,None)}}continue
                                 }
                                 let carbon=root.get_child("received","urn:xmpp:carbons:2").or_else(||root.get_child("sent","urn:xmpp:carbons:2"));
-                                if let Some(wrapper)=carbon{if from!=owner{continue}if let Some(inner)=wrapper.get_child("forwarded","urn:xmpp:forward:0").and_then(|f|f.get_child("message",NS)){deliver(&crypto,&emit,inner,&owner,None,true,None);}continue}
-                                if let Some((_peer,message,historical))=normalize(&root,&owner,None){let receipt_to=(!historical&&!message.own&&!message.wire_id.is_empty()&&root.get_child("request","urn:xmpp:receipts").is_some()).then(||from.to_string());deliver(&crypto,&emit,&root,&owner,None,historical,receipt_to);}
+                                if let Some(wrapper)=carbon{if from!=owner{continue}if let Some(inner)=wrapper.get_child("forwarded","urn:xmpp:forward:0").and_then(|f|f.get_child("message",NS)){deliver(&crypto,&legacy,&emit,inner,&owner,None,true,None);}continue}
+                                if let Some((_peer,message,historical))=normalize(&root,&owner,None){let receipt_to=(!historical&&!message.own&&!message.wire_id.is_empty()&&root.get_child("request","urn:xmpp:receipts").is_some()).then(||from.to_string());deliver(&crypto,&legacy,&emit,&root,&owner,None,historical,receipt_to);}
                                 if root.get_child("delay","urn:xmpp:delay").is_none(){for name in ["composing","paused","active","inactive","gone"]{if root.get_child(name,"http://jabber.org/protocol/chatstates").is_some(){emit(BackendEvent::Typing{peer:bare_of(from),composing:name=="composing"})}}}
-                            }else if root.is("presence",NS){let peer=bare_of(from);let kind=root.attr("type").unwrap_or("");if kind=="subscribe"{emit(BackendEvent::Request(peer));continue}let set=resources.entry(peer.clone()).or_default();if kind=="unavailable"{set.remove(from);}else if kind.is_empty(){set.insert(from.into());}emit(BackendEvent::Presence{peer,online:!set.is_empty()});
+                            }else if root.is("presence",NS){let peer=bare_of(from);let kind=root.attr("type").unwrap_or("");if kind.is_empty() {if let Some(hint)=crate::avatar::presence_hash(&root){let avatar_peer=if root.get_child("x","http://jabber.org/protocol/muc#user").is_some(){from.to_string()}else{peer.clone()};if bare(&peer).ok().as_deref()==Some(&peer){emit(BackendEvent::AvatarChanged{peer:avatar_peer,hint:Some(hint)});}}}if kind=="subscribe"{emit(BackendEvent::Request(peer));continue}let set=resources.entry(peer.clone()).or_default();if kind=="unavailable"{set.remove(from);}else if kind.is_empty(){set.insert(from.into());}emit(BackendEvent::Presence{peer,online:!set.is_empty()});
                             }else if root.is("iq",NS){let id=root.attr("id").unwrap_or("");let trusted=from.is_empty()||from==owner;
                                 if trusted{if let Some(query)=root.get_child("query","jabber:iq:roster"){let contacts=query.children().filter(|c|c.is("item","jabber:iq:roster")).filter_map(|c|Some((c.attr("jid")?.into(),c.attr("name").unwrap_or("").into(),c.attr("subscription").unwrap_or("none").into()))).collect();emit(BackendEvent::Roster(contacts));if root.attr("type")==Some("set"){send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).build()).await;}}}
                                 if !trusted && mam.contains_key(id) { continue } if let Some((peer,_))=mam.remove(id){let fin=root.get_child("fin","urn:xmpp:mam:2");let before=fin.and_then(|f|f.get_child("set","http://jabber.org/protocol/rsm")).and_then(|s|s.get_child("first","http://jabber.org/protocol/rsm")).map(|f|f.text()).unwrap_or_default();let complete=fin.is_some_and(|f|matches!(f.attr("complete"),Some("true"|"1")))||before.is_empty();emit(BackendEvent::History{peer,before,complete,error:fin.is_none()});}
-                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in ["urn:xmpp:receipts",REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT,crate::polls::NS,crate::forwarding::NS,crate::file_share::NS]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
+                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in ["urn:xmpp:receipts",REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT,crate::polls::NS,crate::forwarding::NS,crate::file_share::NS]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if legacy_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),legacy::NS).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
                             }
                         }
                     }},
@@ -673,7 +744,8 @@ fn fatal_error(error: &tokio_xmpp::Error) -> bool {
     }
 }
 fn deliver(
-    crypto: &crate::crypto::service::Handle,
+    crypto: &modern::Handle,
+    legacy: &legacy::service::Handle,
     emit: &impl Fn(BackendEvent),
     xml: &Element,
     owner: &str,
@@ -681,21 +753,26 @@ fn deliver(
     historical: bool,
     receipt_to: Option<String>,
 ) {
-    if xml.get_child("encrypted", "urn:xmpp:omemo:2").is_some() {
-        crypto.send(crate::crypto::service::Request::Incoming(
-            crate::crypto::service::Frame {
-                xml: xml.clone(),
-                archive: archive.map(|(id, stamp)| (id.into(), stamp.into())),
-                historical,
-                receipt_to,
-            },
-        ));
+    let modern = xml.get_child("encrypted", "urn:xmpp:omemo:2").is_some();
+    let classic = xml.get_child("encrypted", legacy::NS).is_some();
+    if modern != classic {
+        let frame = modern::Frame {
+            xml: xml.clone(),
+            archive: archive.map(|(id, stamp)| (id.into(), stamp.into())),
+            historical,
+            receipt_to,
+        };
+        if modern {
+            crypto.send(modern::Request::Incoming(frame));
+        } else {
+            legacy.send(legacy::service::Request::Incoming(frame));
+        }
     } else if let Some((peer, message, delayed)) = normalize(xml, owner, archive) {
         emit(BackendEvent::Message {
             peer,
             message,
             historical: historical || delayed,
-            receipt_to,
+            receipt_to: if modern { None } else { receipt_to },
         });
     }
 }

@@ -3,8 +3,18 @@ use super::*;
 use secret_service::{EncryptionType, SecretService};
 use std::collections::HashMap;
 const APP: &str = "com.negzero.MonogramDesktop";
-const PIN: &str = "OMEMO2 local identity binding v1";
-pub async fn existing_devices(account: &str) -> Result<Vec<u32>> {
+fn purpose(legacy: bool, pin: bool) -> &'static str {
+    match (legacy, pin) {
+        (true, true) => "Legacy OMEMO local identity binding v1",
+        (true, false) => "Legacy OMEMO record encryption v1",
+        (false, true) => "OMEMO2 local identity binding v1",
+        (false, false) => "OMEMO2 record encryption v1",
+    }
+}
+fn name(legacy: bool) -> &'static str {
+    if legacy { "Legacy OMEMO" } else { "OMEMO 2" }
+}
+pub(super) async fn existing_devices(account: &str, legacy: bool) -> Result<Vec<u32>> {
     address(account, 1)?;
     let service = SecretService::connect(EncryptionType::Dh)
         .await
@@ -12,7 +22,7 @@ pub async fn existing_devices(account: &str) -> Result<Vec<u32>> {
     let found = service
         .search_items(HashMap::from([
             ("application", APP),
-            ("purpose", "OMEMO2 record encryption v1"),
+            ("purpose", purpose(legacy, false)),
             ("account", account),
         ]))
         .await
@@ -28,10 +38,11 @@ pub async fn existing_devices(account: &str) -> Result<Vec<u32>> {
     }
     Ok(devices)
 }
-pub async fn identity_pin(
+pub(super) async fn identity_pin(
     account: &str,
     device: u32,
     create: Option<&[u8; 32]>,
+    legacy: bool,
 ) -> Result<Option<[u8; 32]>> {
     address(account, device)?;
     let id = device.to_string();
@@ -40,7 +51,7 @@ pub async fn identity_pin(
         .map_err(|_| Error::Vault)?;
     let attrs = HashMap::from([
         ("application", APP),
-        ("purpose", PIN),
+        ("purpose", purpose(legacy, true)),
         ("account", account),
         ("device", id.as_str()),
     ]);
@@ -70,7 +81,7 @@ pub async fn identity_pin(
     collection.unlock().await.map_err(|_| Error::Vault)?;
     collection
         .create_item(
-            &format!("Monogram OMEMO 2 identity · {account} · {device}"),
+            &format!("Monogram {} identity · {account} · {device}", name(legacy)),
             attrs,
             pin,
             false,
@@ -80,7 +91,12 @@ pub async fn identity_pin(
         .map_err(|_| Error::Vault)?;
     Ok(Some(*pin))
 }
-pub async fn master_key(account: &str, device: u32, create: bool) -> Result<MasterKey> {
+pub(super) async fn master_key_for(
+    account: &str,
+    device: u32,
+    create: bool,
+    legacy: bool,
+) -> Result<MasterKey> {
     address(account, device)?;
     let service = SecretService::connect(EncryptionType::Dh)
         .await
@@ -88,7 +104,7 @@ pub async fn master_key(account: &str, device: u32, create: bool) -> Result<Mast
     let device = device.to_string();
     let attributes = HashMap::from([
         ("application", "com.negzero.MonogramDesktop"),
-        ("purpose", "OMEMO2 record encryption v1"),
+        ("purpose", purpose(legacy, false)),
         ("account", account),
         ("device", device.as_str()),
     ]);
@@ -121,7 +137,7 @@ pub async fn master_key(account: &str, device: u32, create: bool) -> Result<Mast
     let key = MasterKey::new(random::<32>()?);
     collection
         .create_item(
-            &format!("Monogram OMEMO 2 · {account} · {device}"),
+            &format!("Monogram {} · {account} · {device}", name(legacy)),
             attributes,
             key.as_slice(),
             false,
@@ -135,6 +151,9 @@ pub async fn master_key(account: &str, device: u32, create: bool) -> Result<Mast
 #[cfg(test)]
 mod tests {
     use super::*;
+    async fn master_key(account: &str, device: u32, create: bool) -> Result<MasterKey> {
+        master_key_for(account, device, create, false).await
+    }
     #[test]
     #[ignore = "requires disposable Secret Service and private D-Bus"]
     fn isolated_secret_service() {

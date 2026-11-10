@@ -87,7 +87,7 @@ archive_expires_after = "1d"
 VirtualHost "wrong.localhost"
 authentication = "internal_hashed"
 ''')
-        for user in ("alice", "bob", "carol", "dave", "erin", "frank"):
+        for user in ("alice", "bob", "carol", "dave", "erin", "frank", "grace", "hank"):
             subprocess.run(["prosodyctl", "--config", str(config), "register", user, "localhost", "fixture-password"], check=True, capture_output=True)
         with (root / "server.log").open("w+") as log:
             server = subprocess.Popen(["prosody", "--config", str(config), "-F"], stdout=log, stderr=subprocess.STDOUT)
@@ -222,14 +222,21 @@ def run_checks(root, server_port, cert, file_url):
     env = dict(os.environ, MONOGRAM_IT_PORT=str(listener.getsockname()[1]), MONOGRAM_IT_RECONNECT=str(marker), SSL_CERT_FILE=str(cert), MONOGRAM_FILE_URL=file_url)
     def run(name, environment):
         subprocess.run([args.test_binary, "--ignored", "--exact", name, "--nocapture"], env=environment, check=True, timeout=110)
+    def run_private(binary, target, timeout=150):
+        subprocess.run(["bash", "tests/keyring_fixture.sh", binary, args.bus_config, target], env=env, check=True, timeout=timeout)
     try:
-        run("live_roundtrip", env)
         if args.crypto_test_binary:
+            # The manual Alice/Bob PEP fixture expects no previous devices on the test server.
             subprocess.run([args.crypto_test_binary, "--ignored", "--exact", "crypto::tests::live_pep_encrypted_roundtrip", "--nocapture"], env=env, check=True, timeout=110)
-            subprocess.run(["bash", "tests/keyring_fixture.sh", args.crypto_test_binary, args.bus_config, "crypto::service::tests::live_service_roundtrip"], env=env, check=True, timeout=150)
+        # Signing in now publishes both OMEMO profiles. Keep even plain transport fixtures private.
+        run_private(args.test_binary, "live_roundtrip")
+        if args.crypto_test_binary:
+            run_private(args.crypto_test_binary, "crypto::service::tests::live_service_roundtrip")
+            run_private(args.crypto_test_binary, "crypto::legacy::tests::live_legacy_service_and_independent_send_preference")
         if args.app_binary:
-            subprocess.run(["bash", "tests/keyring_fixture.sh", args.app_binary, args.bus_config, "--live-smoke-test"], env=env, check=True, timeout=90)
-            subprocess.run(["bash", "tests/keyring_fixture.sh", args.app_binary, args.bus_config, "--crypto-smoke-test"], env=env, check=True, timeout=150)
+            run_private(args.app_binary, "--live-smoke-test", timeout=90)
+            run_private(args.app_binary, "--crypto-smoke-test")
+        run_private(args.test_binary, "avatar::tests::reads_an_avatar_published_by_another_account_over_tls")
         empty = root / "empty-ca.pem"
         empty.write_text("")
         run("tls_rejection", dict(env, SSL_CERT_FILE=str(empty), SSL_CERT_DIR=str(root / "empty-ca")))

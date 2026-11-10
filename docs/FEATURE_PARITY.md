@@ -3,7 +3,7 @@
 Target: all shipped Monogram behavior, with desktop-specific presentation.
 Android baseline: `be6876c045163e32fe07a84416621770b0964b30` / 0.2.195.
 
-**Live direct-text XMPP and explicit OMEMO 2 text/replies are implemented; full parity is open.**
+**Live direct text, Legacy OMEMO and OMEMO 2 are implemented. Full parity remains open.**
 The desktop implementation is Rust with GTK 4/libadwaita; its Python predecessor
 is replaced, preserving the SQLite schema and account-specific data.
 See [LIVE_XMPP.md](LIVE_XMPP.md) for verified behavior and security limits.
@@ -25,14 +25,14 @@ an in-memory interaction or surface; "planned" means it is still absent.
 | HTML widgets | Upstream sandbox source audited; no renderer/runtime integrated | Resolve upstream licensing, GTK host and compatible XMPP proposal; enforce accepted **16 KiB compressed** budget plus independent expansion/memory/execution bounds on both clients |
 | Media authoring | Planned | Crop/trim/markup, compression, albums, camera capture and desktop permission/device flows |
 | Locations and previews | Location card/form preview | Real safe map rendering, provider privacy, coordinates, live/location selection and valid fallback removal |
-| OMEMO legacy and Monocles PQ in DMs/MUCs | Legacy/PQ remain unavailable; unsupported encrypted payloads show an unavailable placeholder, never a decrypted fallback | Exact separate key stores, authenticated content, trust/block, key change prompts and compatible wire protocols |
-| OMEMO 2 direct messages | [Live explicit OMEMO 2](OMEMO2.md): native setup/review, durable identity/keyring, encrypted text/replies, live/carbon/MAM handling, journal/history/ack integration and trust retry | Automatic version/trust policies, event/cached review lifecycle, complete background retry, rich content, restore/migration/revocation and remaining mobile policies |
-| Device and contact access control | Exact OMEMO 2 fingerprint review/deny, per-contact opt-in blind trust and public key PEP setup; other access forms remain previews | Device revocation, legacy/PQ trust, presence authorization and ACL grant/revoke |
+| Legacy OMEMO and Monocles PQ in DMs/MUCs | [Live Legacy OMEMO direct text](LEGACY_OMEMO.md), separate durable identity/ratchet/trust, live/carbon/MAM receive and per-contact opt-in blind trust | Legacy attachments, rich actions, room encryption, PQ, receive-only recovery and independent-client coverage |
+| OMEMO 2 direct messages | [Live OMEMO 2](OMEMO2.md): independent incoming decryption, sending selector and both-version fingerprints, automatic 24-hour selection, durable identity/keyring, encrypted text/replies, live/carbon/MAM and journal recovery | PEP event/cached review lifecycle, complete background retry, rich content, restore/migration/revocation and remaining mobile policies |
+| Device and contact access control | Both standard OMEMO fingerprint reviews, per-contact opt-in blind trust and public key PEP setup | Device revocation, PQ trust, presence authorization and ACL grant/revoke |
 | Groups, MUCs, MIX and Spaces | Group creation and spaces/channel form/list previews | Real membership, roles/configuration, presence, bookmarks, pagination, history and transport-specific crypto |
 | Invitations and contact requests | Live presence-subscription requests with explicit authorization; room invitations remain demo-only | Durable requests, room invitation permissions and complete account fencing/lifecycle |
 | Presence and typing | Roster multi-resource status and live direct typing with expiry/privacy control; clears on disconnect | Group states, full carbons/delay/archive rejection and broader interoperability |
 | Direct and MUJI group calls | Call-controls dialog preview | Real media transport, incoming calls, desktop device/portal permissions, mute/camera/speaker, lifecycle and group membership |
-| Contacts and profiles | Contact list, editable profile preview | Real roster/local overrides, vCard fields, avatar publication/suggestions, colors, notes and blocking |
+| Contacts and profiles | Live roster and verified direct-chat PEP/vCard avatars with in-memory cache, editable profile preview | Live MUC avatar integration, durable avatar cache, local overrides, vCard fields, avatar publication/suggestions, colors, notes and blocking |
 | Stories and persistent profile posts | Horizontal chat-list avatar strip and timed native overlay viewer | Correct PEP/Atom access, expiry, persistent saves, edits/retractions, media and profile editing |
 | Notifications | Basic live desktop notifications, opt-in message previews, local chat mute and notification preferences | Actions/attention, mention matching, timed-mute expiry and background behavior |
 | Read state and archives | Local unread state, scroll-triggered local history and paged direct MAM retrieval and account/peer/direction-scoped dedup | Viewport-bounded in-memory history, private read synchronization, public read-receipt consent, account-wide recovery, room readers |
@@ -64,7 +64,7 @@ updated rather than dropping features because their mobile presentation differs.
 
 1. Broaden the initial direct-text backend's interoperability, history/outbox and
    account lifecycle coverage; close explicit gaps listed in LIVE_XMPP.md.
-2. Extend the explicit OMEMO 2 direct-text path to remaining mobile encryption
+2. Extend the standard OMEMO direct-text paths to remaining mobile encryption
    policies, legacy/PQ, groups and media. Encrypted sends never fall back to plaintext.
 3. Implement media, groups/calls/profile and wallet systems with their safety
    invariants, then close each remaining ledger row with evidence.

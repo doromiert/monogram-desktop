@@ -1,8 +1,12 @@
 //! Disposable loopback-only transport checks; launched by xmpp_fixture.py.
 #[path = "../src/action_store.rs"]
 mod action_store;
+#[path = "../src/avatar.rs"]
+mod avatar;
 #[path = "../src/crypto/mod.rs"]
 mod crypto;
+#[path = "../src/encryption_policy.rs"]
+mod encryption_policy;
 #[path = "../src/file_share.rs"]
 mod file_share;
 #[path = "../src/forwarding.rs"]

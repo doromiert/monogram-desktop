@@ -199,7 +199,10 @@ impl Store {
     pub fn known_message(&self, a: &str, peer: &str, message: &Message) -> Option<String> {
         let mut aliases = message.aliases.clone();
         aliases.sort_by_key(|v| {
-            !v.starts_with("omemo2:") && !v.starts_with("server:") && !v.starts_with("archive:")
+            !v.starts_with("omemo2:")
+                && !v.starts_with("legacy-omemo:")
+                && !v.starts_with("server:")
+                && !v.starts_with("archive:")
         });
         for alias in aliases {
             let Some(id) = self.known(a, peer, message.own, &[alias.clone()]) else {
@@ -213,6 +216,7 @@ impl Store {
                 return Some(id);
             };
             if alias.starts_with("omemo2:")
+                || alias.starts_with("legacy-omemo:")
                 || alias.starts_with("server:")
                 || alias.starts_with("archive:")
                 || same_source(&old, message)

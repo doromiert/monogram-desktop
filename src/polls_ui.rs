@@ -225,7 +225,7 @@ impl Ui {
         let state = self.state.borrow();
         let owner = state.account.clone();
         let peer = state.current().jid.clone();
-        let encrypted = state.current().encryption;
+        let sending = self.sending_mode(state.current());
         if owner.is_empty() {
             drop(state);
             let Some(id) = self.state.borrow_mut().send(&poll.question, "poll") else {
@@ -253,6 +253,13 @@ impl Ui {
             self.notice("Connect before creating a live poll");
             return false;
         }
+        let Some(mode) = sending else { return false };
+        if mode == crate::encryption_policy::Mode::Legacy {
+            drop(state);
+            self.notice("Structured encrypted polls require OMEMO 2");
+            return false;
+        }
+        let encrypted = mode.encrypted();
         if encrypted && !self.crypto.borrow().ready {
             drop(state);
             self.notice("Enable OMEMO 2 and review devices before sending this poll");

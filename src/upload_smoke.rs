@@ -215,8 +215,15 @@ impl UploadSmoke {
                     ui.uploads.borrow().phase(&self.id.borrow()),
                     Some(Phase::Uploading { .. })
                 ) {
-                    ui.state.borrow_mut().current_mut().encryption = !encrypted;
-                    ui.persist();
+                    let peer = ui.state.borrow().current().jid.clone();
+                    ui.set_sending_preference(
+                        &peer,
+                        if encrypted {
+                            crate::encryption_policy::Preference::Plain
+                        } else {
+                            crate::encryption_policy::Preference::Omemo2
+                        },
+                    );
                     self.stage.set(7);
                 }
             }
@@ -236,8 +243,15 @@ impl UploadSmoke {
                             .contains("encryption changed")
                     );
                     assert!(!self.received.get());
-                    ui.state.borrow_mut().current_mut().encryption = encrypted;
-                    ui.persist();
+                    let peer = ui.state.borrow().current().jid.clone();
+                    ui.set_sending_preference(
+                        &peer,
+                        if encrypted {
+                            crate::encryption_policy::Preference::Omemo2
+                        } else {
+                            crate::encryption_policy::Preference::Plain
+                        },
+                    );
                     if click("Retry") {
                         self.stage.set(8);
                     }

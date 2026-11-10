@@ -130,6 +130,13 @@ impl Ui {
             self.notice("Message changed; reopen its menu");
             return false;
         }
+        if current.mode() == crate::encryption_policy::Mode::Legacy
+            || self.sending_mode(self.state.borrow().current())
+                == Some(crate::encryption_policy::Mode::Legacy)
+        {
+            self.notice("Legacy OMEMO does not support protected message actions here");
+            return false;
+        }
         let encrypted = current.encrypted
             || self.state.borrow().current().encryption
             || kind == "react" && self.store.action_protected(&owner, &peer, id);

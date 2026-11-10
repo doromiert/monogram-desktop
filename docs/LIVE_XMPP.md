@@ -34,7 +34,7 @@ drafts, authorization requests or transport.
   connection attempts and backoff. GTK/model/database changes stay on the main thread. Login can be cancelled by Disconnect or switching
   accounts; socket loss reconnects with backoff. Initial handshake attempts have
   a deadline, and authentication/certificate failures require user intervention.
-- Roster names and multi-resource presence update chats. Incoming subscription
+- Roster names, multi-resource presence and verified PEP or vCard avatar data update direct chats. Incoming subscription
   requests have explicit Accept/Decline controls. Starting a direct conversation
   does not silently subscribe or grant presence access.
 - Direct text uses stanza/origin IDs. Trusted own-account carbons and query-bound
@@ -61,24 +61,25 @@ drafts, authorization requests or transport.
 
 ## Security and current limits
 
-**Direct text/replies can use explicitly enabled OMEMO 2.** Open Conversation
-Security to initialize this account, compare/review device fingerprints and enable
-Encrypt Messages for the conversation. The selected mode persists and encrypted
-sends never fall back to plaintext. Unreviewed/missing/blocked devices or failed
-key publication stop sending. Secret Service protects the local crypto master key.
-See [OMEMO2.md](OMEMO2.md) for protocol, lifecycle, tests and remaining limitations.
+Direct chats use the sending policy in **Conversation Security**. Automatic
+checks OMEMO 2 and then Legacy OMEMO on the first send and caches the result for
+24 hours. Explicit choices constrain outgoing messages. Receiving and
+fingerprint review work independently for both versions. Devices still require
+approval unless the specific contact has opt-in blind trust enabled. A
+connection, timeout or storage failure stops automatic selection. Only a
+definitive result for both protocols permits automatic plaintext. A sent or
+uncertain message never changes protocol on retry. See [OMEMO 2](OMEMO2.md)
+and [Legacy OMEMO](LEGACY_OMEMO.md).
 
-Conversations without that selection use plaintext over verified TLS.
-Conversation Security contains a per-contact blind-trust option for OMEMO 2.
-It is off by default and does not approve own devices or override explicit blocks. Unsupported or untrusted encrypted payloads remain
-unavailable; their outer fallback bodies never appear as decrypted content.
+Unsupported or untrusted encrypted payloads remain unavailable. Their outer
+fallback bodies never appear as decrypted content.
 
 Live mode implements [direct polls](STRUCTURED_POLLS.md) and
 [attributed text/poll forwarding](FORWARDING.md), including explicit OMEMO 2.
 Direct files use [real uploads and manual downloads](FILE_TRANSFERS.md). Fictional
 media, article, wallet, story, group and call actions remain disabled.
 Their offline demo surfaces remain available through Open Offline Demo.
-MUC/MIX, complete rich media transfers/playback, legacy/PQ, complete OMEMO 2 policies, stream resumption,
+MUC/MIX, complete rich media transfers/playback, Legacy OMEMO attachments, PQ, stream resumption,
 proxy configuration, certificate exceptions, keyring-backed credentials and
 simultaneous connected accounts remain outstanding. Unsupported discovery/archive
 features report their absence without fabricating successful results.

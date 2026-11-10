@@ -1,5 +1,6 @@
 //! Durable pending attachments, bounded upload workers, and native progress controls.
 use crate::{
+    encryption_policy::Mode,
     model::*,
     protocol::Command,
     ui::Ui,
@@ -180,27 +181,29 @@ impl Ui {
         let Some(mut draft) = message.upload.clone() else {
             return;
         };
-        let encrypted = self
+        let mode = self
             .state
             .borrow()
             .chats
             .iter()
             .find(|c| c.jid == peer)
-            .is_some_and(|c| c.encryption);
-        if encrypted && (!self.crypto.borrow().ready || self.crypto.borrow().fingerprint.is_empty())
-        {
-            self.notice("Enable OMEMO 2 and review devices before uploading");
+            .and_then(|chat| self.sending_mode(chat));
+        let Some(mode) = mode else {
+            self.notice("Check conversation encryption before uploading");
+            return;
+        };
+        if mode == Mode::Legacy {
+            self.notice("Legacy OMEMO file sending is unavailable");
             return;
         }
-        let fingerprint = if encrypted {
-            self.crypto.borrow().fingerprint.clone()
-        } else {
-            String::new()
+        let Some(fingerprint) = self.fingerprint_for_send(mode) else {
+            self.notice("The selected OMEMO version is not ready");
+            return;
         };
+        let encrypted = mode.encrypted();
         draft.error = None;
         message.upload = Some(draft.clone());
-        message.encrypted = encrypted;
-        message.fingerprint = fingerprint.clone();
+        message.set_encryption(mode, fingerprint.clone());
         message.delivery = "sending".into();
         if !self.upload_row(&owner, peer, message) {
             return;
@@ -248,15 +251,20 @@ impl Ui {
             else {
                 continue;
             };
-            let enabled = self
+            let selected = self
                 .state
                 .borrow()
                 .chats
                 .iter()
                 .find(|c| c.jid == work.peer)
-                .map(|c| c.encryption);
-            let unchanged = enabled == Some(work.encrypted)
-                && message.encrypted == work.encrypted
+                .and_then(|chat| self.sending_mode(chat));
+            let mode = if work.encrypted {
+                Mode::Omemo2
+            } else {
+                Mode::Plain
+            };
+            let unchanged = selected == Some(mode)
+                && message.mode() == mode
                 && message.fingerprint == work.fingerprint
                 && (!work.encrypted
                     || (self.crypto.borrow().ready
@@ -305,7 +313,14 @@ impl Ui {
             self.notice("Connect before uploading. Your draft is kept.");
             return false;
         }
-        let encrypted = self.state.borrow().current().encryption;
+        let Some(mode) = self.sending_mode(self.state.borrow().current()) else {
+            return false;
+        };
+        if mode == Mode::Legacy {
+            self.notice("Legacy OMEMO file sending is unavailable");
+            return false;
+        }
+        let encrypted = mode.encrypted();
         if encrypted && (!self.crypto.borrow().ready || self.crypto.borrow().fingerprint.is_empty())
         {
             self.notice("Enable OMEMO 2 and review devices before uploading");

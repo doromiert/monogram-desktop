@@ -932,6 +932,7 @@ pub fn run_crypto(ui: Rc<Ui>) {
                     .borrow()
                     .as_ref()
                     .unwrap()
+                    .modern
                     .enable
                     .clone();
                 enable.emit_clicked();
@@ -945,9 +946,9 @@ pub fn run_crypto(ui: Rc<Ui>) {
             1 if ui.crypto.borrow().ready && frank_ready.get() => {
                 let widgets = ui.security_widgets.borrow();
                 let w = widgets.as_ref().unwrap();
-                assert!(!w.enable.is_visible());
-                w.encrypted.set_active(true);
-                w.review.emit_clicked();
+                assert!(!w.modern.enable.is_visible());
+                w.sending.set_selected(1);
+                w.modern.review.emit_clicked();
                 drop(widgets);
                 frank
                     .borrow()
@@ -1389,6 +1390,11 @@ pub fn run_live(ui: Rc<Ui>) {
                         continue;
                     }
                     if stage.get() == 1 && message.text == "Native Rust composer 🌿" {
+                        assert!(ui.composer_text().is_empty());
+                        assert_eq!(
+                            ui.state.borrow().current().selected_encryption(),
+                            Some(crate::encryption_policy::Mode::Plain)
+                        );
                         let reply = Message {
                             text: "Native fixture reply 🦊".into(),
                             wire_id: new_id(),
@@ -1460,6 +1466,7 @@ pub fn run_live(ui: Rc<Ui>) {
                 assert_eq!(ui.store.pref("active_account", ""), config.jid);
                 let peer = ui.state.borrow_mut().chat_for("bob@localhost").id.clone();
                 ui.select_chat(&peer);
+                ui.set_sending_preference(&peer, crate::encryption_policy::Preference::Automatic);
                 println!(
                     "Native first-run sign-in passed: failed authentication keeps welcome open with no saved profile, retry enters the real chat list"
                 );
@@ -1469,7 +1476,6 @@ pub fn run_live(ui: Rc<Ui>) {
                 assert!(ui.window.lookup_action("attach-file").unwrap().is_enabled());
                 ui.composer.buffer().set_text("Native Rust composer 🌿");
                 ui.send();
-                assert!(ui.composer_text().is_empty());
                 stage.set(1);
             }
             2 => {

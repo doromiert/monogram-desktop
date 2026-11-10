@@ -291,7 +291,7 @@ impl Ui {
         pane.add_top_bar(&h);
         let body = bx(true, 16);
         margins(&body, 12);
-        body.append(&avatar(&chat, 76));
+        body.append(&self.chat_avatar(&chat, 76));
         body.append(&label(&chat.name, "title-2"));
         body.append(&label(&chat.subtitle, "dim-label"));
         let g = adw::PreferencesGroup::new();

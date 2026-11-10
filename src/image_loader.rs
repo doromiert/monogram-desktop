@@ -1,11 +1,11 @@
-//! Decode verified attachment descriptors through libglycin's mandatory Linux sandbox.
+//! Decode verified attachment descriptors and in-memory avatars through libglycin's Linux sandbox.
 //! Construct and advance decoders on a worker; only immutable textures cross to GTK.
 use gtk::{cairo, gdk, gio, glib, glib::translate::*, prelude::*};
 use std::{ffi::CStr, os::fd::IntoRawFd, time::Duration};
 unsafe extern "C" {
     fn monogram_verified_stream_new(fd: i32) -> *mut gio::ffi::GInputStream;
     fn monogram_image_open(
-        fd: i32,
+        stream: *mut gio::ffi::GInputStream,
         cancel: *mut gio::ffi::GCancellable,
         error: *mut *mut glib::ffi::GError,
     ) -> *mut glib::gobject_ffi::GObject;
@@ -46,13 +46,25 @@ impl Decoder {
         input: crate::downloads::VerifiedFile,
         cancel: &gio::Cancellable,
     ) -> Result<Self, &'static str> {
+        Self::open_stream(&input_stream(input), cancel)
+    }
+    pub fn open_bytes(
+        bytes: &glib::Bytes,
+        cancel: &gio::Cancellable,
+    ) -> Result<Self, &'static str> {
+        let stream = gio::MemoryInputStream::from_bytes(bytes);
+        Self::open_stream(stream.upcast_ref(), cancel)
+    }
+    fn open_stream(
+        stream: &gio::InputStream,
+        cancel: &gio::Cancellable,
+    ) -> Result<Self, &'static str> {
         if cancel.is_cancelled() {
             return Err("Image preview cancelled");
         }
         let mut error = std::ptr::null_mut();
-        // The C adapter owns and closes this verified descriptor, even on failure.
         let raw = unsafe {
-            monogram_image_open(input.0.into_raw_fd(), cancel.to_glib_none().0, &mut error)
+            monogram_image_open(stream.to_glib_none().0, cancel.to_glib_none().0, &mut error)
         };
         clear_error(error);
         if raw.is_null() {
@@ -116,6 +128,28 @@ impl Decoder {
         })
     }
 }
+impl crate::avatar::Avatar {
+    /// Run on a blocking worker. The immutable, downscaled texture is safe to hand to GTK.
+    pub fn decode(&self, cancel: &gio::Cancellable) -> Result<gdk::Texture, &'static str> {
+        let mut image = Decoder::open_bytes(&self.bytes, cancel)?;
+        let valid_mime = if self.pep {
+            image.mime == "image/png"
+        } else {
+            matches!(
+                image.mime.as_str(),
+                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+            )
+        };
+        if !valid_mime
+            || image.width > 4096
+            || image.height > 4096
+            || u64::from(image.width) * u64::from(image.height) > 8_000_000
+        {
+            return Err("Unsupported avatar format or dimensions");
+        }
+        Ok(image.frame(256)?.texture)
+    }
+}
 fn fit(texture: gdk::Texture, edge: u32) -> Result<gdk::Texture, &'static str> {
     let (w, h) = (texture.width(), texture.height());
     if w <= edge as i32 && h <= edge as i32 {
@@ -166,6 +200,19 @@ fn fit(texture: gdk::Texture, edge: u32) -> Result<gdk::Texture, &'static str> {
 mod tests {
     use super::*;
     use std::{fs, sync::atomic::AtomicBool};
+    #[test]
+    #[ignore = "requires real bubblewrap namespaces and glycin loaders outside the Nix build sandbox"]
+    fn sandboxed_inline_avatar_decodes_from_memory() {
+        let bytes = glib::Bytes::from_owned([64u8, 64, 64, 255].repeat(360 * 180));
+        let png = gdk::MemoryTexture::new(360, 180, gdk::MemoryFormat::R8g8b8a8, &bytes, 360 * 4)
+            .save_to_png_bytes();
+        let avatar = crate::avatar::Avatar::new(png.as_ref().to_vec(), true);
+        let cancel = gio::Cancellable::new();
+        let texture = avatar.decode(&cancel).unwrap();
+        assert_eq!((texture.width(), texture.height()), (256, 128));
+        cancel.cancel();
+        assert!(avatar.decode(&cancel).is_err());
+    }
     fn texture(w: i32, h: i32) -> gdk::Texture {
         let bytes = glib::Bytes::from_owned([0u8, 0, 128, 128].repeat(w as usize * h as usize));
         gdk::MemoryTexture::new(
