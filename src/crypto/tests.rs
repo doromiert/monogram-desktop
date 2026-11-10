@@ -497,7 +497,17 @@ fn full_incoming_journal_rolls_back_ratchet_and_consumed_prekey() {
             (0..128u8)
                 .map(|i| {
                     journal
-                        .append(tx, [i; 32], &plain, Some(&plain), None, [1; 32], false, 0)
+                        .append(
+                            tx,
+                            [i; 32],
+                            &plain,
+                            Some(&plain),
+                            None,
+                            [1; 32],
+                            false,
+                            0,
+                            None,
+                        )
                         .map(|r| r.token.unwrap())
                 })
                 .collect()

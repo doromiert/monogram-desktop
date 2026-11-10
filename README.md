@@ -4,7 +4,7 @@ A native **Rust / GTK 4 / libadwaita** reimplementation of Monogram for Linux.
 The app now includes **initial live XMPP direct-text messaging** and a separate
 offline demo with fictional conversations. Live mode supports verified TLS login,
 roster/presence, text, replies, carbons, archive history, receipts and local drafts.
-**End-to-end encryption is not implemented yet.** Calls, media, groups and wallets
+**OMEMO 2 direct text/replies are available through explicit setup and fingerprint review.** Calls, media, groups and wallets
 remain offline demo surfaces and are disabled for live accounts.
 
 ## Run with Nix
@@ -54,6 +54,10 @@ checks were run on x86_64-linux.
   Enter sends; Shift+Enter adds a line.
 - Pin/archive/mark unread from a chat's menu; open Archived Chats to unarchive.
   Live text drafts and reply targets survive switching chats and restarting.
+- Open **Conversation Security** to enable OMEMO 2, review exact device
+  fingerprints and choose encrypted sending for a direct conversation. Its
+  identity and trust survive reconnect; encrypted sending never falls back to
+  plaintext. See [encryption support and limits](docs/OMEMO2.md).
 - The remaining controls below describe the offline demo; live transfers,
   editing/reactions, groups, stories, calls and wallet operations are outstanding.
 - Press **F9** for emoji, stickers, GIFs and Monero controls in a **right-hand utility pane**.
@@ -82,7 +86,7 @@ checks were run on x86_64-linux.
 
 **100% Monogram feature parity is the product goal, not the current prototype's
 completion claim.** The offline milestone established the desktop layout; the
-first XMPP milestone adds real text messaging. See [FEATURE_PARITY.md](docs/FEATURE_PARITY.md) for
+XMPP backend adds real text messaging and explicit OMEMO 2 text/replies. See [FEATURE_PARITY.md](docs/FEATURE_PARITY.md) for
 coverage, desktop adaptations and outstanding work, and
 [ANDROID_SOURCE_INDEX.md](docs/ANDROID_SOURCE_INDEX.md) for the pinned Android
 feature-note inventory. Existing backend behavior must not be silently dropped

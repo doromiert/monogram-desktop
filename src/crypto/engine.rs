@@ -90,6 +90,22 @@ impl Engine {
         })
     }
     pub fn receive(&mut self, message: &Element, sent_time: i64) -> Result<Received> {
+        self.receive_with_context(message, sent_time, None)
+    }
+    pub fn receive_with_context(
+        &mut self,
+        message: &Element,
+        sent_time: i64,
+        context: Option<super::journal::Context>,
+    ) -> Result<Received> {
+        if context.as_ref().is_some_and(|v| {
+            v.archive
+                .as_ref()
+                .is_some_and(|(id, stamp)| id.len() > 4096 || stamp.len() > 100)
+                || v.receipt_to.as_ref().is_some_and(|v| v.len() > 4096)
+        }) {
+            return Err(Error::Invalid("incoming context bounds"));
+        }
         let envelope = parse(message, &self.store.owner, self.store.device)?;
         let local = self.store.device;
         let owner = self.store.owner.clone();
@@ -156,6 +172,7 @@ impl Engine {
                     fingerprint,
                     replenish,
                     sent_time,
+                    context.clone(),
                 )
             } else {
                 Ok(Received {
@@ -166,6 +183,7 @@ impl Engine {
                     replenish,
                     token: None,
                     sent_time,
+                    context,
                 })
             }
         })

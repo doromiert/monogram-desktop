@@ -58,16 +58,20 @@ drafts, authorization requests or transport.
 
 ## Security and current limits
 
-**Live messages are not end-to-end encrypted.** Verified TLS protects the client
-connection; it does not hide message content from an XMPP server. This is stated
-in the login form, conversation banner, message details and security dialog.
-OMEMO payloads show an unavailable/decryption placeholder; fallback body text is
-never presented as decrypted content. No real encryption keys are loaded,
-generated, trusted or migrated by this milestone.
+**Direct text/replies can use explicitly enabled OMEMO 2.** Open Conversation
+Security to initialize this account, compare/review device fingerprints and enable
+Encrypt Messages for the conversation. The selected mode persists and encrypted
+sends never fall back to plaintext. Unreviewed/missing/blocked devices or failed
+key publication stop sending. Secret Service protects the local crypto master key.
+See [OMEMO2.md](OMEMO2.md) for protocol, lifecycle, tests and remaining limitations.
+
+Conversations without that selection remain plaintext over verified TLS and are
+labelled accordingly. Unsupported or untrusted encrypted payloads remain
+unavailable; their outer fallback bodies never appear as decrypted content.
 
 Live mode disables the fictional media, poll/article, wallet, story, group and call
 actions. Their offline demo surfaces remain available through Open Offline Demo.
-Live edits, reactions, retractions, MUC/MIX, transfers, OMEMO/PQ, stream resumption,
+Live edits, reactions, retractions, MUC/MIX, transfers, legacy/PQ, complete OMEMO 2 policies, stream resumption,
 proxy configuration, certificate exceptions, keyring-backed credentials and
 simultaneous connected accounts remain outstanding. Unsupported discovery/archive
 features report their absence without fabricating successful results.
@@ -79,9 +83,9 @@ details, never passwords or encryption keys. Removing an account deletes its
 local rows and leaves the server untouched; this is not a forensic secure erase.
 Storage-at-rest encryption is a later milestone.
 
-An independently tested [OMEMO 2 backend](OMEMO2.md) now exists. It is not invoked
-by the live composer or account login; the limits above still apply. Its encrypted
-record store protects only crypto state, not the existing plaintext chat database.
+The [OMEMO 2 integration](OMEMO2.md) stores crypto records separately under
+`crypto/<account-hash>/`. Removing an account's chat data retains that identity
+and trust for safe reconnection. Chat/draft storage remains plaintext.
 
 ## Verification
 

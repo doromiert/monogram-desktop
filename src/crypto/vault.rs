@@ -2,6 +2,84 @@
 use super::*;
 use secret_service::{EncryptionType, SecretService};
 use std::collections::HashMap;
+const APP: &str = "com.negzero.MonogramDesktop";
+const PIN: &str = "OMEMO2 local identity binding v1";
+pub async fn existing_devices(account: &str) -> Result<Vec<u32>> {
+    address(account, 1)?;
+    let service = SecretService::connect(EncryptionType::Dh)
+        .await
+        .map_err(|_| Error::Vault)?;
+    let found = service
+        .search_items(HashMap::from([
+            ("application", APP),
+            ("purpose", "OMEMO2 record encryption v1"),
+            ("account", account),
+        ]))
+        .await
+        .map_err(|_| Error::Vault)?;
+    let mut devices = vec![];
+    for item in found.unlocked.into_iter().chain(found.locked) {
+        let attrs = item.get_attributes().await.map_err(|_| Error::Vault)?;
+        let id = super::bundle::positive(attrs.get("device").map(String::as_str))?;
+        if devices.contains(&id) {
+            return Err(Error::Vault);
+        }
+        devices.push(id);
+    }
+    Ok(devices)
+}
+pub async fn identity_pin(
+    account: &str,
+    device: u32,
+    create: Option<&[u8; 32]>,
+) -> Result<Option<[u8; 32]>> {
+    address(account, device)?;
+    let id = device.to_string();
+    let service = SecretService::connect(EncryptionType::Dh)
+        .await
+        .map_err(|_| Error::Vault)?;
+    let attrs = HashMap::from([
+        ("application", APP),
+        ("purpose", PIN),
+        ("account", account),
+        ("device", id.as_str()),
+    ]);
+    let found = service
+        .search_items(attrs.clone())
+        .await
+        .map_err(|_| Error::Vault)?;
+    let mut items = found.unlocked;
+    items.extend(found.locked);
+    if items.len() > 1 {
+        return Err(Error::Vault);
+    }
+    if let Some(item) = items.pop() {
+        item.unlock().await.map_err(|_| Error::Vault)?;
+        let secret = Secret::new(item.get_secret().await.map_err(|_| Error::Vault)?);
+        let pin: [u8; 32] = secret.as_slice().try_into().map_err(|_| Error::Vault)?;
+        if create.is_some_and(|expected| expected != &pin) {
+            return Err(Error::Incomplete);
+        }
+        return Ok(Some(pin));
+    }
+    let Some(pin) = create else { return Ok(None) };
+    let collection = service
+        .get_default_collection()
+        .await
+        .map_err(|_| Error::Vault)?;
+    collection.unlock().await.map_err(|_| Error::Vault)?;
+    collection
+        .create_item(
+            &format!("Monogram OMEMO 2 identity · {account} · {device}"),
+            attrs,
+            pin,
+            false,
+            "application/octet-stream",
+        )
+        .await
+        .map_err(|_| Error::Vault)?;
+    Ok(Some(*pin))
+}
 pub async fn master_key(account: &str, device: u32, create: bool) -> Result<MasterKey> {
     address(account, device)?;
     let service = SecretService::connect(EncryptionType::Dh)

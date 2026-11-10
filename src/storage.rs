@@ -148,6 +148,33 @@ impl Store {
         )?;
         Ok(())
     }
+    pub fn message(&self, a: &str, peer: &str, id: &str) -> Option<Message> {
+        self.db
+            .query_row(
+                "SELECT body FROM messages WHERE account=? AND peer=? AND id=?",
+                params![a, peer, id],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|body| serde_json::from_str(&body).ok())
+    }
+    pub fn merge_aliases(
+        &self,
+        a: &str,
+        peer: &str,
+        own: bool,
+        id: &str,
+        aliases: &[String],
+    ) -> rusqlite::Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        for alias in aliases {
+            tx.execute(
+                "INSERT OR IGNORE INTO aliases VALUES(?,?,?,?,?)",
+                params![a, peer, own, alias, id],
+            )?;
+        }
+        tx.commit()
+    }
     pub fn forget(&self, a: &str) -> rusqlite::Result<()> {
         let tx = self.db.unchecked_transaction()?;
         tx.execute("DELETE FROM accounts WHERE jid=?", [a])?;

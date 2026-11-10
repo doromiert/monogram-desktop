@@ -61,6 +61,9 @@ pub struct Ui {
     pub session: RefCell<Option<Session>>,
     pub generation: Cell<u64>,
     pub online: Cell<bool>,
+    pub crypto: RefCell<crate::crypto::service::Status>,
+    pub security_widgets: RefCell<Option<crate::dialogs::SecurityControls>>,
+    pub review_request: RefCell<Option<String>>,
     pub status: RefCell<String>,
     pub event_tx: mpsc::Sender<Envelope>,
     pub event_rx: RefCell<mpsc::Receiver<Envelope>>,
@@ -81,7 +84,8 @@ pub struct Ui {
 }
 impl Ui {
     pub fn new(app: &adw::Application, smoke: bool) -> Rc<Self> {
-        let store = Store::open(smoke).expect("private local history database");
+        let store = Store::open(smoke && !std::env::args().any(|s| s == "--crypto-smoke-test"))
+            .expect("private local history database");
         let demo = State::demo();
         let owner = store.pref("active_account", "");
         let state = if owner.is_empty() || !store.accounts().iter().any(|a| a.jid == owner) {
@@ -227,6 +231,9 @@ impl Ui {
             session: RefCell::new(None),
             generation: Cell::new(0),
             online: Cell::new(false),
+            crypto: RefCell::new(Default::default()),
+            security_widgets: RefCell::new(None),
+            review_request: RefCell::new(None),
             status: RefCell::new("Not connected".into()),
             event_tx: tx,
             event_rx: RefCell::new(rx),
@@ -1303,9 +1310,19 @@ impl Ui {
     pub fn update_mode(&self) {
         let live = !self.state.borrow().account.is_empty();
         self.banner.set_revealed(live);
+        let encrypted = self.state.borrow().current().encryption;
         self.banner.set_title(&format!(
-            "{} · Messages are not end-to-end encrypted",
-            self.status.borrow()
+            "{} · {}",
+            self.status.borrow(),
+            if encrypted {
+                if self.crypto.borrow().ready {
+                    "OMEMO 2 end-to-end encryption"
+                } else {
+                    "OMEMO 2 selected · sending blocked until ready"
+                }
+            } else {
+                "Messages are not end-to-end encrypted"
+            }
         ));
         self.history.set_visible(live);
         self.stories.set_visible(!live);
@@ -1346,6 +1363,9 @@ impl Ui {
         self.session.borrow_mut().take();
         self.generation.set(self.generation.get() + 1);
         self.online.set(false);
+        self.crypto.replace(Default::default());
+        self.security_widgets.borrow_mut().take();
+        self.review_request.borrow_mut().take();
         self.status.replace("Disconnected".into());
         let dialogs = std::mem::take(&mut *self.dialogs.borrow_mut());
         for d in dialogs {
@@ -1407,6 +1427,8 @@ impl Ui {
                 self.online.set(online);
                 self.status.replace(text.clone());
                 if !online {
+                    self.crypto.borrow_mut().ready = false;
+                    self.update_crypto_controls();
                     self.typing.borrow_mut().clear();
                     let mut s = self.state.borrow_mut();
                     for c in &mut s.chats {
@@ -1435,94 +1457,46 @@ impl Ui {
                     c.contact = subscription != "none";
                 }
             }
+            BackendEvent::CryptoStatus(status) => {
+                self.crypto.replace(status);
+                self.update_crypto_controls();
+                self.update_mode();
+            }
+            BackendEvent::CryptoReview { peer, rows, errors } => {
+                if self.review_request.borrow().as_deref() == Some(&peer) {
+                    self.review_request.borrow_mut().take();
+                    self.review_devices(&peer, rows, errors);
+                }
+            }
+            BackendEvent::CryptoError { peer, text } => self.notice(&format!("{peer}: {text}")),
+            BackendEvent::CryptoAliases {
+                peer,
+                own,
+                id,
+                aliases,
+            } => {
+                let _ = self.store.merge_aliases(owner, &peer, own, &id, &aliases);
+            }
+            BackendEvent::EncryptedMessage {
+                peer,
+                message,
+                historical,
+                receipt_to,
+                token,
+            } => {
+                if self.receive_message(owner, peer, message, historical, receipt_to) {
+                    self.command(Command::Crypto(crate::crypto::service::Request::Accepted(
+                        token,
+                    )));
+                }
+            }
             BackendEvent::Message {
                 peer,
-                mut message,
+                message,
                 historical,
                 receipt_to,
             } => {
-                let visible = self.state.borrow().current().jid == peer
-                    && self.window.is_active()
-                    && self.pages.visible_child_name().as_deref() == Some("chat");
-                let known = self
-                    .store
-                    .known(owner, &peer, message.own, &message.aliases);
-                let mut s = self.state.borrow_mut();
-                let c = s.chat_for(&peer);
-                let receipt_id = message.wire_id.clone();
-                let notify = known.is_none()
-                    && !visible
-                    && !message.own
-                    && !historical
-                    && c.notifications == "all";
-                let notification_title = c.name.clone();
-                let notification_body = message.text.clone();
-                if let Some(known) = known {
-                    if let Some(old) = c.messages.iter_mut().find(|m| m.id == known) {
-                        for a in message.aliases {
-                            if !old.aliases.contains(&a) {
-                                old.aliases.push(a)
-                            }
-                        }
-                    }
-                } else {
-                    message.author = if message.own {
-                        "You".into()
-                    } else {
-                        c.name.clone()
-                    };
-                    if !message.reply_id.is_empty() {
-                        if let Some(target) = c.messages.iter().find(|m| {
-                            m.wire_id == message.reply_id
-                                || m.aliases.iter().any(|a| {
-                                    a == &format!("origin:{}", message.reply_id)
-                                        || a == &format!("server:{}", message.reply_id)
-                                })
-                        }) {
-                            message.reply = format!(
-                                "{} · {}",
-                                target.author,
-                                target.text.chars().take(80).collect::<String>()
-                            )
-                        } else if message.reply.is_empty() {
-                            message.reply = "Original message is not loaded".into()
-                        }
-                    }
-                    if !visible && !message.own && !historical {
-                        c.unread += 1
-                    }
-                    c.messages.push(message);
-                    c.messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-                }
-                let active = s.current().jid == peer;
-                drop(s);
-                let saved = self.persist();
-                if saved {
-                    if let Some(to) = receipt_to {
-                        if self.preference("delivery_receipts", false) {
-                            self.command(Command::Receipt {
-                                peer: to,
-                                id: receipt_id,
-                            });
-                        }
-                    }
-                }
-                if saved && notify && self.preference("notifications", true) {
-                    if let Some(app) = self.window.application() {
-                        let notification = gio::Notification::new(&notification_title);
-                        notification.set_body(Some(
-                            if self.preference("message_previews", false) {
-                                &notification_body
-                            } else {
-                                "New message"
-                            },
-                        ));
-                        app.send_notification(None, &notification);
-                    }
-                }
-                if active {
-                    self.render_messages(!historical)
-                }
+                self.receive_message(owner, peer, message, historical, receipt_to);
             }
             BackendEvent::Presence { peer, online } => {
                 let mut s = self.state.borrow_mut();
@@ -1543,6 +1517,10 @@ impl Ui {
                 if self.pages.visible_child_name().as_deref() == Some("chat") {
                     self.show_chat()
                 }
+            }
+            BackendEvent::Uncertain { peer, id } => {
+                self.delivery(&peer, &id, "uncertain");
+                self.notice("Encrypted delivery is uncertain. Retrying may duplicate it.");
             }
             BackendEvent::Sent { peer, id } => self.delivery(&peer, &id, "sent"),
             BackendEvent::Receipt { peer, id } => self.delivery(&peer, &id, "delivered"),
@@ -1580,6 +1558,143 @@ impl Ui {
         }
         self.persist();
         self.refresh_chats(None);
+    }
+    pub fn receive_message(
+        self: &Rc<Self>,
+        owner: &str,
+        peer: String,
+        mut message: Message,
+        historical: bool,
+        receipt_to: Option<String>,
+    ) -> bool {
+        let visible = self.state.borrow().current().jid == peer
+            && self.window.is_active()
+            && self.pages.visible_child_name().as_deref() == Some("chat");
+        let incoming_aliases = message.aliases.clone();
+        let known = self
+            .store
+            .known(owner, &peer, message.own, &message.aliases)
+            .or_else(|| {
+                self.state
+                    .borrow()
+                    .chats
+                    .iter()
+                    .find(|c| c.jid == peer)
+                    .and_then(|c| {
+                        c.messages.iter().find(|m| {
+                            m.own == message.own
+                                && m.aliases
+                                    .iter()
+                                    .any(|alias| message.aliases.contains(alias))
+                        })
+                    })
+                    .map(|m| m.id.clone())
+            });
+        let mut s = self.state.borrow_mut();
+        let c = s.chat_for(&peer);
+        let message_own = message.own;
+        let receipt_id = message.wire_id.clone();
+        let notify =
+            known.is_none() && !visible && !message.own && !historical && c.notifications == "all";
+        let notification_title = c.name.clone();
+        let notification_body = message.text.clone();
+        if let Some(known) = known.clone() {
+            let old = c
+                .messages
+                .iter()
+                .find(|m| m.id == known)
+                .cloned()
+                .or_else(|| self.store.message(owner, &peer, &known));
+            if let Some(old) = old {
+                if old.unavailable && !message.unavailable {
+                    message.id = known.clone();
+                    message.author = old.author;
+                    message.timestamp = old.timestamp;
+                    message.time = old.time;
+                    for alias in old.aliases {
+                        if !message.aliases.contains(&alias) {
+                            message.aliases.push(alias);
+                        }
+                    }
+                    if let Some(row) = c.messages.iter_mut().find(|m| m.id == known) {
+                        *row = message;
+                    } else {
+                        c.messages.push(message);
+                        c.messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+                    }
+                } else if let Some(old) = c.messages.iter_mut().find(|m| m.id == known) {
+                    for alias in &incoming_aliases {
+                        if !old.aliases.contains(alias) {
+                            old.aliases.push(alias.clone());
+                        }
+                    }
+                }
+            }
+        } else {
+            message.author = if message.own {
+                "You".into()
+            } else {
+                c.name.clone()
+            };
+            if !message.reply_id.is_empty() {
+                if let Some(target) = c.messages.iter().find(|m| {
+                    m.wire_id == message.reply_id
+                        || m.aliases.iter().any(|a| {
+                            a == &format!("origin:{}", message.reply_id)
+                                || a == &format!("server:{}", message.reply_id)
+                        })
+                }) {
+                    message.reply = format!(
+                        "{} · {}",
+                        target.author,
+                        target.text.chars().take(80).collect::<String>()
+                    )
+                } else if message.reply.is_empty() {
+                    message.reply = "Original message is not loaded".into()
+                }
+            }
+            if !visible && !message.own && !historical {
+                c.unread += 1
+            }
+            c.messages.push(message);
+            c.messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        }
+        let active = s.current().jid == peer;
+        drop(s);
+        let mut saved = self.persist();
+        if saved {
+            if let Some(id) = known {
+                saved = self
+                    .store
+                    .merge_aliases(owner, &peer, message_own, &id, &incoming_aliases)
+                    .is_ok();
+            }
+        }
+        if saved {
+            if let Some(to) = receipt_to {
+                if self.preference("delivery_receipts", false) {
+                    self.command(Command::Receipt {
+                        peer: to,
+                        id: receipt_id,
+                    });
+                }
+            }
+        }
+        if saved && notify && self.preference("notifications", true) {
+            if let Some(app) = self.window.application() {
+                let notification = gio::Notification::new(&notification_title);
+                notification.set_body(Some(if self.preference("message_previews", false) {
+                    &notification_body
+                } else {
+                    "New message"
+                }));
+                app.send_notification(None, &notification);
+            }
+        }
+        if active {
+            self.render_messages(!historical)
+        }
+        saved
     }
     pub fn delivery(self: &Rc<Self>, peer: &str, id: &str, status: &str) {
         let mut s = self.state.borrow_mut();

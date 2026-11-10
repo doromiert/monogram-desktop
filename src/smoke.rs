@@ -42,6 +42,304 @@ fn close_dialogs(ui: &Ui) {
         dialog.close();
     }
 }
+fn button(widget: &gtk::Widget, title: &str) -> Option<gtk::Button> {
+    if let Some(button) = widget.downcast_ref::<gtk::Button>() {
+        if button.label().as_deref() == Some(title) {
+            return Some(button.clone());
+        }
+    }
+    let mut child = widget.first_child();
+    while let Some(w) = child {
+        if let Some(found) = button(&w, title) {
+            return Some(found);
+        }
+        child = w.next_sibling();
+    }
+    None
+}
+fn crypto_history_failures(ui: &Rc<Ui>) {
+    let owner = ui.state.borrow().account.clone();
+    let peer = ui.state.borrow().current().jid.clone();
+    let id = new_id();
+    let message = Message {
+        id: id.clone(),
+        text: "Persistence fixture".into(),
+        wire_id: id.clone(),
+        aliases: vec![format!("wire:{id}")],
+        encrypted: true,
+        ..Default::default()
+    };
+    ui.store.db.execute_batch(&format!("CREATE TEMP TRIGGER fixture_history_failure BEFORE INSERT ON messages WHEN NEW.id='{id}' BEGIN SELECT RAISE(ABORT,'fixture disk failure');END;")).unwrap();
+    for _ in 0..2 {
+        assert!(!ui.receive_message(&owner, peer.clone(), message.clone(), false, None));
+    }
+    assert_eq!(
+        ui.state
+            .borrow()
+            .current()
+            .messages
+            .iter()
+            .filter(|m| m.id == id)
+            .count(),
+        1,
+        "Persistence retries duplicated the in-memory message"
+    );
+    assert!(ui.store.message(&owner, &peer, &id).is_none());
+    ui.store
+        .db
+        .execute_batch("DROP TRIGGER fixture_history_failure;")
+        .unwrap();
+    assert!(ui.persist());
+    let mut unavailable = Message {
+        text: "Not decrypted".into(),
+        unavailable: true,
+        ciphertext: "fictional ciphertext".into(),
+        ..Default::default()
+    };
+    unavailable.wire_id = unavailable.id.clone();
+    unavailable.aliases = vec![format!("wire:{}", unavailable.id)];
+    let original = unavailable.id.clone();
+    assert!(ui.receive_message(&owner, peer.clone(), unavailable.clone(), false, None));
+    let unread = ui.state.borrow().current().unread;
+    let mut decoded = unavailable.clone();
+    decoded.id = new_id();
+    decoded.text = "Recovered fixture".into();
+    decoded.unavailable = false;
+    decoded.encrypted = true;
+    decoded.ciphertext.clear();
+    decoded.aliases.push("omemo2:fictional-recovery".into());
+    assert!(ui.receive_message(&owner, peer.clone(), decoded, false, None));
+    assert_eq!(ui.state.borrow().current().unread, unread);
+    let recovered = ui.store.message(&owner, &peer, &original).unwrap();
+    assert_eq!(recovered.text, "Recovered fixture");
+    assert!(recovered.ciphertext.is_empty());
+    assert!(recovered.encrypted);
+    assert!(ui.receive_message(&owner, peer.clone(), unavailable, false, None));
+    assert_eq!(
+        ui.store.message(&owner, &peer, &original).unwrap().text,
+        "Recovered fixture",
+        "A replayed placeholder replaced authenticated text"
+    );
+    for row in [&id, &original] {
+        ui.store.delete(&owner, &peer, row).unwrap();
+    }
+    ui.state
+        .borrow_mut()
+        .current_mut()
+        .messages
+        .retain(|m| m.id != id && m.id != original);
+    assert!(ui.persist());
+}
+
+/// Actual account/security widgets and composer, on a private bus, keyring and server.
+pub fn run_crypto(ui: Rc<Ui>) {
+    use crate::{
+        crypto::service::Request,
+        protocol::{BackendEvent, Command, Session},
+    };
+    use std::{cell::RefCell, collections::BTreeMap, sync::mpsc, time::Instant};
+    assert_eq!(
+        std::env::var("MONOGRAM_KEYRING_FIXTURE").as_deref(),
+        Ok("1")
+    );
+    let config = Account {
+        jid: "erin@localhost".into(),
+        host: "127.0.0.1".into(),
+        port: std::env::var("MONOGRAM_IT_PORT").unwrap().parse().unwrap(),
+        direct_tls: false,
+    };
+    let other = Account {
+        jid: "frank@localhost".into(),
+        ..config.clone()
+    };
+    ui.store.save_account(&other).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let frank = RefCell::new(Some(Session::start(
+        other,
+        "fixture-password".into(),
+        31,
+        tx,
+    )));
+    let stage = Cell::new(0);
+    let frank_online = Cell::new(false);
+    let frank_ready = Cell::new(false);
+    let frank_trusted = Cell::new(false);
+    let deadline = Instant::now();
+    ui.store
+        .set_pref("notifications:erin@localhost", "false")
+        .unwrap();
+    ui.connect_account(config.clone(), "fixture-password".into());
+    let chat = ui.state.borrow_mut().chat_for("frank@localhost").id.clone();
+    ui.select_chat(&chat);
+    glib::timeout_add_local(Duration::from_millis(80), move || {
+        assert!(
+            deadline.elapsed() < Duration::from_secs(110),
+            "Native crypto stage {} timed out",
+            stage.get()
+        );
+        while let Ok((_, _, event)) = rx.try_recv() {
+            match event {
+                BackendEvent::Status { online, .. } => frank_online.set(online),
+                BackendEvent::CryptoStatus(status) => frank_ready.set(status.ready),
+                BackendEvent::CryptoReview { rows, errors, .. } => {
+                    assert!(errors.is_empty(), "{errors:?}");
+                    if rows.iter().all(|r| r.trust == "Trusted") {
+                        frank_trusted.set(true)
+                    } else {
+                        let mut keys: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
+                        for row in rows {
+                            keys.entry(row.peer)
+                                .or_default()
+                                .insert(row.device, row.key);
+                        }
+                        frank
+                            .borrow()
+                            .as_ref()
+                            .unwrap()
+                            .send(Command::Crypto(Request::Decide {
+                                keys,
+                                approve: true,
+                            }));
+                    }
+                }
+                BackendEvent::EncryptedMessage { message, token, .. } => {
+                    assert!(message.encrypted && !message.unavailable);
+                    let mut state = ui.store.load("frank@localhost");
+                    state
+                        .chat_for("erin@localhost")
+                        .messages
+                        .push(message.clone());
+                    ui.store.save(&state).unwrap();
+                    frank
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .send(Command::Crypto(Request::Accepted(token)));
+                    if message.text == "Native encrypted composer 🌿" {
+                        frank.borrow().as_ref().unwrap().send(Command::Send {
+                            peer: "erin@localhost".into(),
+                            message: Message {
+                                text: "Native encrypted reply 🦊".into(),
+                                wire_id: new_id(),
+                                reply_id: message.wire_id,
+                                reply_to: "erin@localhost".into(),
+                                encrypted: true,
+                                ..Default::default()
+                            },
+                            quote: message.text,
+                        });
+                    } else if message.text == "Encrypted after restoration" {
+                        assert_eq!(stage.get(), 6);
+                        println!(
+                            "Native encrypted Rust composer: explicit setup, fingerprint review, protected reply, durable history, reconnect identity/trust and encrypted choice passed"
+                        );
+                        frank.borrow_mut().take();
+                        ui.window.close();
+                        return glib::ControlFlow::Break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match stage.get() {
+            0 if ui.online.get() && frank_online.get() => {
+                ui.security();
+                let enable = ui
+                    .security_widgets
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .enable
+                    .clone();
+                enable.emit_clicked();
+                frank
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .send(Command::Crypto(Request::Enable));
+                stage.set(1);
+            }
+            1 if ui.crypto.borrow().ready && frank_ready.get() => {
+                let widgets = ui.security_widgets.borrow();
+                let w = widgets.as_ref().unwrap();
+                assert!(!w.enable.is_visible());
+                w.encrypted.set_active(true);
+                w.review.emit_clicked();
+                drop(widgets);
+                frank
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .send(Command::Crypto(Request::Review("erin@localhost".into())));
+                stage.set(2);
+            }
+            2 => {
+                let dialogs = ui.dialogs.borrow().clone();
+                if let Some(trust) = dialogs
+                    .last()
+                    .and_then(|d| d.child())
+                    .and_then(|w| button(&w, "Trust Shown"))
+                {
+                    trust.emit_clicked();
+                    stage.set(3);
+                }
+            }
+            3 if frank_trusted.get() => {
+                assert!(ui.state.borrow().current().encryption);
+                ui.composer
+                    .buffer()
+                    .set_text("Native encrypted composer 🌿");
+                ui.send();
+                stage.set(4);
+            }
+            4 => {
+                if let Some(reply) = ui
+                    .state
+                    .borrow()
+                    .current()
+                    .messages
+                    .iter()
+                    .find(|m| m.text == "Native encrypted reply 🦊")
+                    .cloned()
+                {
+                    assert!(reply.encrypted && !reply.unavailable);
+                    assert!(reply.reply.contains("Native encrypted composer"));
+                    assert!(reply.aliases.iter().any(|v| v.starts_with("omemo2:")));
+                    ui.persist();
+                    stage.set(5);
+                }
+            }
+            5 => {
+                crypto_history_failures(&ui);
+                ui.activate_state(State::demo());
+                ui.connect_account(config.clone(), "fixture-password".into());
+                ui.select_chat(&chat);
+                stage.set(7);
+            }
+            7 if ui.online.get()
+                && ui.crypto.borrow().ready
+                && !ui.history_pending.borrow().contains("frank@localhost") =>
+            {
+                assert!(ui.state.borrow().current().encryption);
+                assert_eq!(
+                    ui.state
+                        .borrow()
+                        .current()
+                        .messages
+                        .iter()
+                        .filter(|m| m.text == "Native encrypted reply 🦊")
+                        .count(),
+                    1
+                );
+                ui.composer.buffer().set_text("Encrypted after restoration");
+                ui.send();
+                stage.set(6);
+            }
+            _ => {}
+        }
+        glib::ControlFlow::Continue
+    });
+}
 
 pub fn run(ui: Rc<Ui>) {
     let step = Cell::new(0);

@@ -1,8 +1,8 @@
 use adw::prelude::*;
 mod crypto;
-mod iq;
 mod dialogs;
 mod folders;
+mod iq;
 mod media;
 mod messages;
 mod model;
@@ -14,12 +14,23 @@ mod ui;
 mod wallet;
 mod widgets;
 fn main() -> gtk::glib::ExitCode {
+    if std::env::args().any(|s| s == "--crypto-smoke-test") {
+        assert_eq!(
+            std::env::var("MONOGRAM_KEYRING_FIXTURE").as_deref(),
+            Ok("1"),
+            "Crypto smoke requires a disposable keyring"
+        );
+    }
     let _ = tokio_xmpp::rustls::crypto::aws_lc_rs::default_provider().install_default();
     let app = adw::Application::builder()
         .application_id("com.negzero.MonogramDesktop")
         .flags(
-            if std::env::args().any(|s| matches!(s.as_str(), "--smoke-test" | "--live-smoke-test"))
-            {
+            if std::env::args().any(|s| {
+                matches!(
+                    s.as_str(),
+                    "--smoke-test" | "--live-smoke-test" | "--crypto-smoke-test"
+                )
+            }) {
                 gtk::gio::ApplicationFlags::NON_UNIQUE
             } else {
                 gtk::gio::ApplicationFlags::empty()
@@ -29,7 +40,12 @@ fn main() -> gtk::glib::ExitCode {
     app.connect_activate(|app| {
         let ui = ui::Ui::new(
             app,
-            std::env::args().any(|s| matches!(s.as_str(), "--smoke-test" | "--live-smoke-test")),
+            std::env::args().any(|s| {
+                matches!(
+                    s.as_str(),
+                    "--smoke-test" | "--live-smoke-test" | "--crypto-smoke-test"
+                )
+            }),
         );
         let css = gtk::CssProvider::new();
         css.load_from_path(widgets::asset("style.css"));
@@ -42,7 +58,9 @@ fn main() -> gtk::glib::ExitCode {
             ui.toggle_media();
         }
         ui.window.present();
-        if std::env::args().any(|s| s == "--live-smoke-test") {
+        if std::env::args().any(|s| s == "--crypto-smoke-test") {
+            smoke::run_crypto(ui.clone());
+        } else if std::env::args().any(|s| s == "--live-smoke-test") {
             smoke::run_live(ui.clone());
         } else if ui.smoke {
             smoke::run(ui.clone());
@@ -53,7 +71,7 @@ fn main() -> gtk::glib::ExitCode {
         .filter(|s| {
             !matches!(
                 s.as_str(),
-                "--smoke-test" | "--live-smoke-test" | "--show-media"
+                "--smoke-test" | "--live-smoke-test" | "--crypto-smoke-test" | "--show-media"
             )
         })
         .collect();

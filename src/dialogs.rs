@@ -6,7 +6,240 @@ use std::{
     collections::HashMap,
     rc::Rc,
 };
+pub struct SecurityControls {
+    generation: u64,
+    peer: String,
+    row: adw::ActionRow,
+    pub(crate) enable: gtk::Button,
+    pub(crate) encrypted: adw::SwitchRow,
+    pub(crate) review: gtk::Button,
+    fingerprint: gtk::Label,
+}
 impl Ui {
+    pub fn update_crypto_controls(&self) {
+        let widgets = self.security_widgets.borrow();
+        let Some(w) = widgets.as_ref() else { return };
+        if w.generation != self.generation.get() {
+            return;
+        }
+        let status = self.crypto.borrow();
+        w.row.set_subtitle(&status.text);
+        w.enable
+            .set_label(if status.enabled { "Retry" } else { "Enable" });
+        w.enable.set_visible(!status.ready);
+        w.enable.set_sensitive(self.online.get() && !status.ready);
+        w.encrypted.set_sensitive(
+            status.enabled
+                && self
+                    .state
+                    .borrow()
+                    .chats
+                    .iter()
+                    .find(|c| c.jid == w.peer)
+                    .is_some_and(|c| !c.group),
+        );
+        w.review.set_sensitive(status.ready && self.online.get());
+        w.fingerprint.set_text(&if status.fingerprint.is_empty() {
+            "No local identity yet".into()
+        } else {
+            format!(
+                "Device {}\n{}",
+                status.device,
+                status
+                    .fingerprint
+                    .as_bytes()
+                    .chunks(8)
+                    .map(|c| std::str::from_utf8(c).unwrap())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        });
+    }
+    pub fn live_security(self: &Rc<Self>) {
+        use crate::crypto::service::Request;
+        let page = adw::PreferencesPage::new();
+        let group=adw::PreferencesGroup::builder().title("OMEMO 2").description("Compare device fingerprints through a trusted channel before approving them. Unreviewed or blocked devices cannot decrypt your outgoing messages.").build();
+        let row = adw::ActionRow::builder()
+            .title("This Device")
+            .subtitle(&self.crypto.borrow().text)
+            .use_markup(false)
+            .build();
+        let enable = gtk::Button::with_label("Enable");
+        enable.set_valign(gtk::Align::Center);
+        row.add_suffix(&enable);
+        group.add(&row);
+        let identity = adw::ExpanderRow::builder()
+            .title("Local Fingerprint")
+            .build();
+        let fingerprint = wrap("No local identity yet", "monospace");
+        fingerprint.set_selectable(true);
+        margins(&fingerprint, 12);
+        identity.add_row(&fingerprint);
+        group.add(&identity);
+        page.add(&group);
+        let peer = self.state.borrow().current().jid.clone();
+        let generation = self.generation.get();
+        let choices=adw::PreferencesGroup::builder().title("This Conversation").description("Encrypted sending never falls back to plaintext. Legacy/PQ and group encryption remain unavailable.").build();
+        let encrypted = adw::SwitchRow::builder()
+            .title("Encrypt Messages")
+            .subtitle("OMEMO 2")
+            .active(self.state.borrow().current().encryption)
+            .build();
+        choices.add(&encrypted);
+        let devices = adw::ActionRow::builder()
+            .title("Devices and Fingerprints")
+            .subtitle(&peer)
+            .use_markup(false)
+            .build();
+        let review = gtk::Button::with_label("Review");
+        review.set_valign(gtk::Align::Center);
+        devices.add_suffix(&review);
+        choices.add(&devices);
+        page.add(&choices);
+        let weak = Rc::downgrade(self);
+        enable.connect_clicked(move |button| {
+            if let Some(ui) = weak.upgrade() {
+                if generation == ui.generation.get() {
+                    button.set_sensitive(false);
+                    ui.command(protocol::Command::Crypto(Request::Enable));
+                }
+            }
+        });
+        let weak = Rc::downgrade(self);
+        let target = peer.clone();
+        encrypted.connect_active_notify(move |row| {
+            if let Some(ui) = weak.upgrade() {
+                if generation == ui.generation.get() {
+                    if let Some(chat) = ui
+                        .state
+                        .borrow_mut()
+                        .chats
+                        .iter_mut()
+                        .find(|c| c.jid == target)
+                    {
+                        chat.encryption = row.is_active();
+                    }
+                    ui.persist();
+                    ui.update_mode();
+                }
+            }
+        });
+        let weak = Rc::downgrade(self);
+        let target = peer.clone();
+        review.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                if generation == ui.generation.get() {
+                    ui.review_request.replace(Some(target.clone()));
+                    ui.command(protocol::Command::Crypto(Request::Review(target.clone())));
+                }
+            }
+        });
+        self.security_widgets.replace(Some(SecurityControls {
+            generation,
+            peer,
+            row,
+            enable,
+            encrypted,
+            review,
+            fingerprint,
+        }));
+        self.update_crypto_controls();
+        let (d, _) = self.dialog("Conversation Security", &page, 560, 520);
+        let weak = Rc::downgrade(self);
+        d.connect_closed(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                if generation == ui.generation.get() {
+                    ui.security_widgets.borrow_mut().take();
+                }
+            }
+        });
+    }
+    pub fn review_devices(
+        self: &Rc<Self>,
+        peer: &str,
+        rows: Vec<crate::crypto::service::Review>,
+        errors: Vec<String>,
+    ) {
+        use crate::crypto::{lifecycle::hex, service::Request};
+        use std::collections::BTreeMap;
+        let page = adw::PreferencesPage::new();
+        let group=adw::PreferencesGroup::builder().title("Devices and Fingerprints").description("Trust only fingerprints you have verified. Decisions apply to exactly the keys shown here; changed keys require a fresh review.").build();
+        let mut keys: BTreeMap<String, BTreeMap<u32, [u8; 32]>> = BTreeMap::new();
+        for row in rows {
+            keys.entry(row.peer.clone())
+                .or_default()
+                .insert(row.device, row.key);
+            let device = adw::ExpanderRow::builder()
+                .title(&row.peer)
+                .subtitle(format!("Device {} · {}", row.device, row.trust))
+                .use_markup(false)
+                .expanded(true)
+                .build();
+            let key = hex(&row.key);
+            let label = wrap(
+                &key.as_bytes()
+                    .chunks(8)
+                    .map(|c| std::str::from_utf8(c).unwrap())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                "monospace",
+            );
+            label.set_selectable(true);
+            margins(&label, 12);
+            device.add_row(&label);
+            group.add(&device);
+        }
+        if keys.is_empty() {
+            group.add(&adw::ActionRow::builder().title("No Devices Found").build());
+        }
+        page.add(&group);
+        if !errors.is_empty() {
+            let group = adw::PreferencesGroup::builder()
+                .title("Refresh Errors")
+                .build();
+            for error in errors {
+                group.add(
+                    &adw::ActionRow::builder()
+                        .title(&error)
+                        .use_markup(false)
+                        .title_lines(0)
+                        .build(),
+                );
+            }
+            page.add(&group);
+        }
+        let (d, header) = self.dialog(&format!("Review {peer}"), &page, 600, 600);
+        let generation = self.generation.get();
+        for (approve, title, style) in [
+            (false, "Deny Shown", "destructive-action"),
+            (true, "Trust Shown", "suggested-action"),
+        ] {
+            let button = gtk::Button::with_label(title);
+            button.add_css_class(style);
+            button.set_sensitive(!keys.is_empty());
+            let weak = Rc::downgrade(self);
+            let dialog = d.downgrade();
+            let keys = keys.clone();
+            button.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    if generation == ui.generation.get() {
+                        ui.command(protocol::Command::Crypto(Request::Decide {
+                            keys: keys.clone(),
+                            approve,
+                        }));
+                    }
+                    if let Some(d) = dialog.upgrade() {
+                        d.close();
+                    }
+                }
+            });
+            if approve {
+                header.pack_end(&button)
+            } else {
+                header.pack_start(&button)
+            }
+        }
+    }
     pub fn dialog(
         self: &Rc<Self>,
         title: &str,
@@ -373,6 +606,8 @@ impl Ui {
                     ui.session.borrow_mut().take();
                     ui.generation.set(ui.generation.get() + 1);
                     ui.online.set(false);
+                    ui.crypto.borrow_mut().ready = false;
+                    ui.update_crypto_controls();
                     ui.status.replace("Disconnected".into());
                     ui.update_mode();
                 }
@@ -402,7 +637,7 @@ impl Ui {
             direct_tls: false,
         });
         let page = adw::PreferencesPage::new();
-        let group=adw::PreferencesGroup::builder().title("Sign In").description("Direct text messaging over verified TLS. End-to-end encryption is not available in this desktop build yet.").build();
+        let group=adw::PreferencesGroup::builder().title("Sign In").description("Direct text messaging over verified TLS. Enable OMEMO 2 and review fingerprints in Conversation Security for end-to-end encryption.").build();
         let jid = adw::EntryRow::builder()
             .title("XMPP address")
             .text(&config.jid)
@@ -496,7 +731,7 @@ impl Ui {
         });
     }
     pub fn remove_account(self: &Rc<Self>, owner: &str) {
-        let d=adw::AlertDialog::builder().heading("Remove Account?").body("This removes its local history and drafts. Messages stored by the server are unaffected.").build();
+        let d=adw::AlertDialog::builder().heading("Remove Account?").body("This removes its local history and drafts. Encryption identity and trust are retained for reconnecting safely. Messages stored by the server are unaffected.").build();
         d.add_responses(&[("cancel", "Cancel"), ("remove", "Remove")]);
         d.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
         let owner = owner.to_string();
@@ -805,79 +1040,74 @@ impl Ui {
         }
     }
     pub fn security(self: &Rc<Self>) {
+        if !self.state.borrow().account.is_empty() {
+            self.live_security();
+            return;
+        }
         let page = adw::PreferencesPage::new();
-        let live = !self.state.borrow().account.is_empty();
-        let g=adw::PreferencesGroup::builder().title("Encryption").description(if live{"OMEMO is not implemented in this desktop build. Live messages use verified TLS transport and are not end-to-end encrypted."}else{"Preview controls only. No real keys are loaded or changed."}).build();
-        if live {
-            g.add(
-                &adw::ActionRow::builder()
-                    .title("Connection")
-                    .subtitle(&self.status.borrow().clone())
-                    .build(),
-            )
-        } else {
-            let mode = adw::ComboRow::builder()
-                .title("Encryption mode")
-                .model(&gtk::StringList::new(&[
-                    "PQ OMEMO2",
-                    "Legacy OMEMO",
-                    "Unencrypted",
-                ]))
+        let g = adw::PreferencesGroup::builder()
+            .title("Encryption")
+            .description("Preview controls only. No real keys are loaded or changed.")
+            .build();
+        let mode = adw::ComboRow::builder()
+            .title("Encryption mode")
+            .model(&gtk::StringList::new(&[
+                "PQ OMEMO2",
+                "Legacy OMEMO",
+                "Unencrypted",
+            ]))
+            .build();
+        let selected = ["PQ OMEMO2", "Legacy OMEMO", "Unencrypted"]
+            .iter()
+            .position(|m| m == &self.state.borrow().mode)
+            .unwrap_or(0);
+        mode.set_selected(selected as u32);
+        let weak = Rc::downgrade(self);
+        mode.connect_selected_notify(move |r| {
+            if let Some(ui) = weak.upgrade() {
+                ui.state.borrow_mut().mode =
+                    ["PQ OMEMO2", "Legacy OMEMO", "Unencrypted"][r.selected() as usize].into();
+            }
+        });
+        g.add(&mode);
+        g.add(
+            &adw::SwitchRow::builder()
+                .title("Trust new fingerprints automatically")
+                .subtitle("Fictional devices only")
+                .build(),
+        );
+        page.add(&g);
+        let devices = adw::PreferencesGroup::builder()
+            .title("Devices and Fingerprints")
+            .build();
+        for (name, status) in [
+            ("Mira · Laptop", "Verified"),
+            ("Alex · Phone", "Needs review"),
+            ("Your account · Other device", "Needs review"),
+        ] {
+            let row = adw::ActionRow::builder()
+                .title(name)
+                .subtitle(status)
+                .activatable(true)
                 .build();
-            let selected = ["PQ OMEMO2", "Legacy OMEMO", "Unencrypted"]
-                .iter()
-                .position(|m| m == &self.state.borrow().mode)
-                .unwrap_or(0);
-            mode.set_selected(selected as u32);
             let weak = Rc::downgrade(self);
-            mode.connect_selected_notify(move |r| {
+            row.connect_activated(move |_| {
                 if let Some(ui) = weak.upgrade() {
-                    ui.state.borrow_mut().mode =
-                        ["PQ OMEMO2", "Legacy OMEMO", "Unencrypted"][r.selected() as usize].into();
+                    let d = adw::AlertDialog::builder()
+                        .heading(name)
+                        .body("Example fingerprint\nA12B C34D E56F 7890\n1234 5678 90AB CDEF")
+                        .build();
+                    d.add_responses(&[
+                        ("cancel", "Cancel"),
+                        ("block", "Block"),
+                        ("trust", "Trust"),
+                    ]);
+                    d.present(Some(&ui.window));
                 }
             });
-            g.add(&mode);
-            g.add(
-                &adw::SwitchRow::builder()
-                    .title("Trust new fingerprints automatically")
-                    .subtitle("Fictional devices only")
-                    .build(),
-            );
+            devices.add(&row)
         }
-        page.add(&g);
-        if !live {
-            let devices = adw::PreferencesGroup::builder()
-                .title("Devices and Fingerprints")
-                .build();
-            for (name, status) in [
-                ("Mira · Laptop", "Verified"),
-                ("Alex · Phone", "Needs review"),
-                ("Your account · Other device", "Needs review"),
-            ] {
-                let row = adw::ActionRow::builder()
-                    .title(name)
-                    .subtitle(status)
-                    .activatable(true)
-                    .build();
-                let weak = Rc::downgrade(self);
-                row.connect_activated(move |_| {
-                    if let Some(ui) = weak.upgrade() {
-                        let d = adw::AlertDialog::builder()
-                            .heading(name)
-                            .body("Example fingerprint\nA12B C34D E56F 7890\n1234 5678 90AB CDEF")
-                            .build();
-                        d.add_responses(&[
-                            ("cancel", "Cancel"),
-                            ("block", "Block"),
-                            ("trust", "Trust"),
-                        ]);
-                        d.present(Some(&ui.window));
-                    }
-                });
-                devices.add(&row)
-            }
-            page.add(&devices)
-        }
+        page.add(&devices);
         self.dialog("Conversation Security", &page, 560, 480);
     }
     pub fn preferences(self: &Rc<Self>) {
@@ -1214,9 +1444,17 @@ impl Ui {
             (
                 "Encryption",
                 if m.unavailable {
-                    "Decryption is not available"
+                    "Not decrypted"
                 } else if m.encrypted {
-                    "Encrypted fixture"
+                    if self.state.borrow().account.is_empty() {
+                        "Encrypted fixture"
+                    } else if m.own
+                        && matches!(m.delivery.as_str(), "sending" | "failed" | "uncertain")
+                    {
+                        "OMEMO 2 selected; delivery not confirmed"
+                    } else {
+                        "OMEMO 2"
+                    }
                 } else {
                     "Not end-to-end encrypted"
                 }
@@ -1232,6 +1470,15 @@ impl Ui {
                     .use_markup(false)
                     .build(),
             )
+        }
+        if !m.fingerprint.is_empty() {
+            g.add(
+                &adw::ActionRow::builder()
+                    .title("Sender Fingerprint")
+                    .subtitle(&m.fingerprint)
+                    .use_markup(false)
+                    .build(),
+            );
         }
         page.add(&g);
         self.dialog("Message Details", &page, 520, 440);

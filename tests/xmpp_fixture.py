@@ -55,7 +55,7 @@ archive_expires_after = "1d"
 VirtualHost "wrong.localhost"
 authentication = "internal_hashed"
 ''')
-        for user in ("alice", "bob"):
+        for user in ("alice", "bob", "carol", "dave", "erin", "frank"):
             subprocess.run(["prosodyctl", "--config", str(config), "register", user, "localhost", "fixture-password"], check=True, capture_output=True)
         with (root / "server.log").open("w+") as log:
             server = subprocess.Popen(["prosody", "--config", str(config), "-F"], stdout=log, stderr=subprocess.STDOUT)
@@ -86,6 +86,7 @@ def run_checks(root, server_port, cert):
     parser.add_argument("--test-binary", required=True)
     parser.add_argument("--app-binary")
     parser.add_argument("--crypto-test-binary")
+    parser.add_argument("--bus-config", default="/etc/dbus-1/session.conf")
     args = parser.parse_args()
     marker = root / "drop-proxy"
     stop = threading.Event()
@@ -139,8 +140,10 @@ def run_checks(root, server_port, cert):
         run("live_roundtrip", env)
         if args.crypto_test_binary:
             subprocess.run([args.crypto_test_binary, "--ignored", "--exact", "crypto::tests::live_pep_encrypted_roundtrip", "--nocapture"], env=env, check=True, timeout=110)
+            subprocess.run(["bash", "tests/keyring_fixture.sh", args.crypto_test_binary, args.bus_config, "crypto::service::tests::live_service_roundtrip"], env=env, check=True, timeout=150)
         if args.app_binary:
             subprocess.run([args.app_binary, "--live-smoke-test"], env=env, check=True, timeout=50)
+            subprocess.run(["bash", "tests/keyring_fixture.sh", args.app_binary, args.bus_config, "--crypto-smoke-test"], env=env, check=True, timeout=150)
         empty = root / "empty-ca.pem"
         empty.write_text("")
         run("tls_rejection", dict(env, SSL_CERT_FILE=str(empty), SSL_CERT_DIR=str(root / "empty-ca")))

@@ -22,6 +22,8 @@ pub struct Message {
     pub own: bool,
     pub kind: String,
     pub encrypted: bool,
+    pub ciphertext: String,
+    pub fingerprint: String,
     pub reply: String,
     pub reply_id: String,
     pub reply_to: String,
@@ -46,6 +48,8 @@ impl Default for Message {
             own: false,
             kind: "text".into(),
             encrypted: false,
+            ciphertext: String::new(),
+            fingerprint: String::new(),
             reply: String::new(),
             reply_id: String::new(),
             reply_to: String::new(),
@@ -65,6 +69,7 @@ impl Default for Message {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Chat {
+    pub encryption: bool,
     pub id: String,
     pub name: String,
     pub subtitle: String,
@@ -268,7 +273,11 @@ impl State {
             text: text.trim().into(),
             own: true,
             kind: kind.into(),
-            encrypted: self.account.is_empty() && self.mode != "Unencrypted",
+            encrypted: if self.account.is_empty() {
+                self.mode != "Unencrypted"
+            } else {
+                self.current().encryption
+            },
             ..Default::default()
         };
         if !self.account.is_empty() {

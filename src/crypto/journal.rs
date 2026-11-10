@@ -12,6 +12,12 @@ pub struct Token {
     slot: u32,
     digest: [u8; 32],
 }
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Context {
+    pub archive: Option<(String, String)>,
+    pub historical: bool,
+    pub receipt_to: Option<String>,
+}
 #[derive(Serialize, Deserialize)]
 struct Saved {
     version: u32,
@@ -27,6 +33,8 @@ struct Saved {
     content: Option<String>,
     ack: Option<String>,
     sent_time: i64,
+    #[serde(default)]
+    context: Option<Context>,
 }
 pub struct Received {
     pub content: Option<Element>,
@@ -36,6 +44,7 @@ pub struct Received {
     pub replenish: bool,
     pub token: Option<Token>,
     pub sent_time: i64,
+    pub context: Option<Context>,
 }
 pub struct Journal {
     epoch: [u8; 16],
@@ -150,6 +159,7 @@ impl Journal {
                 digest: saved.digest,
             }),
             sent_time: saved.sent_time,
+            context: saved.context.clone(),
         })
     }
     pub fn find(&self, tx: &Tx<'_>, digest: &[u8; 32]) -> Result<Option<Received>> {
@@ -170,6 +180,7 @@ impl Journal {
         fingerprint: [u8; 32],
         replenish: bool,
         sent_time: i64,
+        context: Option<Context>,
     ) -> Result<Received> {
         let entries = self.entries(tx)?;
         if entries.len() >= ENTRIES {
@@ -197,6 +208,7 @@ impl Journal {
             content: content.map(|c| text(c, MAX_CONTENT)).transpose()?,
             ack: ack.map(|a| text(a, 65536)).transpose()?,
             sent_time,
+            context,
         };
         let bytes = Secret::new(serde_json::to_vec(&saved).map_err(|_| Error::Incomplete)?);
         if bytes.len() > ENTRY || total + bytes.len() > BYTES {

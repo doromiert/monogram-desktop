@@ -3,10 +3,12 @@ pub mod bundle;
 pub mod device;
 pub mod engine;
 pub mod journal;
+pub mod lifecycle;
 pub mod native;
 pub mod payload;
 pub mod pep;
 pub mod records;
+pub mod service;
 pub mod vault;
 use std::fmt;
 pub type Secret = zeroize::Zeroizing<Vec<u8>>;
@@ -22,6 +24,9 @@ pub enum Error {
     Changed,
     Incomplete,
     Vault,
+    Unavailable(&'static str),
+    Uncertain,
+    InvalidBundle,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -34,6 +39,11 @@ impl fmt::Display for Error {
             Self::Changed => "The device identity changed; refresh before approving it",
             Self::Incomplete => "Incomplete OMEMO 2 state; existing identity preserved",
             Self::Vault => "The encryption key is missing or the keyring is locked",
+            Self::Unavailable(reason) => reason,
+            Self::Uncertain => "Encrypted delivery is uncertain; retrying may send a duplicate",
+            Self::InvalidBundle => {
+                "A device's public bundle is invalid or missing; refresh device review"
+            }
         })
     }
 }

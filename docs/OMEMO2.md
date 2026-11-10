@@ -1,85 +1,101 @@
-# OMEMO 2 backend milestone
+# Live OMEMO 2 direct messages
 
-The Rust OMEMO 2 backend is implemented and tested independently of the live
-composer. **The installed app still sends plaintext direct messages.** This
-milestone does not enable, advertise or generate keys for real accounts.
-Full encryption parity remains open in [FEATURE_PARITY.md](FEATURE_PARITY.md).
+Desktop now connects the Rust OMEMO 2 backend to explicit account setup, native
+fingerprint review, per-conversation encrypted sending and authenticated receiving.
+This is direct text/reply support; full mobile encryption parity remains open in
+[FEATURE_PARITY.md](FEATURE_PARITY.md).
+
+## Use and persistence
+
+Connect an account, open **Conversation Security**, and choose **Enable**. This
+creates a separate OMEMO 2 identity, stores the master key in Secret Service and
+publishes the public device/bundle through PEP. Review the full fingerprints of
+contacts and your other devices, compare them through a trusted channel, and
+choose Trust Shown or Deny Shown. Enable **Encrypt Messages** for that conversation.
+Other clients must implement `urn:xmpp:omemo:2`; legacy/PQ selection is not yet
+available. Encryption never silently falls back to plaintext.
+
+Setup is explicit and survives restarting/reconnecting. A per-account file lock
+serializes identity initialization. A durable device manifest and an independent
+keyring fingerprint binding detect missing databases, missing keys, incomplete
+initialization and changed identities. Recovery preserves the original device;
+errors require intervention instead of silently rotating it. Another running
+session cannot acquire the same local identity. Removing an account's history
+retains its crypto identity/trust for safe reconnection; server devices are not
+revoked by local account removal.
+
+Crypto lives under `XDG_STATE_HOME/monogram-desktop/crypto/<account-hash>/` in an
+AES-256-GCM record database with account/device/kind/peer/key-ID authenticated
+scope. Directories/databases use 0700/0600 permissions. The encryption master key
+and identity binding live in Secret Service, with no plaintext file fallback.
+**Chat history and drafts remain plaintext locally.** Saved unavailable ciphertext
+can be retried after trust approval without displaying an outer fallback body.
+
+## Protocol and lifecycle
 
 The reference is mobile `be6876c045163e32fe07a84416621770b0964b30`, specifically
 `Omemo2{Device,Bundle,Payload,IncomingJournal}.java`, `XmppOmemo2.java`,
 `omemo2_jni.cpp`, and `crypto_provider.c`. The wire profile follows
 [XEP-0384 0.9.1](https://xmpp.org/extensions/xep-0384.html) and
-[XEP-0420](https://xmpp.org/extensions/xep-0420.html).
+[XEP-0420](https://xmpp.org/extensions/xep-0420.html). The linked libomemo-c source
+is identical to mobile's pin; see [native notices](../native/NOTICE.md).
 
-## Implemented backend behavior
+- Key lifecycle, unsigned 32-bit remote prekey IDs, signature/point validation,
+  signed-key retention and exact-fingerprint trust use the mobile policy.
+  Changed/stale approvals fail atomically. Denial never removes previously
+  decrypted history. Legacy/PQ identities, ratchets and trust are not shared.
+- Public-key setup uses bounded, account-scoped IQs with sender checks, deadlines
+  and disconnect cancellation. Failed own-list reads abort publication; bounded
+  read/merge/verify retries preserve other clients' entries/metadata. Public access
+  is verified, and access repair changes only its configuration field. Sends fetch
+  current device lists/bundles and include every nonblocked target and eligible
+  own-device copy. Unreviewed valid identities block sending.
+  Only invalid/missing auxiliary public bundles may be skipped; own-device
+  storage or network failures still block the send.
+- A dedicated cancellable crypto worker keeps IQ waits off GTK and the transport
+  loop. A bounded incoming frame queue persists overflow ciphertext for later
+  retry; it does not send acknowledgements for dropped/deferred work. Callback
+  generation/account fences prevent stale sessions from changing another account.
+- The HKDF/AES-CBC/HMAC payload and SCE routing affixes are authenticated. Decrypted
+  XML has independent byte/depth/node bounds and must be one complete document.
+  Plaintext fallback bodies cannot become decrypted content. Ratchet/ciphertext
+  transactions roll back on authentication or persistence failure.
+- Live, own-carbon and query-bound MAM frames share decryption. Sender bundles are
+  refreshed before incoming prekey messages. Stable encrypted digest aliases and
+  account/peer/direction-scoped IDs deduplicate replay, including deleted rows.
+- Ratchet changes, consumed prekeys, plaintext, original archive/time/receipt
+  context and heartbeat acknowledgements commit in one encrypted journal
+  transaction. GTK accepts the token only after durable history/alias persistence.
+  Heartbeats and prekey replenishment follow acceptance. Pending content/acks
+  survive restart; capacity/storage errors do not advance the ratchet. Recovered
+  messages replace unavailable rows without duplicating unread state or replacing
+  authenticated text with a replayed placeholder.
+- Uncertain socket delivery is labelled accordingly and retry requires the existing
+  duplicate-delivery confirmation. There is no automatic plaintext retransmission.
 
-- The exact mobile libomemo-c source handles sessions and the Double Ratchet.
-  Rust owns storage, explicit trust, payload authentication, bounds and rollback.
-  No legacy/PQ identities, sessions or trust records are shared.
-- AES-256-GCM protects account/device/kind/peer/key-ID-scoped SQLite records.
-  Private directories/databases use modes 0700/0600. Ratchet changes commit before
-  ciphertext leaves the operation. Failed persistence/authentication rolls back
-  session changes and consumed prekeys.
-- Local key creation, prekey replenishment, signed-key rotation/retention and
-  incomplete-state checks preserve existing identities. Remote unsigned 32-bit
-  prekey/signed-key IDs are accepted; device IDs remain positive 31-bit values.
-  Bundles validate point/subgroup/low-order keys and Ed25519 signatures.
-- Exact observed fingerprints need explicit approval. Changed/stale approvals
-  fail atomically; rejection history survives key changes. Changed pins clear
-  their associated ratchet sessions. There is no implicit trust policy.
-- The mobile HKDF/AES-CBC/truncated-HMAC payload profile and SCE routing affixes
-  are authenticated. Unsupported content, wrong routing, unsafe XML, oversized
-  payloads, invalid timestamps and malformed envelope structures fail closed.
-  No outer fallback body becomes decrypted content.
-- A bounded encrypted journal commits decrypted content, consumed prekeys,
-  ratchets and heartbeat acknowledgements together. History acceptance and
-  acknowledgement delivery are separate phases. Pending content/acks survive
-  database reopening. Capacity exhaustion rejects the operation without advancing
-  the ratchet; stale tokens cannot delete reused slots.
-- Secret Service stores per-account/device master keys using encrypted D-Bus
-  sessions. Missing/locked/invalid/duplicate secrets fail; no plaintext key file
-  fallback exists. This boundary is not yet invoked by normal application login.
-- PEP discovery/publication uses bounded account-scoped IQ requests, exact reply
-  senders, deadlines, cancellation and disconnect handling. Own-list read failure
-  prevents publication. Read/merge/reread preserves other clients' device entries
-  and unknown metadata and retries races at most three times. Access repair only
-  submits the access-model field and verifies the resulting public configuration.
-  Publish-option conflict repair retains the mobile policy.
+## Verification and remaining work
 
-## Verification
+The package runs Rust tests, the unchanged mobile Java/JNI ratchet comparison,
+fixed payload vectors from freshly compiled mobile Java, and real GNOME Secret
+Service tests on disposable private D-Bus/keyring/state directories. Lifecycle
+checks cover process locking, reconnect identity preservation, missing/deleted
+stores and initialization recovery. No real account or user keyring is tested.
 
-The Nix package runs ordinary Rust tests, the unchanged mobile Java/JNI ratchet
-comparison, fixed payload vectors from freshly compiled mobile Java, and a real
-GNOME Secret Service on a disposable private D-Bus/keyring. No user keyring or
-real account is touched.
+Disposable Prosody checks cover public PEP setup, preserved auxiliary devices,
+actual encrypted wire text/replies, own-device copies and heartbeat exchange.
+The integrated service checks unreviewed-send rejection, saved-ciphertext retry
+following approval, crash recovery, preserved trust/identity, MAM digest aliases
+and denial. Native GTK checks activate the real setup/review/encryption controls,
+send from the composer, receive a protected reply, persist/reconnect and send again.
+History failure/replay checks exercise the real receive/persistence path. Prior
+native layout/composer and transport/TLS rejection checks remain required.
 
-The disposable Prosody fixture publishes and discovers devices/bundles, preserves
-an existing auxiliary device and its metadata, sends a body-less encrypted stanza
-over verified TLS, decrypts text/replies and the own-device copy, and exchanges the
-prekey heartbeat. The prior direct-text/reply/receipt/carbon/MAM/reconnect and TLS
-rejection checks remain required. Unit checks separately exercise failed own-list
-reads, publication races, public-access repair, wrong keys, restart recovery,
-capacity/storage/authentication failures, unsigned IDs, replay and stale trust.
-
-## Required before enabling real-account encryption
-
-Connect the backend to explicit account initialization and persistent device
-selection, serialize keyring/identity creation, and handle absent/deleted/incomplete
-stores without silently rotating identities. Add the native trust/version controls
-and manual encrypted-send selection. Discovery must retain partial fingerprints
-for review, refresh sender bundles for incoming prekey messages, preserve explicit
-blocks, implement mobile's default-off automatic-trust option, and account-fence
-every callback.
-
-Route encrypted live/carbon/MAM messages through authenticated normalization,
-durable history and the journal acceptance/ack phases. Persist canonical encrypted
-aliases, replay metadata and unavailable ciphertext for later trust/retry; never
-lose content if the history write fails. Send must include every nonblocked target
-and eligible own-device copy and must never fall back to plaintext on failure.
-Implement PEP invalidation/watch lifecycle, optional known-formatting recovery,
-receive-only restoration, and deliberate logout/reset/revocation semantics.
-
-Legacy/PQ, group crypto, key backup/migration, encrypted attachments and the other
-mobile encryption features remain separate required parity work. The live test
-does not establish mobile app UI exchange, a federated/provider matrix, complete
-SCE rich-content validation, or a security audit.
+Remaining encryption parity includes automatic version selection and default-off
+automatic-trust policy, PEP watch/invalidation lifecycle and richer cached review,
+receive-only restore/migration and explicit revocation/reset, complete rich-content
+and formatting recovery, encrypted attachments, legacy/PQ and group encryption.
+Ciphertext retry currently processes a bounded 128-row batch after setup or trust
+changes; complete background pagination/retry remains open. Provider/federation
+coverage, a mobile app UI exchange and an independent security audit are not
+established by these local tests. Unsupported encrypted rich content remains
+unavailable/pending rather than being presented as plaintext.
