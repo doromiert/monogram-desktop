@@ -1408,7 +1408,15 @@ impl Ui {
                     for m in &messages {
                         if let Some(mut poll) = m.poll.clone() {
                             poll.closed = false;
-                            if !ui.send_poll_text(poll, m.poll_fallback, &m.text) {
+                            if !ui.send_poll_text(
+                                poll,
+                                m.poll_fallback,
+                                if m.poll_source() == crate::polls::Source::Legacy {
+                                    ""
+                                } else {
+                                    &m.text
+                                },
+                            ) {
                                 return;
                             }
                             continue;

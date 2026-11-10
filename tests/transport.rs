@@ -5,6 +5,8 @@ mod action_store;
 mod crypto;
 #[path = "../src/iq.rs"]
 mod iq;
+#[path = "../src/legacy_polls.rs"]
+mod legacy_polls;
 #[path = "../src/message_actions.rs"]
 mod message_actions;
 #[path = "../src/model.rs"]

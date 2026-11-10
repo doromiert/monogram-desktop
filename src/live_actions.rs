@@ -88,7 +88,7 @@ impl Ui {
         };
         if kind == "correct"
             && !match (&base.poll, &poll) {
-                (None, None) => true,
+                (None, None) => base.poll_source() != crate::polls::Source::Structured,
                 (Some(original), Some(edit)) => edit.closed && original.same_definition(edit),
                 _ => false,
             }
@@ -96,6 +96,16 @@ impl Ui {
             self.notice("A poll's question and choices cannot be changed");
             return false;
         }
+        let legacy_body = if kind == "correct" && base.poll_source() == crate::polls::Source::Legacy
+        {
+            let Some(body) = poll.as_ref().and_then(crate::legacy_polls::body) else {
+                self.notice("This historical poll exceeds the legacy closure size limit");
+                return false;
+            };
+            Some(body)
+        } else {
+            None
+        };
         let expected = if kind == "react" {
             actions::reaction_reference(&base)
         } else {
@@ -121,6 +131,11 @@ impl Ui {
         }
         let wire = new_id();
         let message = Message {
+            poll_source: if legacy_body.is_some() {
+                crate::polls::Source::Legacy
+            } else {
+                crate::polls::Source::None
+            },
             poll_fallback: poll.is_some() && current.poll_fallback,
             poll,
             action: Some(action),
@@ -136,7 +151,7 @@ impl Ui {
             } else {
                 String::new()
             },
-            text: text.into(),
+            text: legacy_body.unwrap_or_else(|| text.into()),
             delivery: "sending".into(),
             reply_id: if kind == "correct" {
                 current.reply_id

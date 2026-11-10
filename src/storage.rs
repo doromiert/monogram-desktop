@@ -144,7 +144,7 @@ impl Store {
             .unwrap()
             .filter_map(|r| {
                 r.ok()
-                    .and_then(|s| serde_json::from_str::<Message>(&s).ok())
+                    .and_then(|s| Message::decode(&s).ok())
                     .filter(|m| !m.retracted)
             })
             .collect();
@@ -196,7 +196,7 @@ impl Store {
         })
         .ok()?
         .flatten()
-        .filter_map(|body| serde_json::from_str::<Message>(&body).ok())
+        .filter_map(|body| Message::decode(&body).ok())
         .find(|m| same_source(m, message))
         .map(|m| m.id)
     }
@@ -227,7 +227,7 @@ impl Store {
                 |r| r.get::<_, String>(0),
             )
             .ok()
-            .and_then(|body| serde_json::from_str(&body).ok())
+            .and_then(|body| Message::decode(&body).ok())
     }
     pub fn merge_aliases(
         &self,
@@ -257,7 +257,7 @@ impl Store {
             )?;
         } else if let Some(local) = id.strip_prefix("event:") {
             let body:Option<String>=tx.query_row("SELECT body FROM action_events WHERE account=? AND peer=? AND own=? AND local=?",params![a,peer,own,local],|r|r.get(0)).optional()?;
-            if let Some(mut m) = body.and_then(|body| serde_json::from_str::<Message>(&body).ok()) {
+            if let Some(mut m) = body.and_then(|body| Message::decode(&body).ok()) {
                 for alias in aliases {
                     if !m.aliases.contains(alias) {
                         m.aliases.push(alias.clone());

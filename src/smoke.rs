@@ -60,6 +60,7 @@ fn has_label(widget: &gtk::Widget, title: &str) -> bool {
 }
 #[derive(Default)]
 struct PollSmoke {
+    legacy: Cell<bool>,
     stage: Cell<u8>,
     local: std::cell::RefCell<String>,
     definition: std::cell::RefCell<Option<crate::polls::Poll>>,
@@ -129,7 +130,13 @@ impl PollSmoke {
                 assert_eq!(poll.question, "Where for desktop lunch?");
                 assert_eq!(poll.options[0].label, "Pizza");
                 assert_eq!(poll.options[1].label, "Noodles");
-                assert!(message.text.is_empty());
+                if self.legacy.get() {
+                    assert_eq!(message.poll_source(), crate::polls::Source::Legacy);
+                    assert!(crate::legacy_polls::parse(&message.text).is_some());
+                } else {
+                    assert!(message.text.is_empty());
+                    assert_eq!(message.poll_source(), crate::polls::Source::Structured);
+                }
                 assert_eq!(message.encrypted, encrypted);
                 self.local.replace(
                     ui.state
@@ -142,6 +149,18 @@ impl PollSmoke {
                         .id
                         .clone(),
                 );
+                let pending = ui
+                    .state
+                    .borrow()
+                    .message(&self.local.borrow())
+                    .unwrap()
+                    .clone();
+                ui.poll_voters(&pending);
+                assert!(has_label(
+                    &ui.dialogs.borrow().last().unwrap().child().unwrap(),
+                    "Public votes"
+                ));
+                close_dialogs(ui);
                 self.definition.replace(Some(poll.clone()));
                 session.send(Command::Send {
                     peer: owner,
@@ -172,11 +191,37 @@ impl PollSmoke {
                 true
             }
             5 if matches!(message.action, Some(Action::Correct { .. })) => {
+                assert_eq!(
+                    message.poll_source() == crate::polls::Source::Legacy,
+                    self.legacy.get()
+                );
                 assert!(
                     message.poll.as_ref().is_some_and(|p| p.closed
                         && p.same_definition(self.definition.borrow().as_ref().unwrap()))
                 );
                 self.stage.set(6);
+                true
+            }
+            9 if message.poll.is_some() => {
+                assert_eq!(message.poll_source(), crate::polls::Source::Structured);
+                assert!(!message.poll.as_ref().unwrap().closed);
+                assert!(message.text.is_empty());
+                assert!(
+                    message
+                        .poll
+                        .as_ref()
+                        .unwrap()
+                        .same_definition(self.definition.borrow().as_ref().unwrap())
+                );
+                assert_ne!(
+                    ui.state
+                        .borrow()
+                        .message(&self.local.borrow())
+                        .unwrap()
+                        .wire_id,
+                    message.wire_id
+                );
+                self.stage.set(10);
                 true
             }
             _ => false,
@@ -193,6 +238,10 @@ impl PollSmoke {
                     .is_some_and(|t| t.counts == vec![0, 1]) =>
             {
                 let bubble = ui.bubbles.borrow()[&id].clone();
+                if self.legacy.get() {
+                    assert!(!has_label(&bubble, &m.text));
+                    assert!(has_label(&bubble, "Choose a place"));
+                }
                 button(&bubble, "Pizza").unwrap().emit_clicked();
                 self.stage.set(3);
             }
@@ -246,7 +295,10 @@ impl PollSmoke {
                 if m.reactions.iter().any(|r| {
                     r == &format!(
                         "{} 2",
-                        self.definition.borrow().as_ref().unwrap().options[0].emoji
+                        crate::message_actions::canonical_emoji(
+                            &self.definition.borrow().as_ref().unwrap().options[0].emoji
+                        )
+                        .unwrap()
                     )
                 }) =>
             {
@@ -262,10 +314,67 @@ impl PollSmoke {
                     .unwrap();
                 assert_eq!(restored.poll_tally.as_ref().unwrap().counts, vec![1, 1]);
                 assert_eq!(ui.composer_text(), "Keep the ordinary poll draft");
+                if self.legacy.get() {
+                    assert_eq!(restored.poll_source(), crate::polls::Source::Legacy);
+                    ui.forward(vec![m]);
+                    let dialog = ui.dialogs.borrow().last().unwrap().child().unwrap();
+                    fn activate(widget: &gtk::Widget, title: &str) -> bool {
+                        if let Some(row) = widget.downcast_ref::<adw::ActionRow>()
+                            && row.title() == title
+                        {
+                            row.emit_by_name::<()>("activated", &[]);
+                            return true;
+                        }
+                        let mut child = widget.first_child();
+                        while let Some(w) = child {
+                            child = w.next_sibling();
+                            if activate(&w, title) {
+                                return true;
+                            }
+                        }
+                        false
+                    }
+                    let name = ui.state.borrow().current().name.clone();
+                    self.stage.set(9);
+                    assert!(activate(&dialog, &name));
+                    return false;
+                }
                 println!(
                     "Native structured poll: bodyless composer, explicit choices, public remote/local votes, voter list, authenticated close, cutoff and reload passed (encrypted={encrypted})"
                 );
-                self.stage.set(8);
+                self.legacy.set(true);
+                let poll = crate::polls::Poll {
+                    question: "Where for desktop lunch?".into(),
+                    description: "Choose a place".into(),
+                    options: vec![
+                        crate::polls::OptionValue {
+                            emoji: crate::legacy_polls::EMOJI[0].into(),
+                            label: "Pizza".into(),
+                        },
+                        crate::polls::OptionValue {
+                            emoji: crate::legacy_polls::EMOJI[1].into(),
+                            label: "Noodles".into(),
+                        },
+                    ],
+                    multiple: false,
+                    closed: false,
+                };
+                ui.composer
+                    .buffer()
+                    .set_text(&crate::legacy_polls::body(&poll).unwrap());
+                ui.send();
+                ui.composer
+                    .buffer()
+                    .set_text("Keep the ordinary poll draft");
+                ui.save_draft();
+                self.local.borrow_mut().clear();
+                self.stage.set(1);
+            }
+            (10, _) => {
+                assert_eq!(ui.composer_text(), "Keep the ordinary poll draft");
+                println!(
+                    "Native historical poll: canonical body, votes/voters, legacy closure/cutoff/reload and fresh structured forwarding passed (encrypted={encrypted})"
+                );
                 return true;
             }
             _ => {}

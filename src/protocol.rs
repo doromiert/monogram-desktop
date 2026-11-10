@@ -168,6 +168,11 @@ pub fn normalize(
         text
     };
     let mut m = Message {
+        poll_source: if poll_present {
+            crate::polls::Source::Structured
+        } else {
+            crate::polls::Source::None
+        },
         poll_fallback: poll
             .as_ref()
             .is_some_and(|p| p.accompanying_body(xml) != raw),
@@ -185,6 +190,10 @@ pub fn normalize(
         reply: quote,
         ..Default::default()
     };
+    if xml.get_child("file-sharing", "urn:xmpp:sfs:0").is_some() && !poll_present {
+        m.poll_source = crate::polls::Source::Text;
+    }
+    m.hydrate_legacy_poll();
     m.wire_id = xml
         .attr("id")
         .filter(|id| crate::message_actions::valid_id(id))
@@ -292,6 +301,19 @@ pub fn text_stanza(peer: &str, text: &str, id: &str, reply: Option<(&str, &str, 
     root
 }
 pub fn outgoing(peer: &str, message: &Message, quote: &str) -> Element {
+    if message.poll_source() == crate::polls::Source::Legacy {
+        let mut root = text_stanza(
+            peer,
+            &message.text,
+            &message.wire_id,
+            (!message.reply_id.is_empty()).then_some((&message.reply_id, &message.reply_to, quote)),
+        );
+        if let Some(action) = &message.action {
+            crate::message_actions::decorate(&mut root, action);
+        }
+        root.append_child(el("store", "urn:xmpp:hints"));
+        return root;
+    }
     let poll_body = message
         .poll
         .as_ref()

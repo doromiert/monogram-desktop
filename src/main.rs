@@ -4,6 +4,7 @@ mod crypto;
 mod dialogs;
 mod folders;
 mod iq;
+mod legacy_polls;
 mod live_actions;
 mod media;
 mod message_actions;

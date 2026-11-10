@@ -23,7 +23,7 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         for (a, peer, body) in rows {
-            if let Ok(m) = serde_json::from_str::<Message>(&body) {
+            if let Ok(m) = Message::decode(&body) {
                 self.add_refs(&a, &peer, &m)?;
             }
         }
@@ -144,9 +144,9 @@ impl Store {
                         |r| r.get(0),
                     )
                     .optional()?;
-                if unavailable.is_some_and(|body| {
-                    serde_json::from_str::<Message>(&body).is_ok_and(|m| m.unavailable)
-                }) {
+                if unavailable
+                    .is_some_and(|body| Message::decode(&body).is_ok_and(|m| m.unavailable))
+                {
                     for table in ["messages", "message_bases"] {
                         tx.execute(
                             &format!("DELETE FROM {table} WHERE account=? AND peer=? AND id=?"),
@@ -186,19 +186,17 @@ impl Store {
         let events: Vec<Event> = events
             .drain(..)
             .filter_map(|(row, body, status)| {
-                serde_json::from_str::<Message>(&body)
-                    .ok()
-                    .map(|mut message| {
-                        message.delivery = status.clone();
-                        Event {
-                            row,
-                            failed: matches!(status.as_str(), "failed" | "uncertain")
-                                || status == "sending"
-                                    && matches!(message.action, Some(Action::Retract { .. })),
-                            message,
-                            resolved: None,
-                        }
-                    })
+                Message::decode(&body).ok().map(|mut message| {
+                    message.delivery = status.clone();
+                    Event {
+                        row,
+                        failed: matches!(status.as_str(), "failed" | "uncertain")
+                            || status == "sending"
+                                && matches!(message.action, Some(Action::Retract { .. })),
+                        message,
+                        resolved: None,
+                    }
+                })
             })
             .collect();
         let bases = {
@@ -207,7 +205,7 @@ impl Store {
                 .query_map(params![a, peer], |r| r.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?
                 .into_iter()
-                .filter_map(|body| serde_json::from_str::<Message>(&body).ok())
+                .filter_map(|body| Message::decode(&body).ok())
                 .collect()
         };
         let projection = actions::project(bases, events, a, peer);
@@ -285,11 +283,7 @@ impl Store {
             })
             .ok()?
             .flatten()
-            .filter_map(|(body, status)| {
-                serde_json::from_str::<Message>(&body)
-                    .ok()
-                    .map(|m| (m, status))
-            })
+            .filter_map(|(body, status)| Message::decode(&body).ok().map(|m| (m, status)))
             .find(|(m, _)| matches!(m.action, Some(Action::Correct { .. })))?;
         matches!(latest.1.as_str(), "failed" | "uncertain").then_some(latest.0.text)
     }
@@ -311,7 +305,7 @@ impl Store {
             params![a, peer, id],
             |r| r.get(0),
         )?;
-        serde_json::from_str(&body).map_err(|_| rusqlite::Error::InvalidQuery)
+        Message::decode(&body).map_err(|_| rusqlite::Error::InvalidQuery)
     }
     pub fn action_target(
         &self,
@@ -658,6 +652,68 @@ mod tests {
                 .poll
                 .unwrap()
                 .closed
+        );
+    }
+    #[test]
+    fn historical_cached_poll_votes_close_and_reload_without_cross_format_conversion() {
+        let (db, mut state) = setup();
+        let mut definition = poll();
+        for (i, option) in definition.options.iter_mut().enumerate() {
+            option.emoji = crate::legacy_polls::EMOJI[i].into();
+        }
+        let mut original = base("legacy", "wire", true);
+        original.text = crate::legacy_polls::body(&definition).unwrap();
+        // The old JSON has no poll metadata: loading it must recognize the canonical legacy body.
+        save(&db, &mut state, original);
+        assert_eq!(
+            db.message(OWNER, PEER, "legacy").unwrap().poll_source(),
+            crate::polls::Source::Legacy
+        );
+        record(
+            &db,
+            &ballot("vote", &[crate::legacy_polls::EMOJI[0]], 1, false),
+            "received",
+        );
+        let mut closed = definition.clone();
+        closed.closed = true;
+        let mut correction = event(
+            "wrong-format",
+            Action::Correct {
+                target: "wire".into(),
+            },
+            true,
+            2,
+        );
+        correction.poll = Some(closed.clone());
+        correction.text.clear();
+        record(&db, &correction, "sent");
+        assert!(
+            !db.message(OWNER, PEER, "legacy")
+                .unwrap()
+                .poll
+                .unwrap()
+                .closed
+        );
+        correction.id = "legacy-close".into();
+        correction.wire_id = correction.id.clone();
+        correction.aliases = vec![format!("wire:{}", correction.id)];
+        correction.poll = None;
+        correction.text = crate::legacy_polls::body(&closed).unwrap();
+        record(&db, &correction, "sent");
+        record(
+            &db,
+            &ballot("late", &[crate::legacy_polls::EMOJI[1]], 3, false),
+            "received",
+        );
+        db.load(OWNER);
+        let restored = db.message(OWNER, PEER, "legacy").unwrap();
+        assert_eq!(restored.poll_source(), crate::polls::Source::Legacy);
+        assert!(restored.poll.as_ref().unwrap().closed);
+        assert_eq!(restored.poll_tally.unwrap().counts, vec![1, 0]);
+        assert_eq!(restored.text, crate::legacy_polls::body(&closed).unwrap());
+        assert_eq!(
+            db.action_base(OWNER, PEER, "legacy").unwrap().poll_source(),
+            crate::polls::Source::Legacy
         );
     }
     #[test]

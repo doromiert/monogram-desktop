@@ -17,6 +17,7 @@ fn yes() -> bool {
 pub struct Message {
     pub action: Option<crate::message_actions::Action>,
     pub poll: Option<crate::polls::Poll>,
+    pub poll_source: crate::polls::Source,
     pub poll_tally: Option<crate::polls::Tally>,
     pub poll_closed_at: String,
     pub poll_fallback: bool,
@@ -53,6 +54,7 @@ impl Default for Message {
         Self {
             action: None,
             poll: None,
+            poll_source: crate::polls::Source::None,
             poll_tally: None,
             poll_closed_at: String::new(),
             poll_fallback: false,
@@ -87,6 +89,41 @@ impl Default for Message {
     }
 }
 impl Message {
+    pub fn poll_source(&self) -> crate::polls::Source {
+        if self.poll_source == crate::polls::Source::None && self.poll.is_some() {
+            crate::polls::Source::Structured
+        } else {
+            self.poll_source
+        }
+    }
+    pub fn hydrate_legacy_poll(&mut self) {
+        if self.poll_source() != crate::polls::Source::None
+            || self.unavailable
+            || self.retracted
+            || !matches!(self.kind.as_str(), "text" | "correct")
+            || matches!(
+                self.action,
+                Some(
+                    crate::message_actions::Action::React { .. }
+                        | crate::message_actions::Action::Retract { .. }
+                )
+            )
+        {
+            return;
+        }
+        self.poll_source = crate::polls::Source::Text;
+        if let Some(poll) = crate::legacy_polls::parse(&self.text) {
+            self.poll = Some(poll);
+            self.poll_source = crate::polls::Source::Legacy;
+            self.poll_fallback = true;
+            self.kind = "poll".into();
+        }
+    }
+    pub fn decode(body: &str) -> Result<Self, serde_json::Error> {
+        let mut message: Self = serde_json::from_str(body)?;
+        message.hydrate_legacy_poll();
+        Ok(message)
+    }
     pub fn preview(&self) -> String {
         self.poll
             .as_ref()
@@ -94,6 +131,9 @@ impl Message {
             .unwrap_or_else(|| self.text.clone())
     }
     pub fn content_text(&self) -> String {
+        if self.poll_source() == crate::polls::Source::Legacy {
+            return self.text.clone();
+        }
         self.poll
             .as_ref()
             .map(|p| {
@@ -326,6 +366,7 @@ impl State {
             m.wire_id = m.id.clone();
             m.aliases = vec![format!("wire:{}", m.id), format!("origin:{}", m.id)]
         }
+        m.hydrate_legacy_poll();
         let id = m.id.clone();
         self.current_mut().messages.push(m);
         Some(id)

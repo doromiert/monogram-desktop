@@ -84,7 +84,32 @@ votes and complete closure. Native checks cover outbox serialization, forwarding
 and scheduled retries/repeats. Separate native-backend checks verify protected PQ
 bodyless direct/MUC polls, closure and absence of exposed poll/fallback XML.
 
-A native mobile fallback toggle, desktop historical body-only poll cards, desktop
-room transport, complete legacy/PQ encryption and physical mobile/desktop UI
+A native mobile fallback toggle, historical forward attribution, desktop room
+transport, complete legacy/PQ encryption and physical mobile/desktop UI
 exchange remain open. These checks do not establish exactly once delivery after
 an uncertain send, full poll parity or full client parity.
+
+## Historical mobile body polls
+
+Desktop recognizes the separate historical canonical body convention from mobile
+`MonogramPolls.java`. It matches the fixed 32 emoji mappings, indentation, exact
+footer and UTF-16 limits, including the 40000-unit body limit. These compatibility
+limits do not constrain new structured polls. Existing cached body-only messages
+are recognized on read; their original bodies remain intact for copy and legacy
+closure. No database schema rewrite is required.
+
+An explicit poll element, even malformed, blocks legacy body guessing. Attachment
+bodies, unavailable ciphertext and retracted content are also excluded. Message
+projections retain the source format and decline cross-format corrections. For
+both formats, only an author-scoped complete unchanged definition can close the
+poll; the first accepted closure fixes the vote cutoff. Legacy closure retains
+the historical body convention, including inside OMEMO 2. A legacy poll too close
+to the old size limit to encode closure is refused with an explanation. Forwarding
+creates a fresh structured open poll without repeating the old body or ballots.
+
+Twenty fixtures exported by the actual mobile legacy codec check valid/malformed
+bodies, all mappings, multiline text, UTF-16 boundaries and the maximum body size.
+Native plaintext/OMEMO 2 checks operate the card, voting/voters, closure, reload and
+fresh forwarding. Empty voter dialogs also open correctly. Historical polls with
+a forwarding-text prefix remain readable text until forward attribution is ported;
+this does not establish complete historical forwarding or room parity.

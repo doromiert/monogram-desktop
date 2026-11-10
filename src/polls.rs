@@ -4,6 +4,14 @@ use std::collections::BTreeSet;
 use tokio_xmpp::minidom::Element;
 pub const NS: &str = "urn:xmpp:polls:0";
 pub const MAX_BYTES: usize = 65536;
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Source {
+    #[default]
+    None,
+    Text,
+    Structured,
+    Legacy,
+}
 const FALLBACK: &str = "urn:xmpp:fallback:0";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OptionValue {

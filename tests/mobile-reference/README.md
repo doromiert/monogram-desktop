@@ -53,3 +53,12 @@ a second drifting Java implementation copied into desktop.
 Two cases use the actual mobile send builder, covering a bodyless poll and a poll
 with accompanying text, reply quoting and independent fallback ranges. Rust also
 normalizes those stanzas into the displayed poll/message/reply model.
+
+`legacy-poll-vectors.json` is exported by the actual mobile `MonogramPolls.Poll`
+encoder/parser (application source at `9cde459ac`, GPL-3.0-or-later), through the
+test-only `MonogramPollsTest.exportLegacyCodecVectorsForDesktop`. Set the test JVM
+property `monogram.legacy.poll.vectors` to a local output path. The 20 cases include
+all 32 mappings, multiline descriptions/options, malformed indentation/footers,
+variation selectors, Java UTF-16 bounds and a 40000-unit body that cannot grow a
+legacy closure. Rust checks matching semantics, exact legacy serialization,
+format isolation, cached-message recovery and reply handling.

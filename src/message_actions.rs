@@ -275,7 +275,18 @@ pub struct Projection {
     pub messages: Vec<Message>,
     pub events: Vec<Event>,
 }
-pub fn project(bases: Vec<Message>, mut events: Vec<Event>, owner: &str, peer: &str) -> Projection {
+pub fn project(
+    mut bases: Vec<Message>,
+    mut events: Vec<Event>,
+    owner: &str,
+    peer: &str,
+) -> Projection {
+    for base in &mut bases {
+        base.hydrate_legacy_poll();
+    }
+    for event in &mut events {
+        event.message.hydrate_legacy_poll();
+    }
     events.sort_by(|a, b| {
         a.message
             .timestamp
@@ -307,8 +318,13 @@ pub fn project(bases: Vec<Message>, mut events: Vec<Event>, owner: &str, peer: &
             continue;
         }
         match (&base.poll, &m.poll) {
-            (Some(original), Some(edit)) if edit.closed && original.same_definition(edit) => {}
-            (None, None) => {}
+            (Some(original), Some(edit))
+                if edit.closed
+                    && original.same_definition(edit)
+                    && base.poll_source() == m.poll_source() => {}
+            (None, None)
+                if base.poll_source() != crate::polls::Source::Structured
+                    && m.poll_source() != crate::polls::Source::Structured => {}
             _ => continue,
         }
         event.resolved = Some(base.id.clone());
@@ -328,6 +344,7 @@ pub fn project(bases: Vec<Message>, mut events: Vec<Event>, owner: &str, peer: &
             };
         }
         value.poll = m.poll.clone();
+        value.poll_source = m.poll_source;
         value.text = m.text.clone();
         value.reply = m.reply.clone();
         value.reply_id = m.reply_id.clone();
@@ -481,6 +498,7 @@ pub fn project(bases: Vec<Message>, mut events: Vec<Event>, owner: &str, peer: &
             if visible.poll.is_some() {
                 visible.text = visible.content_text();
                 visible.poll = None;
+                visible.poll_source = crate::polls::Source::Text;
                 visible.poll_tally = None;
                 visible.kind = "text".into();
             }
@@ -497,6 +515,7 @@ pub fn scrub(message: &mut Message) {
     message.retracted = true;
     message.text.clear();
     message.poll = None;
+    message.poll_source = crate::polls::Source::Text;
     message.poll_tally = None;
     message.poll_closed_at.clear();
     message.ciphertext.clear();

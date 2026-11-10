@@ -29,7 +29,7 @@ impl Ui {
         if !poll.description.is_empty() {
             body.append(&wrap(&poll.description, ""));
         }
-        if !message.text.is_empty() {
+        if !message.text.is_empty() && message.poll_source() != crate::polls::Source::Legacy {
             body.append(&wrap(&message.text, ""));
         }
         for (index, option) in poll.options.iter().enumerate() {
@@ -133,6 +133,15 @@ impl Ui {
             return;
         }
         poll.closed = true;
+        let legacy_body = if message.poll_source() == crate::polls::Source::Legacy {
+            let Some(body) = crate::legacy_polls::body(&poll) else {
+                self.notice("This historical poll exceeds the legacy closure size limit");
+                return;
+            };
+            Some(body)
+        } else {
+            None
+        };
         if self.state.borrow().account.is_empty() {
             if let Some(m) = self
                 .state
@@ -143,6 +152,9 @@ impl Ui {
                 .find(|m| m.id == id)
             {
                 m.poll = Some(poll);
+                if let Some(body) = legacy_body {
+                    m.text = body;
+                }
             }
             self.render_messages(false);
             return;
@@ -154,9 +166,7 @@ impl Ui {
     }
     pub fn poll_voters(self: &Rc<Self>, message: &Message) {
         let Some(poll) = &message.poll else { return };
-        let Some(tally) = &message.poll_tally else {
-            return;
-        };
+        let tally = message.poll_tally.clone().unwrap_or_default();
         let page = adw::PreferencesPage::new();
         let group = adw::PreferencesGroup::builder()
             .title("Public votes")
