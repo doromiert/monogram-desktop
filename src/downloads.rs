@@ -11,7 +11,7 @@ use openssl::{
 use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{
@@ -73,6 +73,17 @@ impl Downloads {
         self.tasks.clear();
     }
     pub fn start(&mut self, account: &str, file: Attachment) -> Result<(), &'static str> {
+        self.start_with_policy(account, file, true)
+    }
+    pub fn restore_cached(&mut self, account: &str, file: Attachment) -> Result<(), &'static str> {
+        self.start_with_policy(account, file, false)
+    }
+    fn start_with_policy(
+        &mut self,
+        account: &str,
+        file: Attachment,
+        network: bool,
+    ) -> Result<(), &'static str> {
         if account.is_empty() || file.link().is_none() {
             return Err("Invalid attachment");
         }
@@ -113,8 +124,10 @@ impl Downloads {
                 .enable_all()
                 .build();
             let result=match runtime {Ok(rt)=>rt.block_on(async {
-                let client=client()?;
-                tokio::select!{biased; _=rx=>Err("Cancelled"),result=download(&client,&file,&root,&cancel,&state)=>result}
+                tokio::select!{biased; _=rx=>Err("Cancelled"),result=async {
+                    if network {let client=client()?;download(&client,&file,&root,&cancel,&state).await}
+                    else {let path=root.join(file.key());verify(&path,&file,&cancel)?;Ok(path)}
+                }=>result}
             }),Err(_)=>Err("Download runtime unavailable")};
             let mut current = state.lock().unwrap();
             if cancel.load(Ordering::Acquire) {
@@ -177,6 +190,14 @@ fn checked(cancel: &AtomicBool) -> Result<(), &'static str> {
     }
 }
 pub fn verify(path: &Path, file: &Attachment, cancel: &AtomicBool) -> Result<(), &'static str> {
+    verified_input(path, file, cancel).map(|_| ())
+}
+pub struct VerifiedFile(pub(crate) File);
+pub fn verified_input(
+    path: &Path,
+    file: &Attachment,
+    cancel: &AtomicBool,
+) -> Result<VerifiedFile, &'static str> {
     checked(cancel)?;
     let mut input = File::open(path).map_err(|_| "Attachment cache unavailable")?;
     let metadata = input
@@ -220,7 +241,9 @@ pub fn verify(path: &Path, file: &Attachment, cancel: &AtomicBool) -> Result<(),
             return Err("Attachment integrity check failed");
         }
     }
-    checked(cancel)
+    checked(cancel)?;
+    input.rewind().map_err(|_| "Attachment cache unavailable")?;
+    Ok(VerifiedFile(input))
 }
 async fn download(
     client: &reqwest::Client,

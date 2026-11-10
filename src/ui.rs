@@ -15,11 +15,19 @@ use std::{
     time::{Duration, Instant},
 };
 pub struct Ui {
+    pub images: RefCell<crate::image_ui::Images>,
     pub uploads: RefCell<crate::upload_ui::Uploads>,
     pub downloads: RefCell<crate::downloads::Downloads>,
     pub window: adw::ApplicationWindow,
     pub toast: adw::ToastOverlay,
     pub overlay: gtk::Overlay,
+    shell: gtk::Stack,
+    welcome_status: gtk::Label,
+    welcome_progress: gtk::Spinner,
+    welcome_sign_in: gtk::Button,
+    welcome_cancel: gtk::Button,
+    welcome_register: gtk::LinkButton,
+    welcome_account: RefCell<Option<Account>>,
     pub split: adw::OverlaySplitView,
     pub utility: adw::OverlaySplitView,
     pub pages: gtk::Stack,
@@ -39,8 +47,9 @@ pub struct Ui {
     pub search_toggle: gtk::ToggleButton,
     pub search_page: gtk::Box,
     pub timeline: gtk::ListBox,
-    pub history: gtk::Button,
+    pub history: gtk::Spinner,
     pub scroll: gtk::ScrolledWindow,
+    pub message_scroll: RefCell<Option<crate::messages::ScrollTarget>>,
     pub composer: gtk::TextView,
     pub send_button: gtk::Button,
     pub input_scroll: gtk::ScrolledWindow,
@@ -58,7 +67,6 @@ pub struct Ui {
     pub media_pane: adw::ToolbarView,
     pub media_mode: RefCell<String>,
     pub media_toggles: RefCell<HashMap<String, adw::Toggle>>,
-    pub banner: adw::Banner,
     pub request_badge: gtk::Label,
     pub session: RefCell<Option<Session>>,
     pub generation: Cell<u64>,
@@ -90,10 +98,14 @@ impl Ui {
             .expect("private local history database");
         let demo = State::demo();
         let owner = store.pref("active_account", "");
-        let state = if owner.is_empty() || !store.accounts().iter().any(|a| a.jid == owner) {
-            demo.clone()
-        } else {
-            store.load(&owner)
+        let accounts = store.accounts();
+        let has_owner = accounts.iter().any(|a| a.jid == owner);
+        let live_smoke = std::env::args().any(|arg| arg == "--live-smoke-test");
+        let welcome = (!smoke || live_smoke) && !has_owner && accounts.is_empty();
+        let state = match (has_owner, welcome) {
+            (true, _) => store.load(&owner),
+            (_, true) => State::live("", vec![]),
+            _ => demo.clone(),
         };
         let window = adw::ApplicationWindow::builder()
             .application(app)
@@ -115,7 +127,45 @@ impl Ui {
             .build();
         utility.set_sidebar_width_unit(adw::LengthUnit::Px);
         let overlay = gtk::Overlay::builder().child(&utility).build();
-        toast.set_child(Some(&overlay));
+        let shell = gtk::Stack::new();
+        shell.set_hhomogeneous(false);
+        shell.set_vhomogeneous(false);
+        shell.add_named(&overlay, Some("main"));
+        toast.set_child(Some(&shell));
+        let welcome_view = adw::ToolbarView::new();
+        welcome_view.add_top_bar(&adw::HeaderBar::new());
+        let welcome_sign_in = gtk::Button::with_label("Sign In");
+        welcome_sign_in.add_css_class("suggested-action");
+        let welcome_cancel = gtk::Button::with_label("Cancel");
+        welcome_cancel.set_visible(false);
+        let welcome_register = gtk::LinkButton::with_label(
+            "https://jabber.hot-chilli.net/forms/create/",
+            "Create an XMPP Account on Hot-Chilli",
+        );
+        let welcome_status = label("", "dim-label");
+        welcome_status.set_wrap(true);
+        welcome_status.set_justify(gtk::Justification::Center);
+        welcome_status.set_visible(false);
+        let welcome_progress = gtk::Spinner::new();
+        welcome_progress.set_visible(false);
+        let controls = bx(true, 12);
+        controls.set_halign(gtk::Align::Center);
+        controls.append(&welcome_sign_in);
+        controls.append(&welcome_progress);
+        controls.append(&welcome_status);
+        controls.append(&welcome_cancel);
+        controls.append(&welcome_register);
+        let landing = adw::StatusPage::builder()
+            .icon_name("mail-unread-symbolic")
+            .title("Welcome to Monogram")
+            .description("Sign in with your XMPP account to start messaging.")
+            .child(&controls)
+            .build();
+        welcome_view.set_content(Some(&scroll(&landing)));
+        shell.add_named(&welcome_view, Some("welcome"));
+        if welcome {
+            shell.set_visible_child_name("welcome");
+        }
         let split = adw::OverlaySplitView::builder()
             .min_sidebar_width(290.)
             .max_sidebar_width(360.)
@@ -138,11 +188,19 @@ impl Ui {
         window.add_breakpoint(bp);
         let (tx, rx) = mpsc::channel();
         let ui = Rc::new(Self {
+            images: RefCell::new(Default::default()),
             uploads: RefCell::new(Default::default()),
             downloads: RefCell::new(Default::default()),
             window,
             toast,
             overlay,
+            shell,
+            welcome_status,
+            welcome_progress,
+            welcome_sign_in,
+            welcome_cancel,
+            welcome_register,
+            welcome_account: RefCell::new(None),
             split,
             utility,
             pages: gtk::Stack::builder()
@@ -187,7 +245,14 @@ impl Ui {
                 .valign(gtk::Align::Start)
                 .vexpand(false)
                 .build(),
-            history: gtk::Button::with_label("Load Earlier Messages"),
+            history: gtk::Spinner::builder()
+                .halign(gtk::Align::Center)
+                .valign(gtk::Align::Start)
+                .margin_top(8)
+                .can_target(false)
+                .visible(false)
+                .build(),
+            message_scroll: RefCell::new(None),
             scroll: gtk::ScrolledWindow::builder()
                 .vexpand(true)
                 .hscrollbar_policy(gtk::PolicyType::Never)
@@ -226,11 +291,6 @@ impl Ui {
             media_pane: adw::ToolbarView::new(),
             media_mode: RefCell::new("media".into()),
             media_toggles: RefCell::new(HashMap::new()),
-            banner: adw::Banner::builder()
-                .title("Messages are not end-to-end encrypted")
-                .button_label("Account")
-                .revealed(false)
-                .build(),
             request_badge: label("2", "request-badge"),
             session: RefCell::new(None),
             generation: Cell::new(0),
@@ -257,6 +317,15 @@ impl Ui {
             sidebar_card: RefCell::new(None),
         });
         ui.make_sidebar();
+        ui.weak_button(&ui.welcome_sign_in, |ui| {
+            let account = ui.welcome_account.borrow().clone();
+            ui.login(account);
+        });
+        ui.weak_button(&ui.welcome_cancel, |ui| {
+            ui.session.borrow_mut().take();
+            ui.generation.set(ui.generation.get() + 1);
+            ui.show_welcome_status("", false, false);
+        });
         ui.make_content();
         ui.make_media();
         ui.actions();
@@ -330,6 +399,11 @@ impl Ui {
             if let Some(u) = weak.upgrade() {
                 u.save_draft();
                 u.stop_uploads();
+                u.images.borrow_mut().clear();
+                let media = u.active_media.borrow().clone();
+                if let Some(media) = media {
+                    media.close_immediate();
+                }
                 u.downloads.borrow_mut().clear();
                 u.session.borrow_mut().take();
                 u.generation.set(u.generation.get() + 1);
@@ -361,7 +435,7 @@ impl Ui {
         let action = gio::SimpleAction::new(name, None);
         let weak = Rc::downgrade(self);
         action.connect_activate(move |_, _| {
-            if let Some(ui) = weak.upgrade() {
+            if let Some(ui) = weak.upgrade().filter(|ui| !ui.on_welcome()) {
                 f(&ui)
             }
         });
@@ -648,6 +722,9 @@ impl Ui {
         list.set_valign(gtk::Align::Start);
         list.set_vexpand(false);
         let state = self.state.borrow();
+        self.request_badge
+            .set_label(&state.requests.len().to_string());
+        self.request_badge.set_visible(!state.requests.is_empty());
         for chat in state.filtered(self.search.text().as_str()) {
             let row = gtk::ListBoxRow::new();
             row.set_widget_name(&chat.id);
@@ -836,14 +913,28 @@ impl Ui {
         view.add_top_bar(&header);
         let chat = bx(true, 0);
         chat.add_css_class("conversation");
-        chat.append(&self.banner);
-        self.weak_button(&self.history, |s| s.load_history(false));
-        self.history.add_css_class("flat");
-        chat.append(&self.history);
         self.timeline.add_css_class("messages");
         self.timeline.add_css_class("message-list");
         self.scroll.set_child(Some(&self.timeline));
-        chat.append(&self.scroll);
+        let history_view = gtk::Overlay::builder()
+            .child(&self.scroll)
+            .vexpand(true)
+            .build();
+        history_view.add_overlay(&self.history);
+        chat.append(&history_view);
+        let history_scroll =
+            gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+        history_scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = Rc::downgrade(self);
+        history_scroll.connect_scroll(move |_, _, dy| {
+            if dy < 0. {
+                if let Some(ui) = weak.upgrade() {
+                    ui.load_history_near_top();
+                }
+            }
+            glib::Propagation::Proceed
+        });
+        self.scroll.add_controller(history_scroll);
         self.selection.pack_start(&self.selection_count);
         let clear = icon_button("window-close-symbolic", "Clear selection");
         self.weak_button(&clear, |s| s.clear_selection());
@@ -916,12 +1007,6 @@ impl Ui {
             .add_named(&scroll(&self.search_page), Some("search"));
         view.set_content(Some(&self.pages));
         self.split.set_content(Some(&view));
-        let weak = Rc::downgrade(self);
-        self.banner.connect_button_clicked(move |_| {
-            if let Some(s) = weak.upgrade() {
-                s.accounts_dialog()
-            }
-        });
         let weak = Rc::downgrade(self);
         self.composer.buffer().connect_changed(move |_| {
             if let Some(s) = weak.upgrade() {
@@ -997,7 +1082,7 @@ impl Ui {
         }
     }
     pub fn save_draft(&self) {
-        if self.loading.get() {
+        if self.loading.get() || self.on_welcome() {
             return;
         }
         if let Some(id) = self.draft_timer.borrow_mut().take() {
@@ -1370,22 +1455,7 @@ impl Ui {
     }
     pub fn update_mode(&self) {
         let live = !self.state.borrow().account.is_empty();
-        self.banner.set_revealed(live);
-        let encrypted = self.state.borrow().current().encryption;
-        self.banner.set_title(&format!(
-            "{} · {}",
-            self.status.borrow(),
-            if encrypted {
-                if self.crypto.borrow().ready {
-                    "OMEMO 2 end-to-end encryption"
-                } else {
-                    "OMEMO 2 selected · sending blocked until ready"
-                }
-            } else {
-                "Messages are not end-to-end encrypted"
-            }
-        ));
-        self.history.set_visible(live);
+        self.update_history_spinner();
         self.stories.set_visible(!live);
         for name in [
             "wallet",
@@ -1420,8 +1490,36 @@ impl Ui {
             self.media_stack.set_visible_child_name("emoji")
         }
     }
+    pub fn on_welcome(&self) -> bool {
+        self.shell.visible_child_name().as_deref() == Some("welcome")
+    }
+    pub fn show_main(&self) {
+        self.shell.set_visible_child_name("main");
+    }
+    pub fn show_welcome(&self) {
+        self.shell.set_visible_child_name("welcome");
+        self.welcome_account.borrow_mut().take();
+        self.show_welcome_status("", false, false);
+    }
+    fn show_welcome_status(&self, status: &str, connecting: bool, error: bool) {
+        self.welcome_status.set_text(status);
+        self.welcome_status.set_visible(!status.is_empty());
+        if error {
+            self.welcome_status.add_css_class("error");
+        } else {
+            self.welcome_status.remove_css_class("error");
+        }
+        self.welcome_progress.set_spinning(connecting);
+        self.welcome_progress.set_visible(connecting);
+        self.welcome_cancel.set_visible(connecting);
+        self.welcome_sign_in.set_visible(!connecting);
+        self.welcome_register.set_visible(!connecting);
+        self.welcome_sign_in
+            .set_label(if error { "Try Again" } else { "Sign In" });
+    }
     pub fn activate_state(self: &Rc<Self>, mut state: State) {
         self.stop_uploads();
+        self.images.borrow_mut().clear();
         for chat in &mut state.chats {
             for m in &mut chat.messages {
                 if let Some(draft) = &mut m.upload {
@@ -1434,7 +1532,7 @@ impl Ui {
         }
         self.downloads.borrow_mut().clear();
         self.save_draft();
-        if self.state.borrow().account.is_empty() {
+        if self.state.borrow().account.is_empty() && !self.on_welcome() {
             self.demo.replace(self.state.borrow().clone());
         }
         self.session.borrow_mut().take();
@@ -1450,7 +1548,7 @@ impl Ui {
         }
         let media = self.active_media.borrow().clone();
         if let Some(v) = media {
-            v.close()
+            v.close_immediate()
         }
         let story = self.active_story.borrow().clone();
         if let Some(v) = story {
@@ -1465,23 +1563,32 @@ impl Ui {
         self.refresh_stories();
         self.load_current();
         self.update_mode();
-        let _ = self
-            .store
-            .set_pref("active_account", &self.state.borrow().account);
+        if !self.on_welcome() {
+            let _ = self
+                .store
+                .set_pref("active_account", &self.state.borrow().account);
+        }
     }
     pub fn connect_account(self: &Rc<Self>, config: Account, password: String) {
         self.save_draft();
-        if self.store.save_account(&config).is_err() {
+        let onboarding = self.on_welcome();
+        if !onboarding && self.store.save_account(&config).is_err() {
             self.notice("Account storage is unavailable");
             return;
         }
-        let state = if self.state.borrow().account == config.jid {
+        let state = if onboarding {
+            State::live(&config.jid, vec![])
+        } else if self.state.borrow().account == config.jid {
             self.state.borrow().clone()
         } else {
             self.store.load(&config.jid)
         };
         self.activate_state(state);
         self.status.replace("Connecting…".into());
+        if onboarding {
+            self.welcome_account.replace(Some(config.clone()));
+            self.show_welcome_status("Connecting…", true, false);
+        }
         let session = Session::start(
             config,
             password,
@@ -1494,6 +1601,34 @@ impl Ui {
     pub fn backend_event(self: &Rc<Self>, generation: u64, owner: &str, event: BackendEvent) {
         if generation != self.generation.get() || owner != self.state.borrow().account {
             return;
+        }
+        if self.on_welcome() {
+            let BackendEvent::Status {
+                online,
+                error,
+                text,
+            } = &event
+            else {
+                return;
+            };
+            if !online {
+                if *error {
+                    self.session.borrow_mut().take();
+                    self.generation.set(self.generation.get() + 1);
+                }
+                self.show_welcome_status(text, !error, *error);
+                return;
+            }
+            let config = self.welcome_account.borrow().clone();
+            if config.is_none_or(|config| self.store.save_account(&config).is_err()) {
+                self.session.borrow_mut().take();
+                self.generation.set(self.generation.get() + 1);
+                self.show_welcome_status("Account storage is unavailable", false, true);
+                return;
+            }
+            let _ = self.store.set_pref("active_account", owner);
+            self.welcome_account.borrow_mut().take();
+            self.show_main();
         }
         match event {
             BackendEvent::Status {
@@ -1637,12 +1772,7 @@ impl Ui {
                 error,
             } => {
                 self.history_pending.borrow_mut().remove(&peer);
-                self.history.set_sensitive(true);
-                self.history.set_label(if error {
-                    "Retry Server History"
-                } else {
-                    "Load Earlier Messages"
-                });
+                self.update_history_spinner();
                 if error {
                     self.notice("Server history unavailable or unsupported")
                 } else {
@@ -1803,6 +1933,9 @@ impl Ui {
             c.messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
         }
         let active = s.current().jid == peer;
+        let follow = active
+            && self.at_message_end()
+            && (!historical || !self.history_pages.borrow().contains_key(&peer));
         drop(s);
         let mut saved = self.persist();
         if saved {
@@ -1852,7 +1985,7 @@ impl Ui {
             }
         }
         if active {
-            self.render_messages(!historical)
+            self.render_messages(follow)
         }
         saved
     }
@@ -1886,53 +2019,97 @@ impl Ui {
         self.persist();
         self.render_messages(false);
     }
+    fn update_history_spinner(&self) {
+        let state = self.state.borrow();
+        let busy = !state.account.is_empty()
+            && self.history_pending.borrow().contains(&state.current().jid);
+        self.history.set_visible(busy);
+        self.history.set_spinning(busy);
+    }
+    fn load_history_near_top(self: &Rc<Self>) {
+        let adjustment = self.scroll.vadjustment();
+        if adjustment.page_size() > 0. && adjustment.value() < adjustment.page_size() / 2. {
+            self.load_history(false);
+        }
+    }
     pub fn load_history(self: &Rc<Self>, initial: bool) {
-        let s = self.state.borrow();
-        if s.account.is_empty() {
+        let state = self.state.borrow();
+        if state.account.is_empty() {
             return;
         }
-        let c = s.current();
-        if !initial {
-            if let Some(first) = c.messages.first() {
-                let older = self.store.history(
-                    &s.account,
-                    &c.jid,
-                    Some((&first.timestamp, &first.id)),
-                    100,
-                );
-                if !older.is_empty() {
-                    drop(s);
-                    self.state
-                        .borrow_mut()
-                        .current_mut()
-                        .messages
-                        .splice(0..0, older);
-                    self.render_messages(false);
-                    return;
-                }
+        let chat = state.current();
+        let owner = state.account.clone();
+        let peer = chat.jid.clone();
+        let before = chat
+            .messages
+            .first()
+            .map(|first| (first.timestamp.clone(), first.id.clone()));
+        drop(state);
+        if self.history_pending.borrow().contains(&peer) {
+            return;
+        }
+        if initial || before.is_none() {
+            if !initial || !self.history_pages.borrow().contains_key(&peer) {
+                self.request_server_history(&peer);
             }
-        }
-        let peer = c.jid.clone();
-        drop(s);
-        let page = if initial {
-            None
-        } else {
-            self.history_pages.borrow().get(&peer).cloned()
-        };
-        if page.as_ref().is_some_and(|(_, done)| *done) {
-            self.notice("Beginning of available history");
-            return;
-        }
-        if !self.online.get() || self.history_pending.borrow().contains(&peer) {
             return;
         }
         self.history_pending.borrow_mut().insert(peer.clone());
-        self.history.set_sensitive(false);
-        self.history.set_label("Loading History…");
-        self.command(Command::History {
-            peer,
-            before: page.map(|(b, _)| b).unwrap_or_default(),
+        self.update_history_spinner();
+        let weak = Rc::downgrade(self);
+        let generation = self.generation.get();
+        glib::MainContext::default().spawn_local(async move {
+            let Some(ui) = weak.upgrade() else { return };
+            let (account, conversation) = (owner.clone(), peer.clone());
+            let local = ui
+                .store
+                .read_snapshot(move |store| {
+                    store.try_history(
+                        &account,
+                        &conversation,
+                        before.as_ref().map(|(t, id)| (t.as_str(), id.as_str())),
+                        36,
+                    )
+                })
+                .await;
+            if ui.generation.get() != generation || ui.state.borrow().account != owner {
+                return;
+            }
+            ui.history_pending.borrow_mut().remove(&peer);
+            ui.update_history_spinner();
+            if ui.state.borrow().current().jid != peer {
+                return;
+            }
+            match local {
+                Ok(older) if older.is_empty() => ui.request_server_history(&peer),
+                Ok(mut older) => {
+                    let mut state = ui.state.borrow_mut();
+                    let messages = &mut state.current_mut().messages;
+                    older.retain(|message| !messages.iter().any(|m| m.id == message.id));
+                    messages.splice(0..0, older);
+                    drop(state);
+                    ui.render_messages(false);
+                }
+                Err(_) => ui.notice("Local history could not be loaded"),
+            }
         });
+    }
+    fn request_server_history(&self, peer: &str) {
+        if !self.online.get() || self.history_pending.borrow().contains(peer) {
+            return;
+        }
+        let before = match self.history_pages.borrow().get(peer) {
+            Some((_, true)) => return,
+            Some((before, false)) => before.clone(),
+            None => String::new(),
+        };
+        if self.command(Command::History {
+            peer: peer.into(),
+            before,
+        }) {
+            self.history_pending.borrow_mut().insert(peer.into());
+            self.update_history_spinner();
+        }
     }
     pub fn preference(&self, key: &str, default: bool) -> bool {
         self.store.pref(

@@ -46,6 +46,10 @@ local serial = 0;
 module:hook("iq-get/host/" .. ns .. ":request", function(event)
     local request = event.stanza.tags[1];
     local size = tonumber(request.attr.size);
+    if event.stanza.attr.from:match("^erin@localhost/") then
+        assert(request.attr.filename:match("^[0-9a-f%-]+%.bin$"));
+        assert(request.attr["content-type"] == "application/octet-stream");
+    end
     if not size or size <= 0 or size > 1048576 then
         event.origin.send(st.error_reply(event.stanza, "modify", "not-acceptable")); return true;
     end

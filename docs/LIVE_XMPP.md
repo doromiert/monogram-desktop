@@ -5,8 +5,10 @@ This is the first backend milestone, not full Monogram parity.
 
 ## Use
 
-Open **Main Menu → Accounts → Add Account**, enter a bare XMPP address and
-password, and choose Connect. DNS service discovery is the default. The optional
+Choose **Sign In** on first launch, enter a bare XMPP address and password,
+and choose Connect. The welcome screen stays open until authentication succeeds.
+Failed or cancelled first sign-ins do not save an account. Additional profiles
+are available from **Main Menu → Accounts → Add Account**. DNS service discovery is the default. The optional
 server override changes the endpoint, while TLS identity verification still uses
 the XMPP address's service domain. STARTTLS and direct TLS are available; no
 unencrypted transport or certificate-verification bypass is exposed.
@@ -40,9 +42,10 @@ drafts, authorization requests or transport.
   senders are rejected. Deduplication is scoped by account, conversation and
   direction; only the account's server-assigned stanza IDs are accepted.
 - Server history is fetched in pages of 50. The initial local window loads at
-  most 200 messages per conversation; older local pages load 100 at a time.
-  History preserves server timestamps. Reconnection syncs the latest page for
-  the selected conversation. This is not an exhaustive account-wide MAM sync.
+  most 200 messages per conversation. Scrolling near the top loads up to 36
+  local rows at a time and requests the next server page when local history runs
+  out. Prepending preserves the visible message position. Loaded rows are not
+  yet evicted as you scroll. This is not an exhaustive account-wide MAM sync.
 - Outgoing delivery receipts are requested. The visible Delivered state means
   receipt by another client, never that a person read the message. Receipt sender
   and message ID must match the stored conversation. Sending receipts is opt-in
@@ -65,8 +68,9 @@ sends never fall back to plaintext. Unreviewed/missing/blocked devices or failed
 key publication stop sending. Secret Service protects the local crypto master key.
 See [OMEMO2.md](OMEMO2.md) for protocol, lifecycle, tests and remaining limitations.
 
-Conversations without that selection remain plaintext over verified TLS and are
-labelled accordingly. Unsupported or untrusted encrypted payloads remain
+Conversations without that selection use plaintext over verified TLS.
+Conversation Security contains a per-contact blind-trust option for OMEMO 2.
+It is off by default and does not approve own devices or override explicit blocks. Unsupported or untrusted encrypted payloads remain
 unavailable; their outer fallback bodies never appear as decrypted content.
 
 Live mode implements [direct polls](STRUCTURED_POLLS.md) and

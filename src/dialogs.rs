@@ -95,6 +95,52 @@ impl Ui {
         review.set_valign(gtk::Align::Center);
         devices.add_suffix(&review);
         choices.add(&devices);
+        let owner = self.state.borrow().account.clone();
+        if peer != owner && !self.state.borrow().current().group {
+            let trust = adw::ActionRow::builder()
+                .title("Blindly Trust This Contact")
+                .subtitle("Automatically approve new OMEMO 2 fingerprints for this contact")
+                .build();
+            let toggle = gtk::Button::with_label(
+                if self.store.blind_trust(&owner, &peer).unwrap_or(false) {
+                    "Disable"
+                } else {
+                    "Enable…"
+                },
+            );
+            toggle.set_valign(gtk::Align::Center);
+            trust.add_suffix(&toggle);
+            let weak = Rc::downgrade(self);
+            let target = peer.clone();
+            toggle.connect_clicked(move |button| {
+                let Some(ui) = weak.upgrade().filter(|ui| ui.generation.get() == generation) else { return };
+                let Ok(enabled) = ui.store.blind_trust(&owner, &target) else {
+                    ui.notice("Could not read the trust setting");
+                    return;
+                };
+                if enabled {
+                    ui.set_blind_trust(&owner, &target, false, button);
+                    return;
+                }
+                let confirm = adw::AlertDialog::builder()
+                    .heading("Blindly Trust This Contact?")
+                    .body(format!("New devices and changed keys for {target} will be accepted without fingerprint verification. Anyone who controls their account could receive future messages. Blocked devices stay blocked. Turning this off stops new approvals and keeps fingerprints already approved."))
+                    .build();
+                confirm.add_responses(&[("cancel", "Cancel"), ("enable", "Enable Blind Trust")]);
+                confirm.set_default_response(Some("cancel"));
+                confirm.set_response_appearance("enable", adw::ResponseAppearance::Destructive);
+                let (owner, target, weak, button) = (owner.clone(), target.clone(), weak.clone(), button.downgrade());
+                confirm.connect_response(Some("enable"), move |_, _| {
+                    if let (Some(ui), Some(button)) = (weak.upgrade(), button.upgrade()) {
+                        if ui.generation.get() == generation {
+                            ui.set_blind_trust(&owner, &target, true, &button);
+                        }
+                    }
+                });
+                confirm.present(Some(&ui.window));
+            });
+            choices.add(&trust);
+        }
         page.add(&choices);
         let weak = Rc::downgrade(self);
         enable.connect_clicked(move |button| {
@@ -153,6 +199,18 @@ impl Ui {
                 }
             }
         });
+    }
+    fn set_blind_trust(&self, owner: &str, peer: &str, enabled: bool, button: &gtk::Button) {
+        if self.store.set_blind_trust(owner, peer, enabled).is_err() {
+            self.notice("Could not save the trust setting");
+            return;
+        }
+        button.set_label(if enabled { "Disable" } else { "Enable…" });
+        if enabled {
+            self.command(protocol::Command::Crypto(
+                crate::crypto::service::Request::RefreshTrust(peer.into()),
+            ));
+        }
     }
     pub fn review_devices(
         self: &Rc<Self>,
@@ -623,7 +681,8 @@ impl Ui {
         demo.connect_activated(move |_| {
             if let Some(ui) = weak.upgrade() {
                 let state = ui.demo.borrow().clone();
-                ui.activate_state(state)
+                ui.activate_state(state);
+                ui.show_main();
             }
         });
         options.add(&demo);
@@ -637,7 +696,7 @@ impl Ui {
             direct_tls: false,
         });
         let page = adw::PreferencesPage::new();
-        let group=adw::PreferencesGroup::builder().title("Sign In").description("Direct text messaging over verified TLS. Enable OMEMO 2 and review fingerprints in Conversation Security for end-to-end encryption.").build();
+        let group = adw::PreferencesGroup::new();
         let jid = adw::EntryRow::builder()
             .title("XMPP address")
             .text(&config.jid)
@@ -646,7 +705,11 @@ impl Ui {
         group.add(&jid);
         group.add(&password);
         page.add(&group);
-        let advanced=adw::PreferencesGroup::builder().title("Connection").description("Leave server override empty for DNS discovery. Certificates are verified for the XMPP domain.").build();
+        let advanced = adw::ExpanderRow::builder()
+            .title("Advanced Connection Settings")
+            .subtitle("Use DNS discovery by default")
+            .expanded(!config.host.is_empty() || config.port != 5222 || config.direct_tls)
+            .build();
         let host = adw::EntryRow::builder()
             .title("Server override")
             .text(&config.host)
@@ -661,19 +724,25 @@ impl Ui {
             .subtitle("Leave off for STARTTLS")
             .active(config.direct_tls)
             .build();
-        advanced.add(&host);
-        advanced.add(&port);
-        advanced.add(&direct);
-        page.add(&advanced);
+        advanced.add_row(&host);
+        advanced.add_row(&port);
+        advanced.add_row(&direct);
+        let connection = adw::PreferencesGroup::new();
+        connection.add(&advanced);
+        page.add(&connection);
         let error = wrap("", "error");
         let body = bx(true, 8);
         body.append(&page);
         margins(&error, 12);
         body.append(&error);
-        let (d, header) = self.dialog("Connect Account", &scroll(&body), 500, 600);
+        let (d, header) = self.dialog("Sign In to XMPP", &scroll(&body), 500, 440);
         let connect = gtk::Button::with_label("Connect");
         connect.add_css_class("suggested-action");
         header.pack_end(&connect);
+        d.set_default_widget(Some(&connect));
+        d.set_focus(Some(&jid));
+        jid.set_activates_default(true);
+        password.set_activates_default(true);
         let p = password.clone();
         d.connect_closed(move |_| p.set_text(""));
         let p = port.clone();
@@ -727,7 +796,6 @@ impl Ui {
                 },
                 secret,
             );
-            d.close();
         });
     }
     pub fn remove_account(self: &Rc<Self>, owner: &str) {
@@ -750,7 +818,11 @@ impl Ui {
                     if let Err(reason) = crate::downloads::forget(&owner) {
                         ui.notice(reason);
                     }
-                    ui.accounts_dialog();
+                    if !ui.smoke && ui.store.accounts().is_empty() {
+                        ui.show_welcome();
+                    } else {
+                        ui.accounts_dialog();
+                    }
                 }
             }
         });

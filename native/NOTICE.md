@@ -21,3 +21,7 @@ OpenSSL supplies the existing mobile-compatible cryptographic provider.
 The adapter/provider are GPL-3.0-or-later; the combined build uses GPL-3.0. See
 `LICENSES/GPL-3.0-or-later.txt`. The Java/JNI comparison fixtures are test-only;
 see `tests/mobile-reference/README.md` for their provenance.
+
+`image_loader.c` is a thin adapter to [GNOME Glycin](https://gnome.pages.gitlab.gnome.org/glycin/)
+2.1.5 from Nix. It hands verified descriptors to the upstream sandbox and returns
+decoded textures to Rust.

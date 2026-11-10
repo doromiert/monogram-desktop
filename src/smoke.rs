@@ -1246,6 +1246,41 @@ pub fn run(ui: Rc<Ui>) {
     });
 }
 
+fn sign_in(ui: &Ui, config: &Account, button_label: &str, password: &str) {
+    fn entry(widget: &gtk::Widget, title: &str) -> Option<adw::EntryRow> {
+        if let Some(row) = widget.downcast_ref::<adw::EntryRow>() {
+            if row.title() == title {
+                return Some(row.clone());
+            }
+        }
+        let mut child = widget.first_child();
+        while let Some(w) = child {
+            if let Some(found) = entry(&w, title) {
+                return Some(found);
+            }
+            child = w.next_sibling();
+        }
+        None
+    }
+    button(&ui.window.clone().upcast(), button_label)
+        .expect("welcome sign-in action")
+        .emit_clicked();
+    let form = ui.dialogs.borrow().last().unwrap().child().unwrap();
+    entry(&form, "XMPP address").unwrap().set_text(&config.jid);
+    entry(&form, "Password").unwrap().set_text(password);
+    entry(&form, "Server override")
+        .unwrap()
+        .set_text(&config.host);
+    entry(&form, "Port")
+        .unwrap()
+        .set_text(&config.port.to_string());
+    let connect = button(&form, "Connect").unwrap();
+    assert!(connect.is_sensitive());
+    connect.emit_clicked();
+    assert!(ui.on_welcome());
+    assert!(ui.store.accounts().is_empty());
+}
+
 /// The actual composer and event handler, connected only to the loopback fixture.
 pub fn run_live(ui: Rc<Ui>) {
     use crate::protocol::{BackendEvent, Command, Session};
@@ -1270,10 +1305,10 @@ pub fn run_live(ui: Rc<Ui>) {
     ui.store
         .set_pref("notifications:alice@localhost", "false")
         .unwrap();
-    ui.connect_account(config.clone(), "fixture-password".into());
-    let peer = ui.state.borrow_mut().chat_for("bob@localhost").id.clone();
-    ui.select_chat(&peer);
-    let stage = Cell::new(0);
+    assert!(ui.on_welcome());
+    assert!(ui.store.accounts().is_empty());
+    sign_in(&ui, &config, "Sign In", "incorrect-fixture-password");
+    let stage = Cell::new(100);
     let poll_smoke = PollSmoke::default();
     let forward_smoke = ForwardSmoke::default();
     let download_smoke = crate::download_smoke::DownloadSmoke::default();
@@ -1413,6 +1448,23 @@ pub fn run_live(ui: Rc<Ui>) {
             return glib::ControlFlow::Break;
         }
         match stage.get() {
+            100 if button(&ui.window.clone().upcast(), "Try Again").is_some() => {
+                assert!(ui.on_welcome());
+                assert!(ui.store.accounts().is_empty());
+                sign_in(&ui, &config, "Try Again", "fixture-password");
+                stage.set(101);
+            }
+            101 if ui.online.get() => {
+                assert!(!ui.on_welcome());
+                assert_eq!(ui.store.accounts()[0].jid, config.jid);
+                assert_eq!(ui.store.pref("active_account", ""), config.jid);
+                let peer = ui.state.borrow_mut().chat_for("bob@localhost").id.clone();
+                ui.select_chat(&peer);
+                println!(
+                    "Native first-run sign-in passed: failed authentication keeps welcome open with no saved profile, retry enters the real chat list"
+                );
+                stage.set(0);
+            }
             0 if ui.online.get() && bob_online.get() => {
                 assert!(ui.window.lookup_action("attach-file").unwrap().is_enabled());
                 ui.composer.buffer().set_text("Native Rust composer 🌿");
@@ -1458,6 +1510,7 @@ pub fn run_live(ui: Rc<Ui>) {
                             .all(|m| m.text != "Durable draft 🌿")
                     );
                     ui.connect_account(config.clone(), "fixture-password".into());
+                    let peer = ui.state.borrow_mut().chat_for("bob@localhost").id.clone();
                     ui.select_chat(&peer);
                     assert_eq!(ui.composer_text(), "Durable draft 🌿");
                     assert_eq!(ui.replying.borrow().as_deref(), Some(reply.id.as_str()));

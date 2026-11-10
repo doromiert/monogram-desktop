@@ -11,6 +11,8 @@ mod forwarding;
 mod iq;
 #[path = "../src/legacy_polls.rs"]
 mod legacy_polls;
+#[path = "../src/media_store.rs"]
+mod media_store;
 #[path = "../src/message_actions.rs"]
 mod message_actions;
 #[path = "../src/model.rs"]

@@ -142,10 +142,26 @@ pub fn prepare(store: &mut Store, now: u64) -> Result<Bundle> {
         Ok(result)
     })
 }
-pub fn observe(store: &mut Store, peer: &str, device: u32, bundle: &Bundle) -> Result<()> {
+pub fn observe(
+    store: &mut Store,
+    peer: &str,
+    device: u32,
+    bundle: &Bundle,
+    blind_trust: bool,
+) -> Result<()> {
     address(peer, device)?;
     bundle.validate()?;
-    store.transaction(|t| t.save(SEEN, peer, device, Some(&bundle.identity)))
+    let accept = blind_trust && peer != store.owner;
+    store.transaction(|tx| {
+        tx.save(SEEN, peer, device, Some(&bundle.identity))?;
+        if accept
+            && tx.load(REJECTED, peer, device)?.is_none()
+            && trust(tx, peer, device, &bundle.identity)? != Trust::Trusted
+        {
+            tx.save(TRUSTED, peer, device, Some(&bundle.identity))?;
+        }
+        Ok(())
+    })
 }
 pub fn trust(tx: &Tx<'_>, peer: &str, device: u32, key: &[u8; 32]) -> Result<Trust> {
     address(peer, device)?;
@@ -237,7 +253,15 @@ pub fn session(tx: &Tx<'_>, local: u32, peer: &str, device: u32, bundle: &Bundle
         return Err(Error::TrustRequired);
     }
     if tx.load(SESSION, peer, device)?.is_some() {
-        return Ok(());
+        if tx
+            .load(SESSION_IDENTITY, peer, device)?
+            .is_some_and(|key| key.as_slice() == bundle.identity)
+        {
+            return Ok(());
+        }
+        // A newly approved fingerprint needs its own ratchet.
+        tx.save(SESSION, peer, device, None)?;
+        tx.save(SESSION_IDENTITY, peer, device, None)?;
     }
     bundle.validate()?;
     let keys: Vec<_> = bundle.prekeys.iter().collect();

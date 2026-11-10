@@ -4,8 +4,8 @@ Desktop advertises SFS support, receives direct file messages in plaintext or
 explicit OMEMO 2 and offers
 manual Download, Cancel, Retry and native Save As. The reference is mobile's
 `FileLink`, `FileShare`, `FileTransfer` and account-owned transfer registry.
-Direct uploads now use XEP-0363 service discovery and slot requests. Rich media
-viewing and complete transfer/settings parity remain open.
+Direct uploads now use XEP-0363 service discovery and slot requests. Live photos have inline previews, a shared media grid and an expanded viewer.
+Other rich media and complete transfer/settings parity remain open.
 
 ## Wire profile
 
@@ -115,6 +115,20 @@ local history. Source URIs and bearer credentials are excluded from Debug/error
 output. Snapshots and abandoned private partials are removed with the account
 cache; complete retention/cleanup controls and process-kill resume remain open.
 
+## Photo previews and shared media
+
+Once an image is downloaded, desktop verifies its open file descriptor and gives
+that descriptor to libglycin in a bubblewrap sandbox. GTK only receives a decoded
+texture. Save As also keeps the verified descriptor through destination selection
+and asynchronous copy. Local MIME and dimensions do not change the original wire
+metadata. Decode workers and the texture cache have separate bounded queues and
+budgets for thumbnails and viewer images.
+
+Conversation Info → Shared Media opens a three-by-three photo grid. Further pages
+use a cursor ordered by timestamp and ID. Choosing a tile opens the viewer. It
+keeps the current image and up to ten older and ten newer images. It prepares
+neighbor thumbnails from cached files and can download the selected image.
+
 ## Verification and remaining work
 
 The mobile test-only `GenerateFileVectors` exports 32 actual wire/model cases and
@@ -129,8 +143,8 @@ partial cleanup. The private GTK/XMPP fixture drives Download/Cancel/Retry,
 live SFS discovery, leave-chat continuation, native Save As/export, preserved drafts, reload and account
 cache removal in plaintext and OMEMO 2. No real account or host clipboard is used.
 
-Generic file cards currently represent photos, video, audio, stickers and GIFs as
-files. Live thumbnails/viewer/playback, content-type upgrades,
+Generic file cards still represent video, audio and unsupported image types.
+Animated playback, full content-type upgrades,
 media authoring, albums, automatic-download preferences, automatic transfer resume,
 complete cache management, caption edits, fresh media forwarding, room transport
 and physical mobile/desktop application exchange remain open. These receive and

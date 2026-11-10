@@ -40,7 +40,7 @@ checks were run on x86_64-linux.
 
 ## Try it
 
-- Open **Main Menu → Accounts → Add Account** to connect an XMPP account.
+- On first launch, choose **Sign In** to connect an XMPP account. You can also add an account from **Main Menu → Accounts → Add Account**.
   Use New Conversation to enter another person's bare address. Passwords stay in
   memory; reconnect after restart requires entering them again. Accounts keep
   separate local history/drafts. Open Offline Demo returns to the fictional data.

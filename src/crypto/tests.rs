@@ -6,7 +6,7 @@ fn store(owner: &str, id: u32) -> Store {
     Store::open(None, owner, id, MasterKey::new(random().unwrap())).unwrap()
 }
 fn approve(store: &mut Store, peer: &str, id: u32, bundle: &Bundle) {
-    device::observe(store, peer, id, bundle).unwrap();
+    device::observe(store, peer, id, bundle, false).unwrap();
     device::decide(
         store,
         &BTreeMap::from([(peer.into(), BTreeMap::from([(id, bundle.identity)]))]),
@@ -113,7 +113,7 @@ fn no_implicit_trust_and_stale_batch_decisions_are_atomic() {
     let (mut a, mut b) = (store(A, 101), store(B, 202));
     device::prepare(&mut a, 1).unwrap();
     let bb = device::prepare(&mut b, 1).unwrap();
-    device::observe(&mut a, B, 202, &bb).unwrap();
+    device::observe(&mut a, B, 202, &bb, false).unwrap();
     assert!(matches!(
         encrypt(&mut a, B, 202, &bb, b"Blocked"),
         Err(Error::TrustRequired)

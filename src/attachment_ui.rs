@@ -4,16 +4,22 @@ use gtk::{gio, glib};
 use std::{rc::Rc, time::Duration};
 impl Ui {
     pub fn attachment_content(self: &Rc<Self>, message: &Message) -> gtk::Box {
+        self.file_controls(message, true)
+    }
+    pub(crate) fn file_controls(self: &Rc<Self>, message: &Message, preview: bool) -> gtk::Box {
         let file = message.attachment.as_ref().unwrap().clone();
         let owner = self.state.borrow().account.clone();
         let id = message.id.clone();
         let content = bx(true, 8);
+        if preview {
+            self.attach_image(message, &content);
+        }
         let line = bx(false, 10);
         let image = gtk::Image::from_icon_name("document-save-symbolic");
         image.set_pixel_size(28);
         line.append(&image);
         let words = bx(true, 2);
-        words.set_hexpand(true);
+        words.set_hexpand(!preview);
         words.append(&wrap(&file.name, "heading"));
         let detail = match file.size {
             Some(size) => format!("{} · {}", glib::format_size(size), file.mime),
@@ -105,12 +111,13 @@ impl Ui {
         });
         content
     }
-    fn save_attachment(self: &Rc<Self>, id: &str, path: &std::path::Path) {
+    pub(crate) fn save_attachment(self: &Rc<Self>, id: &str, path: &std::path::Path) {
+        let owner = self.state.borrow().account.clone();
+        let peer = self.state.borrow().current().jid.clone();
         let Some(file) = self
-            .state
-            .borrow()
-            .message(id)
-            .and_then(|m| m.attachment.clone())
+            .store
+            .message(&owner, &peer, id)
+            .and_then(|m| m.attachment)
         else {
             return;
         };
@@ -125,26 +132,31 @@ impl Ui {
             return;
         };
         let key = file.key();
+        let generation = self.generation.get();
         let path = path.to_path_buf();
         let weak = Rc::downgrade(self);
         let window = self.window.clone();
         glib::MainContext::default().spawn_local(async move {
             let source = path.clone();
             let expected = file.clone();
-            let valid =
-                gio::spawn_blocking(move || crate::downloads::verify(&source, &expected, &cancel))
-                    .await;
-            let Some(ui) = weak
-                .upgrade()
-                .filter(|ui| ui.state.borrow().account == owner)
-            else {
+            let valid = gio::spawn_blocking(move || {
+                crate::downloads::verified_input(&source, &expected, &cancel)
+            })
+            .await;
+            let Some(ui) = weak.upgrade().filter(|ui| {
+                ui.state.borrow().account == owner && ui.generation.get() == generation
+            }) else {
                 return;
             };
-            if !matches!(valid, Ok(Ok(()))) {
-                ui.downloads.borrow_mut().invalidate(&owner, &file);
-                ui.notice("Cached attachment failed verification. Download it again.");
-                return;
-            }
+            let input = match valid {
+                Ok(Ok(input)) => input,
+                _ => {
+                    ui.downloads.borrow_mut().invalidate(&owner, &file);
+                    ui.images.borrow_mut().invalidate(&file);
+                    ui.notice("Cached attachment failed verification. Download it again.");
+                    return;
+                }
+            };
             drop(ui);
             let destination = match chooser.save_future(Some(&window)).await {
                 Ok(file) => file,
@@ -161,34 +173,50 @@ impl Ui {
                 return;
             };
             if ui.state.borrow().account != owner
+                || ui.generation.get() != generation
+                || ui.state.borrow().current().jid != peer
                 || ui
-                    .state
-                    .borrow()
-                    .message(&id)
-                    .and_then(|m| m.attachment.as_ref())
+                    .store
+                    .message(&owner, &peer, &id)
+                    .filter(|m| !m.retracted)
+                    .and_then(|m| m.attachment)
                     .is_none_or(|f| f.key() != key)
             {
                 return;
             }
+            let _hold = ui.window.application().map(|app| app.hold());
             let weak = Rc::downgrade(&ui);
-            gio::File::for_path(path).copy_async(
-                &destination,
-                gio::FileCopyFlags::OVERWRITE,
-                glib::Priority::DEFAULT,
-                None::<&gio::Cancellable>,
-                None,
-                move |result| {
-                    if let Some(ui) = weak.upgrade() {
-                        if ui.state.borrow().account == owner {
-                            ui.notice(if result.is_ok() {
-                                "Attachment saved"
-                            } else {
-                                "Attachment could not be saved"
-                            });
-                        }
-                    }
-                },
-            );
+            drop(ui);
+            let source = crate::image_loader::input_stream(input);
+            let result = match destination
+                .replace_future(
+                    None,
+                    false,
+                    gio::FileCreateFlags::PRIVATE | gio::FileCreateFlags::REPLACE_DESTINATION,
+                    glib::Priority::DEFAULT,
+                )
+                .await
+            {
+                Ok(output) => output
+                    .splice_future(
+                        &source,
+                        gio::OutputStreamSpliceFlags::CLOSE_SOURCE
+                            | gio::OutputStreamSpliceFlags::CLOSE_TARGET,
+                        glib::Priority::DEFAULT,
+                    )
+                    .await
+                    .map(|_| ()),
+                Err(error) => Err(error),
+            };
+            if let Some(ui) = weak.upgrade().filter(|ui| {
+                ui.state.borrow().account == owner && ui.generation.get() == generation
+            }) {
+                ui.notice(if result.is_ok() {
+                    "Attachment saved"
+                } else {
+                    "Attachment could not be saved"
+                });
+            }
         });
     }
 }

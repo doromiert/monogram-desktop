@@ -17,6 +17,9 @@
         in { default = pkgs.mkShell {
           inputsFrom = [ self.packages.${system}.default ];
           JAVA_HOME = "${pkgs.jdk21}/lib/openjdk";
+          shellHook = ''
+            export XDG_DATA_DIRS="''${NIX_GLYCIN_LOADER_PATHS}:''${XDG_DATA_DIRS:-}"
+          '';
           packages = with pkgs; [ cargo rustc rustfmt clippy pkg-config sqlite libepoxy python3 jdk21 gnome-keyring gtk4 libadwaita gobject-introspection xorg-server xdotool imagemagick prosody openssl ];
         }; });
       checks = eachSystem (system: {

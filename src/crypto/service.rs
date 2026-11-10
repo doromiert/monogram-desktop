@@ -52,6 +52,7 @@ pub enum Request {
     Online(bool),
     Enable,
     Review(String),
+    RefreshTrust(String),
     Decide {
         keys: BTreeMap<String, BTreeMap<u32, [u8; 32]>>,
         approve: bool,
@@ -258,11 +259,17 @@ impl Worker {
     }
     async fn observe(&mut self, peer: &str, id: u32) -> Result<Bundle> {
         let bundle = self.pep()?.bundle(peer, id).await.map_err(|error|match error {super::pep::Error::Crypto(Error::Invalid(_)|Error::Crypto(_))=>Error::InvalidBundle,super::pep::Error::Crypto(error)=>error,_=>Error::Unavailable("A device bundle could not be fetched; check the connection and contact authorization")})?;
+        let blind_trust = if let Some(history) = self.history()? {
+            history.blind_trust(&self.owner, peer)?
+        } else {
+            false
+        };
         device::observe(
             &mut self.local.as_mut().ok_or(Error::Incomplete)?.engine.store,
             peer,
             id,
             &bundle,
+            blind_trust,
         )?;
         Ok(bundle)
     }
@@ -709,6 +716,12 @@ impl Worker {
                 }
             }
             Request::Review(peer) => self.review(&peer).await,
+            Request::RefreshTrust(peer) => {
+                if self.ready {
+                    self.review(&peer).await;
+                    self.retry().await;
+                }
+            }
             Request::Decide { keys, approve } => {
                 let result = self
                     .local
@@ -777,7 +790,7 @@ mod tests {
         );
         device::prepare(&mut a, 1).unwrap();
         let bundle = device::prepare(&mut b, 1).unwrap();
-        device::observe(&mut a, "b@example.invalid", 202, &bundle).unwrap();
+        device::observe(&mut a, "b@example.invalid", 202, &bundle, false).unwrap();
         device::decide(
             &mut a,
             &BTreeMap::from([(

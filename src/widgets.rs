@@ -111,6 +111,7 @@ mod image_imp {
     pub struct AspectImage {
         pub paintable: RefCell<Option<gdk::Paintable>>,
         pub ratio: Cell<f64>,
+        pub cover: Cell<bool>,
     }
     #[glib::object_subclass]
     impl ObjectSubclass for AspectImage {
@@ -124,6 +125,15 @@ mod image_imp {
             gtk::SizeRequestMode::HeightForWidth
         }
         fn measure(&self, o: gtk::Orientation, size: i32) -> (i32, i32, i32, i32) {
+            if self.cover.get() {
+                return match o {
+                    gtk::Orientation::Horizontal => (0, 110, -1, -1),
+                    _ => {
+                        let edge = if size < 0 { 110 } else { size };
+                        (edge, edge, -1, -1)
+                    }
+                };
+            }
             if o == gtk::Orientation::Horizontal {
                 (0, 420, -1, -1)
             } else {
@@ -142,7 +152,23 @@ mod image_imp {
             if let Some(ref p) = *self.paintable.borrow() {
                 let bounds = gtk::graphene::Rect::new(0., 0., w as f32, h as f32);
                 snapshot.push_rounded_clip(&gtk::gsk::RoundedRect::from_rect(bounds, 10.));
-                p.snapshot(snapshot, w, h);
+                if self.cover.get() {
+                    let ratio = p.intrinsic_aspect_ratio();
+                    let (width, height) = if ratio <= 0. {
+                        (w, h)
+                    } else {
+                        (w.max(h * ratio), h.max(w / ratio))
+                    };
+                    snapshot.save();
+                    snapshot.translate(&gtk::graphene::Point::new(
+                        ((w - width) / 2.) as f32,
+                        ((h - height) / 2.) as f32,
+                    ));
+                    p.snapshot(snapshot, width, height);
+                    snapshot.restore();
+                } else {
+                    p.snapshot(snapshot, w, h);
+                }
                 snapshot.pop();
             }
         }
@@ -150,6 +176,18 @@ mod image_imp {
 }
 glib::wrapper! {pub struct AspectImage(ObjectSubclass<image_imp::AspectImage>) @extends gtk::Widget,@implements gtk::Accessible,gtk::Buildable,gtk::ConstraintTarget;}
 impl AspectImage {
+    pub fn square() -> Self {
+        let image: Self = glib::Object::new();
+        image.imp().cover.set(true);
+        image
+    }
+    pub fn paintable(&self) -> Option<gdk::Paintable> {
+        self.imp().paintable.borrow().clone()
+    }
+    pub fn set_paintable(&self, paintable: Option<gdk::Paintable>) {
+        self.imp().paintable.replace(paintable);
+        self.queue_draw();
+    }
     pub fn new(path: &Path) -> Self {
         let obj: Self = glib::Object::new();
         let source = gtk::Picture::for_filename(path);

@@ -371,7 +371,19 @@ impl State {
             })
             .cloned()
             .collect();
-        out.sort_by_key(|c| !c.pinned);
+        out.sort_by(|a, b| {
+            b.pinned.cmp(&a.pinned).then_with(|| {
+                if self.account.is_empty() || a.pinned {
+                    return std::cmp::Ordering::Equal;
+                }
+                fn latest(c: &Chat) -> Option<&Message> {
+                    c.messages.iter().rev().find(|m| !m.retracted)
+                }
+                latest(b)
+                    .map(|m| &m.timestamp)
+                    .cmp(&latest(a).map(|m| &m.timestamp))
+            })
+        });
         out
     }
     pub fn chat_for(&mut self, peer: &str) -> &mut Chat {

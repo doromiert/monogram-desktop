@@ -8,10 +8,13 @@ mod downloads;
 mod file_share;
 mod folders;
 mod forwarding;
+mod image_loader;
+mod image_ui;
 mod iq;
 mod legacy_polls;
 mod live_actions;
 mod media;
+mod media_store;
 mod message_actions;
 mod messages;
 mod model;
@@ -28,6 +31,24 @@ mod uploads;
 mod wallet;
 mod widgets;
 fn main() -> gtk::glib::ExitCode {
+    let started = std::time::Instant::now();
+    let mut monitor = None;
+    let mut args = vec![];
+    let mut raw = std::env::args();
+    while let Some(arg) = raw.next() {
+        if arg == "--monitor" {
+            monitor = raw.next();
+            if monitor.is_none() {
+                eprintln!("--monitor requires a connector name, e.g. DP-2");
+                return gtk::glib::ExitCode::FAILURE;
+            }
+        } else if !matches!(
+            arg.as_str(),
+            "--smoke-test" | "--live-smoke-test" | "--crypto-smoke-test" | "--show-media"
+        ) {
+            args.push(arg);
+        }
+    }
     if std::env::args().any(|s| s == "--crypto-smoke-test") {
         assert_eq!(
             std::env::var("MONOGRAM_KEYRING_FIXTURE").as_deref(),
@@ -51,7 +72,11 @@ fn main() -> gtk::glib::ExitCode {
             },
         )
         .build();
-    app.connect_activate(|app| {
+    app.connect_activate(move |app| {
+        if let Some(window) = app.active_window() {
+            window.present();
+            return;
+        }
         let ui = ui::Ui::new(
             app,
             std::env::args().any(|s| {
@@ -71,7 +96,7 @@ fn main() -> gtk::glib::ExitCode {
         if std::env::args().any(|s| s == "--show-media") {
             ui.toggle_media();
         }
-        ui.window.present();
+        present_window(&ui.window, monitor.as_deref(), started);
         if std::env::args().any(|s| s == "--crypto-smoke-test") {
             smoke::run_crypto(ui.clone());
         } else if std::env::args().any(|s| s == "--live-smoke-test") {
@@ -81,14 +106,93 @@ fn main() -> gtk::glib::ExitCode {
         }
         ROOT.with(|root| root.replace(Some(ui)));
     });
-    let args: Vec<_> = std::env::args()
-        .filter(|s| {
-            !matches!(
-                s.as_str(),
-                "--smoke-test" | "--live-smoke-test" | "--crypto-smoke-test" | "--show-media"
-            )
-        })
-        .collect();
     app.run_with_args(&args)
+}
+
+fn present_window(
+    window: &adw::ApplicationWindow,
+    connector: Option<&str>,
+    started: std::time::Instant,
+) {
+    use gtk::{gdk, glib};
+    use std::{cell::Cell, time::Duration};
+    if let Some(connector) = connector {
+        let display = gtk::prelude::WidgetExt::display(window);
+        let monitors = display.monitors();
+        let target = (0..monitors.n_items())
+            .filter_map(|i| monitors.item(i).and_downcast::<gdk::Monitor>())
+            .find(|m| m.connector().as_deref() == Some(connector));
+        if let Some(target) = target {
+            // Wayland supports an explicit output for the first fullscreen map.
+            window.fullscreen_on_monitor(&target);
+            let placed = Cell::new(false);
+            window.connect_map(move |window| {
+                if placed.replace(true) {
+                    return;
+                }
+                if let Some(clock) = window.frame_clock() {
+                    let first = Cell::new(true);
+                    clock.connect_after_paint(move |_| {
+                        if first.replace(false) {
+                            eprintln!("Monogram first paint: {} ms", started.elapsed().as_millis());
+                        }
+                    });
+                }
+                let weak = window.downgrade();
+                let target = target.clone();
+                glib::timeout_add_local_once(Duration::from_millis(200), move || {
+                    let Some(window) = weak.upgrade() else {
+                        return;
+                    };
+                    window.unfullscreen();
+                    let weak = window.downgrade();
+                    glib::timeout_add_local_once(Duration::from_millis(250), move || {
+                        let Some(window) = weak.upgrade() else {
+                            return;
+                        };
+                        let Some(surface) = window.surface() else {
+                            return;
+                        };
+                        let display = gtk::prelude::WidgetExt::display(&window);
+                        if display.monitor_at_surface(&surface).as_ref() == Some(&target) {
+                            eprintln!(
+                                "Monogram monitor: {} ({})",
+                                target.connector().unwrap_or_default(),
+                                if window.is_fullscreen() {
+                                    "fullscreen"
+                                } else {
+                                    "windowed"
+                                }
+                            );
+                        } else {
+                            window.fullscreen_on_monitor(&target);
+                            let weak = window.downgrade();
+                            glib::timeout_add_local_once(Duration::from_millis(250), move || {
+                                if let Some(window) = weak.upgrade() {
+                                    if let Some(surface) = window.surface() {
+                                        let display = gtk::prelude::WidgetExt::display(&window);
+                                        if let Some(actual) = display.monitor_at_surface(&surface) {
+                                            eprintln!(
+                                                "Monogram monitor: {} ({})",
+                                                actual.connector().unwrap_or_default(),
+                                                if window.is_fullscreen() {
+                                                    "fullscreen"
+                                                } else {
+                                                    "windowed"
+                                                }
+                                            );
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    });
+                });
+            });
+        } else {
+            eprintln!("Monogram monitor {connector} is unavailable; using compositor placement");
+        }
+    }
+    window.present();
 }
 thread_local! {static ROOT:std::cell::RefCell<Option<std::rc::Rc<ui::Ui>>>=const{std::cell::RefCell::new(None)};}

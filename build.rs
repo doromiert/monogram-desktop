@@ -37,4 +37,27 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=native/omemo.cpp");
     println!("cargo:rerun-if-changed=native/crypto_provider.c");
+    let image = pkg_config::Config::new()
+        .cargo_metadata(false)
+        .atleast_version("2.1")
+        .probe("glycin-gtk4-2")
+        .expect("libglycin-gtk4 2.1 or newer");
+    let unix = pkg_config::Config::new()
+        .cargo_metadata(false)
+        .probe("gio-unix-2.0")
+        .expect("GIO Unix streams");
+    let mut bridge = cc::Build::new();
+    bridge.opt_level(2).file("native/image_loader.c");
+    for path in image.include_paths.iter().chain(&unix.include_paths) {
+        bridge.include(path);
+    }
+    bridge.compile("monogram_image_loader");
+    // --as-needed requires the shared providers after the archive that references them.
+    for path in image.link_paths.iter().chain(&unix.link_paths) {
+        println!("cargo:rustc-link-search=native={}", path.display());
+    }
+    for library in image.libs.iter().chain(&unix.libs) {
+        println!("cargo:rustc-link-lib={library}");
+    }
+    println!("cargo:rerun-if-changed=native/image_loader.c");
 }

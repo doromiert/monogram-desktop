@@ -24,6 +24,7 @@ impl Ui {
                 .is_none_or(|m| m.retracted)
             {
                 self.downloads.borrow_mut().cancel(owner, &file);
+                self.images.borrow_mut().invalidate(&file);
             }
         }
         c.unread = self.store.unread_count(owner, peer);

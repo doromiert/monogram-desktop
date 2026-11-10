@@ -20,11 +20,14 @@ impl Store {
             let path = root.join("history.sqlite3");
             let db = Connection::open(&path)?;
             let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+            // Media history readers must not block foreground message writes.
+            db.pragma_update(None, "journal_mode", "WAL")?;
             db
         };
         db.execute_batch("PRAGMA foreign_keys=ON;CREATE TABLE IF NOT EXISTS accounts(jid TEXT PRIMARY KEY,config TEXT NOT NULL);CREATE TABLE IF NOT EXISTS chats(account TEXT NOT NULL REFERENCES accounts(jid) ON DELETE CASCADE,peer TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(account,peer));CREATE TABLE IF NOT EXISTS messages(account TEXT NOT NULL,peer TEXT NOT NULL,id TEXT NOT NULL,timestamp TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(account,peer,id),FOREIGN KEY(account,peer) REFERENCES chats(account,peer) ON DELETE CASCADE);CREATE INDEX IF NOT EXISTS message_order ON messages(account,peer,timestamp,id);CREATE TABLE IF NOT EXISTS aliases(account TEXT NOT NULL,peer TEXT NOT NULL,own INTEGER NOT NULL,alias TEXT NOT NULL,message TEXT NOT NULL,PRIMARY KEY(account,peer,own,alias));CREATE TABLE IF NOT EXISTS preferences(key TEXT PRIMARY KEY,value TEXT NOT NULL);")?;
         let store = Self { db };
         store.init_actions()?;
+        store.init_media()?;
         Ok(store)
     }
     pub fn accounts(&self) -> Vec<Account> {
@@ -54,6 +57,28 @@ impl Store {
             params![key, value],
         )?;
         Ok(())
+    }
+    pub fn blind_trust(&self, owner: &str, peer: &str) -> rusqlite::Result<bool> {
+        if owner == peer {
+            return Ok(false);
+        }
+        self.db
+            .query_row(
+                "SELECT value='true' FROM preferences WHERE key=?",
+                [format!("blind-trust:{owner}\n{peer}")],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|value| value.unwrap_or(false))
+    }
+    pub fn set_blind_trust(&self, owner: &str, peer: &str, enabled: bool) -> rusqlite::Result<()> {
+        if owner == peer || crate::protocol::bare(peer).ok().as_deref() != Some(peer) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        self.set_pref(
+            &format!("blind-trust:{owner}\n{peer}"),
+            if enabled { "true" } else { "false" },
+        )
     }
     pub fn save(&self, s: &State) -> rusqlite::Result<()> {
         if s.account.is_empty() {
@@ -138,19 +163,26 @@ impl Store {
         before: Option<(&str, &str)>,
         limit: u32,
     ) -> Vec<Message> {
+        self.try_history(a, peer, before, limit).unwrap_or_default()
+    }
+    pub fn try_history(
+        &self,
+        a: &str,
+        peer: &str,
+        before: Option<(&str, &str)>,
+        limit: u32,
+    ) -> rusqlite::Result<Vec<Message>> {
         let (time, id) = before.unwrap_or(("~", "~"));
-        let mut stmt=self.db.prepare("SELECT body FROM messages WHERE account=? AND peer=? AND (timestamp,id)<(?,?) AND COALESCE(json_extract(body,'$.retracted'),0)=0 ORDER BY timestamp DESC,id DESC LIMIT ?").unwrap();
+        let mut stmt=self.db.prepare("SELECT body FROM messages WHERE account=? AND peer=? AND (timestamp,id)<(?,?) AND COALESCE(json_extract(body,'$.retracted'),0)=0 ORDER BY timestamp DESC,id DESC LIMIT ?")?;
         let mut rows: Vec<_> = stmt
-            .query_map(params![a, peer, time, id, limit], |r| r.get::<_, String>(0))
-            .unwrap()
-            .filter_map(|r| {
-                r.ok()
-                    .and_then(|s| Message::decode(&s).ok())
-                    .filter(|m| !m.retracted)
-            })
+            .query_map(params![a, peer, time, id, limit], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter_map(|body| Message::decode(&body).ok())
+            .filter(|m| !m.retracted)
             .collect();
         rows.reverse();
-        rows
+        Ok(rows)
     }
     pub fn known(&self, a: &str, peer: &str, own: bool, aliases: &[String]) -> Option<String> {
         aliases.iter().find_map(|alias| {
@@ -276,6 +308,11 @@ impl Store {
         tx.execute(
             "DELETE FROM preferences WHERE key=?",
             [format!("folders:{a}")],
+        )?;
+        let trust_prefix = format!("blind-trust:{a}\n");
+        tx.execute(
+            "DELETE FROM preferences WHERE substr(key,1,length(?1))=?1",
+            [trust_prefix],
         )?;
         tx.commit()
     }

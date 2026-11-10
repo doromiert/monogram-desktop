@@ -1,10 +1,21 @@
 use crate::{model::*, ui::Ui, widgets::*};
 use adw::prelude::*;
 use gtk::{gdk, glib};
-use std::{rc::Rc, time::Duration};
+use std::{cell::Cell, rc::Rc, time::Duration};
+pub enum ScrollTarget {
+    Bottom,
+    Position {
+        value: f64,
+        anchor: Option<(String, f64)>,
+    },
+}
 impl Ui {
     pub fn render_messages(self: &Rc<Self>, bottom: bool) {
-        let old_value = self.scroll.vadjustment().value();
+        let position = if bottom {
+            ScrollTarget::Bottom
+        } else {
+            self.capture_scroll_position()
+        };
         clear_list(&self.timeline);
         self.bubbles.borrow_mut().clear();
         let state = self.state.borrow();
@@ -362,20 +373,65 @@ impl Ui {
             self.timeline.append(&row);
         }
         self.update_selection();
-        let weak = Rc::downgrade(self);
-        glib::idle_add_local_once(move || {
-            if let Some(ui) = weak.upgrade() {
-                let a = ui.scroll.vadjustment();
-                a.set_value(if bottom {
-                    a.upper() - a.page_size()
-                } else {
-                    old_value
-                });
+        self.queue_message_scroll(position);
+    }
+    fn capture_scroll_position(&self) -> ScrollTarget {
+        let value = self.scroll.vadjustment().value();
+        let mut row = self
+            .timeline
+            .row_at_y(value as i32)
+            .map(|row| row.upcast::<gtk::Widget>());
+        let mut anchor = None;
+        while let Some(widget) = row {
+            let id = widget.widget_name();
+            if let Some(bubble) = self.bubbles.borrow().get(id.as_str()) {
+                if let Some(bounds) = bubble.compute_bounds(&self.timeline) {
+                    anchor = Some((id.to_string(), f64::from(bounds.y()) - value));
+                    break;
+                }
             }
-        });
-        if live {
-            self.history.set_visible(true)
+            row = widget.next_sibling();
         }
+        ScrollTarget::Position { value, anchor }
+    }
+    pub fn at_message_end(&self) -> bool {
+        let adjustment = self.scroll.vadjustment();
+        adjustment.upper() - adjustment.page_size() - adjustment.value() < 24.
+    }
+    pub fn queue_message_scroll(self: &Rc<Self>, target: ScrollTarget) {
+        let pending = self.message_scroll.borrow().is_some();
+        // A receipt or an archive response may rebuild the rows in the same frame.
+        if !pending || matches!(target, ScrollTarget::Bottom) {
+            self.message_scroll.replace(Some(target));
+        }
+        if pending {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        self.scroll.add_tick_callback(move |_, clock| {
+            let weak = weak.clone();
+            let handler = Rc::new(Cell::new(None));
+            let signal = handler.clone();
+            handler.set(Some(clock.connect_after_paint(move |clock| {
+                clock.disconnect(signal.take().unwrap());
+                if let Some(ui) = weak.upgrade() {
+                    if let Some(target) = ui.message_scroll.take() {
+                        let adjustment = ui.scroll.vadjustment();
+                        adjustment.set_value(match target {
+                            ScrollTarget::Bottom => adjustment.upper() - adjustment.page_size(),
+                            ScrollTarget::Position { value, anchor } => anchor
+                                .and_then(|(id, delta)| {
+                                    let bubbles = ui.bubbles.borrow();
+                                    let bounds = bubbles.get(&id)?.compute_bounds(&ui.timeline)?;
+                                    Some(f64::from(bounds.y()) - delta)
+                                })
+                                .unwrap_or(value),
+                        });
+                    }
+                }
+            })));
+            glib::ControlFlow::Break
+        });
     }
     pub fn highlight(self: &Rc<Self>, id: &str) {
         let weak = Rc::downgrade(self);
@@ -557,6 +613,7 @@ impl Ui {
                 }
                 if let Some(file) = s.message(id).and_then(|m| m.attachment.as_ref()) {
                     self.downloads.borrow_mut().cancel(&s.account, file);
+                    self.images.borrow_mut().invalidate(file);
                 }
             }
         }
