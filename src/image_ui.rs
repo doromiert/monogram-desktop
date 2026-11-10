@@ -149,35 +149,43 @@ impl Ui {
 }
 
 impl Ui {
-    pub fn attach_image(self: &Rc<Self>, message: &crate::model::Message, content: &gtk::Box) {
+    pub(crate) fn in_chat_viewport(&self, widget: &impl IsA<gtk::Widget>) -> bool {
+        widget.is_mapped()
+            && widget.compute_bounds(&self.scroll).is_some_and(|bounds| {
+                bounds.y() < self.scroll.height() as f32 && bounds.y() + bounds.height() > 0.
+            })
+    }
+    pub fn attach_image(
+        self: &Rc<Self>,
+        message: &crate::model::Message,
+        content: &gtk::Box,
+        controls: &gtk::Box,
+    ) {
         let file = message.attachment.as_ref().unwrap().clone();
+        let sticker = file.sticker;
         let id = message.id.clone();
         let owner = self.state.borrow().account.clone();
         let peer = self.state.borrow().current().jid.clone();
         let generation = self.generation.get();
-        let picture = gtk::Picture::builder()
-            .can_shrink(true)
-            .content_fit(gtk::ContentFit::Contain)
-            .build();
-        let aspect = gtk::AspectFrame::builder()
-            .ratio(1.5)
-            .obey_child(false)
-            .child(&picture)
-            .build();
+        let picture =
+            crate::widgets::AspectImage::thumbnail(if sticker { 168 } else { 320 }, sticker);
         let button = gtk::Button::builder()
-            .child(&aspect)
+            .child(&picture)
             .visible(false)
-            .tooltip_text("View image")
+            .halign(gtk::Align::Start)
+            .tooltip_text(if sticker {
+                "View sticker"
+            } else {
+                "View image"
+            })
             .build();
         button.set_widget_name(&id);
         button.add_css_class("shared-media-tile");
-        button.set_overflow(gtk::Overflow::Hidden);
-        let clamp = adw::Clamp::builder()
-            .maximum_size(420)
-            .tightening_threshold(300)
-            .child(&button)
-            .build();
-        content.append(&clamp);
+        button.add_css_class("message-media-tile");
+        if sticker {
+            button.add_css_class("message-sticker-tile");
+        }
+        content.append(&button);
         let weak = Rc::downgrade(self);
         button.connect_clicked(move |button| {
             if let Some(ui) = weak.upgrade() {
@@ -187,10 +195,10 @@ impl Ui {
         let weak = Rc::downgrade(self);
         let p = picture.downgrade();
         let b = button.downgrade();
-        let a = aspect.downgrade();
+        let fallback = controls.downgrade();
         glib::timeout_add_local(std::time::Duration::from_millis(150), move || {
-            let (Some(ui), Some(picture), Some(button), Some(aspect)) =
-                (weak.upgrade(), p.upgrade(), b.upgrade(), a.upgrade())
+            let (Some(ui), Some(picture), Some(button)) =
+                (weak.upgrade(), p.upgrade(), b.upgrade())
             else {
                 return glib::ControlFlow::Break;
             };
@@ -202,49 +210,75 @@ impl Ui {
             }
             if let Some(path) = ui.cached_image_source(&file) {
                 let edge = (768 * picture.scale_factor() as u32).min(1536);
-                if let Some(Ok(image)) = ui.image(&file, &path, edge) {
-                    if !ui
-                        .store
-                        .remember_image(
-                            &owner,
-                            &peer,
-                            &id,
-                            &file,
-                            &image.mime,
-                            image.width,
-                            image.height,
-                            image.animated,
-                        )
-                        .unwrap_or(false)
-                    {
+                match ui.image(&file, &path, edge) {
+                    Some(Ok(image)) => {
+                        if !ui
+                            .store
+                            .remember_image(
+                                &owner,
+                                &peer,
+                                &id,
+                                &file,
+                                &image.mime,
+                                image.width,
+                                image.height,
+                                image.animated,
+                            )
+                            .unwrap_or(false)
+                        {
+                            return glib::ControlFlow::Break;
+                        }
+                        let adjustment = ui.scroll.vadjustment();
+                        let old = adjustment.value();
+                        let follow = adjustment.upper() - adjustment.page_size() - old < 20.;
+                        picture.set_paintable(Some(image.texture.upcast()));
+                        button.set_visible(true);
+                        if let Some(controls) = fallback.upgrade() {
+                            controls.set_visible(false);
+                        }
+                        if image.animated {
+                            let weak = Rc::downgrade(&ui);
+                            crate::image_loader::play(
+                                &picture,
+                                path,
+                                file.clone(),
+                                if sticker { 352 } else { 640 },
+                                move |picture| {
+                                    weak.upgrade()
+                                        .is_some_and(|ui| ui.in_chat_viewport(picture))
+                                },
+                                |picture, frame| picture.set_paintable(Some(frame.upcast())),
+                            );
+                        }
+                        if follow {
+                            let button = button.downgrade();
+                            glib::timeout_add_local_once(
+                                std::time::Duration::from_millis(45),
+                                move || {
+                                    if button.upgrade().is_some_and(|button| button.is_mapped())
+                                        && adjustment.value() >= old - 16.
+                                    {
+                                        adjustment.set_value(
+                                            (adjustment.upper() - adjustment.page_size()).max(0.),
+                                        );
+                                    }
+                                },
+                            );
+                        }
                         return glib::ControlFlow::Break;
                     }
-                    let adjustment = ui.scroll.vadjustment();
-                    let old = adjustment.value();
-                    let follow = adjustment.upper() - adjustment.page_size() - old < 20.;
-                    picture.set_paintable(Some(&image.texture));
-                    aspect.set_ratio(
-                        (image.texture.width() as f32 / image.texture.height().max(1) as f32)
-                            .clamp(0.6, 2.5),
-                    );
-                    button.set_visible(true);
-                    picture.set_width_request(280);
-                    if follow {
-                        let button = button.downgrade();
-                        glib::timeout_add_local_once(
-                            std::time::Duration::from_millis(45),
-                            move || {
-                                if button.upgrade().is_some_and(|button| button.is_mapped())
-                                    && adjustment.value() >= old - 16.
-                                {
-                                    adjustment.set_value(
-                                        (adjustment.upper() - adjustment.page_size()).max(0.),
-                                    );
-                                }
-                            },
-                        );
+                    Some(Err(_)) if file.image_candidate() => {
+                        if let Some(controls) = fallback.upgrade() {
+                            crate::widgets::clear(&controls);
+                            controls.append(&crate::widgets::wrap(
+                                "Image preview unavailable",
+                                "dim-label",
+                            ));
+                        }
+                        return glib::ControlFlow::Break;
                     }
-                    return glib::ControlFlow::Break;
+                    Some(Err(_)) => return glib::ControlFlow::Break,
+                    None => {}
                 }
             }
             glib::ControlFlow::Continue

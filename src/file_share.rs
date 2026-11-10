@@ -242,6 +242,26 @@ impl Attachment {
             );
         }
     }
+    pub fn image_candidate(&self) -> bool {
+        self.sticker || self.mime.starts_with("image/") || self.image_extension()
+    }
+    pub fn image_extension(&self) -> bool {
+        self.name.rsplit_once('.').is_some_and(|(_, ext)| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "avif" | "gif" | "heic" | "jpeg" | "jpg" | "png" | "webp"
+            )
+        })
+    }
+    pub fn image_label(&self) -> &'static str {
+        if self.sticker {
+            "Sticker"
+        } else if self.mime == "image/gif" || self.name.to_ascii_lowercase().ends_with(".gif") {
+            "GIF"
+        } else {
+            "Image"
+        }
+    }
     pub fn link(&self) -> Option<Link> {
         Link::parse(&self.wire_url)
     }
@@ -336,7 +356,8 @@ impl Attachment {
             .children()
             .filter(|c| c.is("file-sharing", NS))
             .collect();
-        let value = if descriptions.is_empty() {
+        let sticker = Self::sticker_marker(root);
+        let mut value = if descriptions.is_empty() {
             let references: Vec<_> = root.children().filter(|c| c.is("x", OOB)).collect();
             if references.len() == 1 {
                 Self::bare(&only(references[0], "url", OOB)?.text())?
@@ -346,17 +367,22 @@ impl Attachment {
                 return None;
             }
         } else if descriptions.len() == 1 {
-            Self::description(
-                descriptions[0],
-                root.children()
-                    .filter(|c| c.is("sticker", "urn:xmpp:stickers:0"))
-                    .count()
-                    == 1,
-            )?
+            Self::description(descriptions[0], sticker)?
         } else {
             return None;
         };
+        value.sticker = sticker;
         (value.link()?.encrypted() == encrypted).then_some(value)
+    }
+    pub fn sticker_marker(root: &Element) -> bool {
+        let mut markers = root
+            .children()
+            .filter(|c| c.is("sticker", "urn:xmpp:stickers:0"));
+        markers.next().is_some_and(|marker| {
+            marker.attrs().iter().next().is_none()
+                && marker.children().next().is_none()
+                && marker.text().trim().is_empty()
+        }) && markers.next().is_none()
     }
     /// Only validated file URL spans disappear; malformed fallbacks keep caption text.
     pub fn caption(&self, root: &Element, body: &str) -> String {

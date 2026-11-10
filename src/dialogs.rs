@@ -13,6 +13,11 @@ use std::{
     collections::HashMap,
     rc::Rc,
 };
+fn set_switch(row: &adw::SwitchRow, changing: &Cell<bool>, active: bool) {
+    changing.set(true);
+    row.set_active(active);
+    changing.set(false);
+}
 pub struct SecurityControls {
     generation: u64,
     pub(crate) sending: adw::ComboRow,
@@ -165,43 +170,42 @@ impl Ui {
         choices.add(&sending);
         let owner = self.state.borrow().account.clone();
         if peer != owner && !self.state.borrow().current().group {
-            let trust = adw::ActionRow::builder()
+            let trust = adw::SwitchRow::builder()
                 .title("Blindly Trust This Contact")
                 .subtitle("Applies to Legacy OMEMO and OMEMO 2")
+                .active(self.store.blind_trust(&owner, &peer).unwrap_or(false))
                 .build();
-            let toggle = gtk::Button::with_label(
-                if self.store.blind_trust(&owner, &peer).unwrap_or(false) {
-                    "Disable"
-                } else {
-                    "Enable…"
-                },
-            );
-            toggle.set_valign(gtk::Align::Center);
-            trust.add_suffix(&toggle);
             let weak = Rc::downgrade(self);
             let target = peer.clone();
-            toggle.connect_clicked(move |button| {
+            let setting = Rc::new(Cell::new(false));
+            trust.connect_active_notify(move |row| {
+                if setting.get() { return; }
                 let Some(ui) = weak.upgrade().filter(|ui| ui.generation.get() == generation) else { return };
                 let Ok(enabled) = ui.store.blind_trust(&owner, &target) else {
+                    set_switch(row, &setting, !row.is_active());
                     ui.notice("Could not read the trust setting");
                     return;
                 };
+                if row.is_active() == enabled { return; }
                 if enabled {
-                    ui.set_blind_trust(&owner, &target, false, button);
+                    if !ui.set_blind_trust(&owner, &target, false) {
+                        set_switch(row, &setting, true);
+                    }
                     return;
                 }
+                set_switch(row, &setting, false);
                 let confirm = adw::AlertDialog::builder()
                     .heading("Blindly Trust This Contact?")
-                    .body(format!("New devices and changed keys for {target} will be accepted without fingerprint verification. Anyone who controls their account could receive future messages. Blocked devices stay blocked. Turning this off stops new approvals and keeps fingerprints already approved."))
+                    .body(format!("Approve new devices and changed keys for {target} without fingerprint verification. Explicitly blocked devices stay blocked."))
                     .build();
                 confirm.add_responses(&[("cancel", "Cancel"), ("enable", "Enable Blind Trust")]);
                 confirm.set_default_response(Some("cancel"));
                 confirm.set_response_appearance("enable", adw::ResponseAppearance::Destructive);
-                let (owner, target, weak, button) = (owner.clone(), target.clone(), weak.clone(), button.downgrade());
+                let (owner, target, weak, row, setting) = (owner.clone(), target.clone(), weak.clone(), row.downgrade(), setting.clone());
                 confirm.connect_response(Some("enable"), move |_, _| {
-                    if let (Some(ui), Some(button)) = (weak.upgrade(), button.upgrade()) {
-                        if ui.generation.get() == generation {
-                            ui.set_blind_trust(&owner, &target, true, &button);
+                    if let (Some(ui), Some(row)) = (weak.upgrade(), row.upgrade()) {
+                        if ui.generation.get() == generation && ui.set_blind_trust(&owner, &target, true) {
+                            set_switch(&row, &setting, true);
                         }
                     }
                 });
@@ -244,12 +248,11 @@ impl Ui {
             }
         });
     }
-    fn set_blind_trust(&self, owner: &str, peer: &str, enabled: bool, button: &gtk::Button) {
+    fn set_blind_trust(&self, owner: &str, peer: &str, enabled: bool) -> bool {
         if self.store.set_blind_trust(owner, peer, enabled).is_err() {
             self.notice("Could not save the trust setting");
-            return;
+            return false;
         }
-        button.set_label(if enabled { "Disable" } else { "Enable…" });
         self.invalidate_sending_choice(peer);
         if enabled {
             self.command(protocol::Command::Legacy(
@@ -259,6 +262,7 @@ impl Ui {
                 crate::crypto::service::Request::RefreshTrust(peer.into()),
             ));
         }
+        true
     }
     pub fn handle_device_review(
         self: &Rc<Self>,
@@ -680,7 +684,7 @@ impl Ui {
         let page = adw::PreferencesPage::new();
         let g = adw::PreferencesGroup::builder()
             .title("XMPP Accounts")
-            .description("Passwords are kept only in memory for the current connection")
+            .description("Saved sign-ins use the system keyring")
             .build();
         page.add(&g);
         for account in self.store.accounts() {
@@ -730,6 +734,8 @@ impl Ui {
             row.connect_activated(move |_| {
                 if let Some(ui) = weak.upgrade() {
                     ui.save_draft();
+                    let owner = ui.state.borrow().account.clone();
+                    let _ = ui.store.set_pref(&format!("auto-connect:{owner}"), "false");
                     ui.session.borrow_mut().take();
                     ui.generation.set(ui.generation.get() + 1);
                     ui.online.set(false);
@@ -873,27 +879,36 @@ impl Ui {
         d.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
         let owner = owner.to_string();
         let weak = Rc::downgrade(self);
-        d.connect_response(None, move |_, r| {
-            if r == "remove" {
-                if let Some(ui) = weak.upgrade() {
-                    if ui.state.borrow().account == owner {
-                        let demo = ui.demo.borrow().clone();
-                        ui.activate_state(demo)
-                    }
-                    if ui.store.forget(&owner).is_err() {
-                        ui.notice("Local account removal failed");
-                        return;
-                    }
-                    if let Err(reason) = crate::downloads::forget(&owner) {
-                        ui.notice(reason);
-                    }
-                    if !ui.smoke && ui.store.accounts().is_empty() {
-                        ui.show_welcome();
-                    } else {
-                        ui.accounts_dialog();
-                    }
-                }
+        d.connect_response(None, move |_, response| {
+            if response != "remove" {
+                return;
             }
+            let owner = owner.clone();
+            let weak = weak.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let result = crate::credentials::remove(&owner).await;
+                let Some(ui) = weak.upgrade() else { return };
+                if let Err(error) = result {
+                    ui.notice(&format!("Could not remove saved sign-in. {error}"));
+                    return;
+                }
+                if ui.state.borrow().account == owner {
+                    let demo = ui.demo.borrow().clone();
+                    ui.activate_state(demo);
+                }
+                if ui.store.forget(&owner).is_err() {
+                    ui.notice("Local account removal failed");
+                    return;
+                }
+                if let Err(reason) = crate::downloads::forget(&owner) {
+                    ui.notice(reason);
+                }
+                if !ui.smoke && ui.store.accounts().is_empty() {
+                    ui.show_welcome();
+                } else {
+                    ui.accounts_dialog();
+                }
+            });
         });
         d.present(Some(&self.window));
     }

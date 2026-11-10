@@ -475,6 +475,7 @@ pub enum BackendEvent {
         text: String,
     },
     CryptoAliases {
+        legacy_sticker: bool,
         peer: String,
         own: bool,
         id: String,
@@ -506,6 +507,9 @@ pub enum BackendEvent {
         text: String,
     },
     Roster(Vec<(String, String, String)>),
+    RoomBookmarks(Vec<crate::rooms::BookmarkInfo>),
+    RoomPresence(crate::rooms::Presence),
+    RoomError(String),
     Presence {
         peer: String,
         online: bool,
@@ -554,6 +558,15 @@ pub enum Command {
     },
     Crypto(crate::crypto::service::Request),
     Legacy(crate::crypto::legacy::service::Request),
+    LoadRoomBookmarks,
+    RoomBookmarksLoaded {
+        epoch: u64,
+        result: Result<Vec<crate::rooms::Bookmark>, crate::rooms::Error>,
+    },
+    JoinRoom {
+        peer: String,
+        nick: Option<String>,
+    },
     Avatar {
         peer: String,
         source: crate::avatar::Source,
@@ -617,6 +630,10 @@ impl Session {
                 let crypto=modern::Handle::start(owner.clone(),generation,network.clone(),events.clone());
                 let legacy=legacy::service::Handle::start(owner.clone(),generation,network.clone(),events.clone());
                 let mut iq=crate::iq::Pending::default();
+                let mut rooms=crate::rooms::Rooms::new(owner.clone());
+                let mut room_epoch=0u64;
+                let mut loading_rooms=false;
+                let mut subscribing_rooms=false;
                 let mut crypto_ready=false;let mut legacy_ready=false;let mut online=false;let mut mam:HashMap<String,(String,std::time::Instant)>=HashMap::new();let mut resources:HashMap<String,std::collections::HashSet<String>>=HashMap::new();let mut timer=tokio::time::interval(Duration::from_secs(1));let mut handshake=std::time::Instant::now();
                 emit(BackendEvent::Status{online:false,error:false,text:"Connecting…".into()});
                 loop{tokio::select!{
@@ -626,6 +643,39 @@ impl Session {
                         Some(Command::LegacyReady(ready))=>legacy_ready=ready,
                         Some(Command::Crypto(request))=>crypto.send(request),
                         Some(Command::Legacy(request))=>legacy.send(request),
+                        Some(Command::LoadRoomBookmarks) if online && !loading_rooms => {
+                            loading_rooms=true;
+                            let tx=network.clone(); let owner=owner.clone(); let epoch=room_epoch;
+                            let subscribe=!std::mem::replace(&mut subscribing_rooms,true);
+                            tokio::spawn(async move {
+                                let iq=crate::iq::Client::new(tx.clone());
+                                let result=crate::rooms::load_bookmarks(&iq,&owner).await;
+                                let _=tx.send(Command::RoomBookmarksLoaded{epoch,result});
+                                if subscribe { crate::rooms::subscribe_bookmarks(&iq,&owner).await; }
+                            });
+                        },
+                        Some(Command::LoadRoomBookmarks)=>{},
+                        Some(Command::RoomBookmarksLoaded{epoch,result}) if online && epoch==room_epoch=>{
+                            loading_rooms=false;
+                            match result {
+                                Ok(bookmarks)=>{
+                                    emit(BackendEvent::RoomBookmarks(rooms.import(bookmarks)));
+                                    for peer in rooms.autojoin(){ let _=network.send(Command::JoinRoom{peer,nick:None}); }
+                                }
+                                Err(error)=>emit(BackendEvent::RoomError(error.to_string())),
+                            }
+                        },
+                        Some(Command::RoomBookmarksLoaded{..})=>{},
+                        Some(Command::JoinRoom{peer,nick})=>{
+                            if !online { emit(BackendEvent::RoomError("Connect before joining a room".into())); continue; }
+                            match rooms.join(&peer,nick.as_deref()){
+                                Ok(presence)=>{
+                                    emit(BackendEvent::RoomPresence(rooms.status(&peer)));
+                                    if !send(&mut client,presence).await { emit(BackendEvent::RoomError("Could not send the room join request".into())); }
+                                }
+                                Err(error)=>emit(BackendEvent::RoomError(error.to_string())),
+                            }
+                        },
                         Some(Command::Avatar { peer, source, reply })=>{
                             let client = crate::iq::Client::new(network.clone());
                             tokio::spawn(async move {
@@ -662,6 +712,13 @@ impl Session {
                         },
                         Some(Command::Send{peer,message,quote})=>{
                             if !online || message.unavailable || message.upload.is_some() || message.attachment.as_ref().is_some_and(|file|!file.valid_outgoing(message.encrypted)||message.poll.is_some()||message.action.is_some()){emit(BackendEvent::Failed{peer,id:message.wire_id});continue}
+                            if rooms.known(&peer) {
+                                match rooms.outgoing(&peer,&message,&quote){
+                                    Ok(root)=>{let ok=send(&mut client,root).await;emit(if ok{BackendEvent::Sent{peer,id:message.wire_id}}else{BackendEvent::Failed{peer,id:message.wire_id}});}
+                                    Err(error)=>{emit(BackendEvent::RoomError(error.to_string()));emit(BackendEvent::Failed{peer,id:message.wire_id});}
+                                }
+                                continue;
+                            }
                             match message.mode() {
                                 Mode::Legacy => { legacy.send(legacy::service::Request::Send{peer,message,quote}); continue; },
                                 Mode::Omemo2 => { crypto.send(modern::Request::Send{peer,message,quote}); continue; },
@@ -680,12 +737,17 @@ impl Session {
                         Some(Command::Receipt{peer,id})=>{if online{send(&mut client,Element::builder("message",NS).attr("to".try_into().expect("static XML attribute"),peer).attr("type".try_into().expect("static XML attribute"),"chat").append(Element::builder("received","urn:xmpp:receipts").attr("id".try_into().expect("static XML attribute"),id).build()).build()).await;}},
                     }},
                     event=client.next()=>{match event{
-                        Some(Event::Online)=>{online=true;crypto.send(modern::Request::Online(true));legacy.send(legacy::service::Request::Online(true));emit(BackendEvent::Status{online:true,error:false,text:"Connected · TLS".into()});send(&mut client,el("presence",NS)).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"get").attr("id".try_into().expect("static XML attribute"),"roster").append(el("query","jabber:iq:roster")).build()).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"set").attr("id".try_into().expect("static XML attribute"),"carbons").append(el("enable","urn:xmpp:carbons:2")).build()).await;},
-                        Some(Event::Disconnected(error))=>{#[cfg(test)] eprintln!("fixture disconnect: {error:?}");online=false;crypto_ready=false;legacy_ready=false;crypto.send(modern::Request::Online(false));legacy.send(legacy::service::Request::Online(false));iq.disconnect();resources.clear();handshake=std::time::Instant::now();let fatal = fatal_error(&error);emit(BackendEvent::Status{online:false,error:fatal,text:if fatal{"Sign-in failed. Check credentials, TLS certificate and server configuration."}else{"Disconnected. Reconnecting…"}.into()});if fatal{break}},
+                        Some(Event::Online)=>{online=true;room_epoch=room_epoch.wrapping_add(1);let _=network.send(Command::LoadRoomBookmarks);crypto.send(modern::Request::Online(true));legacy.send(legacy::service::Request::Online(true));emit(BackendEvent::Status{online:true,error:false,text:"Connected · TLS".into()});send(&mut client,el("presence",NS)).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"get").attr("id".try_into().expect("static XML attribute"),"roster").append(el("query","jabber:iq:roster")).build()).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"set").attr("id".try_into().expect("static XML attribute"),"carbons").append(el("enable","urn:xmpp:carbons:2")).build()).await;},
+                        Some(Event::Disconnected(error))=>{#[cfg(test)] eprintln!("fixture disconnect: {error:?}");online=false;rooms.disconnect();loading_rooms=false;subscribing_rooms=false;crypto_ready=false;legacy_ready=false;crypto.send(modern::Request::Online(false));legacy.send(legacy::service::Request::Online(false));iq.disconnect();resources.clear();handshake=std::time::Instant::now();let fatal = fatal_error(&error);emit(BackendEvent::Status{online:false,error:fatal,text:if fatal{"Sign-in failed. Check credentials, TLS certificate and server configuration."}else{"Disconnected. Reconnecting…"}.into()});if fatal{break}},
                         None=>break,
                         Some(Event::Stanza(stanza))=>{
                             let root:Element=stanza.into();if iq.receive(&root,&owner){continue}let from=root.attr("from").unwrap_or("");
                             if root.is("message",NS){
+                                if crate::rooms::bookmark_changed(&root,&owner) { let _=network.send(Command::LoadRoomBookmarks); }
+                                if root.attr("type")==Some("groupchat"){
+                                    if let Some((peer,message,historical))=rooms.message(&root){emit(BackendEvent::Message{peer,message,historical,receipt_to:None});}
+                                    continue;
+                                }
                                 if crate::avatar::pep_changed(&root) && bare(from).ok().as_deref()==Some(from) {
                                     emit(BackendEvent::AvatarChanged{peer:from.into(),hint:None});
                                 }
@@ -698,7 +760,10 @@ impl Session {
                                 if let Some(wrapper)=carbon{if from!=owner{continue}if let Some(inner)=wrapper.get_child("forwarded","urn:xmpp:forward:0").and_then(|f|f.get_child("message",NS)){deliver(&crypto,&legacy,&emit,inner,&owner,None,true,None);}continue}
                                 if let Some((_peer,message,historical))=normalize(&root,&owner,None){let receipt_to=(!historical&&!message.own&&!message.wire_id.is_empty()&&root.get_child("request","urn:xmpp:receipts").is_some()).then(||from.to_string());deliver(&crypto,&legacy,&emit,&root,&owner,None,historical,receipt_to);}
                                 if root.get_child("delay","urn:xmpp:delay").is_none(){for name in ["composing","paused","active","inactive","gone"]{if root.get_child(name,"http://jabber.org/protocol/chatstates").is_some(){emit(BackendEvent::Typing{peer:bare_of(from),composing:name=="composing"})}}}
-                            }else if root.is("presence",NS){let peer=bare_of(from);let kind=root.attr("type").unwrap_or("");if kind.is_empty() {if let Some(hint)=crate::avatar::presence_hash(&root){let avatar_peer=if root.get_child("x","http://jabber.org/protocol/muc#user").is_some(){from.to_string()}else{peer.clone()};if bare(&peer).ok().as_deref()==Some(&peer){emit(BackendEvent::AvatarChanged{peer:avatar_peer,hint:Some(hint)});}}}if kind=="subscribe"{emit(BackendEvent::Request(peer));continue}let set=resources.entry(peer.clone()).or_default();if kind=="unavailable"{set.remove(from);}else if kind.is_empty(){set.insert(from.into());}emit(BackendEvent::Presence{peer,online:!set.is_empty()});
+                            }else if root.is("presence",NS){
+                                if let Some(presence)=rooms.presence(&root){emit(BackendEvent::RoomPresence(presence));continue;}
+                                if root.get_child("x","http://jabber.org/protocol/muc#user").is_some(){continue;}
+                                let peer=bare_of(from);let kind=root.attr("type").unwrap_or("");if kind.is_empty() {if let Some(hint)=crate::avatar::presence_hash(&root){let avatar_peer=if root.get_child("x","http://jabber.org/protocol/muc#user").is_some(){from.to_string()}else{peer.clone()};if bare(&peer).ok().as_deref()==Some(&peer){emit(BackendEvent::AvatarChanged{peer:avatar_peer,hint:Some(hint)});}}}if kind=="subscribe"{emit(BackendEvent::Request(peer));continue}let set=resources.entry(peer.clone()).or_default();if kind=="unavailable"{set.remove(from);}else if kind.is_empty(){set.insert(from.into());}emit(BackendEvent::Presence{peer,online:!set.is_empty()});
                             }else if root.is("iq",NS){let id=root.attr("id").unwrap_or("");let trusted=from.is_empty()||from==owner;
                                 if trusted{if let Some(query)=root.get_child("query","jabber:iq:roster"){let contacts=query.children().filter(|c|c.is("item","jabber:iq:roster")).filter_map(|c|Some((c.attr("jid")?.into(),c.attr("name").unwrap_or("").into(),c.attr("subscription").unwrap_or("none").into()))).collect();emit(BackendEvent::Roster(contacts));if root.attr("type")==Some("set"){send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).build()).await;}}}
                                 if !trusted && mam.contains_key(id) { continue } if let Some((peer,_))=mam.remove(id){let fin=root.get_child("fin","urn:xmpp:mam:2");let before=fin.and_then(|f|f.get_child("set","http://jabber.org/protocol/rsm")).and_then(|s|s.get_child("first","http://jabber.org/protocol/rsm")).map(|f|f.text()).unwrap_or_default();let complete=fin.is_some_and(|f|matches!(f.attr("complete"),Some("true"|"1")))||before.is_empty();emit(BackendEvent::History{peer,before,complete,error:fin.is_none()});}
@@ -706,7 +771,7 @@ impl Session {
                             }
                         }
                     }},
-                    _=timer.tick()=>{iq.expire();if !online&&handshake.elapsed()>Duration::from_secs(45){emit(BackendEvent::Status{online:false,error:true,text:"Connection timed out. Check the account settings.".into()});break}let expired:Vec<_>=mam.iter().filter(|(_,(_,start))|start.elapsed()>Duration::from_secs(20)).map(|(id,_)|id.clone()).collect();for id in expired{if let Some((peer,_))=mam.remove(&id){emit(BackendEvent::History{peer,before:String::new(),complete:false,error:true})}}}
+                    _=timer.tick()=>{iq.expire();for presence in rooms.expire(){emit(BackendEvent::RoomPresence(presence));}if !online&&handshake.elapsed()>Duration::from_secs(45){emit(BackendEvent::Status{online:false,error:true,text:"Connection timed out. Check the account settings.".into()});break}let expired:Vec<_>=mam.iter().filter(|(_,(_,start))|start.elapsed()>Duration::from_secs(20)).map(|(id,_)|id.clone()).collect();for id in expired{if let Some((peer,_))=mam.remove(&id){emit(BackendEvent::History{peer,before:String::new(),complete:false,error:true})}}}
                 }}
                 iq.disconnect();
                 let _=tokio::time::timeout(Duration::from_secs(2),client.send_end()).await;

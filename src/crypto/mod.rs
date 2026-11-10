@@ -22,6 +22,7 @@ pub enum Error {
     Storage(rusqlite::Error),
     Crypto(openssl::error::ErrorStack),
     TrustRequired,
+    OwnDeviceTrustRequired,
     Changed,
     Incomplete,
     Vault,
@@ -37,6 +38,9 @@ impl fmt::Display for Error {
             Self::Storage(_) => "OMEMO 2 state could not be saved",
             Self::Crypto(_) => "OMEMO 2 authentication failed",
             Self::TrustRequired => "Review this device's fingerprint before using encryption",
+            Self::OwnDeviceTrustRequired => {
+                "Review your other devices in Account OMEMO before sending. Contact blind trust only approves the contact's devices."
+            }
             Self::Changed => "The device identity changed; refresh before approving it",
             Self::Incomplete => "Incomplete OMEMO 2 state; existing identity preserved",
             Self::Vault => "The encryption key is missing or the keyring is locked",

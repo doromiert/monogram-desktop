@@ -29,6 +29,7 @@ pub struct Ui {
     welcome_cancel: gtk::Button,
     welcome_register: gtk::LinkButton,
     welcome_account: RefCell<Option<Account>>,
+    login_secret: RefCell<Option<zeroize::Zeroizing<String>>>,
     pub split: adw::OverlaySplitView,
     pub utility: adw::OverlaySplitView,
     pub pages: gtk::Stack,
@@ -209,6 +210,7 @@ impl Ui {
             welcome_cancel,
             welcome_register,
             welcome_account: RefCell::new(None),
+            login_secret: RefCell::new(None),
             split,
             utility,
             pages: gtk::Stack::builder()
@@ -346,6 +348,7 @@ impl Ui {
         });
         ui.weak_button(&ui.welcome_cancel, |ui| {
             ui.session.borrow_mut().take();
+            ui.login_secret.borrow_mut().take();
             ui.generation.set(ui.generation.get() + 1);
             ui.show_welcome_status("", false, false);
         });
@@ -1181,7 +1184,19 @@ impl Ui {
             self.split.set_show_sidebar(false)
         }
         if self.online.get() {
-            self.load_history(true)
+            let state = self.state.borrow();
+            let chat = state.current();
+            if chat.group {
+                if !chat.room_joined {
+                    self.command(Command::JoinRoom {
+                        peer: chat.jid.clone(),
+                        nick: None,
+                    });
+                }
+            } else {
+                drop(state);
+                self.load_history(true)
+            }
         }
     }
     pub fn load_current(self: &Rc<Self>) {
@@ -1674,6 +1689,7 @@ impl Ui {
             self.demo.replace(self.state.borrow().clone());
         }
         self.session.borrow_mut().take();
+        self.login_secret.borrow_mut().take();
         self.generation.set(self.generation.get() + 1);
         self.online.set(false);
         self.crypto.replace(Default::default());
@@ -1711,6 +1727,9 @@ impl Ui {
         }
     }
     pub fn connect_account(self: &Rc<Self>, config: Account, password: String) {
+        self.start_account(config, password, true);
+    }
+    fn start_account(self: &Rc<Self>, config: Account, password: String, remember: bool) {
         self.save_draft();
         let onboarding = self.on_welcome();
         if !onboarding && self.store.save_account(&config).is_err() {
@@ -1725,6 +1744,10 @@ impl Ui {
             self.store.load_windowed(&config.jid)
         };
         self.activate_state(state);
+        if remember && !self.smoke {
+            self.login_secret
+                .replace(Some(zeroize::Zeroizing::new(password.clone())));
+        }
         self.status.replace("Connecting…".into());
         if onboarding {
             self.welcome_account.replace(Some(config.clone()));
@@ -1738,6 +1761,71 @@ impl Ui {
         );
         self.session.replace(Some(session));
         self.update_mode();
+    }
+    pub fn reconnect_saved(self: &Rc<Self>) {
+        let owner = self.state.borrow().account.clone();
+        if owner.is_empty() || self.store.pref(&format!("auto-connect:{owner}"), "true") != "true" {
+            return;
+        }
+        let Some(config) = self
+            .store
+            .accounts()
+            .into_iter()
+            .find(|account| account.jid == owner)
+        else {
+            return;
+        };
+        let generation = self.generation.get();
+        let weak = Rc::downgrade(self);
+        self.status.replace("Looking up saved sign-in…".into());
+        glib::MainContext::default().spawn_local(async move {
+            let password = crate::credentials::load(&owner).await;
+            let Some(ui) = weak.upgrade().filter(|ui| {
+                ui.generation.get() == generation
+                    && ui.session.borrow().is_none()
+                    && ui.state.borrow().account == owner
+            }) else {
+                return;
+            };
+            match password {
+                Ok(password) => ui.start_account(config, password.to_string(), false),
+                Err(crate::credentials::Error::Missing) => {
+                    ui.status
+                        .replace("Sign in to reconnect automatically".into());
+                    if ui.dialogs.borrow().is_empty() {
+                        ui.login(Some(config));
+                    }
+                }
+                Err(error) => {
+                    ui.status.replace("Disconnected".into());
+                    ui.notice(&format!("Could not use saved sign-in. {error}"));
+                }
+            }
+        });
+    }
+    fn remember_sign_in(self: &Rc<Self>, owner: &str) {
+        let Some(password) = self.login_secret.borrow_mut().take() else {
+            return;
+        };
+        let generation = self.generation.get();
+        let owner = owner.to_string();
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            let result = crate::credentials::store(&owner, password).await;
+            let Some(ui) = weak.upgrade().filter(|ui| {
+                ui.generation.get() == generation && ui.state.borrow().account == owner
+            }) else {
+                return;
+            };
+            match result {
+                Ok(()) => {
+                    let _ = ui.store.set_pref(&format!("auto-connect:{owner}"), "true");
+                }
+                Err(error) => {
+                    ui.notice(&format!("Could not save sign-in for next launch. {error}"))
+                }
+            }
+        });
     }
     pub fn backend_event(self: &Rc<Self>, generation: u64, owner: &str, event: BackendEvent) {
         if generation != self.generation.get() || owner != self.state.borrow().account {
@@ -1755,6 +1843,7 @@ impl Ui {
             if !online {
                 if *error {
                     self.session.borrow_mut().take();
+                    self.login_secret.borrow_mut().take();
                     self.generation.set(self.generation.get() + 1);
                 }
                 self.show_welcome_status(text, !error, *error);
@@ -1763,6 +1852,7 @@ impl Ui {
             let config = self.welcome_account.borrow().clone();
             if config.is_none_or(|config| self.store.save_account(&config).is_err()) {
                 self.session.borrow_mut().take();
+                self.login_secret.borrow_mut().take();
                 self.generation.set(self.generation.get() + 1);
                 self.show_welcome_status("Account storage is unavailable", false, true);
                 return;
@@ -1794,6 +1884,8 @@ impl Ui {
                     let mut s = self.state.borrow_mut();
                     for c in &mut s.chats {
                         c.subtitle = "Offline".into();
+                        c.room_joined = false;
+                        c.room_can_send = false;
                         for m in &mut c.messages {
                             if m.delivery == "sending" {
                                 m.delivery = "uncertain".into()
@@ -1819,8 +1911,10 @@ impl Ui {
                 }
                 self.update_mode();
                 if online {
+                    self.remember_sign_in(owner);
                     self.load_history(true)
                 } else if error {
+                    self.login_secret.borrow_mut().take();
                     self.notice(&text)
                 }
             }
@@ -1834,6 +1928,34 @@ impl Ui {
                     c.contact = subscription != "none";
                 }
             }
+            BackendEvent::RoomBookmarks(bookmarks) => {
+                let mut state = self.state.borrow_mut();
+                for bookmark in bookmarks {
+                    let room = state.chat_for(&bookmark.jid);
+                    room.group = true;
+                    room.contact = false;
+                    room.name = if bookmark.name.is_empty() {
+                        bookmark.jid
+                    } else {
+                        bookmark.name
+                    };
+                }
+            }
+            BackendEvent::RoomPresence(presence) => {
+                let mut state = self.state.borrow_mut();
+                let room = state.chat_for(&presence.jid);
+                room.group = true;
+                room.contact = false;
+                room.room_joined = presence.joined;
+                room.room_can_send = presence.can_send;
+                room.subtitle = presence.detail;
+                let active = state.current().jid == presence.jid;
+                drop(state);
+                if active && self.pages.visible_child_name().as_deref() == Some("chat") {
+                    self.show_chat();
+                }
+            }
+            BackendEvent::RoomError(error) => self.notice(&error),
             BackendEvent::CryptoStatus(status) => {
                 self.crypto.replace(status);
                 self.update_crypto_controls();
@@ -1865,6 +1987,7 @@ impl Ui {
             }
             BackendEvent::CryptoError { peer, text } => self.notice(&format!("{peer}: {text}")),
             BackendEvent::CryptoAliases {
+                legacy_sticker,
                 peer,
                 own,
                 id,
@@ -1873,6 +1996,12 @@ impl Ui {
                 if self
                     .store
                     .merge_aliases(owner, &peer, own, &id, &aliases)
+                    .and_then(|_| {
+                        if legacy_sticker {
+                            self.store.restore_legacy_sticker(owner, &peer, &id)?;
+                        }
+                        Ok(())
+                    })
                     .and_then(|_| self.store.reconcile_actions(owner, &peer).map(|_| ()))
                     .is_ok()
                 {
@@ -2098,6 +2227,8 @@ impl Ui {
         } else {
             message.author = if message.own {
                 "You".into()
+            } else if c.group && !message.author.is_empty() {
+                message.author
             } else {
                 c.name.clone()
             };
@@ -2258,6 +2389,15 @@ impl Ui {
     }
     pub(crate) fn request_server_history(&self, peer: &str) {
         if !self.online.get() || self.history_pending.borrow().contains(peer) {
+            return;
+        }
+        if self
+            .state
+            .borrow()
+            .chats
+            .iter()
+            .any(|chat| chat.jid == peer && chat.group)
+        {
             return;
         }
         let before = match self.history_pages.borrow().get(peer) {

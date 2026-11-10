@@ -286,17 +286,7 @@ fn live_legacy_service_and_independent_send_preference() {
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].trust, "Undecided");
-    sender.send(Command::Legacy(service::Request::Decide {
-        keys: BTreeMap::from([(
-            RECEIVER.into(),
-            BTreeMap::from([(rows[0].device, rows[0].key)]),
-        )]),
-        approve: true,
-    }));
-    wait(
-        &sent,
-        |event| matches!(event, BackendEvent::LegacyReview { peer, rows, .. } if peer == RECEIVER && rows.iter().any(|row| row.trust == "Trusted")),
-    );
+    history.set_blind_trust(SENDER, RECEIVER, true).unwrap();
     let (tx, mut result) = tokio::sync::oneshot::channel();
     sender.send(Command::ChooseEncryption {
         peer: RECEIVER.into(),
@@ -306,7 +296,7 @@ fn live_legacy_service_and_independent_send_preference() {
     loop {
         match result.try_recv() {
             Ok(probed) => {
-                assert_eq!(probed.unwrap(), Mode::Legacy);
+                assert_eq!(probed.unwrap(), Mode::Omemo2);
                 break;
             }
             Err(tokio::sync::oneshot::error::TryRecvError::Empty) if Instant::now() < deadline => {

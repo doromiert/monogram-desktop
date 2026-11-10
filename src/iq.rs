@@ -61,6 +61,7 @@ impl Client {
 }
 struct Job {
     peer: String,
+    local_private: bool,
     reply: oneshot::Sender<Reply>,
     started: Instant,
 }
@@ -86,9 +87,12 @@ impl Pending {
             return None;
         }
         let id = format!("request-{}", new_id());
-        let request = Element::builder("iq", CLIENT)
-            .attr("id".try_into().unwrap(), &id)
-            .attr("to".try_into().unwrap(), &to)
+        let local_private = payload.is("query", "jabber:iq:private");
+        let mut request = Element::builder("iq", CLIENT).attr("id".try_into().unwrap(), &id);
+        if !local_private {
+            request = request.attr("to".try_into().unwrap(), &to);
+        }
+        let request = request
             .attr(
                 "type".try_into().unwrap(),
                 match kind {
@@ -102,6 +106,7 @@ impl Pending {
             id,
             Job {
                 peer: to,
+                local_private,
                 reply,
                 started: Instant::now(),
             },
@@ -117,7 +122,15 @@ impl Pending {
             return false;
         };
         let from = root.attr("from").unwrap_or("");
-        if from != job.peer && !(from.is_empty() && job.peer == owner) {
+        // XEP-0049 is addressed to the local server. Some servers echo the bound resource.
+        let own_resource = job.local_private
+            && job.peer == owner
+            && root.attr("to") == Some(from)
+            && from
+                .parse::<tokio_xmpp::jid::Jid>()
+                .ok()
+                .is_some_and(|jid| jid.resource().is_some() && jid.to_bare().as_str() == owner);
+        if from != job.peer && !(from.is_empty() && job.peer == owner) && !own_resource {
             return false;
         }
         if root

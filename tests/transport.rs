@@ -27,6 +27,8 @@ mod model;
 mod polls;
 #[path = "../src/protocol.rs"]
 mod protocol;
+#[path = "../src/rooms/mod.rs"]
+mod rooms;
 #[path = "../src/storage.rs"]
 mod storage;
 #[path = "../src/transport.rs"]

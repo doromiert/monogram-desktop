@@ -4,37 +4,49 @@ use gtk::{gio, glib};
 use std::{rc::Rc, time::Duration};
 impl Ui {
     pub fn attachment_content(self: &Rc<Self>, message: &Message) -> gtk::Box {
-        self.file_controls(message, true)
-    }
-    pub(crate) fn file_controls(self: &Rc<Self>, message: &Message, preview: bool) -> gtk::Box {
         let file = message.attachment.as_ref().unwrap().clone();
         let owner = self.state.borrow().account.clone();
         let id = message.id.clone();
+        let media = file.image_candidate();
         let content = bx(true, 8);
-        if preview {
-            self.attach_image(message, &content);
-        }
+        let controls = bx(true, 8);
+        self.attach_image(message, &content, &controls);
+        content.append(&controls);
         let line = bx(false, 10);
-        let image = gtk::Image::from_icon_name("document-save-symbolic");
+        let icon = if media {
+            "image-x-generic-symbolic"
+        } else {
+            "document-save-symbolic"
+        };
+        let image = gtk::Image::from_icon_name(icon);
         image.set_pixel_size(28);
         line.append(&image);
         let words = bx(true, 2);
-        words.set_hexpand(!preview);
-        words.append(&wrap(&file.name, "heading"));
-        let detail = match file.size {
-            Some(size) => format!("{} · {}", glib::format_size(size), file.mime),
-            None => file.mime.clone(),
+        words.append(&wrap(
+            if media {
+                file.image_label()
+            } else {
+                &file.name
+            },
+            "heading",
+        ));
+        let detail = match (media, file.size) {
+            (true, Some(size)) => glib::format_size(size).to_string(),
+            (true, None) => String::new(),
+            (false, Some(size)) => format!("{} · {}", glib::format_size(size), file.mime),
+            (false, None) => file.mime.clone(),
         };
         let info = wrap(&detail, "caption dim-label");
+        info.set_visible(!detail.is_empty());
         words.append(&info);
         line.append(&words);
         let action = gtk::Button::with_label("Download");
         action.set_valign(gtk::Align::Center);
         line.append(&action);
-        content.append(&line);
+        controls.append(&line);
         let progress = gtk::ProgressBar::new();
         progress.set_visible(false);
-        content.append(&progress);
+        controls.append(&progress);
         let weak = Rc::downgrade(self);
         let source = file.clone();
         let account = owner.clone();
@@ -48,7 +60,9 @@ impl Ui {
             match ui.downloads.borrow().status(&account, &source) {
                 Some(Status::Running { .. }) => {}
                 Some(Status::Ready(path)) if path.is_file() => {
-                    ui.save_attachment(&id, &path);
+                    if !media {
+                        ui.save_attachment(&id, &path);
+                    }
                     return;
                 }
                 _ => {}
@@ -70,6 +84,9 @@ impl Ui {
         let a = action.downgrade();
         let p = progress.downgrade();
         let l = info.downgrade();
+        let visible = controls.downgrade();
+        let allow_auto = !self.smoke
+            && (message.own || message.encrypted || self.state.borrow().current().contact);
         glib::timeout_add_local(Duration::from_millis(150), move || {
             let (Some(ui), Some(action), Some(progress), Some(info)) =
                 (weak.upgrade(), a.upgrade(), p.upgrade(), l.upgrade())
@@ -79,7 +96,21 @@ impl Ui {
             if ui.state.borrow().account != owner {
                 return glib::ControlFlow::Break;
             }
+            let Some(controls) = visible.upgrade().filter(|controls| controls.is_visible()) else {
+                return glib::ControlFlow::Break;
+            };
             let status = ui.downloads.borrow().status(&owner, &file);
+            if status.is_none()
+                && allow_auto
+                && media
+                && !file.manual
+                && ui.in_chat_viewport(&controls)
+            {
+                ui.downloads
+                    .borrow_mut()
+                    .start_automatic(&owner, file.clone());
+            }
+            action.set_visible(!media || !matches!(status, Some(Status::Ready(_))));
             progress.set_visible(matches!(status, Some(Status::Running { .. })));
             let (title, subtitle) = match status {
                 Some(Status::Running { bytes, total }) => {
@@ -100,13 +131,22 @@ impl Ui {
                         },
                     )
                 }
+                Some(Status::Ready(_)) if media => ("", "Preparing preview…".into()),
                 Some(Status::Ready(_)) => ("Save As…", "Downloaded".into()),
+                Some(Status::Deferred { reason, total }) => (
+                    "Download",
+                    total.map_or_else(
+                        || reason.into(),
+                        |size| format!("{} · {reason}", glib::format_size(size)),
+                    ),
+                ),
                 Some(Status::Failed(reason)) => ("Retry", reason.into()),
                 Some(Status::Cancelled) => ("Retry", "Download cancelled".into()),
                 None => ("Download", detail.clone()),
             };
             action.set_label(title);
             info.set_text(&subtitle);
+            info.set_visible(!subtitle.is_empty());
             glib::ControlFlow::Continue
         });
         content

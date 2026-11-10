@@ -351,10 +351,19 @@ impl Worker {
             match self.observe(peer, id).await {
                 Ok(bundle) => {
                     let store = &mut self.local.as_mut().unwrap().engine.store;
-                    if store.transaction(|tx| device::trust(tx, peer, id, &bundle.identity))?
-                        != Trust::Rejected
-                    {
-                        targets.insert(id, bundle);
+                    match store.transaction(|tx| device::trust(tx, peer, id, &bundle.identity))? {
+                        Trust::Trusted => {
+                            targets.insert(id, bundle);
+                        }
+                        Trust::Rejected => {}
+                        Trust::Undecided => {
+                            return Err(if peer == self.owner {
+                                Error::OwnDeviceTrustRequired
+                            } else {
+                                Error::TrustRequired
+                            }
+                            .into());
+                        }
                     }
                 }
                 Err(PreparationError::Crypto(Error::InvalidBundle))
@@ -600,6 +609,7 @@ impl Worker {
                         .is_none_or(|m| !m.unavailable)
                     {
                         self.emit(BackendEvent::CryptoAliases {
+                            legacy_sticker: false,
                             peer: peer.clone(),
                             own: message.own,
                             id,
@@ -1158,7 +1168,9 @@ mod tests {
             &a,
             |e| matches!(e,BackendEvent::Failed{id,..} if id==&blocked_id),
         );
-        decide(&alice, &a, "dave@localhost", arows, true);
+        history
+            .set_blind_trust("carol@localhost", "dave@localhost", true)
+            .unwrap();
         assert!(runtime.block_on(probe(&alice, "dave@localhost")).unwrap());
         let stale_id = new_id();
         alice.send(Command::Send {
@@ -1315,7 +1327,10 @@ mod tests {
             assert_eq!(aux_rows.len(), 1);
             assert_eq!(aux_rows[0].key, aux_bundle.identity);
             assert_eq!(aux_rows[0].trust, "Undecided");
-            assert!(!probe(&alice, peer).await.unwrap());
+            assert!(matches!(probe(&alice, peer).await, Err(Error::OwnDeviceTrustRequired)));
+            let (reply, selected) = oneshot::channel();
+            assert!(alice.send(Command::ChooseEncryption { peer: peer.into(), reply }));
+            assert!(matches!(tokio::time::timeout(Duration::from_secs(15), selected).await.unwrap().unwrap(), Err(Error::OwnDeviceTrustRequired)));
             decide(&alice, &a, owner, aux_rows, true);
 
             let mut other_resource = Client::new(config("carol"), "fixture-password".into());

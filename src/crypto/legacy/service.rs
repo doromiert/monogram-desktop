@@ -350,6 +350,9 @@ impl Worker {
                         .is_some_and(|m| !m.unavailable)
                     {
                         self.emit(BackendEvent::CryptoAliases {
+                            legacy_sticker: crate::file_share::Attachment::sticker_marker(
+                                &frame.xml,
+                            ),
                             peer: peer.clone(),
                             own: message.own,
                             id,
@@ -411,6 +414,12 @@ impl Worker {
             .ok_or(Error::Invalid("legacy envelope metadata"))?;
             let (_, mut message, _) = protocol::normalize_protected(&content, &self.owner, None)
                 .ok_or(Error::Invalid("legacy body"))?;
+            if let Some(file) = message.attachment.as_mut()
+                && file.link().is_some_and(|link| link.encrypted())
+                && crate::file_share::Attachment::sticker_marker(outer)
+            {
+                file.sticker = true;
+            }
             message.set_encryption(Mode::Legacy, lifecycle::hex(&received.fingerprint));
             message.unavailable = false;
             message.aliases.extend(metadata.aliases);

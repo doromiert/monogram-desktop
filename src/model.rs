@@ -247,6 +247,10 @@ pub struct Chat {
     pub color: String,
     pub unread: u32,
     pub group: bool,
+    #[serde(skip)]
+    pub room_joined: bool,
+    #[serde(skip)]
+    pub room_can_send: bool,
     pub messages: Vec<Message>,
     #[serde(skip)]
     pub latest: Option<MessagePreview>,

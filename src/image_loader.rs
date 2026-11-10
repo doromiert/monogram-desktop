@@ -128,6 +128,77 @@ impl Decoder {
         })
     }
 }
+pub fn play<W: IsA<gtk::Widget> + Clone + 'static>(
+    picture: &W,
+    path: std::path::PathBuf,
+    file: crate::file_share::Attachment,
+    edge: u32,
+    visible: impl Fn(&W) -> bool + 'static,
+    draw: impl Fn(&W, gdk::Texture) + 'static,
+) {
+    use std::{
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc,
+        },
+        time::Instant,
+    };
+    static WORKERS: AtomicUsize = AtomicUsize::new(0);
+    let picture = picture.downgrade();
+    let mut frames = None;
+    let mut next = Instant::now();
+    glib::timeout_add_local(Duration::from_millis(25), move || {
+        let Some(picture) = picture.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        if !picture.is_mapped() || !visible(&picture) {
+            frames = None;
+            return glib::ControlFlow::Continue;
+        }
+        if let Some(rx) = frames.as_ref() {
+            if Instant::now() < next {
+                return glib::ControlFlow::Continue;
+            }
+            match mpsc::Receiver::<Frame>::try_recv(rx) {
+                Ok(frame) => {
+                    draw(&picture, frame.texture);
+                    let Some(delay) = frame.delay else {
+                        return glib::ControlFlow::Break;
+                    };
+                    next = Instant::now()
+                        + delay.clamp(Duration::from_millis(25), Duration::from_secs(60));
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => return glib::ControlFlow::Break,
+            }
+        } else if WORKERS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < 4).then_some(n + 1)
+            })
+            .is_ok()
+        {
+            let (tx, rx) = mpsc::sync_channel(1);
+            let (path, file) = (path.clone(), file.clone());
+            std::thread::spawn(move || {
+                let input = crate::downloads::verified_input(&path, &file, &AtomicBool::new(false));
+                if let Ok(input) = input
+                    && let Ok(mut decoder) = Decoder::open(input, &gio::Cancellable::new())
+                {
+                    while let Ok(frame) = decoder.frame(edge) {
+                        let animated = frame.delay.is_some();
+                        if tx.send(frame).is_err() || !animated {
+                            break;
+                        }
+                    }
+                }
+                WORKERS.fetch_sub(1, Ordering::AcqRel);
+            });
+            next = Instant::now();
+            frames = Some(rx);
+        }
+        glib::ControlFlow::Continue
+    });
+}
 impl crate::avatar::Avatar {
     /// Run on a blocking worker. The immutable, downscaled texture is safe to hand to GTK.
     pub fn decode(&self, cancel: &gio::Cancellable) -> Result<gdk::Texture, &'static str> {

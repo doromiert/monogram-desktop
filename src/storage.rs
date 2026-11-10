@@ -114,6 +114,30 @@ impl Store {
         }
         Ok(())
     }
+    pub fn restore_legacy_sticker(
+        &self,
+        account: &str,
+        peer: &str,
+        id: &str,
+    ) -> rusqlite::Result<()> {
+        if !self.message(account, peer, id).is_some_and(|message| {
+            message.mode() == crate::encryption_policy::Mode::Legacy
+                && !message.retracted
+                && message.attachment.is_some_and(|file| {
+                    !file.sticker && file.link().is_some_and(|link| link.encrypted())
+                })
+        }) {
+            return Ok(());
+        }
+        let tx = self.db.unchecked_transaction()?;
+        for table in ["messages", "message_bases"] {
+            tx.execute(
+                &format!("UPDATE {table} SET body=json_set(body,'$.attachment.sticker',json('true')) WHERE account=? AND peer=? AND id=? AND json_type(body,'$.attachment')='object'"),
+                params![account, peer, id],
+            )?;
+        }
+        tx.commit()
+    }
     pub fn update_delivery(
         &self,
         account: &str,

@@ -282,21 +282,32 @@ impl Legacy {
         {
             return Err(Error::Unavailable(NO_DEVICES));
         }
+        if targets
+            .iter()
+            .any(|(device, _)| device.trust == Trust::Undecided)
+        {
+            return Err(if peer == owner {
+                Error::OwnDeviceTrustRequired
+            } else {
+                Error::TrustRequired
+            });
+        }
         if owner != peer {
             // Failure to read our own devices is not evidence that they don't exist.
-            targets.extend(self.devices(&owner).await.map_err(|error| {
+            let copies = self.devices(&owner).await.map_err(|error| {
                 if probe_unavailable(&error) {
                     Error::Unavailable("Could not verify your other Legacy OMEMO devices")
                 } else {
                     error
                 }
-            })?);
-        }
-        if targets
-            .iter()
-            .any(|(device, _)| device.trust == Trust::Undecided)
-        {
-            return Err(Error::TrustRequired);
+            })?;
+            if copies
+                .iter()
+                .any(|(device, _)| device.trust == Trust::Undecided)
+            {
+                return Err(Error::OwnDeviceTrustRequired);
+            }
+            targets.extend(copies);
         }
         targets.retain(|(device, _)| device.trust == Trust::Trusted);
         encrypt_for(&mut self.store, peer, body, wire_id, &targets)

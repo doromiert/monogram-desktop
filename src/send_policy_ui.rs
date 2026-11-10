@@ -49,6 +49,19 @@ impl Ui {
             return;
         }
         let chat = state.current();
+        if chat.group {
+            let can_send = chat.room_can_send;
+            let explicit = chat.encryption_preference() == Preference::Plain;
+            drop(state);
+            if !can_send {
+                self.notice("Join the room before sending");
+            } else if !explicit {
+                self.notice("Encrypted rooms are unavailable. Choose Unencrypted in Conversation Security to send here.");
+            } else {
+                then(self, Mode::Plain);
+            }
+            return;
+        }
         if let Some(mode) = self.sending_mode(chat) {
             drop(state);
             then(self, mode);

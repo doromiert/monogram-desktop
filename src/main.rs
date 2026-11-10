@@ -3,6 +3,7 @@ mod action_store;
 mod attachment_ui;
 mod avatar;
 mod avatar_ui;
+mod credentials;
 mod crypto;
 mod dialogs;
 mod download_smoke;
@@ -26,6 +27,7 @@ mod model;
 mod polls;
 mod polls_ui;
 mod protocol;
+mod rooms;
 mod send_policy_ui;
 mod smoke;
 mod storage;
@@ -103,6 +105,9 @@ fn main() -> gtk::glib::ExitCode {
             ui.toggle_media();
         }
         present_window(&ui.window, monitor.as_deref(), started);
+        if !ui.smoke {
+            ui.reconnect_saved();
+        }
         if std::env::args().any(|s| s == "--crypto-smoke-test") {
             smoke::run_crypto(ui.clone());
         } else if std::env::args().any(|s| s == "--live-smoke-test") {

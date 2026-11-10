@@ -1,4 +1,4 @@
-//! Account-owned explicit downloads. Each retry owns its own progress and partial file.
+//! Account-owned downloads. Each retry owns its own progress and partial file.
 use crate::file_share::{Attachment, MAX};
 use blake2::{
     Blake2b,
@@ -22,10 +22,27 @@ use std::{
 };
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
-    Running { bytes: u64, total: Option<u64> },
+    Running {
+        bytes: u64,
+        total: Option<u64>,
+    },
     Ready(PathBuf),
     Failed(&'static str),
+    Deferred {
+        reason: &'static str,
+        total: Option<u64>,
+    },
     Cancelled,
+}
+const AUTO_MAX: u64 = 10 * 1024 * 1024;
+const AUTO_SIZE: &str = "Image exceeds the automatic download limit or its size is unknown";
+const AUTO_TYPE: &str = "The server did not identify this as an image";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Policy {
+    Cache,
+    Manual,
+    Automatic,
 }
 struct Task {
     state: Arc<Mutex<Status>>,
@@ -73,16 +90,21 @@ impl Downloads {
         self.tasks.clear();
     }
     pub fn start(&mut self, account: &str, file: Attachment) -> Result<(), &'static str> {
-        self.start_with_policy(account, file, true)
+        self.start_with_policy(account, file, Policy::Manual)
     }
     pub fn restore_cached(&mut self, account: &str, file: Attachment) -> Result<(), &'static str> {
-        self.start_with_policy(account, file, false)
+        self.start_with_policy(account, file, Policy::Cache)
+    }
+    pub fn start_automatic(&mut self, account: &str, file: Attachment) {
+        if !file.manual && file.image_candidate() && self.status(account, &file).is_none() {
+            let _ = self.start_with_policy(account, file, Policy::Automatic);
+        }
     }
     fn start_with_policy(
         &mut self,
         account: &str,
         file: Attachment,
-        network: bool,
+        policy: Policy,
     ) -> Result<(), &'static str> {
         if account.is_empty() || file.link().is_none() {
             return Err("Invalid attachment");
@@ -123,18 +145,34 @@ impl Downloads {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build();
-            let result=match runtime {Ok(rt)=>rt.block_on(async {
-                tokio::select!{biased; _=rx=>Err("Cancelled"),result=async {
-                    if network {let client=client()?;download(&client,&file,&root,&cancel,&state).await}
-                    else {let path=root.join(file.key());verify(&path,&file,&cancel)?;Ok(path)}
-                }=>result}
-            }),Err(_)=>Err("Download runtime unavailable")};
+            let result = match runtime {
+                Ok(rt) => rt.block_on(async {
+                    tokio::select! {biased; _=rx=>Err("Cancelled"),result=async {
+                        if policy == Policy::Cache {
+                            let path = root.join(file.key());
+                            verify(&path, &file, &cancel)?;
+                            Ok(path)
+                        } else {
+                            let client = client()?;
+                            download(&client, &file, &root, &cancel, &state, policy).await
+                        }
+                    }=>result}
+                }),
+                Err(_) => Err("Download runtime unavailable"),
+            };
             let mut current = state.lock().unwrap();
             if cancel.load(Ordering::Acquire) {
                 *current = Status::Cancelled;
             } else {
                 *current = match result {
                     Ok(path) => Status::Ready(path),
+                    Err(reason @ (AUTO_SIZE | AUTO_TYPE)) => Status::Deferred {
+                        reason,
+                        total: match *current {
+                            Status::Running { total, .. } => total,
+                            _ => None,
+                        },
+                    },
                     Err(reason) => Status::Failed(reason),
                 };
             }
@@ -251,6 +289,7 @@ async fn download(
     root: &Path,
     cancel: &AtomicBool,
     state: &Mutex<Status>,
+    policy: Policy,
 ) -> Result<PathBuf, &'static str> {
     checked(cancel)?;
     if file.size.is_some_and(|size| size > MAX) {
@@ -260,20 +299,6 @@ async fn download(
     if destination.exists() && verify(&destination, file, cancel).is_ok() {
         return Ok(destination);
     }
-    let partial = Partial(root.join(format!("{}.part", crate::model::new_id())));
-    let mut output = {
-        let _guard = CACHE_IO.lock().unwrap();
-        checked(cancel)?;
-        fs::create_dir_all(root).map_err(|_| "Attachment cache unavailable")?;
-        fs::set_permissions(root, fs::Permissions::from_mode(0o700))
-            .map_err(|_| "Attachment cache unavailable")?;
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&partial.0)
-            .map_err(|_| "Attachment cache unavailable")?
-    };
     let link = file.link().ok_or("Invalid attachment")?;
     let mut url = link.url.clone();
     let mut response = None;
@@ -328,6 +353,55 @@ async fn download(
         return Err("Invalid download size");
     }
     let total = expected.map(|size| size - overhead).or(file.size);
+    *state.lock().unwrap() = Status::Running { bytes: 0, total };
+    let limit = if policy == Policy::Automatic {
+        let mime = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| {
+                value
+                    .split(';')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_lowercase()
+            });
+        if !mime.as_deref().is_some_and(|mime| {
+            mime.starts_with("image/")
+                || mime == "application/octet-stream"
+                    && (link.encrypted() || file.image_extension())
+        }) {
+            return Err(AUTO_TYPE);
+        }
+        if total.is_none_or(|total| total > AUTO_MAX)
+            || file.size.is_some_and(|size| size > AUTO_MAX)
+        {
+            return Err(AUTO_SIZE);
+        }
+        AUTO_MAX
+    } else {
+        MAX
+    };
+    if let (Some(expected), Some(size)) = (expected, file.size)
+        && expected - overhead != size
+    {
+        return Err("Download size mismatch");
+    }
+    let partial = Partial(root.join(format!("{}.part", crate::model::new_id())));
+    let mut output = {
+        let _guard = CACHE_IO.lock().unwrap();
+        checked(cancel)?;
+        fs::create_dir_all(root).map_err(|_| "Attachment cache unavailable")?;
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700))
+            .map_err(|_| "Attachment cache unavailable")?;
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&partial.0)
+            .map_err(|_| "Attachment cache unavailable")?
+    };
     let mut cipher = if link.encrypted() {
         Some(
             Crypter::new(
@@ -347,7 +421,7 @@ async fn download(
     while let Some(chunk) = response.chunk().await.map_err(|_| "Download interrupted")? {
         checked(cancel)?;
         count += chunk.len() as u64;
-        if count > MAX + overhead {
+        if count > limit + overhead {
             return Err("Attachment exceeds size limit");
         }
         for chunk in chunk.chunks(32768) {
@@ -579,7 +653,14 @@ mod tests {
                 total: None,
             });
             let path = rt
-                .block_on(download(&client, &file, &root, &cancel, &progress))
+                .block_on(download(
+                    &client,
+                    &file,
+                    &root,
+                    &cancel,
+                    &progress,
+                    Policy::Manual,
+                ))
                 .unwrap();
             assert_eq!(fs::read(&path).unwrap(), plain);
             assert_eq!(
@@ -587,12 +668,26 @@ mod tests {
                 0o600
             );
             let requests = server.requests.lock().unwrap().len();
-            rt.block_on(download(&client, &file, &root, &cancel, &progress))
-                .unwrap();
+            rt.block_on(download(
+                &client,
+                &file,
+                &root,
+                &cancel,
+                &progress,
+                Policy::Manual,
+            ))
+            .unwrap();
             assert_eq!(server.requests.lock().unwrap().len(), requests);
             fs::write(&path, b"corrupted cache").unwrap();
-            rt.block_on(download(&client, &file, &root, &cancel, &progress))
-                .unwrap();
+            rt.block_on(download(
+                &client,
+                &file,
+                &root,
+                &cancel,
+                &progress,
+                Policy::Manual,
+            ))
+            .unwrap();
             assert_eq!(fs::read(&path).unwrap(), plain);
             for route in [
                 "bad",
@@ -614,7 +709,14 @@ mod tests {
                     .wire_url
                     .replace("/file?", "/unused?")
                     .replace("/file#", &format!("/{route}#"));
-                let result = rt.block_on(download(&client, &wrong, &root, &cancel, &progress));
+                let result = rt.block_on(download(
+                    &client,
+                    &wrong,
+                    &root,
+                    &cancel,
+                    &progress,
+                    Policy::Manual,
+                ));
                 assert!(result.is_err(), "route {route}");
                 assert!(!root.join(wrong.key()).exists());
                 assert!(
@@ -628,7 +730,14 @@ mod tests {
             let mut redirect = file.clone();
             redirect.wire_url = redirect.wire_url.replace("/file#", "/redirect#");
             let result = rt
-                .block_on(download(&client, &redirect, &root, &cancel, &progress))
+                .block_on(download(
+                    &client,
+                    &redirect,
+                    &root,
+                    &cancel,
+                    &progress,
+                    Policy::Manual,
+                ))
                 .unwrap();
             assert_eq!(fs::read(result).unwrap(), plain);
             let mut slow = file.clone();
@@ -636,7 +745,7 @@ mod tests {
             let timeout = rt.block_on(async {
                 tokio::time::timeout(
                     Duration::from_millis(100),
-                    download(&client, &slow, &root, &cancel, &progress),
+                    download(&client, &slow, &root, &cancel, &progress, Policy::Manual),
                 )
                 .await
             });

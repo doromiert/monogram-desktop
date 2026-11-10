@@ -112,6 +112,8 @@ mod image_imp {
         pub paintable: RefCell<Option<gdk::Paintable>>,
         pub ratio: Cell<f64>,
         pub cover: Cell<bool>,
+        pub max_width: Cell<i32>,
+        pub borderless: Cell<bool>,
     }
     #[glib::object_subclass]
     impl ObjectSubclass for AspectImage {
@@ -134,12 +136,13 @@ mod image_imp {
                     }
                 };
             }
+            let width = self.max_width.get().max(1);
             if o == gtk::Orientation::Horizontal {
-                (0, 420, -1, -1)
+                (0, width, -1, -1)
             } else {
                 // ListBox measures a start-aligned row against the entire viewport.
                 // Its photo is at most its natural width, even in a wide window.
-                let h = ((if size >= 0 { size.min(420) } else { 420 }) as f64
+                let h = ((if size >= 0 { size.min(width) } else { width }) as f64
                     / self.ratio.get().max(0.01))
                 .round() as i32;
                 (if size >= 0 { h } else { 0 }, h, -1, -1)
@@ -151,7 +154,9 @@ mod image_imp {
             let h = obj.height() as f64;
             if let Some(ref p) = *self.paintable.borrow() {
                 let bounds = gtk::graphene::Rect::new(0., 0., w as f32, h as f32);
-                snapshot.push_rounded_clip(&gtk::gsk::RoundedRect::from_rect(bounds, 10.));
+                if !self.borderless.get() {
+                    snapshot.push_rounded_clip(&gtk::gsk::RoundedRect::from_rect(bounds, 10.));
+                }
                 if self.cover.get() {
                     let ratio = p.intrinsic_aspect_ratio();
                     let (width, height) = if ratio <= 0. {
@@ -169,7 +174,9 @@ mod image_imp {
                 } else {
                     p.snapshot(snapshot, w, h);
                 }
-                snapshot.pop();
+                if !self.borderless.get() {
+                    snapshot.pop();
+                }
             }
         }
     }
@@ -185,11 +192,26 @@ impl AspectImage {
         self.imp().paintable.borrow().clone()
     }
     pub fn set_paintable(&self, paintable: Option<gdk::Paintable>) {
+        if !self.imp().cover.get()
+            && let Some(image) = paintable.as_ref()
+        {
+            let ratio = image.intrinsic_aspect_ratio().max(0.01);
+            if (self.imp().ratio.replace(ratio) - ratio).abs() > 0.001 {
+                self.queue_resize();
+            }
+        }
         self.imp().paintable.replace(paintable);
         self.queue_draw();
     }
-    pub fn new(path: &Path) -> Self {
+    pub fn thumbnail(width: i32, borderless: bool) -> Self {
         let obj: Self = glib::Object::new();
+        obj.imp().max_width.set(width);
+        obj.imp().borderless.set(borderless);
+        obj.imp().ratio.set(1.);
+        obj
+    }
+    pub fn new(path: &Path) -> Self {
+        let obj = Self::thumbnail(420, false);
         let source = gtk::Picture::for_filename(path);
         if let Some(p) = source.paintable() {
             let ratio = p.intrinsic_aspect_ratio();

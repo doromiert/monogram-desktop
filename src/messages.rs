@@ -55,9 +55,11 @@ impl Ui {
                 gtk::Align::Start
             });
             if group && !m.own {
-                let a = avatar(
+                let a = self.chat_avatar(
                     &Chat {
                         name: m.author.clone(),
+                        jid: m.sender.clone(),
+                        group: true,
                         color: "purple".into(),
                         ..Default::default()
                     },
@@ -66,6 +68,7 @@ impl Ui {
                 a.set_valign(gtk::Align::End);
                 outer.append(&a)
             }
+            let sticker = m.attachment.as_ref().is_some_and(|file| file.sticker);
             let bubble = bx(true, 0);
             bubble.set_vexpand(false);
             bubble.set_valign(gtk::Align::Start);
@@ -81,6 +84,9 @@ impl Ui {
             }
             if m.own {
                 bubble.add_css_class("own")
+            }
+            if sticker {
+                bubble.add_css_class("sticker-bubble");
             }
             let heading = bx(false, 6);
             heading.set_margin_bottom(6);
@@ -124,8 +130,12 @@ impl Ui {
                 }));
                 meta.append(&image)
             }
-            heading.append(&meta);
-            bubble.append(&heading);
+            if !sticker {
+                heading.append(&meta);
+            }
+            if !sticker || (group && !m.own) || m.pinned {
+                bubble.append(&heading);
+            }
             if let Some(attribution) = m.forwarded.clone() {
                 let header = gtk::Button::new();
                 header.add_css_class("flat");
@@ -257,7 +267,19 @@ impl Ui {
                     }
                 }
                 "file" if m.attachment.is_some() => {
-                    bubble.append(&self.attachment_content(&m));
+                    let attachment = self.attachment_content(&m);
+                    if sticker {
+                        let overlay = gtk::Overlay::new();
+                        overlay.set_child(Some(&attachment));
+                        meta.add_css_class("sticker-meta");
+                        meta.set_halign(gtk::Align::End);
+                        meta.set_valign(gtk::Align::End);
+                        meta.set_can_target(false);
+                        overlay.add_overlay(&meta);
+                        bubble.append(&overlay);
+                    } else {
+                        bubble.append(&attachment);
+                    }
                     if !m.text.is_empty() {
                         bubble.append(&wrap(&m.text, ""));
                     }

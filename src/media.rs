@@ -717,8 +717,9 @@ impl MediaItem {
             title: message
                 .attachment
                 .as_ref()
-                .map(|f| f.name.clone())
-                .unwrap_or_default(),
+                .map(|f| f.image_label())
+                .unwrap_or("Image")
+                .into(),
             path: Default::default(),
             message: Some(message),
         }
@@ -738,7 +739,6 @@ pub struct MediaViewer {
     owner: String,
     peer: String,
     generation: u64,
-    footer: gtk::Box,
     preview_status: gtk::Label,
     title: adw::WindowTitle,
     fullscreen: gtk::Button,
@@ -818,10 +818,6 @@ impl MediaViewer {
         next.set_halign(gtk::Align::End);
         next.set_margin_end(16);
         root.add_overlay(&next);
-        let footer = bx(true, 4);
-        footer.set_valign(gtk::Align::End);
-        margins(&footer, 12);
-        root.add_overlay(&footer);
         let preview_status = label("Loading preview…", "");
         preview_status.set_halign(gtk::Align::Center);
         preview_status.set_valign(gtk::Align::Center);
@@ -840,7 +836,6 @@ impl MediaViewer {
             owner: ui.state.borrow().account.clone(),
             peer: ui.state.borrow().current().jid.clone(),
             generation: ui.generation.get(),
-            footer,
             preview_status,
             items: RefCell::new(items),
             title,
@@ -903,6 +898,44 @@ impl MediaViewer {
             glib::Propagation::Proceed
         });
         viewer.root.add_controller(key);
+        let click = gtk::GestureClick::new();
+        click.set_button(gdk::BUTTON_PRIMARY);
+        let weak = Rc::downgrade(&viewer);
+        click.connect_released(move |_, presses, x, y| {
+            let Some(viewer) = weak
+                .upgrade()
+                .filter(|v| presses == 1 && v.progress.get() >= 0.99)
+            else {
+                return;
+            };
+            let mut target = viewer.root.pick(x, y, gtk::PickFlags::DEFAULT);
+            while let Some(widget) = target {
+                if widget.is::<gtk::Button>() || widget.is::<adw::HeaderBar>() {
+                    return;
+                }
+                target = widget.parent();
+            }
+            let picture = &viewer.pictures.borrow()[viewer.index.get()];
+            let inside = picture
+                .paintable()
+                .zip(picture.compute_bounds(&viewer.root))
+                .is_some_and(|(paintable, bounds)| {
+                    let width = f64::from(bounds.width());
+                    let height = f64::from(bounds.height());
+                    let ratio = paintable.intrinsic_aspect_ratio();
+                    let (w, h) = if ratio > 0. {
+                        (width.min(height * ratio), height.min(width / ratio))
+                    } else {
+                        (width, height)
+                    };
+                    (x - f64::from(bounds.x()) - width / 2.).abs() <= w / 2.
+                        && (y - f64::from(bounds.y()) - height / 2.).abs() <= h / 2.
+                });
+            if !inside {
+                viewer.close();
+            }
+        });
+        viewer.root.add_controller(click);
         let swipe = gtk::GestureSwipe::new();
         let weak = Rc::downgrade(&viewer);
         swipe.connect_swipe(move |_, x, y| {
@@ -985,7 +1018,6 @@ impl MediaViewer {
         self.update_position(delta);
         if !self.owner.is_empty() {
             let Some(ui) = self.ui.upgrade() else { return };
-            clear(&self.footer);
             let id = self.items.borrow()[index].id.clone();
             let Some(message) = ui
                 .store
@@ -1005,7 +1037,6 @@ impl MediaViewer {
                     ui.notice(reason);
                 }
             }
-            self.footer.append(&ui.file_controls(&message, false));
             self.refresh_neighbours();
         }
     }
@@ -1116,6 +1147,7 @@ impl MediaViewer {
         let weak = Rc::downgrade(self);
         let p = picture.downgrade();
         let loaded_edge = Cell::new(0u32);
+        let mut playing = false;
         glib::timeout_add_local(Duration::from_millis(100), move || {
             let (Some(viewer), Some(picture)) = (weak.upgrade(), p.upgrade()) else {
                 return glib::ControlFlow::Break;
@@ -1173,7 +1205,16 @@ impl MediaViewer {
                 return glib::ControlFlow::Continue;
             }
             if index == viewer.index.get() {
-                viewer.preview_status.set_text("Loading preview…");
+                let status = ui.downloads.borrow().status(&viewer.owner, &file);
+                let feedback = match status {
+                    Some(
+                        crate::downloads::Status::Failed(reason)
+                        | crate::downloads::Status::Deferred { reason, .. },
+                    ) => reason,
+                    Some(crate::downloads::Status::Cancelled) => "Download cancelled",
+                    _ => "Loading preview…",
+                };
+                viewer.preview_status.set_text(feedback);
                 viewer
                     .preview_status
                     .set_visible(picture.paintable().is_none());
@@ -1196,6 +1237,25 @@ impl MediaViewer {
                             .unwrap_or(false)
                         {
                             picture.set_paintable(Some(&image.texture));
+                            if current && image.animated && !playing {
+                                playing = true;
+                                let weak = Rc::downgrade(&viewer);
+                                let id = id.clone();
+                                crate::image_loader::play(
+                                    &picture,
+                                    path,
+                                    file,
+                                    2048,
+                                    move |_| {
+                                        weak.upgrade().is_some_and(|viewer| {
+                                            !viewer.closing.get()
+                                                && viewer.items.borrow()[viewer.index.get()].id
+                                                    == id
+                                        })
+                                    },
+                                    |picture, frame| picture.set_paintable(Some(&frame)),
+                                );
+                            }
                             loaded_edge.set(edge);
                             if index == viewer.index.get() {
                                 viewer.preview_status.set_visible(false);
@@ -1203,9 +1263,7 @@ impl MediaViewer {
                         }
                     }
                     Some(Err(_)) if index == viewer.index.get() => {
-                        viewer
-                            .preview_status
-                            .set_text("Preview unavailable. You can save this file.");
+                        viewer.preview_status.set_text("Image preview unavailable");
                         viewer
                             .preview_status
                             .set_visible(picture.paintable().is_none());
