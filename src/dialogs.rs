@@ -1563,6 +1563,24 @@ impl Ui {
         self.dialog("Message Details", &page, 520, 440);
     }
     pub fn retry(self: &Rc<Self>, id: &str) {
+        if self
+            .state
+            .borrow()
+            .message(id)
+            .is_some_and(|m| m.upload.is_some())
+        {
+            let peer = self.state.borrow().current().jid.clone();
+            self.start_upload(&peer, id);
+            return;
+        }
+        if self.state.borrow().message(id).is_some_and(|m| {
+            m.attachment.is_some()
+                && (m.encrypted != self.state.borrow().current().encryption
+                    || (m.encrypted && m.fingerprint != self.crypto.borrow().fingerprint))
+        }) {
+            self.notice("Encryption changed. Select the file again to send a fresh copy.");
+            return;
+        }
         if !self.online.get() {
             self.notice("Reconnect before retrying");
             return;
@@ -1754,10 +1772,9 @@ impl Ui {
         });
     }
     pub fn choose_files(self: &Rc<Self>, media: bool) {
-        if !self.state.borrow().account.is_empty() {
-            self.notice("Live file transfers are not available yet");
-            return;
-        }
+        self.choose_files_in(media, None);
+    }
+    pub(crate) fn choose_files_in(self: &Rc<Self>, media: bool, folder: Option<&gio::File>) {
         let owner = self.state.borrow().account.clone();
         let chat = self.state.borrow().active.clone();
         let chooser = gtk::FileDialog::builder()
@@ -1768,6 +1785,7 @@ impl Ui {
             })
             .modal(true)
             .build();
+        chooser.set_initial_folder(folder);
         if media {
             let filter = gtk::FileFilter::new();
             filter.set_name(Some("Photos and videos"));
@@ -1779,7 +1797,7 @@ impl Ui {
         }
         let weak = Rc::downgrade(self);
         let window = self.window.clone();
-        glib::MainContext::default().spawn_local(async move{match chooser.open_multiple_future(Some(&window)).await{Ok(files)=>{let Some(ui)=weak.upgrade()else{return};if ui.state.borrow().account!=owner||ui.state.borrow().active!=chat{ui.notice("Conversation changed. Select the files again in their destination chat.");return}for file in files.iter::<gio::File>().flatten(){if let Some(path)=file.path(){let chip=bx(false,4);chip.add_css_class("file-chip");chip.append(&label(path.file_name().unwrap_or_default().to_string_lossy().as_ref(),""));let remove=icon_button("window-close-symbolic","Remove attachment");let weak=Rc::downgrade(&ui);let c=chip.downgrade();let p=path.clone();remove.connect_clicked(move|_|{if let Some(ui)=weak.upgrade(){ui.attachments.borrow_mut().retain(|v|v!=&p);if let Some(c)=c.upgrade(){ui.chips.remove(&c)}ui.compose_changed();}});chip.append(&remove);ui.chips.append(&chip);ui.attachments.borrow_mut().push(path)}}ui.chips.set_visible(true);ui.compose_changed();ui.show_chat();},Err(e)=>{if !e.matches(gtk::DialogError::Dismissed){if let Some(ui)=weak.upgrade(){ui.notice("File selection is unavailable")}}}}});
+        glib::MainContext::default().spawn_local(async move{match chooser.open_multiple_future(Some(&window)).await{Ok(files)=>{let Some(ui)=weak.upgrade()else{return};if ui.state.borrow().account!=owner||ui.state.borrow().active!=chat{ui.notice("Conversation changed. Select the files again in their destination chat.");return}for file in files.iter::<gio::File>().flatten(){let chip=bx(false,4);chip.add_css_class("file-chip");chip.append(&label(file.basename().unwrap_or_default().to_string_lossy().as_ref(),""));let remove=icon_button("window-close-symbolic","Remove attachment");let weak=Rc::downgrade(&ui);let c=chip.downgrade();let p=file.clone();remove.connect_clicked(move|_|{if let Some(ui)=weak.upgrade(){ui.attachments.borrow_mut().retain(|v|v!=&p);if let Some(c)=c.upgrade(){ui.chips.remove(&c)}ui.compose_changed();}});chip.append(&remove);ui.chips.append(&chip);ui.attachments.borrow_mut().push(file)}ui.chips.set_visible(true);ui.compose_changed();ui.show_chat();},Err(e)=>{if !e.matches(gtk::DialogError::Dismissed){if let Some(ui)=weak.upgrade(){ui.notice("File selection is unavailable")}}}}});
     }
     pub fn payment(self: &Rc<Self>, request: bool) {
         let page = adw::PreferencesPage::new();

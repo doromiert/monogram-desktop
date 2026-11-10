@@ -71,10 +71,10 @@ unavailable; their outer fallback bodies never appear as decrypted content.
 
 Live mode implements [direct polls](STRUCTURED_POLLS.md) and
 [attributed text/poll forwarding](FORWARDING.md), including explicit OMEMO 2.
-Received files use [real manual downloads](FILE_TRANSFERS.md); upload/attach and
-fictional media, article, wallet, story, group and call actions remain disabled.
+Direct files use [real uploads and manual downloads](FILE_TRANSFERS.md). Fictional
+media, article, wallet, story, group and call actions remain disabled.
 Their offline demo surfaces remain available through Open Offline Demo.
-MUC/MIX, uploads/complete media transfers, legacy/PQ, complete OMEMO 2 policies, stream resumption,
+MUC/MIX, complete rich media transfers/playback, legacy/PQ, complete OMEMO 2 policies, stream resumption,
 proxy configuration, certificate exceptions, keyring-backed credentials and
 simultaneous connected accounts remain outstanding. Unsupported discovery/archive
 features report their absence without fabricating successful results.

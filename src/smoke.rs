@@ -745,6 +745,7 @@ pub fn run_crypto(ui: Rc<Ui>) {
     let poll_smoke = PollSmoke::default();
     let forward_smoke = ForwardSmoke::default();
     let download_smoke = crate::download_smoke::DownloadSmoke::default();
+    let upload_smoke = crate::upload_smoke::UploadSmoke::default();
     let frank_online = Cell::new(false);
     let frank_ready = Cell::new(false);
     let frank_trusted = Cell::new(false);
@@ -813,6 +814,9 @@ pub fn run_crypto(ui: Rc<Ui>) {
                         .as_ref()
                         .unwrap()
                         .send(Command::Crypto(Request::Accepted(token)));
+                    if upload_smoke.incoming(&message, true) {
+                        continue;
+                    }
                     if forward_smoke.incoming(&message, true) {
                         continue;
                     }
@@ -905,6 +909,9 @@ pub fn run_crypto(ui: Rc<Ui>) {
             forward_smoke.start(&ui, frank.borrow().as_ref().unwrap(), true);
         }
         if forward_smoke.tick(&ui, true) {
+            upload_smoke.start(&ui);
+        }
+        if upload_smoke.tick(&ui, true) {
             download_smoke.start(
                 &ui,
                 frank.borrow().as_ref().unwrap(),
@@ -1270,11 +1277,12 @@ pub fn run_live(ui: Rc<Ui>) {
     let poll_smoke = PollSmoke::default();
     let forward_smoke = ForwardSmoke::default();
     let download_smoke = crate::download_smoke::DownloadSmoke::default();
+    let upload_smoke = crate::upload_smoke::UploadSmoke::default();
     let bob_online = Cell::new(false);
     let started = Instant::now();
     glib::timeout_add_local(Duration::from_millis(50), move || {
         assert!(
-            started.elapsed() < Duration::from_secs(40),
+            started.elapsed() < Duration::from_secs(60),
             "native live stage {} timed out",
             stage.get()
         );
@@ -1286,6 +1294,9 @@ pub fn run_live(ui: Rc<Ui>) {
                     historical: false,
                     ..
                 } if !message.own => {
+                    if upload_smoke.incoming(&message, false) {
+                        continue;
+                    }
                     if forward_smoke.incoming(&message, false) {
                         continue;
                     }
@@ -1386,6 +1397,9 @@ pub fn run_live(ui: Rc<Ui>) {
             forward_smoke.start(&ui, bob.borrow().as_ref().unwrap(), false);
         }
         if forward_smoke.tick(&ui, false) {
+            upload_smoke.start(&ui);
+        }
+        if upload_smoke.tick(&ui, false) {
             download_smoke.start(
                 &ui,
                 bob.borrow().as_ref().unwrap(),
@@ -1400,7 +1414,7 @@ pub fn run_live(ui: Rc<Ui>) {
         }
         match stage.get() {
             0 if ui.online.get() && bob_online.get() => {
-                assert!(!ui.window.lookup_action("attach-file").unwrap().is_enabled());
+                assert!(ui.window.lookup_action("attach-file").unwrap().is_enabled());
                 ui.composer.buffer().set_text("Native Rust composer 🌿");
                 ui.send();
                 assert!(ui.composer_text().is_empty());

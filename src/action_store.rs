@@ -9,7 +9,7 @@ impl Store {
     pub fn init_actions(&self) -> rusqlite::Result<()> {
         self.db.execute_batch("CREATE TABLE IF NOT EXISTS message_bases(account TEXT NOT NULL REFERENCES accounts(jid) ON DELETE CASCADE,peer TEXT NOT NULL,id TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(account,peer,id));CREATE TABLE IF NOT EXISTS action_refs(account TEXT NOT NULL REFERENCES accounts(jid) ON DELETE CASCADE,peer TEXT NOT NULL,own INTEGER NOT NULL,kind TEXT NOT NULL,value TEXT NOT NULL,message TEXT NOT NULL,PRIMARY KEY(account,peer,own,kind,value,message));CREATE INDEX IF NOT EXISTS action_reference ON action_refs(account,peer,value);CREATE TABLE IF NOT EXISTS action_events(account TEXT NOT NULL REFERENCES accounts(jid) ON DELETE CASCADE,peer TEXT NOT NULL,own INTEGER NOT NULL,identity TEXT NOT NULL,target TEXT NOT NULL,local TEXT NOT NULL,wire TEXT NOT NULL,status TEXT NOT NULL,resolved TEXT,body TEXT NOT NULL,PRIMARY KEY(account,peer,own,identity));CREATE INDEX IF NOT EXISTS action_target ON action_events(account,peer,target);CREATE INDEX IF NOT EXISTS action_local ON action_events(account,peer,local);")?;
         // Upgrade cached unread counts once, before serde adds defaults to old rows.
-        self.db.execute_batch("WITH ranked AS(SELECT account,peer,id,row_number() OVER(PARTITION BY account,peer ORDER BY timestamp DESC,id DESC) AS position FROM messages WHERE json_valid(body) AND json_extract(body,'$.own')=0) UPDATE messages SET body=json_set(body,'$.unread',json(CASE WHEN COALESCE((SELECT position FROM ranked r WHERE r.account=messages.account AND r.peer=messages.peer AND r.id=messages.id),2147483647)<=COALESCE((SELECT json_extract(c.body,'$.unread') FROM chats c WHERE c.account=messages.account AND c.peer=messages.peer),0) THEN 'true' ELSE 'false' END)) WHERE json_valid(body) AND json_type(body,'$.unread') IS NULL;INSERT OR IGNORE INTO message_bases SELECT account,peer,id,body FROM messages WHERE json_valid(body) AND COALESCE(json_type(body,'$.action'),'null')='null';")?;
+        self.db.execute_batch("WITH ranked AS(SELECT account,peer,id,row_number() OVER(PARTITION BY account,peer ORDER BY timestamp DESC,id DESC) AS position FROM messages WHERE json_valid(body) AND json_extract(body,'$.own')=0) UPDATE messages SET body=json_set(body,'$.unread',json(CASE WHEN COALESCE((SELECT position FROM ranked r WHERE r.account=messages.account AND r.peer=messages.peer AND r.id=messages.id),2147483647)<=COALESCE((SELECT json_extract(c.body,'$.unread') FROM chats c WHERE c.account=messages.account AND c.peer=messages.peer),0) THEN 'true' ELSE 'false' END)) WHERE json_valid(body) AND json_type(body,'$.unread') IS NULL;INSERT OR IGNORE INTO message_bases SELECT account,peer,id,body FROM messages WHERE json_valid(body) AND COALESCE(json_type(body,'$.action'),'null')='null' AND COALESCE(json_type(body,'$.upload'),'null')='null';")?;
         let rows = {
             let mut query=self.db.prepare("SELECT account,peer,body FROM message_bases WHERE NOT EXISTS(SELECT 1 FROM action_refs r WHERE r.account=message_bases.account AND r.peer=message_bases.peer AND r.message=message_bases.id)")?;
             query
@@ -49,7 +49,7 @@ impl Store {
         Ok(())
     }
     pub fn save_base(&self, a: &str, peer: &str, m: &Message) -> rusqlite::Result<()> {
-        if m.action.is_some() {
+        if m.action.is_some() || m.upload.is_some() {
             return Ok(());
         }
         let body = serde_json::to_string(m).unwrap();

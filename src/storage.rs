@@ -86,6 +86,7 @@ impl Store {
         tx.commit()
     }
     pub fn load(&self, a: &str) -> State {
+        let _ = self.interrupt_uploads(a);
         let _ = self.interrupt_actions(a);
         let peers: Vec<String> = {
             let mut q = self
@@ -317,5 +318,38 @@ mod tests {
         db.delete(&a.jid, &a.jid, &m.id).unwrap();
         assert!(db.load(&a.jid).current().messages.is_empty());
         assert!(db.known(&a.jid, &a.jid, true, &m.aliases).is_some());
+    }
+}
+
+impl Store {
+    // Pending placeholders must never become the immutable wire payload used by corrections.
+    pub fn update_upload(
+        &self,
+        owner: &str,
+        peer: &str,
+        message: &Message,
+    ) -> rusqlite::Result<bool> {
+        let tx = self.db.unchecked_transaction()?;
+        let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM messages WHERE account=? AND peer=? AND id=? AND json_type(body,'$.upload')='object')",rusqlite::params![owner,peer,message.id],|r|r.get(0))?;
+        if !exists {
+            return Ok(false);
+        }
+        if message.upload.is_none() {
+            self.save_base(owner, peer, message)?;
+        }
+        tx.execute(
+            "UPDATE messages SET body=? WHERE account=? AND peer=? AND id=?",
+            rusqlite::params![
+                serde_json::to_string(message).unwrap(),
+                owner,
+                peer,
+                message.id
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+    pub fn interrupt_uploads(&self, owner: &str) -> rusqlite::Result<usize> {
+        self.db.execute("UPDATE messages SET body=json_set(body,'$.delivery','failed','$.upload.error','Upload interrupted. Retry to send.') WHERE account=? AND json_type(body,'$.upload')='object' AND COALESCE(json_extract(body,'$.delivery'),'')='sending'",[owner])
     }
 }

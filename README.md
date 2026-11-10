@@ -4,8 +4,11 @@ A native **Rust / GTK 4 / libadwaita** reimplementation of Monogram for Linux.
 The app now includes **initial live XMPP direct-text messaging** and a separate
 offline demo with fictional conversations. Live mode supports verified TLS login,
 roster/presence, text, replies, carbons, archive history, receipts and local drafts.
-**OMEMO 2 direct text/replies are available through explicit setup and fingerprint review.** Calls, media, groups and wallets
-remain offline demo surfaces and are disabled for live accounts.
+**OMEMO 2 direct messages are available through explicit setup and fingerprint review.**
+Live direct chats also support structured polls, corrections/reactions/retractions,
+attributed text forwarding, and generic file uploads/downloads with encrypted
+metadata and native progress controls. Rich media playback, calls, groups and
+wallets remain offline demo surfaces. See the [parity ledger](docs/FEATURE_PARITY.md).
 
 ## Run with Nix
 

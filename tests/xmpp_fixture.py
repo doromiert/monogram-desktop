@@ -35,9 +35,33 @@ def main():
         subprocess.run(["openssl", "x509", "-req", "-in", str(csr), "-CA", str(ca), "-CAkey", str(ca_key), "-CAcreateserial", "-days", "2", "-extfile", str(extensions), "-out", str(cert)], check=True, capture_output=True)
         key.chmod(0o600)
         port = free_port()
+        file_port = free_port()
+        modules = root / "modules"
+        modules.mkdir()
+        (modules / "mod_monogram_upload.lua").write_text(f'''
+local st = require "util.stanza";
+local ns = "urn:xmpp:http:upload:0";
+module:add_feature(ns);
+local serial = 0;
+module:hook("iq-get/host/" .. ns .. ":request", function(event)
+    local request = event.stanza.tags[1];
+    local size = tonumber(request.attr.size);
+    if not size or size <= 0 or size > 1048576 then
+        event.origin.send(st.error_reply(event.stanza, "modify", "not-acceptable")); return true;
+    end
+    serial = serial + 1;
+    local url = "https://localhost:{file_port}/uploaded/" .. tostring(serial);
+    event.origin.send(st.reply(event.stanza):tag("slot", {{xmlns=ns}})
+        :tag("put", {{url=url}}):tag("header", {{name="Authorization"}}):text("Bearer fixture-upload"):up()
+        :tag("header", {{name="Cookie"}}):text("fixture=upload"):up():up()
+        :tag("get", {{url=url}}));
+    return true;
+end);
+''')
         config = root / "prosody.cfg.lua"
         config.write_text(f'''
 daemonize = false
+plugin_paths = {{ "{modules}" }}
 run_as_root = false
 pidfile = "{root}/prosody.pid"
 data_path = "{root}/data"
@@ -50,7 +74,7 @@ https_ports = {{}}
 allow_registration = false
 c2s_require_encryption = true
 ssl = {{ key = "{key}"; certificate = "{cert}" }}
-modules_enabled = {{ "roster"; "saslauth"; "tls"; "disco"; "carbons"; "mam"; "ping"; "pep" }}
+modules_enabled = {{ "roster"; "saslauth"; "tls"; "disco"; "carbons"; "mam"; "ping"; "pep"; "monogram_upload" }}
 log = {{ {{ levels = {{ min = "warn" }}; to = "console" }} }}
 VirtualHost "localhost"
 authentication = "internal_hashed"
@@ -78,12 +102,32 @@ authentication = "internal_hashed"
                 vectors = json.loads(Path("tests/mobile-reference/file-cipher-vectors.json").read_text())
                 encrypted = base64.b64decode(vectors[1]["ciphertext"])
                 plain = base64.b64decode(vectors[1]["plain"])
+                uploaded = {}
                 class Files(http.server.BaseHTTPRequestHandler):
                     def log_message(self, *_):
                         pass
+                    def do_PUT(self):
+                        assert self.headers["Authorization"] == "Bearer fixture-upload"
+                        assert self.headers["Cookie"] == "fixture=upload"
+                        assert self.headers.get("Referer") is None
+                        size = int(self.headers["Content-Length"])
+                        assert 0 < size <= 1048576
+                        data = self.rfile.read(size)
+                        assert len(data) == size
+                        uploaded[self.path] = data
+                        # Leave a stable cancellation/policy-change window after streaming.
+                        time.sleep(.4)
+                        try:
+                            self.send_response(201)
+                            self.send_header("Content-Length", "0")
+                            self.end_headers()
+                        except (BrokenPipeError, ConnectionResetError, ssl.SSLError):
+                            pass
                     def do_GET(self):
                         assert "#" not in self.path and "aesgcm" not in self.path
                         data = encrypted if self.path.startswith("/encrypted") else plain
+                        if self.path.startswith("/uploaded/"):
+                            data = uploaded[self.path]
                         if self.path.endswith("bad"):
                             data = data[:-1] + bytes([data[-1] ^ 1])
                         self.send_response(200)
@@ -98,7 +142,7 @@ authentication = "internal_hashed"
                             self.wfile.write(data)
                         except (BrokenPipeError, ConnectionResetError, ssl.SSLError):
                             pass
-                files = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Files)
+                files = http.server.ThreadingHTTPServer(("127.0.0.1", file_port), Files)
                 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 context.load_cert_chain(cert, key)
                 files.socket = context.wrap_socket(files.socket, server_side=True)
@@ -180,7 +224,7 @@ def run_checks(root, server_port, cert, file_url):
             subprocess.run([args.crypto_test_binary, "--ignored", "--exact", "crypto::tests::live_pep_encrypted_roundtrip", "--nocapture"], env=env, check=True, timeout=110)
             subprocess.run(["bash", "tests/keyring_fixture.sh", args.crypto_test_binary, args.bus_config, "crypto::service::tests::live_service_roundtrip"], env=env, check=True, timeout=150)
         if args.app_binary:
-            subprocess.run(["bash", "tests/keyring_fixture.sh", args.app_binary, args.bus_config, "--live-smoke-test"], env=env, check=True, timeout=60)
+            subprocess.run(["bash", "tests/keyring_fixture.sh", args.app_binary, args.bus_config, "--live-smoke-test"], env=env, check=True, timeout=90)
             subprocess.run(["bash", "tests/keyring_fixture.sh", args.app_binary, args.bus_config, "--crypto-smoke-test"], env=env, check=True, timeout=150)
         empty = root / "empty-ca.pem"
         empty.write_text("")

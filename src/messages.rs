@@ -219,6 +219,12 @@ impl Ui {
                     l.set_margin_top(6);
                     bubble.append(&l)
                 }
+                "file" if m.upload.is_some() => {
+                    bubble.append(&self.upload_content(&m));
+                    if !m.text.is_empty() {
+                        bubble.append(&wrap(&m.text, ""));
+                    }
+                }
                 "file" if m.attachment.is_some() => {
                     bubble.append(&self.attachment_content(&m));
                     if !m.text.is_empty() {
@@ -541,6 +547,13 @@ impl Ui {
                     drop(s);
                     self.notice("Local deletion failed");
                     return;
+                }
+                self.uploads.borrow_mut().cancel(id);
+                if s.message(id).is_some_and(|m| m.upload.is_some()) {
+                    let _guard = crate::downloads::CACHE_IO.lock().unwrap();
+                    if let Ok(path) = crate::uploads::snapshot_path(&s.account, id) {
+                        let _ = std::fs::remove_file(path);
+                    }
                 }
                 if let Some(file) = s.message(id).and_then(|m| m.attachment.as_ref()) {
                     self.downloads.borrow_mut().cancel(&s.account, file);

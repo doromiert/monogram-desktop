@@ -45,7 +45,7 @@ pub struct Downloads {
     tasks: HashMap<(String, String), Task>,
 }
 // Account removal must fence cache creation/commit; network and hashing stay outside this lock.
-static CACHE_IO: Mutex<()> = Mutex::new(());
+pub(crate) static CACHE_IO: Mutex<()> = Mutex::new(());
 impl Downloads {
     pub fn token(&self, account: &str, file: &Attachment) -> Option<Arc<AtomicBool>> {
         self.tasks
@@ -151,7 +151,7 @@ pub fn forget(account: &str) -> Result<(), &'static str> {
 fn client() -> Result<reqwest::Client, &'static str> {
     client_builder().build().map_err(|_| "HTTPS unavailable")
 }
-fn client_builder() -> reqwest::ClientBuilder {
+pub(crate) fn client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())

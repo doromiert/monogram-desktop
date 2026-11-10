@@ -373,9 +373,11 @@ impl Worker {
         });
     }
     async fn send_message(&mut self, peer: &str, message: &Message, quote: &str) -> Result<()> {
-        if message.attachment.as_ref().is_some_and(|file| {
-            !file.valid_outgoing(true) || message.poll.is_some() || message.action.is_some()
-        }) {
+        if message.upload.is_some()
+            || message.attachment.as_ref().is_some_and(|file| {
+                !file.valid_outgoing(true) || message.poll.is_some() || message.action.is_some()
+            })
+        {
             return Err(Error::Invalid("attachment encryption"));
         }
         if !self.ready || !self.online {

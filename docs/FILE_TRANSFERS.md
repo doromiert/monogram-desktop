@@ -4,7 +4,8 @@ Desktop advertises SFS support, receives direct file messages in plaintext or
 explicit OMEMO 2 and offers
 manual Download, Cancel, Retry and native Save As. The reference is mobile's
 `FileLink`, `FileShare`, `FileTransfer` and account-owned transfer registry.
-Uploads, rich media viewing and complete transfer/settings parity remain open.
+Direct uploads now use XEP-0363 service discovery and slot requests. Rich media
+viewing and complete transfer/settings parity remain open.
 
 ## Wire profile
 
@@ -30,8 +31,7 @@ unsupported sources are not interpreted as downloadable files.
 
 The backend can serialize a fresh typed description and independent file/reply
 fallbacks; it rejects file-key/envelope mismatches. Live upload/attach controls
-remain disabled until provider discovery, immutable inputs and fresh uploads are
-implemented. Forwarding a received attachment is still refused rather than
+use provider discovery, immutable inputs and fresh uploads. Forwarding a received attachment is still refused rather than
 reusing its original key-bearing URL. Caption corrections remain unsupported
 until unchanged attachment identity is verified.
 
@@ -74,6 +74,45 @@ and ratchet keys continue using their existing protected keyring-backed store.
 Local message deletion/retraction does not promise forensic removal of copies,
 exports or cached media; cache management/retention UI remains unfinished.
 
+## Upload selection, sending and retry
+
+The native chooser retains GIO files, including portal/GVfs sources without a
+local path. Sending creates durable local pending messages and clears the composer
+only after persistence. The first selected file carries the caption; selections
+currently send as independent files rather than a media album.
+
+[XEP-0363](https://xmpp.org/extensions/xep-0363.html) discovery queries the account
+server and its advertised services. Provider limits include the encrypted 16-byte
+tag and are checked before copying a known-size source. Unknown-size sources are
+bounded while copying, and the actual snapshot size is checked before slot use.
+The worker copies to a private, synced, immutable account-owned snapshot. Retry
+reuses that snapshot, protecting against later changes to the original file.
+
+Uploads use at most four workers with 64 total queued files. Plaintext bytes stream
+in 64 KiB chunks; encrypted uploads use a fresh 12-byte nonce and 32-byte AES-GCM
+key for each attempt. Modern encrypted slots expose only a random `.bin` name and
+`application/octet-stream`; actual filename, MIME, size and plaintext SHA-256 are
+inside the protected SFS description. PUT credentials are restricted to the
+XEP's Authorization/Cookie/Expires headers. CR/LF is rejected, redirects are
+refused, and only HTTP 200/201/204 after complete body generation permits sending.
+
+A pending placeholder is never an immutable wire-message base and cannot be
+submitted by the XMPP or crypto send path. After a successful upload, owner,
+session generation, encryption mode and local fingerprint must still match;
+otherwise the pending message fails and requires explicit retry. Final attachment
+metadata is persisted before sending its stanza. The snapshot then moves into the
+verified download cache. Cancellation, closing the window or changing account
+stops workers. Restart recovers pending messages as interrupted, without automatic
+retransmission. Retrying a pending upload requests a fresh slot and encryption key. Retrying an
+already uploaded message under changed encryption requires selecting the file
+again. Forwarding to a different recipient still requires its own verified fresh
+upload flow and remains unavailable.
+
+Pending source URIs, filenames, captions and final file URLs/keys are plaintext
+local history. Source URIs and bearer credentials are excluded from Debug/error
+output. Snapshots and abandoned private partials are removed with the account
+cache; complete retention/cleanup controls and process-kill resume remain open.
+
 ## Verification and remaining work
 
 The mobile test-only `GenerateFileVectors` exports 32 actual wire/model cases and
@@ -89,8 +128,8 @@ live SFS discovery, leave-chat continuation, native Save As/export, preserved dr
 cache removal in plaintext and OMEMO 2. No real account or host clipboard is used.
 
 Generic file cards currently represent photos, video, audio, stickers and GIFs as
-files. Live thumbnails/viewer/playback, content-type upgrades, provider uploads,
-media authoring, albums, automatic-download preferences, durable transfers,
+files. Live thumbnails/viewer/playback, content-type upgrades,
+media authoring, albums, automatic-download preferences, automatic transfer resume,
 complete cache management, caption edits, fresh media forwarding, room transport
 and physical mobile/desktop application exchange remain open. These receive and
 download paths do not establish complete file/media or client parity.

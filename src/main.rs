@@ -22,6 +22,9 @@ mod smoke;
 mod storage;
 mod transport;
 mod ui;
+mod upload_smoke;
+mod upload_ui;
+mod uploads;
 mod wallet;
 mod widgets;
 fn main() -> gtk::glib::ExitCode {

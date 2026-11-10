@@ -15,6 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 pub struct Ui {
+    pub uploads: RefCell<crate::upload_ui::Uploads>,
     pub downloads: RefCell<crate::downloads::Downloads>,
     pub window: adw::ApplicationWindow,
     pub toast: adw::ToastOverlay,
@@ -46,7 +47,7 @@ pub struct Ui {
     pub reply_bar: gtk::Revealer,
     pub reply_label: gtk::Label,
     pub replying: RefCell<Option<String>>,
-    pub attachments: RefCell<Vec<std::path::PathBuf>>,
+    pub attachments: RefCell<Vec<gio::File>>,
     pub chips: gtk::Box,
     pub selection: gtk::ActionBar,
     pub selection_count: gtk::Label,
@@ -137,6 +138,7 @@ impl Ui {
         window.add_breakpoint(bp);
         let (tx, rx) = mpsc::channel();
         let ui = Rc::new(Self {
+            uploads: RefCell::new(Default::default()),
             downloads: RefCell::new(Default::default()),
             window,
             toast,
@@ -281,6 +283,7 @@ impl Ui {
             for (g, a, e) in events {
                 ui.backend_event(g, &a, e)
             }
+            ui.poll_uploads();
             glib::ControlFlow::Continue
         });
         let weak = Rc::downgrade(&ui);
@@ -326,6 +329,7 @@ impl Ui {
         ui.window.connect_close_request(move |_| {
             if let Some(u) = weak.upgrade() {
                 u.save_draft();
+                u.stop_uploads();
                 u.downloads.borrow_mut().clear();
                 u.session.borrow_mut().take();
                 u.generation.set(u.generation.get() + 1);
@@ -1266,7 +1270,11 @@ impl Ui {
             self.notice("Connect before sending. Your draft is kept.");
             return;
         }
-        if !value.trim().is_empty() {
+        let files_sent = live && !self.attachments.borrow().is_empty();
+        if files_sent && !self.send_files(&value) {
+            return;
+        }
+        if !files_sent && !value.trim().is_empty() {
             let Some(id) = self.state.borrow_mut().send(&value, "text") else {
                 return;
             };
@@ -1317,7 +1325,7 @@ impl Ui {
             let files = self.attachments.borrow().clone();
             for file in files {
                 self.state.borrow_mut().send(
-                    file.file_name()
+                    file.basename()
                         .unwrap_or_default()
                         .to_string_lossy()
                         .as_ref(),
@@ -1386,8 +1394,6 @@ impl Ui {
             "profile",
             "developer",
             "call",
-            "attach-file",
-            "attach-media",
             "article",
             "location",
             "payment",
@@ -1414,7 +1420,18 @@ impl Ui {
             self.media_stack.set_visible_child_name("emoji")
         }
     }
-    pub fn activate_state(self: &Rc<Self>, state: State) {
+    pub fn activate_state(self: &Rc<Self>, mut state: State) {
+        self.stop_uploads();
+        for chat in &mut state.chats {
+            for m in &mut chat.messages {
+                if let Some(draft) = &mut m.upload {
+                    if m.delivery == "sending" {
+                        m.delivery = "failed".into();
+                        draft.error = Some("Upload interrupted. Retry to send.".into());
+                    }
+                }
+            }
+        }
         self.downloads.borrow_mut().clear();
         self.save_draft();
         if self.state.borrow().account.is_empty() {

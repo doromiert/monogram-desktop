@@ -15,6 +15,7 @@ fn yes() -> bool {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Message {
+    pub upload: Option<UploadDraft>,
     pub attachment: Option<crate::file_share::Attachment>,
     pub forwarded: Option<crate::forwarding::Attribution>,
     pub unsupported_attachment: bool,
@@ -55,6 +56,7 @@ pub struct Message {
 impl Default for Message {
     fn default() -> Self {
         Self {
+            upload: None,
             attachment: None,
             forwarded: None,
             unsupported_attachment: false,
@@ -156,6 +158,13 @@ impl Message {
         Ok(message)
     }
     pub fn preview(&self) -> String {
+        if let Some(upload) = &self.upload {
+            return if self.text.is_empty() {
+                format!("📎 {}", upload.name)
+            } else {
+                self.text.clone()
+            };
+        }
         if let Some(file) = &self.attachment {
             return if self.text.is_empty() {
                 format!("📎 {}", file.name)
@@ -454,5 +463,19 @@ mod tests {
         let live = State::live("me@example.org", vec![]);
         assert_eq!(live.chats.len(), 1);
         assert!(live.stories.is_empty());
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct UploadDraft {
+    pub uri: String,
+    pub name: String,
+    pub error: Option<String>,
+}
+impl std::fmt::Debug for UploadDraft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UploadDraft")
+            .field("failed", &self.error.is_some())
+            .finish_non_exhaustive()
     }
 }
