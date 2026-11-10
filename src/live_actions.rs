@@ -34,7 +34,7 @@ impl Ui {
                 m.reply = format!(
                     "{} · {}",
                     target.author,
-                    target.text.chars().take(80).collect::<String>()
+                    target.preview().chars().take(80).collect::<String>()
                 );
             } else if let Some(id) = self.store.known(
                 owner,
@@ -56,6 +56,15 @@ impl Ui {
         }
     }
     pub fn send_action(self: &Rc<Self>, id: &str, action: Action, text: &str) -> bool {
+        self.send_action_payload(id, action, text, None)
+    }
+    pub fn send_action_payload(
+        self: &Rc<Self>,
+        id: &str,
+        action: Action,
+        text: &str,
+        poll: Option<crate::polls::Poll>,
+    ) -> bool {
         let state = self.state.borrow();
         let owner = state.account.clone();
         let peer = state.current().jid.clone();
@@ -77,6 +86,16 @@ impl Ui {
         let Ok(base) = self.store.action_base(&owner, &peer, id) else {
             return false;
         };
+        if kind == "correct"
+            && !match (&base.poll, &poll) {
+                (None, None) => true,
+                (Some(original), Some(edit)) => edit.closed && original.same_definition(edit),
+                _ => false,
+            }
+        {
+            self.notice("A poll's question and choices cannot be changed");
+            return false;
+        }
         let expected = if kind == "react" {
             actions::reaction_reference(&base)
         } else {
@@ -86,7 +105,9 @@ impl Ui {
             self.notice("Message changed; reopen its menu");
             return false;
         }
-        let encrypted = current.encrypted || self.state.borrow().current().encryption;
+        let encrypted = current.encrypted
+            || self.state.borrow().current().encryption
+            || kind == "react" && self.store.action_protected(&owner, &peer, id);
         let crypto = self.crypto.borrow();
         if encrypted && !crypto.ready {
             drop(crypto);
@@ -100,6 +121,8 @@ impl Ui {
         }
         let wire = new_id();
         let message = Message {
+            poll_fallback: poll.is_some() && current.poll_fallback,
+            poll,
             action: Some(action),
             sender: owner.clone(),
             author: "You".into(),

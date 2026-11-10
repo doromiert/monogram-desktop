@@ -671,7 +671,7 @@ impl Ui {
                         format!(
                             "{}{}",
                             if m.own { "You: " } else { "" },
-                            m.text.replace('\n', " ")
+                            m.preview().replace('\n', " ")
                         )
                     })
                     .unwrap_or_else(|| "No messages yet".into())
@@ -1136,9 +1136,9 @@ impl Ui {
                 count += 1
             }
             for m in c.messages {
-                if m.text.to_lowercase().contains(&query) {
+                if m.content_text().to_lowercase().contains(&query) {
                     let row = adw::ActionRow::builder()
-                        .title(&m.text)
+                        .title(m.preview())
                         .subtitle(format!("{} · {} · {}", c.name, m.author, m.time))
                         .title_lines(2)
                         .use_markup(false)
@@ -1245,7 +1245,7 @@ impl Ui {
                 message.reply = format!(
                     "{} · {}",
                     r.author,
-                    r.text.chars().take(80).collect::<String>()
+                    r.preview().chars().take(80).collect::<String>()
                 );
                 message.reply_id = if live {
                     r.wire_id.clone()
@@ -1268,7 +1268,7 @@ impl Ui {
                 self.command(Command::Send {
                     peer,
                     message,
-                    quote: reply.map(|r| r.text).unwrap_or_default(),
+                    quote: reply.map(|r| r.preview()).unwrap_or_default(),
                 });
             }
         }
@@ -1305,7 +1305,7 @@ impl Ui {
             self.reply_label.set_text(&format!(
                 "Reply to {} · {}",
                 m.author,
-                m.text.chars().take(60).collect::<String>()
+                m.preview().chars().take(60).collect::<String>()
             ));
             self.reply_bar.set_reveal_child(true);
         } else {
@@ -1347,7 +1347,6 @@ impl Ui {
             "call",
             "attach-file",
             "attach-media",
-            "poll",
             "article",
             "location",
             "payment",
@@ -1359,6 +1358,13 @@ impl Ui {
             {
                 a.set_enabled(!live)
             }
+        }
+        if let Some(action) = self
+            .window
+            .lookup_action("poll")
+            .and_downcast::<gio::SimpleAction>()
+        {
+            action.set_enabled(!live || self.online.get());
         }
         for (name, t) in self.media_toggles.borrow().iter() {
             t.set_enabled(name == "emoji" || !live)
@@ -1673,7 +1679,7 @@ impl Ui {
         let notify =
             known.is_none() && !visible && !message.own && !historical && c.notifications == "all";
         let notification_title = c.name.clone();
-        let notification_body = message.text.clone();
+        let notification_body = message.preview();
         if let Some(known) = known.clone() {
             let old = c
                 .messages
@@ -1724,7 +1730,7 @@ impl Ui {
                     message.reply = format!(
                         "{} · {}",
                         target.author,
-                        target.text.chars().take(80).collect::<String>()
+                        target.preview().chars().take(80).collect::<String>()
                     )
                 } else if message.reply.is_empty() {
                     message.reply = "Original message is not loaded".into()

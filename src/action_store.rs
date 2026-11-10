@@ -302,6 +302,9 @@ impl Store {
     pub fn unread_count(&self, a: &str, peer: &str) -> u32 {
         self.db.query_row("SELECT count(*) FROM messages WHERE account=? AND peer=? AND json_extract(body,'$.unread')=1 AND COALESCE(json_extract(body,'$.retracted'),0)=0",params![a,peer],|r|r.get(0)).unwrap_or(0)
     }
+    pub fn action_protected(&self, a: &str, peer: &str, id: &str) -> bool {
+        self.db.query_row("SELECT EXISTS(SELECT 1 FROM action_events e WHERE account=? AND peer=? AND own=1 AND status!='failed' AND json_extract(body,'$.encrypted')=1 AND json_type(body,'$.action.React') IS NOT NULL AND(resolved=? OR target IN(SELECT value FROM action_refs WHERE account=e.account AND peer=e.peer AND message=?)))",params![a,peer,id,id],|r|r.get(0)).unwrap_or(true)
+    }
     pub fn action_base(&self, a: &str, peer: &str, id: &str) -> rusqlite::Result<Message> {
         let body: String = self.db.query_row(
             "SELECT body FROM message_bases WHERE account=? AND peer=? AND id=?",
@@ -569,6 +572,167 @@ mod tests {
                 .reactions
                 .is_empty()
         );
+    }
+    fn poll() -> crate::polls::Poll {
+        crate::polls::Poll {
+            question: "Where?".into(),
+            description: "Tonight".into(),
+            options: vec![
+                crate::polls::OptionValue {
+                    emoji: "🍕".into(),
+                    label: "Pizza".into(),
+                },
+                crate::polls::OptionValue {
+                    emoji: "🍜".into(),
+                    label: "Noodles".into(),
+                },
+            ],
+            multiple: false,
+            closed: false,
+        }
+    }
+    fn ballot(id: &str, options: &[&str], second: u32, secure: bool) -> Message {
+        let mut m = event(
+            id,
+            Action::React {
+                target: "wire".into(),
+                emojis: options.iter().map(|s| s.to_string()).collect(),
+            },
+            false,
+            second,
+        );
+        m.encrypted = secure;
+        m
+    }
+    #[test]
+    fn structured_ballots_replay_revote_withdraw_and_freeze_at_authenticated_closure() {
+        let (db, mut s) = setup();
+        let mut original = base("poll", "wire", true);
+        original.poll = Some(poll());
+        original.encrypted = true;
+        original.fingerprint = "own-key".into();
+        record(&db, &ballot("early", &["🍜"], 1, true), "received");
+        save(&db, &mut s, original);
+        db.reconcile_actions(OWNER, PEER).unwrap();
+        let tally = || db.message(OWNER, PEER, "poll").unwrap().poll_tally.unwrap();
+        assert_eq!(tally().counts, vec![0, 1]);
+        record(&db, &ballot("plain", &["🍕"], 2, false), "received");
+        assert_eq!(tally().counts, vec![0, 1]);
+        record(
+            &db,
+            &ballot("invalid-single", &["🍕", "🍜"], 3, true),
+            "received",
+        );
+        assert_eq!(tally().ballots.len(), 0);
+        record(&db, &ballot("revote", &["🍕", "❤️"], 4, true), "received");
+        assert_eq!(tally().counts, vec![1, 0]);
+        record(&db, &ballot("withdraw", &["❤️"], 5, true), "received");
+        assert_eq!(tally().ballots.len(), 0);
+        record(&db, &ballot("vote", &["🍕"], 6, true), "received");
+        let mut closed = poll();
+        closed.closed = true;
+        let mut close = event(
+            "close",
+            Action::Correct {
+                target: "wire".into(),
+            },
+            true,
+            7,
+        );
+        close.encrypted = true;
+        close.poll = Some(closed);
+        record(&db, &close, "sent");
+        record(&db, &ballot("too-late", &["🍜"], 8, true), "received");
+        assert_eq!(tally().counts, vec![1, 0]);
+        close.id = "close-again".into();
+        close.wire_id = close.id.clone();
+        close.aliases = vec!["wire:close-again".into()];
+        close.timestamp = "2026-11-10T10:00:09.000000+00:00".into();
+        record(&db, &close, "sent");
+        assert_eq!(tally().counts, vec![1, 0]);
+        db.load(OWNER);
+        assert_eq!(tally().counts, vec![1, 0]);
+        assert!(
+            db.message(OWNER, PEER, "poll")
+                .unwrap()
+                .poll
+                .unwrap()
+                .closed
+        );
+    }
+    #[test]
+    fn changed_definition_and_foreign_closure_cannot_mutate_a_poll() {
+        let (db, mut s) = setup();
+        let mut original = base("poll", "wire", true);
+        original.poll = Some(poll());
+        save(&db, &mut s, original);
+        let mut close = event(
+            "bad-close",
+            Action::Correct {
+                target: "wire".into(),
+            },
+            true,
+            1,
+        );
+        let mut definition = poll();
+        definition.closed = true;
+        definition.options[0].label = "Replaced".into();
+        close.poll = Some(definition);
+        record(&db, &close, "sent");
+        assert!(
+            !db.message(OWNER, PEER, "poll")
+                .unwrap()
+                .poll
+                .unwrap()
+                .closed
+        );
+        assert!(db.message(OWNER, PEER, "bad-close").unwrap().poll.is_none());
+        close.id = "foreign".into();
+        close.wire_id = close.id.clone();
+        close.aliases = vec!["wire:foreign".into()];
+        close.own = false;
+        close.sender = PEER.into();
+        close.poll.as_mut().unwrap().options[0].label = "Pizza".into();
+        record(&db, &close, "received");
+        assert!(
+            !db.message(OWNER, PEER, "poll")
+                .unwrap()
+                .poll
+                .unwrap()
+                .closed
+        );
+    }
+    #[test]
+    fn bodyless_poll_id_collisions_are_not_deduplicated_by_empty_body() {
+        let (db, mut s) = setup();
+        let mut first = base("first", "same", true);
+        first.poll = Some(poll());
+        first.text.clear();
+        first.sender = OWNER.into();
+        save(&db, &mut s, first.clone());
+        let mut different = first;
+        different.id = "different".into();
+        different.sender = format!("{OWNER}/other-resource");
+        different.poll.as_mut().unwrap().question = "Different question".into();
+        assert!(db.known_message(OWNER, PEER, &different).is_none());
+        save(&db, &mut s, different);
+        assert!(db.action_target(OWNER, PEER, "first", "correct").is_err());
+    }
+    #[test]
+    fn own_encrypted_reaction_keeps_future_sends_protected_on_plain_original() {
+        let (db, mut s) = setup();
+        save(&db, &mut s, base("first", "wire", false));
+        let mut event = ballot("own-protected", &["❤️"], 1, true);
+        event.own = true;
+        event.sender = OWNER.into();
+        record(&db, &event, "sent");
+        assert!(db.action_protected(OWNER, PEER, "first"));
+        db.action_delivery(OWNER, PEER, "own-protected", "uncertain")
+            .unwrap();
+        assert!(db.action_protected(OWNER, PEER, "first"));
+        db.action_delivery(OWNER, PEER, "own-protected", "failed")
+            .unwrap();
+        assert!(!db.action_protected(OWNER, PEER, "first"));
     }
     #[test]
     fn aliases_read_flags_and_pending_recovery_survive_reload() {

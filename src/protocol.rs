@@ -130,19 +130,49 @@ pub fn normalize(
                 | crate::message_actions::Action::Retract { .. }
         )
     );
+    let poll_present = !unavailable && xml.get_child("poll", crate::polls::NS).is_some();
+    if poll_present && control {
+        return None;
+    }
+    let poll = if unavailable {
+        None
+    } else {
+        crate::polls::Poll::parse(xml).ok().flatten()
+    };
     let raw = if unavailable {
         "Encrypted message — this encryption format is unavailable or needs device review.".into()
     } else if control {
         String::new()
+    } else if let Some(body) = xml.get_child("body", NS) {
+        body.text()
+    } else if poll.is_some() {
+        String::new()
+    } else if poll_present {
+        "Unsupported poll".into()
     } else {
-        xml.get_child("body", NS)?.text()
+        return None;
     };
     let (reply_id, reply_to, quote, text) = if unavailable || control {
         empty_reply(&raw)
     } else {
         reply_content(xml, &raw)
     };
+    let text = if poll.is_some() {
+        let namespaces = if reply_id.is_empty() {
+            vec![crate::polls::NS]
+        } else {
+            vec![crate::polls::NS, REPLY]
+        };
+        crate::polls::Poll::body_without_fallbacks(xml, &namespaces)
+    } else {
+        text
+    };
     let mut m = Message {
+        poll_fallback: poll
+            .as_ref()
+            .is_some_and(|p| p.accompanying_body(xml) != raw),
+        kind: if poll.is_some() { "poll" } else { "text" }.into(),
+        poll,
         action,
         sender: xml.attr("from").unwrap_or("").into(),
         own,
@@ -262,13 +292,27 @@ pub fn text_stanza(peer: &str, text: &str, id: &str, reply: Option<(&str, &str, 
     root
 }
 pub fn outgoing(peer: &str, message: &Message, quote: &str) -> Element {
+    let poll_body = message
+        .poll
+        .as_ref()
+        .filter(|_| message.poll_fallback)
+        .map(|p| p.readable_body());
+    let authored = if let Some(fallback) = &poll_body {
+        if message.text.is_empty() {
+            fallback.clone()
+        } else {
+            format!("{}\n\n{fallback}", message.text)
+        }
+    } else {
+        message.text.clone()
+    };
     let body = if matches!(
         message.action,
         Some(crate::message_actions::Action::Retract { .. })
     ) {
         "A previous message was retracted."
     } else {
-        &message.text
+        &authored
     };
     let mut root = text_stanza(
         peer,
@@ -276,6 +320,42 @@ pub fn outgoing(peer: &str, message: &Message, quote: &str) -> Element {
         &message.wire_id,
         (!message.reply_id.is_empty()).then_some((&message.reply_id, &message.reply_to, quote)),
     );
+    if let Some(poll) = &message.poll {
+        root.append_child(poll.element());
+        if poll_body.is_some() {
+            let wire_body = root.get_child("body", NS).unwrap().text();
+            root.append_child(
+                Element::builder("fallback", FALLBACK)
+                    .attr("for".try_into().unwrap(), crate::polls::NS)
+                    .append(
+                        Element::builder("body", FALLBACK)
+                            .attr(
+                                "start".try_into().unwrap(),
+                                (wire_body.chars().count()
+                                    - poll_body.as_ref().unwrap().chars().count()
+                                    - if message.text.is_empty() { 0 } else { 2 })
+                                .to_string(),
+                            )
+                            .attr(
+                                "end".try_into().unwrap(),
+                                wire_body.chars().count().to_string(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            );
+        } else if body.is_empty() && message.reply_id.is_empty() {
+            let nodes = root.take_nodes();
+            for node in nodes {
+                if node.as_element().is_none_or(|e| !e.is("body", NS)) {
+                    root.append_node(node);
+                }
+            }
+        }
+        if root.get_child("store", "urn:xmpp:hints").is_none() {
+            root.append_child(el("store", "urn:xmpp:hints"));
+        }
+    }
     if let Some(action) = &message.action {
         crate::message_actions::decorate(&mut root, action);
     }
@@ -456,7 +536,7 @@ impl Session {
                             }else if root.is("iq",NS){let id=root.attr("id").unwrap_or("");let trusted=from.is_empty()||from==owner;
                                 if trusted{if let Some(query)=root.get_child("query","jabber:iq:roster"){let contacts=query.children().filter(|c|c.is("item","jabber:iq:roster")).filter_map(|c|Some((c.attr("jid")?.into(),c.attr("name").unwrap_or("").into(),c.attr("subscription").unwrap_or("none").into()))).collect();emit(BackendEvent::Roster(contacts));if root.attr("type")==Some("set"){send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).build()).await;}}}
                                 if !trusted && mam.contains_key(id) { continue } if let Some((peer,_))=mam.remove(id){let fin=root.get_child("fin","urn:xmpp:mam:2");let before=fin.and_then(|f|f.get_child("set","http://jabber.org/protocol/rsm")).and_then(|s|s.get_child("first","http://jabber.org/protocol/rsm")).map(|f|f.text()).unwrap_or_default();let complete=fin.is_some_and(|f|matches!(f.attr("complete"),Some("true"|"1")))||before.is_empty();emit(BackendEvent::History{peer,before,complete,error:fin.is_none()});}
-                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in ["urn:xmpp:receipts",REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
+                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in ["urn:xmpp:receipts",REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT,crate::polls::NS]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
                             }
                         }
                     }},

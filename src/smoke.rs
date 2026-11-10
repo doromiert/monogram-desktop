@@ -42,9 +42,243 @@ fn close_dialogs(ui: &Ui) {
         dialog.close();
     }
 }
+fn has_label(widget: &gtk::Widget, title: &str) -> bool {
+    if widget
+        .downcast_ref::<gtk::Label>()
+        .is_some_and(|label| label.label() == title)
+    {
+        return true;
+    }
+    let mut child = widget.first_child();
+    while let Some(w) = child {
+        child = w.next_sibling();
+        if has_label(&w, title) {
+            return true;
+        }
+    }
+    false
+}
+#[derive(Default)]
+struct PollSmoke {
+    stage: Cell<u8>,
+    local: std::cell::RefCell<String>,
+    definition: std::cell::RefCell<Option<crate::polls::Poll>>,
+}
+impl PollSmoke {
+    fn start(&self, ui: &Rc<Ui>) {
+        fn fields(
+            widget: &gtk::Widget,
+            editors: &mut Vec<gtk::TextView>,
+            entries: &mut Vec<adw::EntryRow>,
+            switches: &mut Vec<adw::SwitchRow>,
+        ) {
+            if let Some(view) = widget.downcast_ref::<gtk::TextView>() {
+                editors.push(view.clone());
+            }
+            if let Some(row) = widget.downcast_ref::<adw::EntryRow>() {
+                entries.push(row.clone());
+            }
+            if let Some(row) = widget.downcast_ref::<adw::SwitchRow>() {
+                switches.push(row.clone());
+            }
+            let mut child = widget.first_child();
+            while let Some(w) = child {
+                child = w.next_sibling();
+                fields(&w, editors, entries, switches);
+            }
+        }
+        ui.composer
+            .buffer()
+            .set_text("Keep the ordinary poll draft");
+        ui.save_draft();
+        ui.new_poll();
+        let dialog = ui.dialogs.borrow().last().unwrap().clone();
+        let child = dialog.child().unwrap();
+        let (mut editors, mut entries, mut switches) = (Vec::new(), Vec::new(), Vec::new());
+        fields(&child, &mut editors, &mut entries, &mut switches);
+        assert_eq!(editors.len(), 2);
+        assert_eq!(entries.len(), 2);
+        editors[0].buffer().set_text("Where for desktop lunch?");
+        editors[1].buffer().set_text("Choose a place");
+        entries[0].set_text("Pizza");
+        entries[1].set_text("Noodles");
+        switches
+            .iter()
+            .find(|s| s.title() == "Include Readable Fallback")
+            .unwrap()
+            .set_active(false);
+        button(&child, "Create Poll").unwrap().emit_clicked();
+        assert_eq!(ui.composer_text(), "Keep the ordinary poll draft");
+        self.stage.set(1);
+    }
+    fn incoming(
+        &self,
+        ui: &Rc<Ui>,
+        session: &crate::protocol::Session,
+        message: &Message,
+        encrypted: bool,
+    ) -> bool {
+        use crate::{message_actions::Action, protocol::Command};
+        if self.stage.get() == 0 {
+            return false;
+        }
+        let owner = ui.state.borrow().account.clone();
+        match self.stage.get() {
+            1 if message.poll.is_some() => {
+                let poll = message.poll.clone().unwrap();
+                assert_eq!(poll.question, "Where for desktop lunch?");
+                assert_eq!(poll.options[0].label, "Pizza");
+                assert_eq!(poll.options[1].label, "Noodles");
+                assert!(message.text.is_empty());
+                assert_eq!(message.encrypted, encrypted);
+                self.local.replace(
+                    ui.state
+                        .borrow()
+                        .current()
+                        .messages
+                        .iter()
+                        .find(|m| m.wire_id == message.wire_id)
+                        .unwrap()
+                        .id
+                        .clone(),
+                );
+                self.definition.replace(Some(poll.clone()));
+                session.send(Command::Send {
+                    peer: owner,
+                    message: Message {
+                        wire_id: new_id(),
+                        encrypted,
+                        action: Some(Action::React {
+                            target: message.wire_id.clone(),
+                            emojis: [poll.options[1].emoji.clone()].into(),
+                        }),
+                        ..Default::default()
+                    },
+                    quote: String::new(),
+                });
+                self.stage.set(2);
+                true
+            }
+            3 if matches!(message.action, Some(Action::React { .. })) => {
+                let Action::React { emojis, .. } = message.action.as_ref().unwrap() else {
+                    unreachable!()
+                };
+                let poll = self.definition.borrow();
+                assert_eq!(
+                    emojis,
+                    &[poll.as_ref().unwrap().options[0].emoji.clone()].into()
+                );
+                self.stage.set(4);
+                true
+            }
+            5 if matches!(message.action, Some(Action::Correct { .. })) => {
+                assert!(
+                    message.poll.as_ref().is_some_and(|p| p.closed
+                        && p.same_definition(self.definition.borrow().as_ref().unwrap()))
+                );
+                self.stage.set(6);
+                true
+            }
+            _ => false,
+        }
+    }
+    fn tick(&self, ui: &Rc<Ui>, session: &crate::protocol::Session, encrypted: bool) -> bool {
+        use crate::{message_actions::Action, protocol::Command};
+        let id = self.local.borrow().clone();
+        let message = ui.state.borrow().message(&id).cloned();
+        match (self.stage.get(), message) {
+            (2, Some(m))
+                if m.poll_tally
+                    .as_ref()
+                    .is_some_and(|t| t.counts == vec![0, 1]) =>
+            {
+                let bubble = ui.bubbles.borrow()[&id].clone();
+                button(&bubble, "Pizza").unwrap().emit_clicked();
+                self.stage.set(3);
+            }
+            (4, Some(m))
+                if m.poll_tally
+                    .as_ref()
+                    .is_some_and(|t| t.counts == vec![1, 1]) =>
+            {
+                ui.poll_voters(&m);
+                let child = ui.dialogs.borrow().last().unwrap().child().unwrap();
+                assert!(has_label(&child, "Public votes"));
+                close_dialogs(ui);
+                let bubble = ui.bubbles.borrow()[&id]
+                    .clone()
+                    .downcast::<gtk::Box>()
+                    .unwrap();
+                ui.message_menu(&bubble, &id, 0., 0.);
+                let mut child = bubble.first_child();
+                let mut clicked = false;
+                while let Some(w) = child {
+                    child = w.next_sibling();
+                    if let Some(b) = button(&w, "Close Poll") {
+                        b.emit_clicked();
+                        clicked = true;
+                        break;
+                    }
+                }
+                assert!(clicked);
+                self.stage.set(5);
+            }
+            (6, Some(m)) if m.poll.as_ref().is_some_and(|p| p.closed) => {
+                session.send(Command::Send {
+                    peer: ui.state.borrow().account.clone(),
+                    message: Message {
+                        wire_id: new_id(),
+                        encrypted,
+                        action: Some(Action::React {
+                            target: m.wire_id,
+                            emojis: [self.definition.borrow().as_ref().unwrap().options[0]
+                                .emoji
+                                .clone()]
+                            .into(),
+                        }),
+                        ..Default::default()
+                    },
+                    quote: String::new(),
+                });
+                self.stage.set(7);
+            }
+            (7, Some(m))
+                if m.reactions.iter().any(|r| {
+                    r == &format!(
+                        "{} 2",
+                        self.definition.borrow().as_ref().unwrap().options[0].emoji
+                    )
+                }) =>
+            {
+                assert_eq!(m.poll_tally.as_ref().unwrap().counts, vec![1, 1]);
+                assert_eq!(m.poll_tally.as_ref().unwrap().ballots.len(), 2);
+                assert!(m.poll.as_ref().unwrap().closed);
+                let state = ui.store.load(&ui.state.borrow().account);
+                let restored = state
+                    .chats
+                    .iter()
+                    .flat_map(|c| &c.messages)
+                    .find(|m| m.id == id)
+                    .unwrap();
+                assert_eq!(restored.poll_tally.as_ref().unwrap().counts, vec![1, 1]);
+                assert_eq!(ui.composer_text(), "Keep the ordinary poll draft");
+                println!(
+                    "Native structured poll: bodyless composer, explicit choices, public remote/local votes, voter list, authenticated close, cutoff and reload passed (encrypted={encrypted})"
+                );
+                self.stage.set(8);
+                return true;
+            }
+            _ => {}
+        }
+        false
+    }
+}
+
 fn button(widget: &gtk::Widget, title: &str) -> Option<gtk::Button> {
     if let Some(button) = widget.downcast_ref::<gtk::Button>() {
-        if button.label().as_deref() == Some(title) {
+        if button.label().as_deref() == Some(title)
+            || button.child().is_some_and(|child| has_label(&child, title))
+        {
             return Some(button.clone());
         }
     }
@@ -181,6 +415,7 @@ pub fn run_crypto(ui: Rc<Ui>) {
         tx,
     )));
     let stage = Cell::new(0);
+    let poll_smoke = PollSmoke::default();
     let frank_online = Cell::new(false);
     let frank_ready = Cell::new(false);
     let frank_trusted = Cell::new(false);
@@ -249,6 +484,9 @@ pub fn run_crypto(ui: Rc<Ui>) {
                         .as_ref()
                         .unwrap()
                         .send(Command::Crypto(Request::Accepted(token)));
+                    if poll_smoke.incoming(&ui, frank.borrow().as_ref().unwrap(), &message, true) {
+                        continue;
+                    }
                     if let Some(action) = &message.action {
                         use crate::message_actions::Action;
                         match (stage.get(), action) {
@@ -330,6 +568,11 @@ pub fn run_crypto(ui: Rc<Ui>) {
                 }
                 _ => {}
             }
+        }
+        if poll_smoke.tick(&ui, frank.borrow().as_ref().unwrap(), true) {
+            frank.borrow_mut().take();
+            ui.window.close();
+            return glib::ControlFlow::Break;
         }
         match stage.get() {
             0 if ui.online.get() && frank_online.get() => {
@@ -444,9 +687,8 @@ pub fn run_crypto(ui: Rc<Ui>) {
                     println!(
                         "Native encrypted controls: explicit setup/trust, composer/reply, durable recovery, protected inline edit, reactions, original-device retraction and reload passed"
                     );
-                    frank.borrow_mut().take();
-                    ui.window.close();
-                    return glib::ControlFlow::Break;
+                    poll_smoke.start(&ui);
+                    stage.set(13);
                 }
             }
             7 if ui.online.get()
@@ -682,6 +924,7 @@ pub fn run_live(ui: Rc<Ui>) {
     let peer = ui.state.borrow_mut().chat_for("bob@localhost").id.clone();
     ui.select_chat(&peer);
     let stage = Cell::new(0);
+    let poll_smoke = PollSmoke::default();
     let bob_online = Cell::new(false);
     let started = Instant::now();
     glib::timeout_add_local(Duration::from_millis(50), move || {
@@ -698,6 +941,9 @@ pub fn run_live(ui: Rc<Ui>) {
                     historical: false,
                     ..
                 } if !message.own => {
+                    if poll_smoke.incoming(&ui, bob.borrow().as_ref().unwrap(), &message, false) {
+                        continue;
+                    }
                     if let Some(action) = &message.action {
                         use crate::message_actions::Action;
                         match (stage.get(), action) {
@@ -787,6 +1033,11 @@ pub fn run_live(ui: Rc<Ui>) {
                 }
                 _ => {}
             }
+        }
+        if poll_smoke.tick(&ui, bob.borrow().as_ref().unwrap(), false) {
+            bob.borrow_mut().take();
+            ui.window.close();
+            return glib::ControlFlow::Break;
         }
         match stage.get() {
             0 if ui.online.get() && bob_online.get() => {
@@ -897,9 +1148,8 @@ pub fn run_live(ui: Rc<Ui>) {
                     println!(
                         "Native live Rust controls: inline correction, preserved composer, remote reaction, narrow message menu, local reaction and confirmed retraction/reload passed"
                     );
-                    bob.borrow_mut().take();
-                    ui.window.close();
-                    return glib::ControlFlow::Break;
+                    poll_smoke.start(&ui);
+                    stage.set(10);
                 }
             }
             3 if ui.online.get() && !ui.history_pending.borrow().contains("bob@localhost") => {

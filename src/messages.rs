@@ -154,6 +154,9 @@ impl Ui {
                 bubble.append(&picture)
             }
             match m.kind.as_str() {
+                "poll" if m.poll.is_some() => {
+                    bubble.append(&self.poll_content(&m));
+                }
                 "poll" => {
                     bubble.append(&wrap(&m.text, "heading"));
                     bubble.append(&text("Public poll · choose one", "caption dim-label"));
@@ -261,6 +264,9 @@ impl Ui {
                         .map(|(e, _)| e)
                         .unwrap_or(reaction)
                         .to_string();
+                    if m.poll.as_ref().is_some_and(|p| p.is_option(&emoji)) {
+                        continue;
+                    }
                     let b = gtk::ToggleButton::with_label(reaction);
                     b.set_active(m.my_reactions.contains(&emoji));
                     b.add_css_class("reaction");
@@ -438,7 +444,7 @@ impl Ui {
             "copy" => self.window.clipboard().set_text(
                 &messages
                     .iter()
-                    .map(|m| format!("{} · {}\n{}", m.author, m.time, m.text))
+                    .map(|m| format!("{} · {}\n{}", m.author, m.time, m.content_text()))
                     .collect::<Vec<_>>()
                     .join("\n\n"),
             ),
@@ -634,6 +640,9 @@ impl Ui {
         {
             choices.push(("document-edit-symbolic", "Edit", "edit"))
         }
+        if message.own && message.poll.as_ref().is_some_and(|p| !p.closed) {
+            choices.push(("process-stop-symbolic", "Close Poll", "close-poll"));
+        }
         if message.own && matches!(message.delivery.as_str(), "failed" | "uncertain") {
             choices.push(("view-refresh-symbolic", "Retry", "retry"))
         }
@@ -731,10 +740,11 @@ impl Ui {
                         ui.persist();
                         ui.render_messages(false)
                     }
-                    "copy" => ui.window.clipboard().set_text(&m.text),
+                    "copy" => ui.window.clipboard().set_text(&m.content_text()),
                     "delete" => ui.delete_confirmation(vec![id.clone()]),
                     "forward" => ui.forward(vec![m]),
                     "edit" => ui.edit_message(&id),
+                    "close-poll" => ui.close_poll(&id),
                     "retry" => ui.retry(&id),
                     "details" => ui.message_details(&m),
                     "report" => ui.notice("Local preview — no report was sent"),

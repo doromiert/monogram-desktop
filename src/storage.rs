@@ -283,7 +283,9 @@ pub fn same_source(old: &Message, new: &Message) -> bool {
     old.own == new.own
         && (old.sender == new.sender
             || (!old.sender.contains('/') || !new.sender.contains('/'))
-                && (old.unavailable || new.unavailable || old.text == new.text))
+                && (old.unavailable
+                    || new.unavailable
+                    || old.text == new.text && old.poll == new.poll))
 }
 #[cfg(test)]
 mod tests {

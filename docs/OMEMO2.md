@@ -87,7 +87,8 @@ The integrated service checks unreviewed-send rejection, saved-ciphertext retry
 following approval, crash recovery, preserved trust/identity, MAM digest aliases
 and denial. Native GTK checks activate the real setup/review/encryption controls,
 send from the composer, receive a protected reply, persist/reconnect and send again.
-Native controls also verify protected inline corrections, reaction replacement
+[Structured direct polls](STRUCTURED_POLLS.md), including bodyless definitions,
+are also inside authenticated SCE. Native controls verify protected inline corrections, reaction replacement
 sets and original-device retraction/reload; see [message actions](MESSAGE_ACTIONS.md).
 History failure/replay checks exercise the real receive/persistence path. Prior
 native layout/composer and transport/TLS rejection checks remain required.

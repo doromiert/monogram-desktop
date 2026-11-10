@@ -11,7 +11,7 @@ use openssl::{
     sign::Signer,
     symm::{Cipher, decrypt, encrypt},
 };
-use std::collections::HashSet;
+use std::collections::HashMap;
 use tokio_xmpp::{jid::Jid, minidom::Element};
 pub const SCE: &str = "urn:xmpp:sce:1";
 pub const CLIENT: &str = "jabber:client";
@@ -118,6 +118,7 @@ pub fn allowed(child: &Element) -> bool {
             | ("fallback", "urn:xmpp:fallback:0")
             | ("replace", "urn:xmpp:message-correct:0")
             | ("reactions", "urn:xmpp:reactions:0")
+            | ("poll", "urn:xmpp:polls:0")
             | ("reference", "urn:xmpp:reference:0")
             | ("content", "urn:xmpp:content")
             | ("markup", "urn:xmpp:markup:0")
@@ -146,6 +147,8 @@ fn wrap(content: Element, from: &str, to: &str, padding: &str) -> Element {
 }
 pub fn envelope(message: &Element) -> Result<Secret> {
     let (from, to) = routing(message)?;
+    crate::polls::Poll::validate_protected(message)
+        .map_err(|_| Error::Invalid("structured poll"))?;
     let mut content = Element::builder("content", SCE).build();
     for child in message.children() {
         if !allowed(child) {
@@ -225,7 +228,7 @@ pub fn content(outer: &Element, plain: &[u8], sent_time: i64) -> Result<Element>
             message.set_attr("".into(), name.try_into().unwrap(), value);
         }
     }
-    let mut languages = HashSet::new();
+    let mut texts = HashMap::new();
     for child in inner.children() {
         if !allowed(child) {
             return Err(Error::Invalid("unsupported protected extension"));
@@ -234,10 +237,16 @@ pub fn content(outer: &Element, plain: &[u8], sent_time: i64) -> Result<Element>
             let language = child
                 .attr_ns("http://www.w3.org/XML/1998/namespace", "lang")
                 .unwrap_or("");
-            if child.children().next().is_some()
-                || !languages.insert((child.name().to_string(), language.to_string()))
-            {
-                return Err(Error::Invalid("duplicate text"));
+            if child.children().next().is_some() {
+                return Err(Error::Invalid("nested text"));
+            }
+            let key = (child.name().to_string(), language.to_string());
+            if let Some(previous) = texts.insert(key, child) {
+                // Older mobile encoders copied typed text again from Smack's extension list.
+                if previous == child {
+                    continue;
+                }
+                return Err(Error::Invalid("conflicting text"));
             }
         }
         message.append_child(child.clone());
@@ -315,6 +324,39 @@ mod tests {
             "<envelope xmlns='urn:xmpp:sce:1'><content><evil xmlns='not-supported'/></content><rpad/></envelope>",
         ] {
             assert!(content(&outer, plain.as_bytes(), 0).is_err());
+        }
+    }
+    #[test]
+    fn historical_identical_text_is_coalesced_but_conflicts_are_rejected() {
+        let outer: Element =
+            "<message xmlns='jabber:client' from='a@example.org' to='b@example.org'/>"
+                .parse()
+                .unwrap();
+        let text = "<body xmlns='jabber:client'>Text 😀</body><body xmlns='jabber:client' xml:lang='fr'>Bonjour</body><subject xmlns='jabber:client'>Subject</subject><thread xmlns='jabber:client'>thread-id</thread>";
+        let envelope = |content: &str| {
+            format!(
+                "<envelope xmlns='urn:xmpp:sce:1'><content>{content}</content><rpad/></envelope>"
+            )
+        };
+        let decoded = content(&outer, envelope(&format!("{text}{text}")).as_bytes(), 0).unwrap();
+        assert_eq!(decoded.children().count(), 4);
+        assert_eq!(decoded.get_child("body", CLIENT).unwrap().text(), "Text 😀");
+        for duplicate in [
+            "<body xmlns='jabber:client'>Conflicting text</body>",
+            "<body xmlns='jabber:client' xml:lang='fr'>Different translation</body>",
+            "<body xmlns='jabber:client' other='attribute'>Text 😀</body>",
+            "<subject xmlns='jabber:client'>Other subject</subject>",
+            "<thread xmlns='jabber:client'>other-thread</thread>",
+            "<body xmlns='jabber:client'><nested/></body>",
+        ] {
+            assert!(
+                content(
+                    &outer,
+                    envelope(&format!("{text}{duplicate}")).as_bytes(),
+                    0
+                )
+                .is_err()
+            );
         }
     }
     #[test]

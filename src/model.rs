@@ -16,6 +16,10 @@ fn yes() -> bool {
 #[serde(default)]
 pub struct Message {
     pub action: Option<crate::message_actions::Action>,
+    pub poll: Option<crate::polls::Poll>,
+    pub poll_tally: Option<crate::polls::Tally>,
+    pub poll_closed_at: String,
+    pub poll_fallback: bool,
     pub sender: String,
     pub edited: bool,
     pub edit_history: Vec<String>,
@@ -48,6 +52,10 @@ impl Default for Message {
     fn default() -> Self {
         Self {
             action: None,
+            poll: None,
+            poll_tally: None,
+            poll_closed_at: String::new(),
+            poll_fallback: false,
             sender: String::new(),
             edited: false,
             edit_history: vec![],
@@ -76,6 +84,26 @@ impl Default for Message {
             gif_index: 0,
             unavailable: false,
         }
+    }
+}
+impl Message {
+    pub fn preview(&self) -> String {
+        self.poll
+            .as_ref()
+            .map(|p| format!("📊 {}", p.question))
+            .unwrap_or_else(|| self.text.clone())
+    }
+    pub fn content_text(&self) -> String {
+        self.poll
+            .as_ref()
+            .map(|p| {
+                if self.text.is_empty() {
+                    p.readable_body()
+                } else {
+                    format!("{}\n\n{}", p.readable_body(), self.text)
+                }
+            })
+            .unwrap_or_else(|| self.text.clone())
     }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

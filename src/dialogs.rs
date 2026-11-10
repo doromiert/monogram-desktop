@@ -1374,8 +1374,12 @@ impl Ui {
             return;
         }
         let owner = self.state.borrow().account.clone();
-        if !owner.is_empty() && messages.iter().any(|m| m.kind != "text" || m.unavailable) {
-            self.notice("Only decrypted text can be forwarded in this build");
+        if !owner.is_empty()
+            && messages
+                .iter()
+                .any(|m| (m.kind != "text" && m.poll.is_none()) || m.unavailable)
+        {
+            self.notice("Only decrypted text and polls can be forwarded in this build");
             return;
         }
         let page = adw::PreferencesPage::new();
@@ -1402,6 +1406,13 @@ impl Ui {
                     }
                     ui.select_chat(&c.id);
                     for m in &messages {
+                        if let Some(mut poll) = m.poll.clone() {
+                            poll.closed = false;
+                            if !ui.send_poll_text(poll, m.poll_fallback, &m.text) {
+                                return;
+                            }
+                            continue;
+                        }
                         if let Some(id) = ui.send_content(
                             &format!("↪ Forwarded from {}\n\n{}", m.author, m.text),
                             &m.kind,
@@ -1535,52 +1546,130 @@ impl Ui {
         d.present(Some(&self.window));
     }
     pub fn new_poll(self: &Rc<Self>) {
+        fn editor(title: &str, page: &adw::PreferencesPage) -> gtk::TextView {
+            let group = adw::PreferencesGroup::builder().title(title).build();
+            let view = gtk::TextView::builder()
+                .wrap_mode(gtk::WrapMode::WordChar)
+                .top_margin(10)
+                .bottom_margin(10)
+                .left_margin(12)
+                .right_margin(12)
+                .build();
+            view.update_property(&[gtk::accessible::Property::Label(title)]);
+            let scroller = scroll(&view);
+            scroller.set_min_content_height(60);
+            scroller.set_max_content_height(120);
+            group.add(&scroller);
+            page.add(&group);
+            view
+        }
+        fn add_option(fields: &Rc<RefCell<Vec<adw::EntryRow>>>, group: &adw::PreferencesGroup) {
+            if fields.borrow().len() >= 32 {
+                return;
+            }
+            let row = adw::EntryRow::builder()
+                .title(format!("Option {}", fields.borrow().len() + 1))
+                .build();
+            let remove = icon_button("user-trash-symbolic", "Remove option");
+            remove.add_css_class("flat");
+            remove.set_valign(gtk::Align::Center);
+            row.add_suffix(&remove);
+            let weak = Rc::downgrade(fields);
+            let parent = group.downgrade();
+            let item = row.downgrade();
+            remove.connect_clicked(move |_| {
+                if let (Some(fields), Some(group), Some(row)) =
+                    (weak.upgrade(), parent.upgrade(), item.upgrade())
+                {
+                    group.remove(&row);
+                    fields.borrow_mut().retain(|r| r != &row);
+                    for (i, r) in fields.borrow().iter().enumerate() {
+                        r.set_title(&format!("Option {}", i + 1));
+                    }
+                }
+            });
+            group.add(&row);
+            fields.borrow_mut().push(row);
+        }
+        let owner = self.state.borrow().account.clone();
+        let chat = self.state.borrow().active.clone();
+        let generation = self.generation.get();
         let page = adw::PreferencesPage::new();
-        let question = adw::EntryRow::builder().title("Question").build();
-        let g = adw::PreferencesGroup::new();
-        g.add(&question);
-        page.add(&g);
-        let answers = adw::PreferencesGroup::builder().title("Options").build();
-        let fields: Vec<_> = ["First option", "Second option", "Third option"]
-            .into_iter()
-            .map(|t| {
-                let r = adw::EntryRow::builder().title(t).build();
-                answers.add(&r);
-                r
-            })
-            .collect();
-        page.add(&answers);
-        let (d, h) = self.dialog("New Poll", &page, 520, 440);
-        let send = gtk::Button::with_label("Create Preview Poll");
+        let question = editor("Question", &page);
+        let description = editor("Description (optional)", &page);
+        let options = adw::PreferencesGroup::builder().title("Options").build();
+        let fields = Rc::new(RefCell::new(Vec::new()));
+        add_option(&fields, &options);
+        add_option(&fields, &options);
+        page.add(&options);
+        let add = gtk::Button::with_label("Add Option");
+        let control = adw::PreferencesGroup::new();
+        control.add(&add);
+        page.add(&control);
+        let rows = fields.clone();
+        let group = options.downgrade();
+        add.connect_clicked(move |_| {
+            if let Some(group) = group.upgrade() {
+                add_option(&rows, &group);
+            }
+        });
+        let settings = adw::PreferencesGroup::builder()
+            .description("Votes are visible to everyone in this conversation.")
+            .build();
+        let multiple = adw::SwitchRow::builder()
+            .title("Multiple Selections")
+            .build();
+        settings.add(&multiple);
+        let fallback = adw::SwitchRow::builder()
+            .title("Include Readable Fallback")
+            .subtitle("Allows clients without poll support to read the choices.")
+            .active(true)
+            .build();
+        settings.add(&fallback);
+        page.add(&settings);
+        let (dialog, header) = self.dialog("New Poll", &page, 520, 640);
+        let send = gtk::Button::with_label(if owner.is_empty() {
+            "Create Preview Poll"
+        } else {
+            "Create Poll"
+        });
         send.add_css_class("suggested-action");
-        h.pack_end(&send);
+        header.pack_end(&send);
         let weak = Rc::downgrade(self);
         send.connect_clicked(move |_| {
             if let Some(ui) = weak.upgrade() {
-                let q = question.text();
-                let options: Vec<_> = fields
-                    .iter()
-                    .map(|r| r.text().trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| (s, 0))
-                    .collect();
-                if q.trim().is_empty() || options.len() < 2 {
-                    ui.notice("Enter a question and at least two options");
+                if ui.generation.get() != generation
+                    || ui.state.borrow().account != owner
+                    || ui.state.borrow().active != chat
+                {
                     return;
                 }
-                if let Some(id) = ui.send_content(q.as_str(), "poll") {
-                    if let Some(m) = ui
-                        .state
-                        .borrow_mut()
-                        .current_mut()
-                        .messages
-                        .iter_mut()
-                        .find(|m| m.id == id)
-                    {
-                        m.options = options
-                    }
-                    ui.render_messages(true);
-                    d.close();
+                let value = |view: &gtk::TextView| {
+                    let b = view.buffer();
+                    b.text(&b.start_iter(), &b.end_iter(), true).to_string()
+                };
+                let emoji = [
+                    "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟", "🔴", "🟠", "🟡",
+                    "🟢", "🔵", "🟣", "🟤", "⚫", "⚪", "⭐", "🌙", "☀️", "🌈", "⚡", "🔥", "💧",
+                    "🌸", "🍀", "🍎", "🍋", "🍇", "🥝",
+                ];
+                let poll = crate::polls::Poll {
+                    question: value(&question),
+                    description: value(&description),
+                    options: fields
+                        .borrow()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, row)| crate::polls::OptionValue {
+                            emoji: emoji[i].into(),
+                            label: row.text().into(),
+                        })
+                        .collect(),
+                    multiple: multiple.is_active(),
+                    closed: false,
+                };
+                if ui.send_poll(poll, fallback.is_active()) {
+                    dialog.close();
                 }
             }
         });

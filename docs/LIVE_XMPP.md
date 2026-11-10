@@ -112,3 +112,6 @@ not embed Android, Telegram services or the Android JVM adapter.
 
 Live [direct-message actions](MESSAGE_ACTIONS.md) now include inline corrections,
 reaction replacement sets and best-effort retractions, with durable event replay.
+
+[Structured direct polls](STRUCTURED_POLLS.md) now use explicit XML definitions,
+public replacement-set ballots and author closure, with optional body fallbacks.

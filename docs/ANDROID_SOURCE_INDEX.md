@@ -3,6 +3,12 @@
 Reference snapshot: Monogram 0.2.195, commit `be6876c045163e32fe07a84416621770b0964b30`.
 This inventory is a completeness reference, not a claim that its features are implemented on desktop.
 
+Structured poll work additionally tracks the adjacent mobile checkout's
+[`PollDefinition.java`](../../mobile/xmpp-core/src/main/java/com/negzero/monogram/xmpp/PollDefinition.java),
+[`MonogramPolls.java`](../../mobile/TMessagesProj/src/main/java/org/telegram/messenger/xmpp/MonogramPolls.java)
+and [current poll status](../../mobile/docs/POLLS.md). This newer shared work does
+not change the historical inventory below or establish full poll parity.
+
 - [ARTICLE_FORMATTING.md](https://github.com/doromiert/monogram/blob/be6876c045163e32fe07a84416621770b0964b30/docs/ARTICLE_FORMATTING.md)
 - [BATTERY_PERFORMANCE.md](https://github.com/doromiert/monogram/blob/be6876c045163e32fe07a84416621770b0964b30/docs/BATTERY_PERFORMANCE.md)
 - [CALENDAR_HISTORY.md](https://github.com/doromiert/monogram/blob/be6876c045163e32fe07a84416621770b0964b30/docs/CALENDAR_HISTORY.md)

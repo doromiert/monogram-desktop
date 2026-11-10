@@ -306,6 +306,11 @@ pub fn project(bases: Vec<Message>, mut events: Vec<Event>, owner: &str, peer: &
         if *floors.get(&base.id).unwrap() && !m.encrypted {
             continue;
         }
+        match (&base.poll, &m.poll) {
+            (Some(original), Some(edit)) if edit.closed && original.same_definition(edit) => {}
+            (None, None) => {}
+            _ => continue,
+        }
         event.resolved = Some(base.id.clone());
         if base.retracted {
             continue;
@@ -313,8 +318,16 @@ pub fn project(bases: Vec<Message>, mut events: Vec<Event>, owner: &str, peer: &
         floors.insert(base.id.clone(), m.encrypted);
         let value = rendered.get_mut(&base.id).unwrap();
         if !value.edited {
-            value.edit_history.push(value.text.clone());
+            value.edit_history.push(value.content_text());
         }
+        if m.poll.as_ref().is_some_and(|poll| poll.closed) && value.poll_closed_at.is_empty() {
+            value.poll_closed_at = if base.poll.as_ref().is_some_and(|poll| poll.closed) {
+                base.timestamp.clone()
+            } else {
+                m.timestamp.clone()
+            };
+        }
+        value.poll = m.poll.clone();
         value.text = m.text.clone();
         value.reply = m.reply.clone();
         value.reply_id = m.reply_id.clone();
@@ -322,7 +335,7 @@ pub fn project(bases: Vec<Message>, mut events: Vec<Event>, owner: &str, peer: &
         value.encrypted = m.encrypted;
         value.fingerprint = m.fingerprint.clone();
         value.edited = true;
-        value.edit_history.push(m.text.clone());
+        value.edit_history.push(m.content_text());
     }
     for event in &mut events {
         if event.failed {
@@ -359,6 +372,7 @@ pub fn project(bases: Vec<Message>, mut events: Vec<Event>, owner: &str, peer: &
         let value = rendered.get_mut(&base.id).unwrap();
         value.retracted = true;
     }
+    let mut vote_latest: BTreeMap<(String, bool), (bool, BTreeSet<String>)> = BTreeMap::new();
     let mut latest: BTreeMap<(String, bool), (String, bool, BTreeSet<String>, i64)> =
         BTreeMap::new();
     let correction_refs: Vec<_> = events
@@ -397,7 +411,25 @@ pub fn project(bases: Vec<Message>, mut events: Vec<Event>, owner: &str, peer: &
         if latest.get(&key).is_some_and(|v| v.1 && !m.encrypted) {
             continue;
         }
-        let known = emojis.iter().filter_map(|e| canonical_emoji(e)).collect();
+        let known: BTreeSet<String> = emojis.iter().filter_map(|e| canonical_emoji(e)).collect();
+        let value = rendered.get(&key.0).unwrap();
+        let original = bases.iter().find(|m| m.id == key.0).unwrap();
+        let cutoff = if value.poll.as_ref().is_some_and(|p| p.closed) {
+            if value.poll_closed_at.is_empty() {
+                &original.timestamp
+            } else {
+                &value.poll_closed_at
+            }
+        } else {
+            "~"
+        };
+        if value.poll.is_some()
+            && m.timestamp.as_str() <= cutoff
+            && (!original.encrypted || m.encrypted)
+            && !vote_latest.get(&key).is_some_and(|v| v.0 && !m.encrypted)
+        {
+            vote_latest.insert(key.clone(), (m.encrypted, known.clone()));
+        }
         latest.insert(
             key,
             (
@@ -426,6 +458,14 @@ pub fn project(bases: Vec<Message>, mut events: Vec<Event>, owner: &str, peer: &
                 }
             }
         }
+        if let Some(poll) = &value.poll {
+            let sets = vote_latest
+                .iter()
+                .filter(|((id, _), _)| id == &value.id)
+                .map(|((_, own), (_, emojis))| (*own, emojis.clone()))
+                .collect();
+            value.poll_tally = Some(poll.tally(&sets, owner, peer));
+        }
         value.reactions = counts
             .into_iter()
             .map(|(e, n)| format!("{e} {n}"))
@@ -437,7 +477,14 @@ pub fn project(bases: Vec<Message>, mut events: Vec<Event>, owner: &str, peer: &
             && event.resolved.is_none()
             && matches!(event.message.action, Some(Action::Correct { .. }))
         {
-            output.push(event.message.clone());
+            let mut visible = event.message.clone();
+            if visible.poll.is_some() {
+                visible.text = visible.content_text();
+                visible.poll = None;
+                visible.poll_tally = None;
+                visible.kind = "text".into();
+            }
+            output.push(visible);
         }
     }
     output.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then(a.id.cmp(&b.id)));
@@ -449,6 +496,9 @@ pub fn project(bases: Vec<Message>, mut events: Vec<Event>, owner: &str, peer: &
 pub fn scrub(message: &mut Message) {
     message.retracted = true;
     message.text.clear();
+    message.poll = None;
+    message.poll_tally = None;
+    message.poll_closed_at.clear();
     message.ciphertext.clear();
     message.reply.clear();
     message.reply_id.clear();

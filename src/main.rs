@@ -9,6 +9,8 @@ mod media;
 mod message_actions;
 mod messages;
 mod model;
+mod polls;
+mod polls_ui;
 mod protocol;
 mod smoke;
 mod storage;
