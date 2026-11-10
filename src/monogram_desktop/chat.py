@@ -6,6 +6,10 @@ class Conversation:
     def __init__(self, window):
         self.window = window
         self.root = box(True)
+        self.live_banner=Adw.Banner(title="Messages are not end-to-end encrypted",revealed=False)
+        self.live_banner.connect("button-clicked",lambda _:self.window.accounts.manager());self.root.append(self.live_banner)
+        self.history_button=Gtk.Button(label="Load Earlier Messages",visible=False)
+        self.history_button.add_css_class("flat");self.history_button.connect("clicked",lambda _:self.window.accounts.load_history());self.root.append(self.history_button)
         self.scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         self.messages = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE,valign=Gtk.Align.START)
         self.messages.add_css_class("messages");self.messages.add_css_class("message-list")
@@ -65,7 +69,7 @@ class Conversation:
         plane=Gtk.Image.new_from_file(str(Path(__file__).with_name("paper-plane-symbolic.svg")));plane.set_pixel_size(20);self.send_button.set_child(plane)
         composer.set_hexpand(True)
         line=box(False,8);line.append(composer);line.append(self.send_button);shell.append(line)
-        self.entry.get_buffer().connect("changed", lambda _: self.update_send())
+        self.entry.get_buffer().connect("changed", lambda _:(self.update_send(),self.window.draft_changed()))
         self.update_send()
 
     def text(self):
@@ -92,14 +96,17 @@ class Conversation:
     def cancel_context(self):
         self.replying = self.editing = None
         self.context.set_reveal_child(False)
+        self.window.draft_changed()
 
     def reply(self, message):
         self.replying = message; self.editing = None
         self.context_label.set_text("Reply to " + message.author + " · " + message.text[:60])
         self.context.set_reveal_child(True)
+        self.window.draft_changed()
         self.entry.grab_focus()
 
     def edit(self, message):
+        if self.window.state.account:self.window.notice("Live message corrections are not available yet.");return
         bubble=self.bubbles[id(message)]
         while bubble.get_first_child():bubble.remove(bubble.get_first_child())
         editor=Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR);editor.get_buffer().set_text(message.text)
@@ -118,13 +125,15 @@ class Conversation:
             self.editing.text = text
         else:
             if text:
-                msg = self.window.state.send(text)
+                msg = self.window.send_message(text)
+                if msg is None:return
                 if self.replying: msg.reply = self.replying.author + " · " + self.replying.text[:80]
-            for name in self.attachments: self.window.state.send(name, "file")
+            for name in self.attachments: self.window.send_message(name, "file")
         self.entry.get_buffer().set_text("")
         self.attachments.clear();self.chips.set_visible(False)
         while self.chips.get_first_child(): self.chips.remove(self.chips.get_first_child())
         self.cancel_context()
+        self.window.save_draft()
         self.render()
         self.window.refresh_chats()
 
@@ -148,10 +157,13 @@ class Conversation:
         selected={id(m) for m in self.selected_messages()};self.rendering=True;self.rows.clear()
         self.bubbles.clear()
         while self.messages.get_first_child(): self.messages.remove(self.messages.get_first_child())
-        self.messages.append(label("Today", "date-pill", halign=Gtk.Align.CENTER))
-        self.messages.get_first_child().set_selectable(False);self.messages.get_first_child().set_activatable(False)
         chat = self.window.state.active
+        previous_day=None
         for message in chat.messages:
+            day=message.timestamp[:10] if message.timestamp else "Today"
+            if day!=previous_day:
+                separator=Gtk.ListBoxRow(child=label(day,"date-pill",halign=Gtk.Align.CENTER),selectable=False,activatable=False)
+                self.messages.append(separator);previous_day=day
             row=Gtk.ListBoxRow(child=self.message_widget(message),activatable=False);row.message=message;row.add_css_class("message-row")
             self.rows[id(message)]=row;self.messages.append(row)
             if id(message) in selected:self.messages.select_row(row)
@@ -199,14 +211,15 @@ class Conversation:
     def delete_selected(self):
         selected=self.selected_messages()
         if not selected:return
-        dialog=Adw.AlertDialog(heading=f"Delete {len(selected)} messages?",body="This removes them from the local preview.")
+        dialog=Adw.AlertDialog(heading=f"Delete {len(selected)} messages?",body="This removes them from this computer. Server history and other devices are unaffected." if self.window.state.account else "This removes them from the local preview.")
         dialog.add_response("cancel","Cancel");dialog.add_response("delete","Delete");dialog.set_response_appearance("delete",Adw.ResponseAppearance.DESTRUCTIVE)
         def delete(_,response):
             if response=="delete":
-                ids={id(m) for m in selected};self.window.state.active.messages[:]=[m for m in self.window.state.active.messages if id(m) not in ids];self.clear_selection();self.render();self.window.refresh_chats()
+                self.window.delete_messages(selected)
         dialog.connect("response",delete);dialog.present(self.window)
 
     def react(self,message,emoji):
+        if self.window.state.account:self.window.notice("Live reactions are not available yet.");return
         mine=emoji in message.my_reactions;change=-1 if mine else 1
         if mine:message.my_reactions.remove(emoji)
         else:message.my_reactions.add(emoji)
@@ -247,7 +260,11 @@ class Conversation:
         meta = box(False,4,valign=Gtk.Align.CENTER);meta.add_css_class("message-meta")
         if message.encrypted:meta.append(Gtk.Image(icon_name="channel-secure-symbolic",pixel_size=11,tooltip_text="Encrypted fixture"))
         meta.append(label(message.time))
-        if message.own:meta.append(Gtk.Image(icon_name="object-select-symbolic",pixel_size=12,tooltip_text="Stored in this preview"))
+        if message.own:
+            descriptions={"sending":"Sending","sent":"Sent to stream; awaiting delivery receipt","delivered":"Delivered to a recipient client, not a read receipt","failed":"Send failed; open the message menu to retry","uncertain":"Delivery is uncertain; retry may duplicate it","local":"Stored in this preview"}
+            status=message.delivery
+            icon="dialog-warning-symbolic" if status in ("failed","uncertain") else "content-loading-symbolic" if status=="sending" else "object-select-symbolic"
+            meta.append(Gtk.Image(icon_name=icon,pixel_size=12,tooltip_text=descriptions.get(status,status)))
         heading.append(meta)
         if message.pinned:heading.prepend(Gtk.Image(icon_name="view-pin-symbolic",pixel_size=11))
         bubble.append(heading)
@@ -255,6 +272,12 @@ class Conversation:
             reply=Gtk.Button();reply.add_css_class("message-reply")
             reply.set_child(label(message.reply,wrap=True,max_width_chars=40,xalign=0))
             def jump():
+                if message.reply_id:
+                    state=self.window.state
+                    candidate=state.reply_target(state.active,message.reply_id,message.reply_to) if state.account else next((m for m in state.active.messages if m.wire_id==message.reply_id or m.id==message.reply_id),None)
+                    if candidate:self.highlight(candidate)
+                    else:self.window.notice("Original message is not loaded. Load earlier messages to find it.")
+                    return
                 target=message.reply.split(" · ",1)[-1]
                 for candidate in self.window.state.active.messages:
                     if candidate.text.startswith(target):
@@ -306,7 +329,7 @@ class Conversation:
         bubble.append(label(message.text, "heading", wrap=True, xalign=0))
         bubble.append(label("Public poll · choose one", "caption dim-label", xalign=0))
         first = None
-        for title, count in getattr(message,"options",[("The café by the park", 5), ("Somewhere with a view", 3), ("Let's stay in", 1)]):
+        for title, count in message.options or [("The café by the park", 5), ("Somewhere with a view", 3), ("Let's stay in", 1)]:
             b = Gtk.ToggleButton()
             answer=box(False,16);answer.append(label(title,xalign=0,hexpand=True,wrap=True));answer.append(label(str(count),xalign=1));b.set_child(answer)
             b.add_css_class("poll-answer")
@@ -330,18 +353,22 @@ class Conversation:
         reactions=box(False,0,homogeneous=True);reactions.add_css_class("message-menu-panel")
         for emoji in ["👍","❤️","😂","😮","😢","🔥"]:
             b=Gtk.Button(label=emoji);b.add_css_class("flat");b.add_css_class("reaction-choice");b.connect("clicked",lambda _,e=emoji:run(lambda:self.react(message,e)));reactions.append(b)
-        content.append(reactions)
-        items = box(True,2);items.add_css_class("message-menu-panel");content.append(items)
+        if not self.window.state.account:content.append(reactions)
+        items = box(True,2,halign=Gtk.Align.CENTER,width_request=208);items.add_css_class("message-menu-panel");content.append(items)
         def action(icon,text,callback):
             b=Gtk.Button();b.add_css_class("flat");line=box(False,12);line.append(Gtk.Image(icon_name=icon));line.append(label(text,xalign=0,hexpand=True));b.set_child(line)
             b.connect("clicked",lambda _:run(callback));items.append(b)
-        if message.own:action("document-edit-symbolic","Edit",lambda:self.edit(message))
-        action("view-pin-symbolic","Unpin" if message.pinned else "Pin",lambda:(setattr(message,"pinned",not message.pinned),self.render(False)))
+        if message.own and not self.window.state.account:action("document-edit-symbolic","Edit",lambda:self.edit(message))
+        if message.own and message.delivery in ("failed","uncertain"):action("view-refresh-symbolic","Retry",lambda:self.window.accounts.retry(message))
+        def pin():
+            message.pinned=not message.pinned;self.render(False)
+            if self.window.state.account:self.window.accounts.persist()
+        action("view-pin-symbolic",("Unpin" if message.pinned else "Pin")+(" Locally" if self.window.state.account else ""),pin)
         action("object-select-symbolic","Select",lambda:self.select_message(message))
-        if not message.own:action("dialog-warning-symbolic","Report",lambda:self.window.panels.report_message(message))
+        if not message.own and not self.window.state.account:action("dialog-warning-symbolic","Report",lambda:self.window.panels.report_message(message))
         action("info-outline-symbolic","Message Details",lambda:self.window.panels.message_details(message))
-        tools=box(False,0,homogeneous=True);tools.add_css_class("message-menu-panel");content.append(tools)
-        for icon,title,callback in [("mail-reply-sender-symbolic","Reply",lambda:self.reply(message)),("user-trash-symbolic","Delete",lambda:(self.window.state.active.messages.remove(message),self.render(False),self.window.refresh_chats())),("edit-copy-symbolic","Copy",lambda:self.window.get_clipboard().set(message.text)),("mail-forward-symbolic","Forward",lambda:self.window.panels.forward(message))]:tools.append(button(icon,title,lambda cb=callback:run(cb)))
+        tools=box(False,0,homogeneous=True,halign=Gtk.Align.CENTER,width_request=208);tools.add_css_class("message-menu-panel");content.append(tools)
+        for icon,title,callback in [("mail-reply-sender-symbolic","Reply",lambda:self.reply(message)),("user-trash-symbolic","Delete Locally" if self.window.state.account else "Delete",lambda:self.window.delete_messages([message])),("edit-copy-symbolic","Copy",lambda:self.window.get_clipboard().set(message.text)),("mail-forward-symbolic","Forward",lambda:self.window.panels.forward(message))]:tools.append(button(icon,title,lambda cb=callback:run(cb)))
         popover.set_child(content)
         popover.connect("closed", lambda _: popover.unparent() if popover.get_parent() else None)
         popover.popup()

@@ -8,6 +8,7 @@ class MonogramWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app,title="Monogram",default_width=1380,default_height=900,width_request=430,height_request=480)
         self.state=PreviewState();self.big_emoji=True;self.folder="All";self.utility_mode="media"
+        self.draft_timer=0;self.loading_draft=False
         self.panels=Panels(self)
         self.toast=Adw.ToastOverlay();self.set_content(self.toast)
         # Nautilus uses one ToolbarView per side of its outer OverlaySplitView.
@@ -33,6 +34,8 @@ class MonogramWindow(Adw.ApplicationWindow):
         narrow.add_setter(self.utility,"collapsed",True)
         self.add_breakpoint(narrow)
         self.select_chat(self.state.active)
+        from .accounts import Accounts
+        self.accounts=Accounts(self)
 
     def notice(self,text): self.toast.add_toast(Adw.Toast.new(text))
 
@@ -46,9 +49,10 @@ class MonogramWindow(Adw.ApplicationWindow):
             "attach-file":lambda:self.choose_files(False),"attach-media":lambda:self.choose_files(True),
             "search":self.show_search,"media":self.toggle_media,"info":self.show_info,
             "saved":lambda:self.select_chat(next(c for c in self.state.chats if c.id=="saved")),
-            "shortcuts":self.shortcuts,"setup":self.panels.setup,
+            "shortcuts":self.shortcuts,"setup":lambda:self.accounts.manager(),
             "mute":lambda:self.notice("Notifications muted for this preview conversation"),
-            "archive":lambda:self.notice("Archive management is planned for backend integration"),
+            "archive":lambda:self.organize(self.state.active,"archived",not self.state.active.archived),
+            "archives":self.archives,
         }
         for name,callback in actions.items():
             action=Gio.SimpleAction.new(name,None)
@@ -56,6 +60,7 @@ class MonogramWindow(Adw.ApplicationWindow):
         notification=Gio.SimpleAction.new_stateful("notifications",GLib.VariantType.new("s"),GLib.Variant("s","all"))
         def notifications(action,value):
             action.set_state(value);self.state.active.notifications=value.get_string()
+            if hasattr(self,"accounts"):self.accounts.persist()
             self.notice("Notifications: "+{"all":"All messages","mentions":"Mentions only","1h":"Muted for 1 hour","8h":"Muted for 8 hours","2d":"Muted for 2 days","forever":"Muted until turned on"}[value.get_string()])
         notification.connect("activate",notifications);self.add_action(notification)
         for action,keys in {"attach-file":["<Control>o"],"new-chat":["<Control>n"],"search":["<Control>f"],"media":["F9"],"preferences":["<Control>comma"],"shortcuts":["<Control>question"]}.items():self.get_application().set_accels_for_action("win."+action,keys)
@@ -65,9 +70,9 @@ class MonogramWindow(Adw.ApplicationWindow):
         header=Adw.HeaderBar(show_end_title_buttons=False)
         header.set_title_widget(label("Monogram","heading"))
         menu=Gio.Menu()
-        for title,action in [("New Conversation…","new-chat"),("Contacts","contacts"),("Saved Messages","saved"),("Wallet","wallet"),("Stories","stories"),("Spaces and Channels","spaces"),("Your Profile","profile")]:menu.append(title,"win."+action)
+        for title,action in [("New Conversation…","new-chat"),("Contacts","contacts"),("Saved Messages","saved"),("Archived Chats","archives"),("Wallet","wallet"),("Stories","stories"),("Spaces and Channels","spaces"),("Your Profile","profile")]:menu.append(title,"win."+action)
         section=Gio.Menu()
-        for title,action in [("Preferences","preferences"),("Keyboard Shortcuts","shortcuts"),("Account Setup Preview","setup"),("Developer Tools","developer")]:section.append(title,"win."+action)
+        for title,action in [("Accounts","setup"),("Preferences","preferences"),("Keyboard Shortcuts","shortcuts"),("Developer Tools","developer")]:section.append(title,"win."+action)
         menu.append_section(None,section)
         primary=Gtk.MenuButton(icon_name="open-menu-symbolic",menu_model=menu,tooltip_text="Main menu")
         header.pack_end(primary)
@@ -120,7 +125,7 @@ class MonogramWindow(Adw.ApplicationWindow):
         self.search_button.set_active(True);self.search.grab_focus()
 
     def set_search_mode(self,active):
-        self.story_strip.set_visible(not active)
+        self.story_strip.set_visible(not active and not self.state.account)
         if active:
             self.page_before_search=self.pages.get_visible_child_name()
             self.title_button.set_visible(False);self.header_titles.set_visible_child_name("search");self.pages.set_visible_child_name("search");self.refresh_search();self.search.grab_focus()
@@ -165,6 +170,7 @@ class MonogramWindow(Adw.ApplicationWindow):
         previous=None
         for name in self.state.folder_order:
             self.folder_bar.reorder_child_after(buttons[name],previous);previous=buttons[name]
+        if hasattr(self,"accounts"):self.accounts.persist()
 
     def set_folder(self,name):self.folder=name;self.refresh_chats()
 
@@ -178,13 +184,13 @@ class MonogramWindow(Adw.ApplicationWindow):
             top.append(label(chat.messages[-1].time if chat.messages else "Now","chat-time"));words.append(top)
             bottom=box(False,6)
             last=chat.messages[-1] if chat.messages else None
-            preview=("You: " if last and last.own else "")+(last.text.replace("\n"," ") if last else "No messages yet")
+            preview=("Draft: "+chat.draft.replace("\n"," ")) if chat.draft else ("You: " if last and last.own else "")+(last.text.replace("\n"," ") if last else "No messages yet")
             if last and last.kind=="photo":preview="Photo · "+preview
             bottom.append(ellipsis(preview,css="chat-preview",hexpand=True))
-            if chat.unread:bottom.append(label(str(chat.unread),"unread-badge"))
-            elif chat.id=="saved":bottom.append(Gtk.Image(icon_name="view-pin-symbolic",pixel_size=12))
+            if chat.unread or chat.unread_mark:bottom.append(label(str(chat.unread) if chat.unread else "•","unread-badge"))
+            elif chat.pinned:bottom.append(Gtk.Image(icon_name="view-pin-symbolic",pixel_size=12))
             words.append(bottom);line.append(words);row.set_child(line);self.list.append(row)
-            self.context_actions(row,[("Open",lambda c=chat:self.select_chat(c)),("Mark unread",lambda c=chat:(setattr(c,"unread",1),self.refresh_chats())),("Mute",lambda c=chat:(setattr(c,"notifications","forever"),self.refresh_chats())),("Archive",lambda c=chat:(setattr(c,"archived",True),self.refresh_chats()))])
+            self.context_actions(row,[("Open",lambda c=chat:self.select_chat(c)),("Unpin" if chat.pinned else "Pin",lambda c=chat:self.organize(c,"pinned",not c.pinned)),("Mark read" if chat.unread or chat.unread_mark else "Mark unread",lambda c=chat:self.mark_read(c)),("Unmute" if chat.notifications!="all" else "Mute",lambda c=chat:self.organize(c,"notifications","all" if c.notifications!="all" else "forever")),("Unarchive" if chat.archived else "Archive",lambda c=chat:self.organize(c,"archived",not c.archived))])
             if chat is self.state.active:self.list.select_row(row)
 
     def make_content(self):
@@ -228,7 +234,9 @@ class MonogramWindow(Adw.ApplicationWindow):
         toolbar.add_top_bar(header)
         self.media_stack=Gtk.Stack(hhomogeneous=False,vhomogeneous=False,transition_type=Gtk.StackTransitionType.CROSSFADE,transition_duration=150)
         switcher=Adw.ToggleGroup(homogeneous=False,can_shrink=False)
-        for name,title in [("emoji","Emoji"),("stickers","Stickers"),("gifs","GIFs"),("monero","Monero")]:switcher.add(Adw.Toggle(name=name,label=title))
+        self.media_toggles={}
+        for name,title in [("emoji","Emoji"),("stickers","Stickers"),("gifs","GIFs"),("monero","Monero")]:
+            toggle=Adw.Toggle(name=name,label=title);switcher.add(toggle);self.media_toggles[name]=toggle
         switcher.connect("notify::active-name",lambda group,*_:self.media_stack.set_visible_child_name(group.get_active_name()))
         header.set_title_widget(switcher)
         search=Gtk.SearchEntry(placeholder_text="Search",margin_start=12,margin_end=12);pane.append(search)
@@ -253,8 +261,9 @@ class MonogramWindow(Adw.ApplicationWindow):
                 def choose(value=item,kind=name,asset=index):
                     if kind=="emoji":self.chat.insert(value)
                     elif kind=="gifs":
-                        message=self.state.send(value,"gif");message.gif_index=asset;self.chat.render();self.refresh_chats()
-                    else:self.state.send(value,"sticker");self.chat.render();self.refresh_chats()
+                        message=self.send_message(value,"gif")
+                        if message:message.gif_index=asset;self.chat.render();self.refresh_chats()
+                    else:self.send_message(value,"sticker");self.chat.render();self.refresh_chats()
                 b.connect("clicked",lambda _,cb=choose:cb())
                 if name=="gifs":flow.attach(b,index%2,index//2,1,1);target=b
                 else:flow.insert(b,-1);target=b.get_parent();target.set_focusable(False)
@@ -274,7 +283,7 @@ class MonogramWindow(Adw.ApplicationWindow):
             value=amount.get_text() or "0"
             code=currency.get_selected_item().get_string()
             if mode.get_active_name()=="request":
-                self.state.send(value+" "+code+(" · "+note.get_text() if note.get_text() else ""),"payment");self.chat.render();self.show_chat()
+                self.send_message(value+" "+code+(" · "+note.get_text() if note.get_text() else ""),"payment");self.chat.render();self.show_chat()
             else:
                 d=Adw.AlertDialog(heading="Payment Review",body=value+" "+code+"\n"+note.get_text()+"\n\nOffline preview. No funds will be sent.");d.add_response("close","Close");d.present(self)
         review.connect("clicked",lambda _:payment_preview());money.append(review)
@@ -329,15 +338,23 @@ class MonogramWindow(Adw.ApplicationWindow):
             for name in ["Alex · Owner","Sam","Mira","Robin"]:pane.append(label(name,xalign=0,margin_start=20))
         toolbar.set_content(scrolled(pane));self.track_sidebar(toolbar);self.utility.set_sidebar(None);self.utility.set_sidebar(toolbar);toolbar.set_visible(True);self.utility_mode="info";self.utility.set_show_sidebar(True)
 
-    def select_chat(self,chat):
+    def select_chat(self,chat,save_previous=True):
         self.chat.clear_selection()
-        self.state.notes[self.state.active.id]=self.chat.text()
-        if chat is not self.state.active:
-            self.chat.attachments.clear()
-            while self.chat.chips.get_first_child():self.chat.chips.remove(self.chat.chips.get_first_child())
-        self.state.active=chat;chat.unread=0
-        self.chat.cancel_context();self.chat.entry.get_buffer().set_text(self.state.notes.get(chat.id,""))
+        if save_previous:self.save_draft()
+        self.chat.attachments.clear()
+        while self.chat.chips.get_first_child():self.chat.chips.remove(self.chat.chips.get_first_child())
+        self.chat.chips.set_visible(False)
+        self.state.active=chat;chat.unread=0;chat.unread_mark=False
+        self.loading_draft=True
+        self.chat.cancel_context();self.chat.entry.get_buffer().set_text(chat.draft)
+        target=next((m for m in chat.messages if m.id==chat.draft_reply),None)
+        if target:self.chat.reply(target)
+        self.loading_draft=False
         self.chat.render();self.refresh_chats();self.show_chat()
+        if hasattr(self,"accounts"):
+            self.accounts.persist()
+            self.chat.history_button.set_sensitive(True);self.chat.history_button.set_label("Load Earlier Messages")
+            if self.state.account and self.accounts.status=="online" and chat.jid not in self.accounts.history_pages:self.accounts.load_history(initial=True)
         if self.split.get_collapsed():self.split.set_show_sidebar(False)
 
     def show_chat(self):
@@ -346,7 +363,8 @@ class MonogramWindow(Adw.ApplicationWindow):
         chat=self.state.active
         self.lookup_action("notifications").set_state(GLib.Variant("s",getattr(chat,"notifications","all")))
         title=box(False,8);title.append(avatar(chat,28));words=box(True,0)
-        words.append(label(chat.name,"chat-title",xalign=0));words.append(label(chat.subtitle,"chat-subtitle dim-label",xalign=0));title.append(words)
+        subtitle=self.accounts.subtitle(chat) if self.state.account and hasattr(self,"accounts") else chat.subtitle
+        words.append(label(chat.name,"chat-title",xalign=0));words.append(label(subtitle,"chat-subtitle dim-label",xalign=0));title.append(words)
         self.title_button.set_child(title);self.title_button.set_visible(True);self.section_title.set_text("")
 
     def show_page(self,title,widget):
@@ -358,7 +376,56 @@ class MonogramWindow(Adw.ApplicationWindow):
 
     def set_big_emoji(self,value):self.big_emoji=value;self.chat.render()
 
+    def send_message(self,text,kind="text"):
+        return self.accounts.send(text,kind) if self.state.account else self.state.send(text,kind)
+
+    def draft_changed(self):
+        if self.loading_draft:return
+        if self.draft_timer:GLib.source_remove(self.draft_timer)
+        self.draft_timer=GLib.timeout_add(750,self.save_draft)
+        if self.state.account and hasattr(self,"accounts"):self.accounts.typing()
+
+    def save_draft(self):
+        if self.draft_timer:GLib.source_remove(self.draft_timer);self.draft_timer=0
+        if self.loading_draft or not hasattr(self,"chat"):return False
+        chat=self.state.active;chat.draft=self.chat.text()
+        chat.draft_reply=self.chat.replying.id if self.chat.replying else ""
+        self.state.notes[chat.id]=chat.draft
+        if hasattr(self,"accounts"):self.accounts.persist()
+        return False
+
+    def organize(self,chat,key,value):
+        setattr(chat,key,value)
+        if hasattr(self,"accounts"):self.accounts.persist()
+        self.refresh_chats()
+        if key=="archived":self.notice("Conversation archived" if value else "Conversation unarchived")
+
+    def mark_read(self,chat):
+        unread=not(chat.unread or chat.unread_mark);chat.unread=0;chat.unread_mark=unread
+        if hasattr(self,"accounts"):self.accounts.persist()
+        self.refresh_chats()
+
+    def archives(self):
+        from .widgets import action_row,group
+        content=margins(box(True,18),24);g=group("Archived Chats");content.append(g)
+        for chat in self.state.chats:
+            if not chat.archived:continue
+            row=action_row(chat.name,chat.jid or chat.subtitle,callback=lambda c=chat:self.select_chat(c));row.add_prefix(avatar(chat,36))
+            row.add_suffix(button("folder-open-symbolic","Unarchive",lambda c=chat:(self.organize(c,"archived",False),self.archives())))
+            g.add(row)
+        if not any(c.archived for c in self.state.chats):content.append(Adw.StatusPage(icon_name="folder-symbolic",title="No Archived Chats"))
+        self.show_page("Archived Chats",scrolled(Adw.Clamp(child=content,maximum_size=800)))
+
+    def delete_messages(self,messages):
+        chat=self.state.active
+        if self.state.account:self.accounts.store.delete_messages(self.state.account,chat,messages)
+        ids={m.id for m in messages};chat.messages[:]=[m for m in chat.messages if m.id not in ids]
+        if hasattr(self,"accounts"):self.accounts.persist()
+        self.chat.clear_selection();self.chat.render(False);self.refresh_chats()
+
     def choose_files(self,media=False):
+        if self.state.account:self.notice("Live file transfers are not available yet.");return
+        owner=self.state;chat_id=self.state.active.id
         dialog=Gtk.FileDialog(title="Attach Photos or Videos" if media else "Attach Files",modal=True)
         if media:
             filt=Gtk.FileFilter(name="Photos and videos");filt.add_mime_type("image/*");filt.add_mime_type("video/*")
@@ -366,6 +433,7 @@ class MonogramWindow(Adw.ApplicationWindow):
         def finished(d,result):
             try:
                 files=d.open_multiple_finish(result)
+                if self.state is not owner or self.state.active.id!=chat_id:self.notice("Conversation changed. Select the files again in their destination chat.");return
                 self.chat.add_files([files.get_item(i) for i in range(files.get_n_items())]);self.show_chat();self.chat.entry.grab_focus()
             except GLib.Error as error:
                 if not error.matches(Gtk.DialogError.quark(),Gtk.DialogError.DISMISSED):self.notice("File selection cancelled or unavailable")
@@ -386,8 +454,12 @@ class MonogramWindow(Adw.ApplicationWindow):
             content=box(True,2)
             for title,callback in items:
                 b=Gtk.Button(label=title);b.add_css_class("flat")
-                b.connect("clicked",lambda _,cb=callback:(pop.popdown(),cb()));content.append(b)
-            pop.set_child(content);pop.connect("closed",lambda _:pop.unparent());pop.popup()
+                def run(_,cb=callback):
+                    pop.popdown()
+                    if pop.get_parent():pop.unparent()
+                    cb()
+                b.connect("clicked",run);content.append(b)
+            pop.set_child(content);pop.connect("closed",lambda _:pop.unparent() if pop.get_parent() else None);pop.popup()
         click=Gtk.GestureClick(button=3);click.connect("pressed",show);parent.add_controller(click)
 
     def edit_folder(self,name):
@@ -433,7 +505,9 @@ class MonogramWindow(Adw.ApplicationWindow):
                 if child.get_label()==new:
                     child.set_active(True);break
                 child=child.get_next_sibling()
-            self.folder=new;self.refresh_chats();dialog.close()
+            self.folder=new;self.refresh_chats()
+            if hasattr(self,"accounts"):self.accounts.persist()
+            dialog.close()
         save.connect("clicked",lambda _:commit())
         def validate(*_):save.set_sensitive(bool(entry.get_text().strip()) and (entry.get_text().strip()==name or entry.get_text().strip() not in self.state.custom_folders))
         entry.connect("changed",validate);validate()

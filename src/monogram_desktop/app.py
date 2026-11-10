@@ -53,6 +53,7 @@ class MonogramApplication(Adw.Application):
             for open_dialog in [w.panels.preferences,w.panels.new_chat,w.panels.requests,w.panels.profile,w.panels.security,w.panels.poll,w.panels.article,w.panels.payment,w.panels.manage_wallets,w.panels.add_wallet,w.panels.setup,w.panels.spaces,w.panels.call]:
                 open_dialog();w.panels.last_dialog.close()
             w.shortcuts();assert isinstance(w.panels.last_dialog,Adw.ShortcutsDialog);w.panels.last_dialog.close()
+            self.smoke_live()
             w.edit_folder("Unread");w.panels.last_dialog.close()
             w.shift_folder("Groups",-1);w.shift_folder("Groups",-1)
             assert w.state.folder_order[0]=="Groups"
@@ -65,6 +66,30 @@ class MonogramApplication(Adw.Application):
         except Exception as error:
             self.failure=error;print("SMOKE FAILED:",repr(error),file=sys.stderr)
         self.quit();return False
+
+    def smoke_live(self):
+        from .live_state import LiveState
+        from datetime import datetime,timezone
+        w=self.window;a=w.accounts
+        config={"jid":"native-fixture@example.invalid","host":"","port":5222,"direct_tls":False}
+        a.store.save_account(config)
+        state=LiveState(config["jid"],a.store);peer=state.chat_for("peer@example.invalid");state.active=peer
+        a.activate(state)
+        assert not w.lookup_action("attach-file").get_enabled() and w.chat.live_banner.get_revealed()
+        w.chat.entry.get_buffer().set_text("durable native draft 🌿")
+        w.chat.send();assert w.chat.text()=="durable native draft 🌿"
+        w.save_draft()
+        data={"peer":peer.jid,"own":False,"text":"native incoming text","aliases":["wire:native-one"],"wire_id":"native-one","timestamp":datetime.now(timezone.utc).isoformat(),"reply_id":"","unavailable":False,"historical":False}
+        a.event(a.generation-1,state.account,"message",data);assert not peer.messages
+        a.event(a.generation,"foreign@example.invalid","message",data);assert not peer.messages
+        a.event(a.generation,state.account,"message",data);assert len(peer.messages)==1
+        w.chat.reply(peer.messages[0]);w.save_draft()
+        a.activate(a.preview);a.activate(LiveState(config["jid"],a.store))
+        peer=w.state.chat_for(peer.jid);w.select_chat(peer)
+        assert w.chat.text()=="durable native draft 🌿" and w.chat.replying.wire_id=="native-one"
+        for show in (a.manager,a.login,a.new_chat,w.panels.security,w.panels.preferences):show();w.panels.last_dialog.close()
+        a.activate(a.preview)
+        assert w.lookup_action("attach-file").get_enabled() and not w.chat.live_banner.get_revealed()
 
     def smoke_viewer(self):
         card=self.window.panels.wallet_stack.get_visible_child()

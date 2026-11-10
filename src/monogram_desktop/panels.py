@@ -20,6 +20,7 @@ class Panels:
     def body(self): return margins(box(True, 18), 24)
 
     def new_chat(self):
+        if self.w.state.account:self.w.accounts.new_chat();return
         content = self.body()
         entry = Gtk.SearchEntry(placeholder_text="Name or XMPP address")
         content.append(entry)
@@ -47,6 +48,7 @@ class Panels:
         d=self.dialog("New Group",content)
 
     def requests(self):
+        owner=self.w.state
         content = self.body()
         content.append(label("Requests and Invitations", "title-2", xalign=0))
         content.append(label("Choose who can contact you and see your presence.", wrap=True, xalign=0))
@@ -58,11 +60,13 @@ class Panels:
                 b=Gtk.Button(label=text,valign=Gtk.Align.CENTER)
                 if text=="Accept":b.add_css_class("suggested-action")
                 def respond(widget=g,verb=text,item=(name,sub)):
+                    if self.w.state is not owner:self.w.notice("Account changed. Reopen Requests.");return
+                    if self.w.state.account and not self.w.accounts.respond_request(item,verb=="Accept"):return
                     content.remove(widget)
                     if item in self.w.state.requests:self.w.state.requests.remove(item)
                     self.w.request_badge.set_text(str(len(self.w.state.requests)))
                     self.w.request_badge.set_visible(bool(self.w.state.requests))
-                    self.w.notice("Request accepted locally" if verb=="Accept" else "Request declined locally")
+                    self.w.notice(("Authorization sent" if self.w.state.account else "Request accepted locally") if verb=="Accept" else "Request declined")
                 b.connect("clicked",lambda _,callback=respond:callback())
                 actions.append(b)
             row.add_suffix(actions);content.append(g)
@@ -72,11 +76,15 @@ class Panels:
         content=self.body();g=group("Contacts")
         for chat in self.w.state.chats:
             if not chat.group and chat.id!="saved":
-                row=action_row(chat.name,chat.subtitle,callback=lambda c=chat:self.w.select_chat(c));row.add_prefix(avatar(chat));g.add(row)
+                row=action_row(chat.name,chat.jid or chat.subtitle,callback=lambda c=chat:self.w.select_chat(c));row.add_prefix(avatar(chat));g.add(row)
         content.append(g)
         self.w.show_page("Contacts",scrolled(content))
 
     def security(self):
+        if self.w.state.account:
+            content=Adw.PreferencesPage();g=group("End-to-End Encryption","OMEMO is not implemented in this desktop build yet. Live text messages are unencrypted at the XMPP content layer.")
+            g.add(action_row("Connection",self.w.accounts.status_text));g.add(action_row("Transport","TLS certificate and service-domain verification are required."));content.add(g)
+            self.dialog("Conversation Security",content,520,360);return
         content=self.body();g=group("Encryption", "Preview controls only. No real keys are loaded or changed.")
         mode=Adw.ComboRow(title="Encryption mode",model=Gtk.StringList.new(["PQ OMEMO2","Legacy OMEMO","Unencrypted"]))
         mode.set_selected(["PQ OMEMO2","Legacy OMEMO","Unencrypted"].index(self.w.state.mode))
@@ -100,6 +108,7 @@ class Panels:
         dialog.present(self.w)
 
     def preferences(self):
+        if self.w.state.account:self.w.accounts.preferences();return
         d=Adw.PreferencesDialog(title="Preferences",search_enabled=True)
         page=Adw.PreferencesPage(title="General",icon_name="preferences-system-symbolic")
         appearance=group("Appearance")
@@ -120,11 +129,11 @@ class Panels:
             g=group(title)
             for text in rows:g.add(Adw.SwitchRow(title=text,active=True))
             privacy.add(g)
-        privacy.add(group("Local preview", "Settings remain in memory for this prototype. No real data is deleted or synchronized."))
+        privacy.add(group("Local preview", "Preview switches do not change protocol behavior."))
         d.add(privacy)
         account=Adw.PreferencesPage(title="Account",icon_name="avatar-default-symbolic")
         g=group("Preview account")
-        for title,sub,callback in [("Profile","Name, avatar and profile fields",self.profile),("Connection","Server, reconnect and proxy",self.setup),("Devices and fingerprints","Review or block a device",self.security),("Contact access","Presence requests and authorizations",self.contact_access),("Developer Tools","Service discovery and ad-hoc commands",self.developer)]:g.add(action_row(title,sub,callback=callback))
+        for title,sub,callback in [("Accounts","Sign in, disconnect and remove local account data",self.w.accounts.manager),("Devices and fingerprints","Review encryption support",self.security)]:g.add(action_row(title,sub,callback=callback))
         account.add(g);d.add(account)
         more=Adw.PreferencesPage(title="Chat",icon_name="mail-message-new-symbolic")
         for title,rows in [("Chat behavior",["Reply on double click","Show message details","Pause media when minimized","Remember drafts"]),("Messages",["Render Markdown articles","Show partial spoilers","Translate selected text"]),("Animation",["Animate stickers","Animate emoji","Play GIFs automatically"])]:
@@ -132,6 +141,9 @@ class Panels:
             for text in rows:g.add(Adw.SwitchRow(title=text,active=True))
             more.add(g)
         self.last_dialog=d
+        if self.w.state.account:
+            # Live protocol controls are added only as their behavior is implemented.
+            privacy.set_sensitive(False);more.set_sensitive(False)
         d.add(more);d.present(self.w)
 
     def profile(self):
@@ -153,12 +165,7 @@ class Panels:
         self.dialog("Control Access",content)
 
     def setup(self):
-        content=self.body();content.append(label("Connect your account", "title-2"))
-        content.append(label("This is an offline form preview. It will not attempt to sign in.",wrap=True))
-        g=group("XMPP account");g.add(Adw.EntryRow(title="XMPP address"));g.add(Adw.PasswordEntryRow(title="Password"));content.append(g)
-        b=Gtk.Button(label="Proxy Settings");b.connect("clicked",lambda _:self.simple_form("Proxy",["Host","Port","Username"]));content.append(b)
-        b=Gtk.Button(label="Preview Connection");b.add_css_class("suggested-action");b.connect("clicked",lambda _:self.w.notice("Offline prototype · no connection attempted"));content.append(b)
-        self.dialog("Account Setup",content)
+        self.w.accounts.manager()
 
     def simple_form(self,title,fields):
         content=self.body();g=group(title)
@@ -329,6 +336,7 @@ class Panels:
         d=self.dialog("Group Call" if self.w.state.active.group else "Call",content)
 
     def media_viewer(self,source=None):
+        if self.w.state.account:self.w.notice("Live media viewing is not available yet.");return
         from .viewer import MediaViewer
         viewer=MediaViewer(self.w,source)
         self.w.viewer_layer.add_overlay(viewer)
@@ -339,13 +347,17 @@ class Panels:
 
     def forward_many(self,messages):
         if not messages:return
+        owner=self.w.state
+        if self.w.state.account and any(m.unavailable or m.kind!="text" for m in messages):self.w.notice("Only decrypted text messages can be forwarded in this build.");return
         content=self.body();g=group("Choose a conversation")
         for chat in self.w.state.chats:
             def send(c=chat):
+                if self.w.state is not owner:self.w.notice("Account changed. Choose the messages again.");return
                 import copy
                 self.w.select_chat(c)
                 for message in messages:
-                    sent=self.w.state.send("↪ Forwarded from "+message.author+"\n\n"+message.text,message.kind)
+                    sent=self.w.send_message("↪ Forwarded from "+message.author+"\n\n"+message.text,message.kind)
+                    if sent is None:return
                     for key in ("options","gif_index"):
                         if hasattr(message,key):setattr(sent,key,copy.deepcopy(getattr(message,key)))
                 self.w.chat.render();self.w.refresh_chats();d.close()
@@ -354,7 +366,9 @@ class Panels:
 
     def message_details(self,message):
         content=self.body();g=group("Message")
-        for title,sub in [("Sender",message.author),("Time",message.time),("Encryption","Encrypted fixture" if message.encrypted else "Unencrypted fixture"),("Delivery","Stored only in this in-memory preview")]:g.add(action_row(title,sub))
+        values=[("Sender",message.author),("Time",message.timestamp or message.time),("Encryption","Not available on this desktop" if message.unavailable else "End-to-end encrypted fixture" if message.encrypted else "Not end-to-end encrypted"),("Delivery",message.delivery if self.w.state.account else "Stored only in this in-memory preview")]
+        if self.w.state.account:values.append(("Message ID",message.wire_id or "Not supplied"))
+        for title,sub in values:g.add(action_row(title,sub))
         content.append(g);self.dialog("Message Details",content)
 
     def report_message(self,message):

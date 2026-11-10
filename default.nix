@@ -1,13 +1,13 @@
-{ lib, stdenv, python3, gtk4, libadwaita, wrapGAppsHook4, gobject-introspection, makeWrapper, xorg-server, dbus, makeFontsConf, adwaita-fonts, gsettings-desktop-schemas, mesa, librsvg }:
+{ lib, stdenv, python3, gtk4, libadwaita, wrapGAppsHook4, gobject-introspection, makeWrapper, xorg-server, dbus, makeFontsConf, adwaita-fonts, gsettings-desktop-schemas, mesa, librsvg, prosody, openssl, cacert }:
 let fontConfig = makeFontsConf { fontDirectories = [ adwaita-fonts ]; };
-    python = python3.withPackages (ps: [ ps.pygobject3 ps.pycairo ps.pyopengl ps.numpy ps.qrcode ]);
+    python = python3.withPackages (ps: [ ps.pygobject3 ps.pycairo ps.pyopengl ps.numpy ps.qrcode ps.slixmpp ]);
 in stdenv.mkDerivation {
   pname = "monogram-desktop";
   version = "0.1.0-prototype";
   src = lib.cleanSource ./.;
   nativeBuildInputs = [ wrapGAppsHook4 gobject-introspection makeWrapper ];
   buildInputs = [ gtk4 libadwaita librsvg gsettings-desktop-schemas ];
-  nativeCheckInputs = [ xorg-server dbus ];
+  nativeCheckInputs = [ xorg-server dbus prosody openssl ];
   dontBuild = true;
   doCheck = true;
   checkPhase = ''
@@ -26,6 +26,7 @@ in stdenv.mkDerivation {
     export FONTCONFIG_FILE=${fontConfig}
     export GSETTINGS_SCHEMA_DIR=${gsettings-desktop-schemas}/share/gsettings-schemas/${gsettings-desktop-schemas.name}/glib-2.0/schemas
     dbus-run-session --config-file=${dbus}/share/dbus-1/session.conf -- ${python}/bin/python -m monogram_desktop --smoke-test
+    MONOGRAM_IT_GUI=1 dbus-run-session --config-file=${dbus}/share/dbus-1/session.conf -- ${python}/bin/python tests/xmpp_integration.py
     kill "$xvfb_pid"
     trap - EXIT
     runHook postCheck
@@ -40,10 +41,11 @@ in stdenv.mkDerivation {
       --add-flags "-m monogram_desktop" \
       --prefix PYTHONPATH : $out/lib/monogram-desktop \
       --set GTK_USE_PORTAL 1 \
+      --set-default SSL_CERT_FILE ${cacert}/etc/ssl/certs/ca-bundle.crt \
       --set PYOPENGL_PLATFORM egl
   '';
   meta = {
-    description = "Backend-free native Monogram Desktop prototype";
+    description = "Native Monogram Desktop with initial XMPP text messaging";
     mainProgram = "monogram-desktop";
     license = lib.licenses.gpl3Plus;
     platforms = lib.platforms.linux;

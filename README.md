@@ -1,9 +1,11 @@
 # Monogram Desktop
 
 A native **GTK 4 / libadwaita** reimplementation of Monogram for Linux.
-This first milestone is an interactive, **backend-free UI prototype** with
-fictional in-memory conversations. It never signs in, contacts an XMPP server,
-loads real encryption keys, places calls or opens a real wallet.
+The app now includes **initial live XMPP direct-text messaging** and a separate
+offline demo with fictional conversations. Live mode supports verified TLS login,
+roster/presence, text, replies, carbons, archive history, receipts and local drafts.
+**End-to-end encryption is not implemented yet.** Calls, media, groups and wallets
+remain offline demo surfaces and are disabled for live accounts.
 
 ## Run with Nix
 
@@ -33,14 +35,23 @@ checks were run on x86_64-linux.
 
 ## Try it
 
+- Open **Main Menu → Accounts → Add Account** to connect an XMPP account.
+  Use New Conversation to enter another person's bare address. Passwords stay in
+  memory; reconnect after restart requires entering them again. Accounts keep
+  separate local history/drafts. Open Offline Demo returns to the fictional data.
+  See [LIVE_XMPP.md](docs/LIVE_XMPP.md) for behavior, storage and current limits.
 - Select chats; Ctrl+F replaces the header with search and shows message/chat results.
 - Filter All / Unread / Groups. Right click folders to edit chat-type/exclusion
   rules and explicit exceptions. Drag horizontally into gaps or empty space to
   reorder folders, or use their Move Left/Right menu actions.
-- Compose locally, reply, edit, copy, forward and inspect message details. Right
+- Compose, reply, copy, forward and inspect message details. Right
   click a message for its mobile-style reaction/action menu. Ctrl-click and
   Shift-click select messages; the action bar copies, forwards or deletes them.
   Enter sends; Shift+Enter adds a line.
+- Pin/archive/mark unread from a chat's menu; open Archived Chats to unarchive.
+  Live text drafts and reply targets survive switching chats and restarting.
+- The remaining controls below describe the offline demo; live transfers,
+  editing/reactions, groups, stories, calls and wallet operations are outstanding.
 - Press **F9** for emoji, stickers, GIFs and Monero controls in a **right-hand utility pane**.
   Emoji insert into the composer; sticker/GIF tiles create local fixture messages.
   The grids show six emoji/four stickers per row; GIF tiles use bundled
@@ -64,8 +75,8 @@ checks were run on x86_64-linux.
 ## Feature parity contract
 
 **100% Monogram feature parity is the product goal, not the current prototype's
-completion claim.** The backend-free milestone establishes the desktop layout
-and interaction vocabulary. See [FEATURE_PARITY.md](docs/FEATURE_PARITY.md) for
+completion claim.** The offline milestone established the desktop layout; the
+first XMPP milestone adds real text messaging. See [FEATURE_PARITY.md](docs/FEATURE_PARITY.md) for
 coverage, desktop adaptations and outstanding work, and
 [ANDROID_SOURCE_INDEX.md](docs/ANDROID_SOURCE_INDEX.md) for the pinned Android
 feature-note inventory. Existing backend behavior must not be silently dropped
@@ -73,7 +84,7 @@ when integration starts.
 
 [DESIGN.md](docs/DESIGN.md) records the GNOME HIG and Nautilus source references.
 This is real GTK: no WebView, browser shell, Android emulator, Telegram account
-or embedded backend is involved. Backend selection remains a separate decision.
+or embedded Android backend is involved. The desktop transport uses Slixmpp.
 
 The prototype code is GPL-2.0-or-later. The imported Monero rendering components
 are GPL-3.0-or-later; the combined build is distributed under GPL-3.0-or-later.

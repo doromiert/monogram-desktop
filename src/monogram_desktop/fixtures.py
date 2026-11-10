@@ -1,6 +1,7 @@
 """Fictional fixtures and transient state. No network, credentials, or disk history."""
 from dataclasses import dataclass, field
 from datetime import datetime
+from uuid import uuid4
 
 @dataclass
 class Message:
@@ -14,6 +15,16 @@ class Message:
     reactions: list = field(default_factory=list)
     my_reactions: set = field(default_factory=set)
     pinned: bool = False
+    id: str = field(default_factory=lambda: uuid4().hex)
+    timestamp: str = ""
+    delivery: str = "local"
+    reply_id: str = ""
+    reply_to: str = ""
+    wire_id: str = ""
+    aliases: list = field(default_factory=list)
+    options: list = field(default_factory=list)
+    gif_index: int = 0
+    unavailable: bool = False
 
 @dataclass
 class Chat:
@@ -32,6 +43,10 @@ class Chat:
     notifications: str = "all"
     unread_mentions: int = 0
     unread_mark: bool = False
+    jid: str = ""
+    pinned: bool = False
+    draft: str = ""
+    draft_reply: str = ""
 
 CHAT_TYPES={"contacts","non_contacts","groups","channels","bots"}
 
@@ -88,6 +103,7 @@ def demo_chats():
 
 class PreviewState:
     def __init__(self):
+        self.account = ""
         self.chats = demo_chats()
         self.active = self.chats[0]
         self.mode = "PQ OMEMO2"

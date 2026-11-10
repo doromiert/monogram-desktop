@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Monogram Desktop
-Comment=Native messaging UI prototype
+Comment=Native XMPP messaging
 Exec=monogram-desktop
 Icon=com.negzero.MonogramDesktop
 Categories=Network;InstantMessaging;GTK;
