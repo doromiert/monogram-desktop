@@ -410,6 +410,18 @@ mod tests {
                 })
                 .collect();
             assert_eq!(poll.options, expected);
+            if value["authored"].as_bool().unwrap_or(false) {
+                let (_, message, _) =
+                    crate::protocol::normalize(&xml, "bob@example.org", None).unwrap();
+                assert_eq!(message.poll.as_ref(), Some(&poll));
+                if xml.get_child("reply", "urn:xmpp:reply:0").is_some() {
+                    assert_eq!(message.text, "Authored note 😀");
+                    assert_eq!(message.reply_id, "original");
+                } else {
+                    assert!(message.text.is_empty());
+                    assert!(message.reply_id.is_empty());
+                }
+            }
             if value.get("sce").is_some() {
                 let plain =
                     crate::crypto::payload::open(&bytes("ciphertext"), &bytes("material")).unwrap();

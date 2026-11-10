@@ -69,10 +69,22 @@ handling and first-closure cutoff are connected. Poll/reply fallback offsets and
 formatting are rebased independently. Malformed metadata cannot fall back to
 legacy body guessing. Deletion clears structured payloads.
 
-**Mobile authoring, author update sending, forwarding and scheduled/outbox metadata
-migration remain unfinished.** The current mobile composer still produces the
-historical body convention. It does not advertise structured poll support, and
-structured update sends fail explicitly instead of emitting an incompatible body
-correction. Desktop historical body-only polls remain readable text. Desktop room
-transport, complete legacy/PQ encryption and physical mobile/desktop UI exchange
-also remain open. This milestone does not establish full poll or client parity.
+Mobile creation now derives XML directly from the native composer fields; author
+closure, fresh forwarding and encoded native outbox/scheduled metadata are
+connected. Scheduled retries/repeats retain the definition, with the existing
+account/encryption fences. Encoding avoids native local-parameter delimiters in
+user text. The mobile composer uses a readable fallback; its shared send API also
+supports bodyless sends. Both clients advertise the proposed namespace.
+
+Java-generated builder vectors additionally exercise actual mobile outgoing
+bodyless content and independent poll/reply fallbacks; Rust verifies both wire and
+protected payloads and normalizes the resulting message/reply. Local mobile-core
+server tests exercise plaintext/OMEMO 2 direct sends and plaintext room sends,
+votes and complete closure. Native checks cover outbox serialization, forwarding
+and scheduled retries/repeats. Separate native-backend checks verify protected PQ
+bodyless direct/MUC polls, closure and absence of exposed poll/fallback XML.
+
+A native mobile fallback toggle, desktop historical body-only poll cards, desktop
+room transport, complete legacy/PQ encryption and physical mobile/desktop UI
+exchange remain open. These checks do not establish exactly once delivery after
+an uncertain send, full poll parity or full client parity.

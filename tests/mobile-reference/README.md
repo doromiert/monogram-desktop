@@ -44,8 +44,12 @@ runtime. Input attribution/license is recorded in `assets/NOTICE.md`.
 `com.negzero.monogram.xmpp.GeneratePollVectors` against freshly compiled
 `PollDefinition`/`Omemo2Payload`, then read by Rust's poll tests. It includes
 bodyless/translated/unmarked fallback cases, scalar/emoji limits, invalid mappings
-and closure, plus five deterministic protected SCE payloads and a historical
+and closure, plus seven deterministic protected SCE payloads and a historical
 duplicate-body payload (fixture key bytes 0 through 31). Run the generator with the mobile test runtime classpath after
 `mvn -f xmpp-core/pom.xml -Dtest=PollDefinitionTest test`. Its stdout is the JSON.
 The mobile codec source remains in the adjacent mobile repository, rather than
 a second drifting Java implementation copied into desktop.
+
+Two cases use the actual mobile send builder, covering a bodyless poll and a poll
+with accompanying text, reply quoting and independent fallback ranges. Rust also
+normalizes those stanzas into the displayed poll/message/reply model.
