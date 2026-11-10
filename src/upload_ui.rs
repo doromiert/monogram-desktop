@@ -131,7 +131,17 @@ impl Ui {
             Ok(true) => {
                 if self.state.borrow().account == owner {
                     let mut s = self.state.borrow_mut();
+                    if s.current().jid == peer {
+                        self.history_window.content_changed();
+                    }
                     if let Some(chat) = s.chats.iter_mut().find(|c| c.jid == peer) {
+                        if chat
+                            .latest
+                            .as_ref()
+                            .is_some_and(|latest| latest.id == message.id)
+                        {
+                            chat.latest = Some(MessagePreview::from(&message));
+                        }
                         if let Some(row) = chat.messages.iter_mut().find(|m| m.id == message.id) {
                             *row = message;
                         }
@@ -335,7 +345,7 @@ impl Ui {
             .replying
             .borrow()
             .as_ref()
-            .and_then(|id| self.state.borrow().message(id).cloned());
+            .and_then(|id| self.active_message(id));
         let (owner, peer) = {
             let s = self.state.borrow();
             (s.account.clone(), s.current().jid.clone())

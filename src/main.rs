@@ -11,6 +11,8 @@ mod encryption_policy;
 mod file_share;
 mod folders;
 mod forwarding;
+mod history_window;
+mod history_window_ui;
 mod image_loader;
 mod image_ui;
 mod iq;

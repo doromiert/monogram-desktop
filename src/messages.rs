@@ -4,6 +4,7 @@ use gtk::{gdk, glib};
 use std::{cell::Cell, rc::Rc, time::Duration};
 pub enum ScrollTarget {
     Bottom,
+    Message(String),
     Position {
         value: f64,
         anchor: Option<(String, f64)>,
@@ -11,17 +12,23 @@ pub enum ScrollTarget {
 }
 impl Ui {
     pub fn render_messages(self: &Rc<Self>, bottom: bool) {
+        if bottom && !self.history_window.newest() && !self.state.borrow().account.is_empty() {
+            self.load_timeline(None);
+            return;
+        }
         let position = if bottom {
             ScrollTarget::Bottom
         } else {
             self.capture_scroll_position()
         };
+        self.render_messages_at(position);
+    }
+    pub fn render_messages_at(self: &Rc<Self>, position: ScrollTarget) {
         clear_list(&self.timeline);
         self.bubbles.borrow_mut().clear();
         let state = self.state.borrow();
         let messages = state.current().messages.clone();
         let group = state.current().group;
-        let live = !state.account.is_empty();
         drop(state);
         let mut last = String::new();
         for m in messages.into_iter().filter(|m| !m.retracted) {
@@ -63,6 +70,15 @@ impl Ui {
             bubble.set_vexpand(false);
             bubble.set_valign(gtk::Align::Start);
             bubble.add_css_class("message-bubble");
+            if self
+                .history_window
+                .highlighted
+                .borrow()
+                .as_ref()
+                .is_some_and(|(id, _)| id == &m.id)
+            {
+                bubble.add_css_class("reply-target");
+            }
             if m.own {
                 bubble.add_css_class("own")
             }
@@ -135,6 +151,7 @@ impl Ui {
                 reply.set_child(Some(&wrap(&m.reply, "")));
                 let weak = Rc::downgrade(self);
                 let target = m.reply_id.clone();
+                let author = m.reply_to.clone();
                 let snippet = m
                     .reply
                     .split_once(" · ")
@@ -143,29 +160,29 @@ impl Ui {
                     .to_string();
                 reply.connect_clicked(move |_| {
                     if let Some(ui) = weak.upgrade() {
-                        let id = ui
-                            .state
-                            .borrow()
-                            .current()
-                            .messages
-                            .iter()
-                            .find(|m| {
-                                (!target.is_empty()
-                                    && (m.id == target
-                                        || m.wire_id == target
-                                        || m.aliases.iter().any(|a| {
-                                            a == &format!("origin:{target}")
-                                                || a == &format!("server:{target}")
-                                        })))
-                                    || (target.is_empty()
-                                        && !snippet.is_empty()
-                                        && m.text.starts_with(&snippet))
-                            })
-                            .map(|m| m.id.clone());
+                        let state = ui.state.borrow();
+                        let chat = state.current();
+                        let id = if !state.account.is_empty() {
+                            ui.store
+                                .resolve_reply(&state.account, &chat.jid, &author, &target)
+                                .filter(|m| !m.retracted)
+                                .map(|m| m.id)
+                        } else {
+                            chat.messages
+                                .iter()
+                                .find(|m| {
+                                    !target.is_empty() && m.id == target
+                                        || target.is_empty()
+                                            && !snippet.is_empty()
+                                            && m.text.starts_with(&snippet)
+                                })
+                                .map(|m| m.id.clone())
+                        };
+                        drop(state);
                         if let Some(id) = id {
                             ui.highlight(&id)
                         } else {
-                            ui.notice("Original message is not loaded. Load earlier messages.")
+                            ui.notice("Original message is unavailable")
                         }
                     }
                 });
@@ -399,12 +416,13 @@ impl Ui {
     }
     pub fn at_message_end(&self) -> bool {
         let adjustment = self.scroll.vadjustment();
-        adjustment.upper() - adjustment.page_size() - adjustment.value() < 24.
+        (self.state.borrow().account.is_empty() || self.history_window.newest())
+            && adjustment.upper() - adjustment.page_size() - adjustment.value() < 24.
     }
     pub fn queue_message_scroll(self: &Rc<Self>, target: ScrollTarget) {
         let pending = self.message_scroll.borrow().is_some();
         // A receipt or an archive response may rebuild the rows in the same frame.
-        if !pending || matches!(target, ScrollTarget::Bottom) {
+        if !pending || matches!(target, ScrollTarget::Bottom | ScrollTarget::Message(_)) {
             self.message_scroll.replace(Some(target));
         }
         if pending {
@@ -420,8 +438,12 @@ impl Ui {
                 if let Some(ui) = weak.upgrade() {
                     if let Some(target) = ui.message_scroll.take() {
                         let adjustment = ui.scroll.vadjustment();
+                        ui.history_window.moving.set(true);
                         adjustment.set_value(match target {
                             ScrollTarget::Bottom => adjustment.upper() - adjustment.page_size(),
+                            ScrollTarget::Message(id) => ui
+                                .highlight_position(id)
+                                .unwrap_or_else(|| adjustment.value()),
                             ScrollTarget::Position { value, anchor } => anchor
                                 .and_then(|(id, delta)| {
                                     let bubbles = ui.bubbles.borrow();
@@ -430,33 +452,46 @@ impl Ui {
                                 })
                                 .unwrap_or(value),
                         });
+                        ui.history_window.moving.set(false);
                     }
+                    ui.schedule_history_maintenance();
                 }
             })));
             glib::ControlFlow::Break
         });
     }
-    pub fn highlight(self: &Rc<Self>, id: &str) {
+    fn highlight_position(self: &Rc<Self>, id: String) -> Option<f64> {
+        let bubble = self.bubbles.borrow().get(&id)?.clone();
+        let bounds = bubble.compute_bounds(&self.timeline)?;
+        let marker = (id, std::time::Instant::now());
+        if let Some((previous, _)) = self
+            .history_window
+            .highlighted
+            .replace(Some(marker.clone()))
+        {
+            if let Some(previous) = self.bubbles.borrow().get(&previous) {
+                previous.remove_css_class("reply-target");
+            }
+        }
+        bubble.add_css_class("reply-target");
         let weak = Rc::downgrade(self);
-        let id = id.to_string();
-        glib::timeout_add_local_once(Duration::from_millis(50), move || {
-            if let Some(ui) = weak.upgrade() {
-                if let Some(widget) = ui.bubbles.borrow().get(&id) {
-                    if let Some(bounds) = widget.compute_bounds(&ui.timeline) {
-                        ui.scroll
-                            .vadjustment()
-                            .set_value((bounds.y() as f64 - 16.).max(0.))
-                    }
-                    widget.add_css_class("reply-target");
-                    let weak = widget.downgrade();
-                    glib::timeout_add_local_once(Duration::from_millis(1200), move || {
-                        if let Some(w) = weak.upgrade() {
-                            w.remove_css_class("reply-target")
-                        }
-                    });
+        glib::timeout_add_local_once(Duration::from_millis(1200), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if ui.history_window.highlighted.borrow().as_ref() == Some(&marker) {
+                ui.history_window.highlighted.borrow_mut().take();
+                if let Some(bubble) = ui.bubbles.borrow().get(&marker.0) {
+                    bubble.remove_css_class("reply-target");
                 }
             }
         });
+        Some((f64::from(bounds.y()) - 16.0).max(0.0))
+    }
+    pub fn highlight(self: &Rc<Self>, id: &str) {
+        if self.bubbles.borrow().contains_key(id) && !self.history_window.busy() {
+            self.queue_message_scroll(ScrollTarget::Message(id.into()));
+        } else if !self.state.borrow().account.is_empty() {
+            self.load_timeline(Some(id.into()));
+        }
     }
     pub fn select_message(self: &Rc<Self>, id: &str, extend: bool) {
         let ids: Vec<_> = self
@@ -479,6 +514,10 @@ impl Ui {
                 for value in &ids[a.min(b)..=a.max(b)] {
                     selected.insert(value.clone());
                 }
+            } else if let Some(anchor) = anchor {
+                drop(selected);
+                self.select_history_span(anchor, id.into());
+                return;
             }
         } else {
             if !selected.remove(id) {
@@ -510,38 +549,38 @@ impl Ui {
         self.update_selection();
     }
     pub fn selection_action(self: &Rc<Self>, action: &str) {
-        let messages: Vec<_> = self
-            .state
-            .borrow()
-            .current()
-            .messages
-            .iter()
-            .filter(|m| self.selected.borrow().contains(&m.id))
-            .cloned()
-            .collect();
-        match action {
-            "select-all" => {
-                self.selected.replace(
-                    self.state
-                        .borrow()
-                        .current()
-                        .messages
-                        .iter()
-                        .map(|m| m.id.clone())
-                        .collect(),
-                );
-                self.update_selection()
-            }
-            "copy" => self.window.clipboard().set_text(
+        if action == "select-all" {
+            self.selected.replace(
+                self.state
+                    .borrow()
+                    .current()
+                    .messages
+                    .iter()
+                    .map(|m| m.id.clone())
+                    .collect(),
+            );
+            self.update_selection();
+            return;
+        }
+        if action == "delete" {
+            self.delete_confirmation(self.selected.borrow().iter().cloned().collect());
+            return;
+        }
+        if matches!(action, "copy" | "forward") {
+            self.resolve_selected_messages(action == "forward");
+        }
+    }
+    pub(crate) fn apply_selection(self: &Rc<Self>, messages: Vec<Message>, forward: bool) {
+        if forward {
+            self.forward(messages);
+        } else {
+            self.window.clipboard().set_text(
                 &messages
                     .iter()
                     .map(|m| format!("{} · {}\n{}", m.author, m.time, m.content_text()))
                     .collect::<Vec<_>>()
                     .join("\n\n"),
-            ),
-            "forward" => self.forward(messages),
-            "delete" => self.delete_confirmation(messages.iter().map(|m| m.id.clone()).collect()),
-            _ => {}
+            );
         }
     }
     pub fn delete_confirmation(self: &Rc<Self>, ids: Vec<String>) {
@@ -602,26 +641,32 @@ impl Ui {
         let peer = s.current().jid.clone();
         if !s.account.is_empty() {
             for id in ids {
+                let message = self.store.message(&s.account, &peer, id);
                 if self.store.delete(&s.account, &peer, id).is_err() {
                     drop(s);
                     self.notice("Local deletion failed");
                     return;
                 }
                 self.uploads.borrow_mut().cancel(id);
-                if s.message(id).is_some_and(|m| m.upload.is_some()) {
+                if message.as_ref().is_some_and(|m| m.upload.is_some()) {
                     let _guard = crate::downloads::CACHE_IO.lock().unwrap();
                     if let Ok(path) = crate::uploads::snapshot_path(&s.account, id) {
                         let _ = std::fs::remove_file(path);
                     }
                 }
-                if let Some(file) = s.message(id).and_then(|m| m.attachment.as_ref()) {
+                if let Some(file) = message.as_ref().and_then(|m| m.attachment.as_ref()) {
                     self.downloads.borrow_mut().cancel(&s.account, file);
                     self.images.borrow_mut().invalidate(file);
                 }
             }
         }
         s.current_mut().messages.retain(|m| !ids.contains(&m.id));
+        let owner = s.account.clone();
         drop(s);
+        if !owner.is_empty() {
+            self.history_window.content_changed();
+            self.sync_latest_preview(&owner, &peer);
+        }
         self.clear_selection();
         self.persist();
         self.render_messages(false);

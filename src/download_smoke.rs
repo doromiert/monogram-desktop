@@ -94,7 +94,9 @@ impl DownloadSmoke {
             );
         }
         let click = |title: &str| {
-            let bubble = ui.bubbles.borrow()[&*self.id.borrow()].clone();
+            let Some(bubble) = ui.bubbles.borrow().get(&*self.id.borrow()).cloned() else {
+                return false;
+            };
             if let Some(button) = crate::smoke::button(&bubble, title) {
                 button.emit_clicked();
                 true

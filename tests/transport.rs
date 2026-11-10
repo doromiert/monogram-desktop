@@ -11,6 +11,8 @@ mod encryption_policy;
 mod file_share;
 #[path = "../src/forwarding.rs"]
 mod forwarding;
+#[path = "../src/history_window.rs"]
+mod history_window;
 #[path = "../src/iq.rs"]
 mod iq;
 #[path = "../src/legacy_polls.rs"]

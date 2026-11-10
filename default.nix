@@ -36,6 +36,7 @@ in rustPlatform.buildRustPackage {
     MONOGRAM_MOBILE_CRYPTO_FIXTURE="$TMPDIR/mobile-crypto" "$crypto_test" --ignored --exact crypto::tests::native_mobile_jvm_interoperability
     bash tests/keyring_fixture.sh "$crypto_test" ${dbus}/share/dbus-1/session.conf
     bash tests/keyring_fixture.sh "$crypto_test" ${dbus}/share/dbus-1/session.conf crypto::lifecycle::tests::isolated_identity_lifecycle
+    bash tests/keyring_fixture.sh "$crypto_test" ${dbus}/share/dbus-1/session.conf history_window_ui::tests::live_viewport_keeps_archive_reply_and_incoming_updates
     dbus-run-session --config-file=${dbus}/share/dbus-1/session.conf -- target/${stdenv.hostPlatform.rust.rustcTarget}/release/monogram-desktop --smoke-test --show-media
     transport_test=$(find target -path '*/release/deps/transport-*' -type f -executable | head -n 1)
     dbus-run-session --config-file=${dbus}/share/dbus-1/session.conf -- ${python3}/bin/python tests/xmpp_fixture.py --test-binary "$transport_test" --crypto-test-binary "$crypto_test" --bus-config ${dbus}/share/dbus-1/session.conf --app-binary target/${stdenv.hostPlatform.rust.rustcTarget}/release/monogram-desktop

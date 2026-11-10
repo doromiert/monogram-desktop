@@ -210,6 +210,30 @@ impl Message {
             .unwrap_or_else(|| self.text.clone())
     }
 }
+#[derive(Clone, Debug)]
+pub struct MessagePreview {
+    pub id: String,
+    pub timestamp: String,
+    pub time: String,
+    pub text: String,
+    pub own: bool,
+}
+impl From<&Message> for MessagePreview {
+    fn from(message: &Message) -> Self {
+        Self {
+            id: message.id.clone(),
+            timestamp: message.timestamp.clone(),
+            time: message.time.clone(),
+            text: message.preview().chars().take(160).collect(),
+            own: message.own,
+        }
+    }
+}
+impl Message {
+    pub fn order_key(&self) -> (&str, &str) {
+        (&self.timestamp, &self.id)
+    }
+}
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Chat {
@@ -224,6 +248,8 @@ pub struct Chat {
     pub unread: u32,
     pub group: bool,
     pub messages: Vec<Message>,
+    #[serde(skip)]
+    pub latest: Option<MessagePreview>,
     #[serde(default = "yes")]
     pub contact: bool,
     pub bot: bool,
@@ -251,7 +277,32 @@ impl Chat {
                 .and_then(|selection| selection.current(Utc::now().timestamp_millis()))
         })
     }
+    pub fn latest_key(&self) -> Option<(&str, &str)> {
+        let loaded = self
+            .messages
+            .iter()
+            .filter(|m| !m.retracted)
+            .map(Message::order_key)
+            .max();
+        loaded.max(
+            self.latest
+                .as_ref()
+                .map(|m| (m.timestamp.as_str(), m.id.as_str())),
+        )
+    }
+    pub fn latest_preview(&self) -> Option<MessagePreview> {
+        let newest = self.latest_key()?;
+        self.messages
+            .iter()
+            .find(|m| !m.retracted && m.order_key() == newest)
+            .map(MessagePreview::from)
+            .or_else(|| self.latest.clone())
+    }
+    pub fn remember_latest(&mut self) {
+        self.latest = self.latest_preview();
+    }
 }
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Folder {
@@ -410,12 +461,7 @@ impl State {
                 if self.account.is_empty() || a.pinned {
                     return std::cmp::Ordering::Equal;
                 }
-                fn latest(c: &Chat) -> Option<&Message> {
-                    c.messages.iter().rev().find(|m| !m.retracted)
-                }
-                latest(b)
-                    .map(|m| &m.timestamp)
-                    .cmp(&latest(a).map(|m| &m.timestamp))
+                b.latest_key().cmp(&a.latest_key())
             })
         });
         out

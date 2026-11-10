@@ -9,14 +9,26 @@ use std::rc::Rc;
 impl Ui {
     pub fn sync_actions(&self, owner: &str, peer: &str) {
         let mut state = self.state.borrow_mut();
+        if state.account == owner && state.current().jid == peer {
+            self.history_window.content_changed();
+        }
         let c = state.chat_for(peer);
         let attachments: Vec<_> = c
             .messages
             .iter()
             .filter_map(|m| m.attachment.clone().map(|file| (m.id.clone(), file)))
             .collect();
-        let count = c.messages.len().max(200).min(u32::MAX as usize) as u32;
-        c.messages = self.store.history(owner, peer, None, count);
+        c.messages = c
+            .messages
+            .iter()
+            .filter_map(|m| self.store.message(owner, peer, &m.id))
+            .filter(|m| !m.retracted)
+            .collect();
+        c.latest = self
+            .store
+            .history(owner, peer, None, 1)
+            .first()
+            .map(MessagePreview::from);
         for (id, file) in attachments {
             if self
                 .store
@@ -28,45 +40,20 @@ impl Ui {
             }
         }
         c.unread = self.store.unread_count(owner, peer);
-        let snapshot = c.messages.clone();
         for m in &mut c.messages {
-            if m.reply_id.is_empty() {
-                continue;
-            }
-            let candidates: Vec<_> = snapshot
-                .iter()
-                .filter(|target| {
-                    (m.reply_to.is_empty() || m.reply_to == if target.own { owner } else { peer })
-                        && (target.wire_id == m.reply_id
-                            || target
-                                .aliases
-                                .iter()
-                                .any(|a| a == &format!("origin:{}", m.reply_id)))
-                })
-                .collect();
-            if candidates.len() == 1 {
-                let target = candidates[0];
-                m.reply = format!(
-                    "{} · {}",
-                    target.author,
-                    target.preview().chars().take(80).collect::<String>()
-                );
-            } else if let Some(id) = self.store.known(
-                owner,
-                peer,
-                m.reply_to == owner,
-                &[
-                    format!("wire:{}", m.reply_id),
-                    format!("origin:{}", m.reply_id),
-                ],
-            ) {
-                if self
-                    .store
-                    .message(owner, peer, &id)
-                    .is_none_or(|m| m.retracted)
-                {
-                    m.reply = "Original message was removed".into();
-                }
+            if let Some(target) = self
+                .store
+                .resolve_reply(owner, peer, &m.reply_to, &m.reply_id)
+            {
+                m.reply = if target.retracted {
+                    "Original message was removed".into()
+                } else {
+                    format!(
+                        "{} · {}",
+                        target.author,
+                        target.preview().chars().take(80).collect::<String>()
+                    )
+                };
             }
         }
     }

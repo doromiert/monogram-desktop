@@ -41,11 +41,12 @@ drafts, authorization requests or transport.
   MAM results share the incoming normalization path. Wrappers from foreign
   senders are rejected. Deduplication is scoped by account, conversation and
   direction; only the account's server-assigned stanza IDs are accepted.
-- Server history is fetched in pages of 50. The initial local window loads at
-  most 200 messages per conversation. Scrolling near the top loads up to 36
-  local rows at a time and requests the next server page when local history runs
-  out. Prepending preserves the visible message position. Loaded rows are not
-  yet evicted as you scroll. This is not an exhaustive account-wide MAM sync.
+- Server history is fetched in pages of 50. The active chat keeps its visible
+  rows and roughly three viewport heights on either side. Local pages use
+  timestamp and ID cursors in both directions. Scrolling to the older edge
+  requests another server page after local history runs out. Paging preserves
+  the visible message position. The complete local history remains in SQLite
+  for reply jumps, search and selection. This is not an account-wide MAM sync.
 - Outgoing delivery receipts are requested. The visible Delivered state means
   receipt by another client, never that a person read the message. Receipt sender
   and message ID must match the stored conversation. Sending receipts is opt-in

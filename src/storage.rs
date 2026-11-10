@@ -90,17 +90,7 @@ impl Store {
             body.as_object_mut().unwrap().remove("messages");
             tx.execute("INSERT INTO chats VALUES (?,?,?) ON CONFLICT(account,peer) DO UPDATE SET body=excluded.body",params![s.account,c.jid,body.to_string()])?;
             for m in &c.messages {
-                if m.action.is_some() {
-                    continue;
-                }
-                self.save_base(&s.account, &c.jid, m)?;
-                tx.execute("INSERT INTO messages VALUES (?,?,?,?,COALESCE((SELECT CASE WHEN json_extract(body,'$.retracted')=1 THEN body END FROM message_bases WHERE account=? AND peer=? AND id=?),?)) ON CONFLICT(account,peer,id) DO UPDATE SET body=excluded.body,timestamp=excluded.timestamp",params![s.account,c.jid,m.id,m.timestamp,s.account,c.jid,m.id,serde_json::to_string(m).unwrap()])?;
-                for alias in &m.aliases {
-                    tx.execute(
-                        "INSERT OR IGNORE INTO aliases VALUES (?,?,?,?,?)",
-                        params![s.account, c.jid, m.own, alias, m.id],
-                    )?;
-                }
+                self.upsert_message(&s.account, &c.jid, m)?;
             }
         }
         let folders = serde_json::json!({"rules":s.folders,"order":s.folder_order});
@@ -110,8 +100,65 @@ impl Store {
         )?;
         tx.commit()
     }
+    fn upsert_message(&self, account: &str, peer: &str, m: &Message) -> rusqlite::Result<()> {
+        if m.action.is_some() {
+            return Ok(());
+        }
+        self.save_base(account, peer, m)?;
+        self.db.execute("INSERT INTO messages VALUES (?,?,?,?,COALESCE((SELECT CASE WHEN json_extract(body,'$.retracted')=1 THEN body END FROM message_bases WHERE account=? AND peer=? AND id=?),?)) ON CONFLICT(account,peer,id) DO UPDATE SET body=excluded.body,timestamp=excluded.timestamp",params![account,peer,m.id,m.timestamp,account,peer,m.id,serde_json::to_string(m).unwrap()])?;
+        for alias in &m.aliases {
+            self.db.execute(
+                "INSERT OR IGNORE INTO aliases VALUES (?,?,?,?,?)",
+                params![account, peer, m.own, alias, m.id],
+            )?;
+        }
+        Ok(())
+    }
+    pub fn update_delivery(
+        &self,
+        account: &str,
+        peer: &str,
+        wire: &str,
+        status: &str,
+    ) -> rusqlite::Result<Option<Message>> {
+        let Some(id) = self.known(
+            account,
+            peer,
+            true,
+            &[format!("wire:{wire}"), format!("origin:{wire}")],
+        ) else {
+            return Ok(None);
+        };
+        let Some(mut message) = self
+            .message(account, peer, &id)
+            .filter(|m| m.own && m.wire_id == wire && !m.retracted)
+        else {
+            return Ok(None);
+        };
+        if message.delivery != "delivered" || status == "delivered" {
+            message.delivery = status.into();
+            let tx = self.db.unchecked_transaction()?;
+            self.upsert_message(account, peer, &message)?;
+            tx.commit()?;
+        }
+        Ok(Some(message))
+    }
+    pub fn interrupt_messages(&self, owner: &str) -> rusqlite::Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        for table in ["messages", "message_bases"] {
+            tx.execute(&format!("UPDATE {table} SET body=json_set(body,'$.delivery','uncertain') WHERE account=? AND json_extract(body,'$.delivery')='sending' AND COALESCE(json_type(body,'$.upload'),'null')='null'"), [owner])?;
+        }
+        tx.commit()
+    }
     pub fn load(&self, a: &str) -> State {
+        self.load_state(a, false)
+    }
+    pub fn load_windowed(&self, a: &str) -> State {
+        self.load_state(a, true)
+    }
+    fn load_state(&self, a: &str, windowed: bool) -> State {
         let _ = self.interrupt_uploads(a);
+        let _ = self.interrupt_messages(a);
         let _ = self.interrupt_actions(a);
         let peers: Vec<String> = {
             let mut q = self
@@ -135,7 +182,17 @@ impl Store {
         let mut chats = vec![];
         for (peer, body) in rows.flatten() {
             if let Ok(mut c) = serde_json::from_str::<Chat>(&body) {
-                c.messages = self.history(a, &peer, None, 200);
+                if !windowed {
+                    c.messages = self.history(a, &peer, None, 200);
+                } else if chats.is_empty() {
+                    c.messages = self.history(a, &peer, None, crate::history_window::PAGE);
+                    c.remember_latest();
+                } else {
+                    c.latest = self
+                        .history(a, &peer, None, 1)
+                        .first()
+                        .map(MessagePreview::from);
+                }
                 chats.push(c)
             }
         }

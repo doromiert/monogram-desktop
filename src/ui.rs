@@ -49,6 +49,9 @@ pub struct Ui {
     pub search_page: gtk::Box,
     pub timeline: gtk::ListBox,
     pub history: gtk::Spinner,
+    pub history_latest: gtk::Button,
+    pub history_window: crate::history_window::HistoryWindow,
+    pub search_revision: Cell<u64>,
     pub scroll: gtk::ScrolledWindow,
     pub message_scroll: RefCell<Option<crate::messages::ScrollTarget>>,
     pub composer: gtk::TextView,
@@ -107,7 +110,7 @@ impl Ui {
         let live_smoke = std::env::args().any(|arg| arg == "--live-smoke-test");
         let welcome = (!smoke || live_smoke) && !has_owner && accounts.is_empty();
         let state = match (has_owner, welcome) {
-            (true, _) => store.load(&owner),
+            (true, _) => store.load_windowed(&owner),
             (_, true) => State::live("", vec![]),
             _ => demo.clone(),
         };
@@ -257,6 +260,18 @@ impl Ui {
                 .can_target(false)
                 .visible(false)
                 .build(),
+            history_latest: gtk::Button::builder()
+                .icon_name("go-bottom-symbolic")
+                .tooltip_text("Jump to latest message")
+                .halign(gtk::Align::End)
+                .valign(gtk::Align::End)
+                .margin_bottom(12)
+                .margin_end(16)
+                .css_classes(["circular", "osd"])
+                .visible(false)
+                .build(),
+            history_window: Default::default(),
+            search_revision: Cell::new(0),
             message_scroll: RefCell::new(None),
             scroll: gtk::ScrolledWindow::builder()
                 .vexpand(true)
@@ -743,6 +758,7 @@ impl Ui {
             .set_label(&state.requests.len().to_string());
         self.request_badge.set_visible(!state.requests.is_empty());
         for chat in state.filtered(self.search.text().as_str()) {
+            let latest = chat.latest_preview();
             let row = gtk::ListBoxRow::new();
             row.set_widget_name(&chat.id);
             let line = bx(false, 11);
@@ -755,10 +771,7 @@ impl Ui {
             name.set_ellipsize(gtk::pango::EllipsizeMode::End);
             top.append(&name);
             top.append(&label(
-                chat.messages
-                    .last()
-                    .map(|m| m.time.as_str())
-                    .unwrap_or("Now"),
+                latest.as_ref().map(|m| m.time.as_str()).unwrap_or("Now"),
                 "chat-time",
             ));
             words.append(&top);
@@ -766,13 +779,13 @@ impl Ui {
             let preview = if !chat.draft.is_empty() {
                 format!("Draft: {}", chat.draft.replace('\n', " "))
             } else {
-                chat.messages
-                    .last()
+                latest
+                    .as_ref()
                     .map(|m| {
                         format!(
                             "{}{}",
                             if m.own { "You: " } else { "" },
-                            m.preview().replace('\n', " ")
+                            m.text.replace('\n', " ")
                         )
                     })
                     .unwrap_or_else(|| "No messages yet".into())
@@ -938,15 +951,33 @@ impl Ui {
             .vexpand(true)
             .build();
         history_view.add_overlay(&self.history);
+        history_view.add_overlay(&self.history_latest);
+        self.weak_button(&self.history_latest, |ui| ui.load_timeline(None));
+        let weak = Rc::downgrade(self);
+        self.scroll.vadjustment().connect_value_changed(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.schedule_history_maintenance();
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.scroll.vadjustment().connect_changed(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.schedule_history_maintenance();
+            }
+        });
         chat.append(&history_view);
         let history_scroll =
             gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
         history_scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = Rc::downgrade(self);
         history_scroll.connect_scroll(move |_, _, dy| {
-            if dy < 0. {
+            if dy != 0. {
                 if let Some(ui) = weak.upgrade() {
-                    ui.load_history_near_top();
+                    ui.history_edge(if dy < 0. {
+                        crate::history_window::Side::Older
+                    } else {
+                        crate::history_window::Side::Newer
+                    });
                 }
             }
             glib::Propagation::Proceed
@@ -1118,8 +1149,15 @@ impl Ui {
             return;
         }
         self.save_draft();
+        let switched = self.state.borrow().active != id;
+        self.timeline_scope_changed();
         {
             let mut state = self.state.borrow_mut();
+            if switched && !state.account.is_empty() {
+                let previous = state.current_mut();
+                previous.remember_latest();
+                previous.messages.clear();
+            }
             state.active = id.into();
             let c = state.current_mut();
             c.unread = 0;
@@ -1134,6 +1172,9 @@ impl Ui {
         clear(&self.chips);
         self.chips.set_visible(false);
         self.load_current();
+        if !self.state.borrow().account.is_empty() {
+            self.load_timeline(None);
+        }
         self.refresh_chats(None);
         self.persist();
         if self.split.is_collapsed() {
@@ -1216,6 +1257,8 @@ impl Ui {
     pub fn search_results(self: &Rc<Self>) {
         clear(&self.search_page);
         margins(&self.search_page, 24);
+        let revision = self.search_revision.get().wrapping_add(1);
+        self.search_revision.set(revision);
         let query = self.search.text().to_lowercase();
         if query.trim().is_empty() {
             self.search_page.append(
@@ -1226,13 +1269,14 @@ impl Ui {
             );
             return;
         }
-        let chats = self.state.borrow().chats.clone();
-        let mut count = 0;
-        for c in chats {
+        let state = self.state.borrow();
+        let owner = state.account.clone();
+        for c in &state.chats {
             if c.name.to_lowercase().contains(&query) {
                 let row = adw::ActionRow::builder()
                     .title(&c.name)
                     .subtitle(&c.subtitle)
+                    .use_markup(false)
                     .activatable(true)
                     .build();
                 let id = c.id.clone();
@@ -1243,39 +1287,86 @@ impl Ui {
                     }
                 });
                 self.search_page.append(&row);
-                count += 1
             }
-            for m in c.messages {
-                if m.content_text().to_lowercase().contains(&query) {
-                    let row = adw::ActionRow::builder()
-                        .title(m.preview())
-                        .subtitle(format!("{} · {} · {}", c.name, m.author, m.time))
-                        .title_lines(2)
-                        .use_markup(false)
-                        .activatable(true)
-                        .build();
-                    let chat = c.id.clone();
-                    let id = m.id;
-                    let weak = Rc::downgrade(self);
-                    row.connect_activated(move |_| {
-                        if let Some(s) = weak.upgrade() {
-                            s.select_chat(&chat);
-                            s.highlight(&id);
-                        }
-                    });
-                    self.search_page.append(&row);
-                    count += 1
+            if owner.is_empty() {
+                for m in &c.messages {
+                    if m.content_text().to_lowercase().contains(&query) {
+                        self.append_search_match(c, m);
+                    }
                 }
             }
         }
-        if count == 0 {
+        drop(state);
+        if owner.is_empty() {
+            self.empty_search_status();
+            return;
+        }
+        let spinner = gtk::Spinner::builder()
+            .spinning(true)
+            .halign(gtk::Align::Center)
+            .build();
+        self.search_page.append(&spinner);
+        let weak = Rc::downgrade(self);
+        let generation = self.generation.get();
+        glib::MainContext::default().spawn_local(async move {
+            let Some(ui) = weak.upgrade() else { return };
+            let account = owner.clone();
+            let matches = ui
+                .store
+                .read_snapshot(move |store| store.search_archive(&account, &query))
+                .await;
+            let state = ui.state.borrow();
+            if ui.generation.get() != generation
+                || state.account != owner
+                || ui.search_revision.get() != revision
+            {
+                return;
+            }
+            ui.search_page.remove(&spinner);
+            match matches {
+                Ok(matches) => {
+                    for (peer, message) in matches {
+                        if let Some(chat) = state.chats.iter().find(|c| c.jid == peer) {
+                            ui.append_search_match(chat, &message);
+                        }
+                    }
+                    ui.empty_search_status();
+                }
+                Err(_) => ui.notice("History search could not be loaded"),
+            }
+        });
+    }
+    fn append_search_match(self: &Rc<Self>, chat: &Chat, message: &Message) {
+        let row = adw::ActionRow::builder()
+            .title(message.preview())
+            .subtitle(format!(
+                "{} · {} · {}",
+                chat.name, message.author, message.time
+            ))
+            .title_lines(2)
+            .use_markup(false)
+            .activatable(true)
+            .build();
+        let chat = chat.id.clone();
+        let id = message.id.clone();
+        let weak = Rc::downgrade(self);
+        row.connect_activated(move |_| {
+            if let Some(s) = weak.upgrade() {
+                s.select_chat(&chat);
+                s.highlight(&id);
+            }
+        });
+        self.search_page.append(&row);
+    }
+    fn empty_search_status(&self) {
+        if self.search_page.first_child().is_none() {
             self.search_page.append(
                 &adw::StatusPage::builder()
                     .title("No Results")
                     .description("Try another search")
                     .icon_name("system-search-symbolic")
                     .build(),
-            )
+            );
         }
     }
     pub fn command(&self, c: Command) -> bool {
@@ -1382,7 +1473,7 @@ impl Ui {
             .replying
             .borrow()
             .as_ref()
-            .and_then(|id| self.state.borrow().message(id).cloned());
+            .and_then(|id| self.active_message(id));
         let live = !self.state.borrow().account.is_empty();
         if live && !self.online.get() {
             self.notice("Connect before sending. Your draft is kept.");
@@ -1480,7 +1571,7 @@ impl Ui {
             .replying
             .borrow()
             .as_ref()
-            .and_then(|id| self.state.borrow().message(id).cloned());
+            .and_then(|id| self.active_message(id));
         if let Some(m) = reply {
             self.reply_label.set_text(&format!(
                 "Reply to {} · {}",
@@ -1604,6 +1695,7 @@ impl Ui {
             v.close()
         }
         self.state.replace(state);
+        self.timeline_scope_changed();
         self.history_pages.borrow_mut().clear();
         self.history_pending.borrow_mut().clear();
         self.typing.borrow_mut().clear();
@@ -1630,7 +1722,7 @@ impl Ui {
         } else if self.state.borrow().account == config.jid {
             self.state.borrow().clone()
         } else {
-            self.store.load(&config.jid)
+            self.store.load_windowed(&config.jid)
         };
         self.activate_state(state);
         self.status.replace("Connecting…".into());
@@ -1710,6 +1802,7 @@ impl Ui {
                     }
                 }
                 if !online {
+                    let _ = self.store.interrupt_messages(owner);
                     let _ = self.store.interrupt_actions(owner);
                     let peers: Vec<_> = self
                         .state
@@ -1910,7 +2003,7 @@ impl Ui {
             if saved {
                 self.sync_actions(owner, &peer);
                 if self.state.borrow().current().jid == peer {
-                    self.render_messages(!historical);
+                    self.render_messages(false);
                 }
                 if let Some(to) = receipt_to {
                     if self.preference("delivery_receipts", false) {
@@ -1949,8 +2042,19 @@ impl Ui {
                     })
                     .map(|m| m.id.clone())
             });
+        let follow = self.at_message_end();
         let mut s = self.state.borrow_mut();
+        let active = s.current().jid == peer;
         let c = s.chat_for(&peer);
+        let new_key = message.order_key();
+        let outside = !active
+            || c.messages.first().is_some_and(|edge| {
+                new_key < edge.order_key() && self.history_window.has_older_gap()
+            })
+            || c.messages
+                .last()
+                .is_some_and(|edge| new_key > edge.order_key() && !self.history_window.newest());
+        let mut inserted = None;
         let message_own = message.own;
         let receipt_id = message.wire_id.clone();
         let notify =
@@ -1979,8 +2083,9 @@ impl Ui {
                     if let Some(row) = c.messages.iter_mut().find(|m| m.id == known) {
                         *row = message;
                     } else {
+                        inserted = Some(message.id.clone());
                         c.messages.push(message);
-                        c.messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+                        c.messages.sort_by(|a, b| a.order_key().cmp(&b.order_key()));
                     }
                 } else if let Some(old) = c.messages.iter_mut().find(|m| m.id == known) {
                     for alias in &incoming_aliases {
@@ -1997,13 +2102,10 @@ impl Ui {
                 c.name.clone()
             };
             if !message.reply_id.is_empty() {
-                if let Some(target) = c.messages.iter().find(|m| {
-                    m.wire_id == message.reply_id
-                        || m.aliases.iter().any(|a| {
-                            a == &format!("origin:{}", message.reply_id)
-                                || a == &format!("server:{}", message.reply_id)
-                        })
-                }) {
+                if let Some(target) =
+                    self.store
+                        .resolve_reply(owner, &peer, &message.reply_to, &message.reply_id)
+                {
                     message.reply = format!(
                         "{} · {}",
                         target.author,
@@ -2017,15 +2119,30 @@ impl Ui {
                 c.unread += 1;
                 message.unread = true;
             }
+            inserted = Some(message.id.clone());
             c.messages.push(message);
-            c.messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+            c.messages.sort_by(|a, b| a.order_key().cmp(&b.order_key()));
         }
-        let active = s.current().jid == peer;
-        let follow = active
-            && self.at_message_end()
-            && (!historical || !self.history_pages.borrow().contains_key(&peer));
+        let follow =
+            active && follow && (!historical || !self.history_pages.borrow().contains_key(&peer));
+        c.remember_latest();
         drop(s);
         let mut saved = self.persist();
+        if saved && active {
+            self.history_window.content_changed();
+        }
+        if saved && outside {
+            if let Some(inserted) = &inserted {
+                self.state
+                    .borrow_mut()
+                    .chat_for(&peer)
+                    .messages
+                    .retain(|m| &m.id != inserted);
+                if active && historical {
+                    self.history_window.invalidate_older();
+                }
+            }
+        }
         if saved {
             if let Some(id) = known {
                 saved = self
@@ -2072,8 +2189,10 @@ impl Ui {
                 app.send_notification(None, &notification);
             }
         }
-        if active {
+        if active && (!outside || inserted.is_none()) {
             self.render_messages(follow)
+        } else if active {
+            self.schedule_history_maintenance();
         }
         saved
     }
@@ -2095,94 +2214,49 @@ impl Ui {
             }
             Ok(false) => {}
         }
-        let mut s = self.state.borrow_mut();
-        if let Some(c) = s.chats.iter_mut().find(|c| c.jid == peer) {
-            if let Some(m) = c.messages.iter_mut().find(|m| m.own && m.wire_id == id) {
-                if m.delivery != "delivered" || status == "delivered" {
-                    m.delivery = status.into()
+        match self.store.update_delivery(&owner, peer, id, status) {
+            Ok(Some(message)) => {
+                let mut state = self.state.borrow_mut();
+                let active = state.current().jid == peer;
+                let chat = state.chat_for(peer);
+                if let Some(row) = chat.messages.iter_mut().find(|m| m.id == message.id) {
+                    *row = message;
+                }
+                chat.remember_latest();
+                drop(state);
+                if active {
+                    self.history_window.content_changed();
+                    self.render_messages(false);
                 }
             }
+            Ok(None) => {}
+            Err(_) => self.notice("Message delivery status could not be saved"),
         }
-        drop(s);
-        self.persist();
-        self.render_messages(false);
     }
-    fn update_history_spinner(&self) {
+    pub(crate) fn update_history_spinner(&self) {
         let state = self.state.borrow();
         let busy = !state.account.is_empty()
-            && self.history_pending.borrow().contains(&state.current().jid);
+            && (self.history_window.busy()
+                || self.history_pending.borrow().contains(&state.current().jid));
         self.history.set_visible(busy);
         self.history.set_spinning(busy);
-    }
-    fn load_history_near_top(self: &Rc<Self>) {
-        let adjustment = self.scroll.vadjustment();
-        if adjustment.page_size() > 0. && adjustment.value() < adjustment.page_size() / 2. {
-            self.load_history(false);
-        }
     }
     pub fn load_history(self: &Rc<Self>, initial: bool) {
         let state = self.state.borrow();
         if state.account.is_empty() {
             return;
         }
-        let chat = state.current();
-        let owner = state.account.clone();
-        let peer = chat.jid.clone();
-        let before = chat
-            .messages
-            .first()
-            .map(|first| (first.timestamp.clone(), first.id.clone()));
+        let peer = state.current().jid.clone();
         drop(state);
-        if self.history_pending.borrow().contains(&peer) {
-            return;
-        }
-        if initial || before.is_none() {
-            if !initial || !self.history_pages.borrow().contains_key(&peer) {
+        if initial {
+            if !self.history_pages.borrow().contains_key(&peer) {
                 self.request_server_history(&peer);
             }
-            return;
+        } else {
+            self.history_edge(crate::history_window::Side::Older);
         }
-        self.history_pending.borrow_mut().insert(peer.clone());
-        self.update_history_spinner();
-        let weak = Rc::downgrade(self);
-        let generation = self.generation.get();
-        glib::MainContext::default().spawn_local(async move {
-            let Some(ui) = weak.upgrade() else { return };
-            let (account, conversation) = (owner.clone(), peer.clone());
-            let local = ui
-                .store
-                .read_snapshot(move |store| {
-                    store.try_history(
-                        &account,
-                        &conversation,
-                        before.as_ref().map(|(t, id)| (t.as_str(), id.as_str())),
-                        36,
-                    )
-                })
-                .await;
-            if ui.generation.get() != generation || ui.state.borrow().account != owner {
-                return;
-            }
-            ui.history_pending.borrow_mut().remove(&peer);
-            ui.update_history_spinner();
-            if ui.state.borrow().current().jid != peer {
-                return;
-            }
-            match local {
-                Ok(older) if older.is_empty() => ui.request_server_history(&peer),
-                Ok(mut older) => {
-                    let mut state = ui.state.borrow_mut();
-                    let messages = &mut state.current_mut().messages;
-                    older.retain(|message| !messages.iter().any(|m| m.id == message.id));
-                    messages.splice(0..0, older);
-                    drop(state);
-                    ui.render_messages(false);
-                }
-                Err(_) => ui.notice("Local history could not be loaded"),
-            }
-        });
     }
-    fn request_server_history(&self, peer: &str) {
+    pub(crate) fn request_server_history(&self, peer: &str) {
         if !self.online.get() || self.history_pending.borrow().contains(peer) {
             return;
         }
