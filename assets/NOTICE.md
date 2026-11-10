@@ -22,7 +22,7 @@ geometry and Monero mesh are reused, rather than approximated by Cairo.
 preview-*.gif are original generated local animation fixtures for this prototype,
 provided with the project's license. They do not contact a GIF provider.
 
-The XEP-0461/0428 reply fallback validation in xmpp.py follows Monogram's
+The XEP-0461/0428 reply fallback validation in src/protocol.rs follows Monogram's
 ReplyReference.java (GPL-3.0-or-later), preserving Unicode code-point slicing and
 the rule that malformed fallback ranges must not hide message text:
 https://github.com/doromiert/monogram/blob/be6876c045163e32fe07a84416621770b0964b30/xmpp-core/src/main/java/com/negzero/monogram/xmpp/ReplyReference.java

@@ -1,0 +1,193 @@
+use crate::model::*;
+use rusqlite::{Connection, params};
+use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+pub struct Store {
+    pub db: Connection,
+}
+impl Store {
+    pub fn open(memory: bool) -> rusqlite::Result<Self> {
+        let db = if memory {
+            Connection::open_in_memory()?
+        } else {
+            let root = std::env::var_os("XDG_STATE_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/state")
+                })
+                .join("monogram-desktop");
+            fs::create_dir_all(&root).map_err(|_| rusqlite::Error::InvalidPath(root.clone()))?;
+            let _ = fs::set_permissions(&root, fs::Permissions::from_mode(0o700));
+            let path = root.join("history.sqlite3");
+            let db = Connection::open(&path)?;
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+            db
+        };
+        db.execute_batch("PRAGMA foreign_keys=ON;CREATE TABLE IF NOT EXISTS accounts(jid TEXT PRIMARY KEY,config TEXT NOT NULL);CREATE TABLE IF NOT EXISTS chats(account TEXT NOT NULL REFERENCES accounts(jid) ON DELETE CASCADE,peer TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(account,peer));CREATE TABLE IF NOT EXISTS messages(account TEXT NOT NULL,peer TEXT NOT NULL,id TEXT NOT NULL,timestamp TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(account,peer,id),FOREIGN KEY(account,peer) REFERENCES chats(account,peer) ON DELETE CASCADE);CREATE INDEX IF NOT EXISTS message_order ON messages(account,peer,timestamp,id);CREATE TABLE IF NOT EXISTS aliases(account TEXT NOT NULL,peer TEXT NOT NULL,own INTEGER NOT NULL,alias TEXT NOT NULL,message TEXT NOT NULL,PRIMARY KEY(account,peer,own,alias));CREATE TABLE IF NOT EXISTS preferences(key TEXT PRIMARY KEY,value TEXT NOT NULL);")?;
+        Ok(Self { db })
+    }
+    pub fn accounts(&self) -> Vec<Account> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT config FROM accounts ORDER BY jid")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok().and_then(|v| serde_json::from_str(&v).ok()))
+            .collect()
+    }
+    pub fn save_account(&self, a: &Account) -> rusqlite::Result<()> {
+        self.db.execute("INSERT INTO accounts VALUES (?,?) ON CONFLICT(jid) DO UPDATE SET config=excluded.config",params![a.jid,serde_json::to_string(a).unwrap()])?;
+        Ok(())
+    }
+    pub fn pref(&self, key: &str, default: &str) -> String {
+        self.db
+            .query_row("SELECT value FROM preferences WHERE key=?", [key], |r| {
+                r.get(0)
+            })
+            .unwrap_or_else(|_| default.into())
+    }
+    pub fn set_pref(&self, key: &str, value: &str) -> rusqlite::Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO preferences VALUES (?,?)",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+    pub fn save(&self, s: &State) -> rusqlite::Result<()> {
+        if s.account.is_empty() {
+            return Ok(());
+        }
+        let tx = self.db.unchecked_transaction()?;
+        for c in &s.chats {
+            let mut body = serde_json::to_value(c).unwrap();
+            body.as_object_mut().unwrap().remove("messages");
+            tx.execute("INSERT INTO chats VALUES (?,?,?) ON CONFLICT(account,peer) DO UPDATE SET body=excluded.body",params![s.account,c.jid,body.to_string()])?;
+            for m in &c.messages {
+                tx.execute("INSERT INTO messages VALUES (?,?,?,?,?) ON CONFLICT(account,peer,id) DO UPDATE SET body=excluded.body,timestamp=excluded.timestamp",params![s.account,c.jid,m.id,m.timestamp,serde_json::to_string(m).unwrap()])?;
+                for alias in &m.aliases {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO aliases VALUES (?,?,?,?,?)",
+                        params![s.account, c.jid, m.own, alias, m.id],
+                    )?;
+                }
+            }
+        }
+        let folders = serde_json::json!({"rules":s.folders,"order":s.folder_order});
+        tx.execute(
+            "INSERT OR REPLACE INTO preferences VALUES (?,?)",
+            params![format!("folders:{}", s.account), folders.to_string()],
+        )?;
+        tx.commit()
+    }
+    pub fn load(&self, a: &str) -> State {
+        let mut stmt = self
+            .db
+            .prepare("SELECT peer,body FROM chats WHERE account=? ORDER BY rowid")
+            .unwrap();
+        let rows = stmt
+            .query_map([a], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .unwrap();
+        let mut chats = vec![];
+        for (peer, body) in rows.flatten() {
+            if let Ok(mut c) = serde_json::from_str::<Chat>(&body) {
+                c.messages = self.history(a, &peer, None, 200);
+                chats.push(c)
+            }
+        }
+        let mut s = State::live(a, chats);
+        if let Ok(data) =
+            serde_json::from_str::<serde_json::Value>(&self.pref(&format!("folders:{a}"), ""))
+        {
+            if let (Ok(f), Ok(o)) = (
+                serde_json::from_value(data["rules"].clone()),
+                serde_json::from_value::<Vec<String>>(data["order"].clone()),
+            ) {
+                if !o.is_empty() {
+                    s.folders = f;
+                    s.folder_order = o;
+                    s.folder = s.folder_order[0].clone()
+                }
+            }
+        }
+        s
+    }
+    pub fn history(
+        &self,
+        a: &str,
+        peer: &str,
+        before: Option<(&str, &str)>,
+        limit: u32,
+    ) -> Vec<Message> {
+        let (time, id) = before.unwrap_or(("~", "~"));
+        let mut stmt=self.db.prepare("SELECT body FROM messages WHERE account=? AND peer=? AND (timestamp,id)<(?,?) ORDER BY timestamp DESC,id DESC LIMIT ?").unwrap();
+        let mut rows: Vec<_> = stmt
+            .query_map(params![a, peer, time, id, limit], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok().and_then(|s| serde_json::from_str(&s).ok()))
+            .collect();
+        rows.reverse();
+        rows
+    }
+    pub fn known(&self, a: &str, peer: &str, own: bool, aliases: &[String]) -> Option<String> {
+        aliases.iter().find_map(|alias| {
+            self.db
+                .query_row(
+                    "SELECT message FROM aliases WHERE account=? AND peer=? AND own=? AND alias=?",
+                    params![a, peer, own, alias],
+                    |r| r.get(0),
+                )
+                .ok()
+        })
+    }
+    pub fn delete(&self, a: &str, peer: &str, id: &str) -> rusqlite::Result<()> {
+        self.db.execute(
+            "DELETE FROM messages WHERE account=? AND peer=? AND id=?",
+            params![a, peer, id],
+        )?;
+        Ok(())
+    }
+    pub fn forget(&self, a: &str) -> rusqlite::Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        tx.execute("DELETE FROM accounts WHERE jid=?", [a])?;
+        tx.execute("DELETE FROM aliases WHERE account=?", [a])?;
+        tx.execute(
+            "DELETE FROM preferences WHERE key=?",
+            [format!("folders:{a}")],
+        )?;
+        tx.commit()
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn save_migrate_and_isolate() {
+        let db = Store::open(true).unwrap();
+        let a = Account {
+            jid: "a@example.org".into(),
+            host: String::new(),
+            port: 5222,
+            direct_tls: false,
+        };
+        db.save_account(&a).unwrap();
+        let mut s = State::live(&a.jid, vec![]);
+        s.current_mut().draft = "draft 🌿".into();
+        s.send("hello", "text");
+        db.save(&s).unwrap();
+        db.save_account(&a).unwrap();
+        let restored = db.load(&a.jid);
+        assert_eq!(restored.current().draft, "draft 🌿");
+        assert_eq!(restored.current().messages.len(), 1);
+        assert!(db.load("other@example.org").current().messages.is_empty());
+        let m = &restored.current().messages[0];
+        assert_eq!(
+            db.known(&a.jid, &a.jid, true, &m.aliases),
+            Some(m.id.clone())
+        );
+        db.delete(&a.jid, &a.jid, &m.id).unwrap();
+        assert!(db.load(&a.jid).current().messages.is_empty());
+        assert!(db.known(&a.jid, &a.jid, true, &m.aliases).is_some());
+    }
+}

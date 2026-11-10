@@ -63,3 +63,24 @@ sizes. Closed utility content is hidden after the native close animation to avoi
 libadwaita 1.9's hidden-sidebar allocation issue when snapshotting an old layout.
 Pointer checks verify horizontal dragging (including vertical pointer movement),
 empty-space and between-folder drops, Ctrl/Shift selection and popup actions.
+
+## Rust replacement and follow-up fixes
+
+The native desktop is implemented in Rust. Python application modules are removed;
+Git commit 0ae33bdf452323ec0ce546887c74595318198f55 retains the previous prototype.
+The new app retains the existing SQLite schema, account ownership and privacy defaults.
+
+A real wide-window photo gap was traced to height-for-width measurement against
+the full row width despite a 420px thumbnail. Measurement now caps the photo's
+width before calculating its height. Native tests assert compact photo rows and
+inter-message spacing at 1920, 960 and 460px widths.
+
+Shared Media opens a three-column square-thumbnail grid in the full-height utility
+sidebar; only thumbnail activation opens the expanded viewer. The viewer uses the
+selected conversation's media. Vertical mouse-wheel input scrolls folder and
+story strips horizontally, with ordinary horizontal input preserved. Folder
+changes animate left/right using Gtk.Stack's native transition.
+
+Rust model/protocol/storage/amount/projection checks, fatal-critical GTK smoke,
+real disposable Prosody/TLS exchange and native composer restoration checks are
+part of the Nix package checks. Full Android feature parity remains open.

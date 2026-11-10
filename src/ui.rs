@@ -1,0 +1,1651 @@
+use crate::{
+    folders::FolderBar,
+    model::*,
+    protocol::{BackendEvent, Command, Envelope, Session},
+    storage::Store,
+    widgets::*,
+};
+use adw::prelude::*;
+use gtk::{gdk, gio, glib};
+use std::{
+    cell::{Cell, RefCell},
+    collections::{HashMap, HashSet},
+    rc::Rc,
+    sync::mpsc,
+    time::{Duration, Instant},
+};
+pub struct Ui {
+    pub window: adw::ApplicationWindow,
+    pub toast: adw::ToastOverlay,
+    pub overlay: gtk::Overlay,
+    pub split: adw::OverlaySplitView,
+    pub utility: adw::OverlaySplitView,
+    pub pages: gtk::Stack,
+    pub state: RefCell<State>,
+    pub demo: RefCell<State>,
+    pub store: Store,
+    pub folder_bar: FolderBar,
+    pub chat_stack: gtk::Stack,
+    pub stories: gtk::Box,
+    pub sidebar_titles: gtk::Stack,
+    pub sidebar_scroll: gtk::ScrolledWindow,
+    pub story_reveal: RefCell<Option<adw::TimedAnimation>>,
+    pub title: gtk::Button,
+    pub titles: gtk::Stack,
+    pub section_title: gtk::Label,
+    pub search: gtk::SearchEntry,
+    pub search_toggle: gtk::ToggleButton,
+    pub search_page: gtk::Box,
+    pub timeline: gtk::ListBox,
+    pub history: gtk::Button,
+    pub scroll: gtk::ScrolledWindow,
+    pub composer: gtk::TextView,
+    pub send_button: gtk::Button,
+    pub input_scroll: gtk::ScrolledWindow,
+    pub reply_bar: gtk::Revealer,
+    pub reply_label: gtk::Label,
+    pub replying: RefCell<Option<String>>,
+    pub attachments: RefCell<Vec<std::path::PathBuf>>,
+    pub chips: gtk::Box,
+    pub selection: gtk::ActionBar,
+    pub selection_count: gtk::Label,
+    pub selected: RefCell<HashSet<String>>,
+    pub anchor: RefCell<Option<String>>,
+    pub bubbles: RefCell<HashMap<String, gtk::Widget>>,
+    pub media_stack: gtk::Stack,
+    pub media_pane: adw::ToolbarView,
+    pub media_mode: RefCell<String>,
+    pub media_toggles: RefCell<HashMap<String, adw::Toggle>>,
+    pub banner: adw::Banner,
+    pub request_badge: gtk::Label,
+    pub session: RefCell<Option<Session>>,
+    pub generation: Cell<u64>,
+    pub online: Cell<bool>,
+    pub status: RefCell<String>,
+    pub event_tx: mpsc::Sender<Envelope>,
+    pub event_rx: RefCell<mpsc::Receiver<Envelope>>,
+    pub loading: Cell<bool>,
+    pub draft_timer: RefCell<Option<glib::SourceId>>,
+    pub big_emoji: Cell<bool>,
+    pub typing: RefCell<HashMap<String, Instant>>,
+    pub last_typing: Cell<Option<Instant>>,
+    pub history_pages: RefCell<HashMap<String, (String, bool)>>,
+    pub history_pending: RefCell<HashSet<String>>,
+    pub cards: RefCell<Vec<Rc<crate::wallet::WalletCard>>>,
+    pub dialogs: RefCell<Vec<adw::Dialog>>,
+    pub smoke: bool,
+    pub folder_serial: Cell<u32>,
+    pub active_media: RefCell<Option<Rc<crate::media::MediaViewer>>>,
+    pub active_story: RefCell<Option<Rc<crate::media::StoryViewer>>>,
+    pub sidebar_card: RefCell<Option<Rc<crate::wallet::WalletCard>>>,
+}
+impl Ui {
+    pub fn new(app: &adw::Application, smoke: bool) -> Rc<Self> {
+        let store = Store::open(smoke).expect("private local history database");
+        let demo = State::demo();
+        let owner = store.pref("active_account", "");
+        let state = if owner.is_empty() || !store.accounts().iter().any(|a| a.jid == owner) {
+            demo.clone()
+        } else {
+            store.load(&owner)
+        };
+        let window = adw::ApplicationWindow::builder()
+            .application(app)
+            .title("Monogram")
+            .default_width(1380)
+            .default_height(900)
+            .width_request(430)
+            .height_request(480)
+            .build();
+        let toast = adw::ToastOverlay::new();
+        window.set_content(Some(&toast));
+        let utility = adw::OverlaySplitView::builder()
+            .sidebar_position(gtk::PackType::End)
+            .min_sidebar_width(360.)
+            .max_sidebar_width(400.)
+            .sidebar_width_fraction(0.3)
+            .show_sidebar(false)
+            .pin_sidebar(true)
+            .build();
+        utility.set_sidebar_width_unit(adw::LengthUnit::Px);
+        let overlay = gtk::Overlay::builder().child(&utility).build();
+        toast.set_child(Some(&overlay));
+        let split = adw::OverlaySplitView::builder()
+            .min_sidebar_width(290.)
+            .max_sidebar_width(360.)
+            .sidebar_width_fraction(0.25)
+            .build();
+        split.set_sidebar_width_unit(adw::LengthUnit::Px);
+        let bin = adw::BreakpointBin::builder()
+            .child(&split)
+            .width_request(375)
+            .height_request(360)
+            .build();
+        utility.set_content(Some(&bin));
+        let bp = adw::Breakpoint::new(adw::BreakpointCondition::parse("max-width: 760sp").unwrap());
+        bp.add_setter(&split, "collapsed", Some(&true.to_value()));
+        bp.add_setter(&split, "show-sidebar", Some(&false.to_value()));
+        bin.add_breakpoint(bp);
+        let bp =
+            adw::Breakpoint::new(adw::BreakpointCondition::parse("max-width: 1240sp").unwrap());
+        bp.add_setter(&utility, "collapsed", Some(&true.to_value()));
+        window.add_breakpoint(bp);
+        let (tx, rx) = mpsc::channel();
+        let ui = Rc::new(Self {
+            window,
+            toast,
+            overlay,
+            split,
+            utility,
+            pages: gtk::Stack::builder()
+                .hhomogeneous(false)
+                .vhomogeneous(false)
+                .transition_type(gtk::StackTransitionType::Crossfade)
+                .transition_duration(160)
+                .build(),
+            state: RefCell::new(state),
+            demo: RefCell::new(demo),
+            store,
+            folder_bar: FolderBar::new(),
+            chat_stack: gtk::Stack::builder()
+                .transition_duration(220)
+                .vhomogeneous(false)
+                .hhomogeneous(true)
+                .build(),
+            stories: bx(false, 8),
+            sidebar_titles: gtk::Stack::builder()
+                .transition_type(gtk::StackTransitionType::Crossfade)
+                .transition_duration(150)
+                .build(),
+            sidebar_scroll: gtk::ScrolledWindow::builder()
+                .hscrollbar_policy(gtk::PolicyType::Never)
+                .vexpand(true)
+                .build(),
+            story_reveal: RefCell::new(None),
+            title: gtk::Button::new(),
+            titles: gtk::Stack::new(),
+            section_title: label("", "heading"),
+            search: gtk::SearchEntry::builder()
+                .placeholder_text("Search chats and messages")
+                .hexpand(true)
+                .build(),
+            search_toggle: gtk::ToggleButton::builder()
+                .icon_name("system-search-symbolic")
+                .tooltip_text("Search chats and messages")
+                .build(),
+            search_page: bx(true, 18),
+            timeline: gtk::ListBox::builder()
+                .selection_mode(gtk::SelectionMode::None)
+                .valign(gtk::Align::Start)
+                .vexpand(false)
+                .build(),
+            history: gtk::Button::with_label("Load Earlier Messages"),
+            scroll: gtk::ScrolledWindow::builder()
+                .vexpand(true)
+                .hscrollbar_policy(gtk::PolicyType::Never)
+                .build(),
+            composer: gtk::TextView::builder()
+                .wrap_mode(gtk::WrapMode::WordChar)
+                .accepts_tab(false)
+                .hexpand(true)
+                .top_margin(4)
+                .bottom_margin(4)
+                .build(),
+            send_button: icon_button("mail-send-symbolic", "Send"),
+            input_scroll: gtk::ScrolledWindow::builder()
+                .min_content_height(28)
+                .max_content_height(96)
+                .propagate_natural_height(true)
+                .hexpand(true)
+                .build(),
+            reply_bar: gtk::Revealer::new(),
+            reply_label: text("", ""),
+            replying: RefCell::new(None),
+            attachments: RefCell::new(vec![]),
+            chips: bx(false, 6),
+            selection: gtk::ActionBar::builder().revealed(false).build(),
+            selection_count: label("", "heading"),
+            selected: RefCell::new(HashSet::new()),
+            anchor: RefCell::new(None),
+            bubbles: RefCell::new(HashMap::new()),
+            media_stack: gtk::Stack::builder()
+                .hhomogeneous(false)
+                .vhomogeneous(false)
+                .vexpand(true)
+                .transition_type(gtk::StackTransitionType::Crossfade)
+                .transition_duration(150)
+                .build(),
+            media_pane: adw::ToolbarView::new(),
+            media_mode: RefCell::new("media".into()),
+            media_toggles: RefCell::new(HashMap::new()),
+            banner: adw::Banner::builder()
+                .title("Messages are not end-to-end encrypted")
+                .button_label("Account")
+                .revealed(false)
+                .build(),
+            request_badge: label("2", "request-badge"),
+            session: RefCell::new(None),
+            generation: Cell::new(0),
+            online: Cell::new(false),
+            status: RefCell::new("Not connected".into()),
+            event_tx: tx,
+            event_rx: RefCell::new(rx),
+            loading: Cell::new(false),
+            draft_timer: RefCell::new(None),
+            big_emoji: Cell::new(true),
+            typing: RefCell::new(HashMap::new()),
+            last_typing: Cell::new(None),
+            history_pages: RefCell::new(HashMap::new()),
+            history_pending: RefCell::new(HashSet::new()),
+            cards: RefCell::new(vec![]),
+            dialogs: RefCell::new(vec![]),
+            smoke,
+            folder_serial: Cell::new(0),
+            active_media: RefCell::new(None),
+            active_story: RefCell::new(None),
+            sidebar_card: RefCell::new(None),
+        });
+        ui.make_sidebar();
+        ui.make_content();
+        ui.make_media();
+        ui.actions();
+        ui.rebuild_folders();
+        ui.refresh_chats(None);
+        ui.refresh_stories();
+        ui.load_current();
+        ui.update_mode();
+        ui.big_emoji
+            .set(ui.store.pref("big_emoji", "true") == "true");
+        adw::StyleManager::default().set_color_scheme(
+            match ui.store.pref("style", "system").as_str() {
+                "dark" => adw::ColorScheme::ForceDark,
+                "light" => adw::ColorScheme::ForceLight,
+                _ => adw::ColorScheme::Default,
+            },
+        );
+        let weak = Rc::downgrade(&ui);
+        glib::timeout_add_local(Duration::from_millis(30), move || {
+            let Some(ui) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let events: Vec<_> = ui.event_rx.borrow().try_iter().collect();
+            for (g, a, e) in events {
+                ui.backend_event(g, &a, e)
+            }
+            glib::ControlFlow::Continue
+        });
+        let weak = Rc::downgrade(&ui);
+        let typing_ui = Rc::downgrade(&ui);
+        glib::timeout_add_local(Duration::from_secs(1), move || {
+            let Some(ui) = typing_ui.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let before = ui.typing.borrow().len();
+            ui.typing
+                .borrow_mut()
+                .retain(|_, t| t.elapsed() < Duration::from_secs(10));
+            if before != ui.typing.borrow().len()
+                && ui.pages.visible_child_name().as_deref() == Some("chat")
+            {
+                ui.show_chat();
+            }
+            glib::ControlFlow::Continue
+        });
+        let keys = gtk::EventControllerKey::new();
+        let weak_keys = Rc::downgrade(&ui);
+        keys.connect_key_pressed(move |_, key, _, modifiers| {
+            let Some(ui) = weak_keys.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
+            if ui.selected.borrow().is_empty() {
+                return glib::Propagation::Proceed;
+            }
+            match key {
+                gdk::Key::Escape => ui.clear_selection(),
+                gdk::Key::Delete => ui.selection_action("delete"),
+                gdk::Key::a if modifiers.contains(gdk::ModifierType::CONTROL_MASK) => {
+                    ui.selection_action("select-all")
+                }
+                gdk::Key::c if modifiers.contains(gdk::ModifierType::CONTROL_MASK) => {
+                    ui.selection_action("copy")
+                }
+                _ => return glib::Propagation::Proceed,
+            }
+            glib::Propagation::Stop
+        });
+        ui.window.add_controller(keys);
+        ui.window.connect_close_request(move |_| {
+            if let Some(u) = weak.upgrade() {
+                u.save_draft();
+                u.session.borrow_mut().take();
+                u.generation.set(u.generation.get() + 1);
+            }
+            glib::Propagation::Proceed
+        });
+        ui
+    }
+    pub fn weak_button(self: &Rc<Self>, b: &gtk::Button, f: impl Fn(&Rc<Self>) + 'static) {
+        let weak = Rc::downgrade(self);
+        b.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                f(&ui)
+            }
+        });
+    }
+    pub fn notice(&self, message: &str) {
+        self.toast.add_toast(adw::Toast::new(message));
+    }
+    pub fn persist(&self) -> bool {
+        if let Err(_) = self.store.save(&self.state.borrow()) {
+            self.notice("Local history could not be saved. Check free space and permissions.");
+            false
+        } else {
+            true
+        }
+    }
+    pub fn action(self: &Rc<Self>, name: &str, f: impl Fn(&Rc<Self>) + 'static) {
+        let action = gio::SimpleAction::new(name, None);
+        let weak = Rc::downgrade(self);
+        action.connect_activate(move |_, _| {
+            if let Some(ui) = weak.upgrade() {
+                f(&ui)
+            }
+        });
+        self.window.add_action(&action);
+    }
+    fn actions(self: &Rc<Self>) {
+        self.action("search", |s| {
+            s.search_toggle.set_active(!s.search_toggle.is_active())
+        });
+        self.action("media", |s| s.toggle_media());
+        self.action("shared-media", |s| s.shared_media());
+        self.action("new-chat", |s| s.new_chat());
+        self.action("accounts", |s| s.accounts_dialog());
+        self.action("preferences", |s| s.preferences());
+        self.action("shortcuts", |s| s.shortcuts());
+        self.action("security", |s| s.security());
+        self.action("info", |s| s.show_info());
+        self.action("requests", |s| s.requests());
+        self.action("contacts", |s| s.contacts());
+        self.action("archives", |s| s.archives());
+        self.action("saved", |s| s.select_chat("saved"));
+        self.action("wallet", |s| s.wallet());
+        self.action("stories", |s| s.show_stories());
+        self.action("spaces", |s| {
+            s.preview_form("Spaces and Channels", &["Service", "Channel name"])
+        });
+        self.action("profile", |s| {
+            s.preview_form("Your Profile", &["Display name", "About", "Website"])
+        });
+        self.action("developer", |s| {
+            s.preview_form("Developer Tools", &["Service address", "Command"])
+        });
+        self.action("call", |s| s.call_preview());
+        self.action("attach-file", |s| s.choose_files(false));
+        self.action("attach-media", |s| s.choose_files(true));
+        self.action("poll", |s| s.new_poll());
+        self.action("article", |s| s.article());
+        self.action("location", |s| {
+            s.send_content("Riverside Park", "location");
+        });
+        self.action("payment", |s| s.payment(true));
+        self.action("archive", |s| s.organize("archive"));
+        let mute = gio::SimpleAction::new_stateful(
+            "notifications",
+            Some(glib::VariantTy::STRING),
+            &"all".to_variant(),
+        );
+        let weak = Rc::downgrade(self);
+        mute.connect_activate(move |a, value| {
+            if let (Some(ui), Some(v)) = (weak.upgrade(), value) {
+                if let Some(mode) = v.str() {
+                    ui.state.borrow_mut().current_mut().notifications = mode.into();
+                    a.set_state(v);
+                    ui.persist();
+                }
+            }
+        });
+        self.window.add_action(&mute);
+        if let Some(app) = self.window.application() {
+            for (name, keys) in [
+                ("search", vec!["<Control>f"]),
+                ("media", vec!["F9"]),
+                ("new-chat", vec!["<Control>n"]),
+                ("attach-file", vec!["<Control>o"]),
+                ("preferences", vec!["<Control>comma"]),
+                ("shortcuts", vec!["<Control>question"]),
+            ] {
+                app.set_accels_for_action(&format!("win.{name}"), &keys)
+            }
+        }
+    }
+    fn make_sidebar(self: &Rc<Self>) {
+        let view = adw::ToolbarView::new();
+        view.add_css_class("chat-sidebar");
+        let header = adw::HeaderBar::builder()
+            .show_end_title_buttons(false)
+            .title_widget(&self.sidebar_titles)
+            .build();
+        header.pack_start(&self.search_toggle);
+        let menu = gio::Menu::new();
+        for (title, action) in [
+            ("New Conversation…", "new-chat"),
+            ("Contacts", "contacts"),
+            ("Saved Messages", "saved"),
+            ("Archived Chats", "archives"),
+            ("Wallet", "wallet"),
+            ("Stories", "stories"),
+            ("Spaces and Channels", "spaces"),
+            ("Your Profile", "profile"),
+        ] {
+            menu.append(Some(title), Some(&format!("win.{action}")))
+        }
+        let section = gio::Menu::new();
+        for (title, action) in [
+            ("Accounts", "accounts"),
+            ("Preferences", "preferences"),
+            ("Keyboard Shortcuts", "shortcuts"),
+            ("Developer Tools", "developer"),
+        ] {
+            section.append(Some(title), Some(&format!("win.{action}")))
+        }
+        menu.append_section(None, &section);
+        let primary = gtk::MenuButton::builder()
+            .icon_name("open-menu-symbolic")
+            .menu_model(&menu)
+            .build();
+        header.pack_end(&primary);
+        let requests = icon_button("contact-new-symbolic", "Requests and invitations");
+        let icon = gtk::Overlay::builder()
+            .child(&gtk::Image::from_icon_name("contact-new-symbolic"))
+            .build();
+        self.request_badge.set_halign(gtk::Align::End);
+        self.request_badge.set_valign(gtk::Align::Start);
+        icon.add_overlay(&self.request_badge);
+        requests.set_child(Some(&icon));
+        self.weak_button(&requests, |s| s.requests());
+        header.pack_end(&requests);
+        view.add_top_bar(&header);
+        let content = bx(true, 6);
+        let folders = horizontal_strip(&self.folder_bar);
+        content.append(&folders);
+        let body = bx(true, 0);
+        margins(&self.stories, 12);
+        self.stories.set_margin_top(8);
+        self.stories.set_margin_bottom(8);
+        body.append(&horizontal_strip(&self.stories));
+        body.append(&self.chat_stack);
+        self.sidebar_scroll.set_child(Some(&body));
+        content.append(&self.sidebar_scroll);
+        self.sidebar_titles
+            .add_named(&label("Monogram", "heading"), Some("title"));
+        let mini = gtk::Button::builder().tooltip_text("Show stories").build();
+        mini.add_css_class("flat");
+        let people = bx(false, 2);
+        for name in ["Mira", "Sam", "Alex"] {
+            people.append(&avatar(
+                &Chat {
+                    name: name.into(),
+                    ..Default::default()
+                },
+                22,
+            ));
+        }
+        mini.set_child(Some(&people));
+        self.weak_button(&mini, |ui| ui.show_stories());
+        self.sidebar_titles.add_named(&mini, Some("stories"));
+        let weak = Rc::downgrade(self);
+        self.sidebar_scroll
+            .vadjustment()
+            .connect_value_changed(move |a| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.sidebar_titles.set_visible_child_name(
+                        if ui.stories.is_visible() && a.value() >= 80. {
+                            "stories"
+                        } else {
+                            "title"
+                        },
+                    );
+                }
+            });
+        view.set_content(Some(&content));
+        self.split.set_sidebar(Some(&view));
+        let weak = Rc::downgrade(self);
+        self.search_toggle.connect_toggled(move |b| {
+            if let Some(ui) = weak.upgrade() {
+                ui.search_mode(b.is_active())
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.search.connect_search_changed(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.search_results();
+                ui.refresh_chats(None);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.search.connect_stop_search(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.search_toggle.set_active(false)
+            }
+        });
+        self.chat_stack.connect_transition_running_notify(|stack| {
+            if !stack.is_transition_running() {
+                let current = stack.visible_child();
+                let pages = stack.pages();
+                let children: Vec<gtk::Widget> = (0..pages.n_items())
+                    .filter_map(|i| {
+                        pages
+                            .item(i)
+                            .and_downcast::<gtk::StackPage>()
+                            .map(|p| p.child())
+                    })
+                    .collect();
+                for c in children {
+                    if Some(&c) != current.as_ref() {
+                        stack.remove(&c)
+                    }
+                }
+            }
+        });
+    }
+    pub fn rebuild_folders(self: &Rc<Self>) {
+        while let Some(c) = self.folder_bar.first_child() {
+            self.folder_bar.remove(&c)
+        }
+        let state = self.state.borrow();
+        let mut first: Option<gtk::ToggleButton> = None;
+        for name in &state.folder_order {
+            let b = gtk::ToggleButton::with_label(name);
+            b.add_css_class("flat");
+            if let Some(ref first) = first {
+                b.set_group(Some(first))
+            } else {
+                first = Some(b.clone())
+            }
+            b.set_active(name == &state.folder);
+            let weak = Rc::downgrade(self);
+            let name = name.clone();
+            let n = name.clone();
+            b.connect_toggled(move |b| {
+                if b.is_active() {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_folder(&n)
+                    }
+                }
+            });
+            let weak = Rc::downgrade(self);
+            self.folder_bar.bind(&b, move |name, index| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.state.borrow_mut().reorder(name, index);
+                    ui.order_folders();
+                    ui.persist();
+                }
+            });
+            let actions = vec![
+                ("Edit folder…".into(), format!("folder-edit:{name}")),
+                ("Move Left".into(), format!("folder-left:{name}")),
+                ("Move Right".into(), format!("folder-right:{name}")),
+                ("New folder…".into(), "folder-new".into()),
+            ];
+            self.context_actions(&b, actions);
+            self.folder_bar.append(&b);
+        }
+    }
+    fn order_folders(&self) {
+        let mut buttons = HashMap::new();
+        let mut child = self.folder_bar.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            if let Ok(b) = c.downcast::<gtk::ToggleButton>() {
+                buttons.insert(b.label().unwrap_or_default().to_string(), b);
+            }
+        }
+        let mut previous: Option<gtk::ToggleButton> = None;
+        for name in &self.state.borrow().folder_order {
+            if let Some(b) = buttons.get(name) {
+                self.folder_bar.reorder_child_after(b, previous.as_ref());
+                previous = Some(b.clone());
+            }
+        }
+    }
+    pub fn set_folder(self: &Rc<Self>, name: &str) {
+        let (old, new) = {
+            let mut s = self.state.borrow_mut();
+            let old = s
+                .folder_order
+                .iter()
+                .position(|n| n == &s.folder)
+                .unwrap_or(0);
+            let new = s.folder_order.iter().position(|n| n == name).unwrap_or(0);
+            if s.folder == name {
+                return;
+            }
+            s.folder = name.into();
+            (old, new)
+        };
+        self.refresh_chats(Some(new >= old));
+        self.persist();
+    }
+    pub fn refresh_chats(self: &Rc<Self>, direction: Option<bool>) {
+        let list = gtk::ListBox::new();
+        list.set_selection_mode(gtk::SelectionMode::Single);
+        list.add_css_class("chat-list");
+        list.set_valign(gtk::Align::Start);
+        list.set_vexpand(false);
+        let state = self.state.borrow();
+        for chat in state.filtered(self.search.text().as_str()) {
+            let row = gtk::ListBoxRow::new();
+            row.set_widget_name(&chat.id);
+            let line = bx(false, 11);
+            line.append(&avatar(&chat, 44));
+            let words = bx(true, 5);
+            words.set_hexpand(true);
+            let top = bx(false, 8);
+            let name = text(&chat.name, "chat-name");
+            name.set_hexpand(true);
+            name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            top.append(&name);
+            top.append(&label(
+                chat.messages
+                    .last()
+                    .map(|m| m.time.as_str())
+                    .unwrap_or("Now"),
+                "chat-time",
+            ));
+            words.append(&top);
+            let bottom = bx(false, 6);
+            let preview = if !chat.draft.is_empty() {
+                format!("Draft: {}", chat.draft.replace('\n', " "))
+            } else {
+                chat.messages
+                    .last()
+                    .map(|m| {
+                        format!(
+                            "{}{}",
+                            if m.own { "You: " } else { "" },
+                            m.text.replace('\n', " ")
+                        )
+                    })
+                    .unwrap_or_else(|| "No messages yet".into())
+            };
+            let l = text(&preview, "chat-preview");
+            l.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            l.set_hexpand(true);
+            bottom.append(&l);
+            if chat.unread > 0 || chat.unread_mark {
+                bottom.append(&label(
+                    &if chat.unread > 0 {
+                        chat.unread.to_string()
+                    } else {
+                        "•".into()
+                    },
+                    "unread-badge",
+                ))
+            } else if chat.pinned {
+                bottom.append(&gtk::Image::from_icon_name("view-pin-symbolic"))
+            }
+            words.append(&bottom);
+            line.append(&words);
+            row.set_child(Some(&line));
+            let actions = vec![
+                ("Open".into(), format!("chat-open:{}", chat.id)),
+                (
+                    (if chat.pinned { "Unpin" } else { "Pin" }).into(),
+                    format!("chat-pin:{}", chat.id),
+                ),
+                (
+                    (if chat.unread > 0 || chat.unread_mark {
+                        "Mark read"
+                    } else {
+                        "Mark unread"
+                    })
+                    .into(),
+                    format!("chat-unread:{}", chat.id),
+                ),
+                (
+                    (if chat.archived {
+                        "Unarchive"
+                    } else {
+                        "Archive"
+                    })
+                    .into(),
+                    format!("chat-archive:{}", chat.id),
+                ),
+                (
+                    (if chat.notifications == "all" {
+                        "Mute"
+                    } else {
+                        "Unmute"
+                    })
+                    .into(),
+                    format!("chat-mute:{}", chat.id),
+                ),
+            ];
+            self.context_actions(&row, actions);
+            list.append(&row);
+            if chat.id == state.active {
+                list.select_row(Some(&row))
+            }
+        }
+        drop(state);
+        let weak = Rc::downgrade(self);
+        list.connect_row_activated(move |_, row| {
+            if let Some(ui) = weak.upgrade() {
+                ui.select_chat(row.widget_name().as_str())
+            }
+        });
+        let serial = self.folder_serial.get() + 1;
+        self.folder_serial.set(serial);
+        self.chat_stack.set_transition_type(match direction {
+            Some(true) => gtk::StackTransitionType::SlideLeft,
+            Some(false) => gtk::StackTransitionType::SlideRight,
+            None => gtk::StackTransitionType::None,
+        });
+        self.chat_stack
+            .add_named(&list, Some(&format!("list-{serial}")));
+        self.chat_stack.set_visible_child(&list);
+        if !self.chat_stack.is_transition_running() {
+            let pages = self.chat_stack.pages();
+            for i in (0..pages.n_items()).rev() {
+                if let Some(page) = pages.item(i).and_downcast::<gtk::StackPage>() {
+                    if page.child() != list {
+                        self.chat_stack.remove(&page.child());
+                    }
+                }
+            }
+        }
+    }
+    fn make_content(self: &Rc<Self>) {
+        let view = adw::ToolbarView::new();
+        view.add_css_class("conversation-view");
+        let header = adw::HeaderBar::builder()
+            .show_start_title_buttons(false)
+            .build();
+        let sidebar = icon_button("sidebar-show-symbolic", "Show conversations");
+        sidebar.set_visible(false);
+        let split = self.split.downgrade();
+        sidebar.connect_clicked(move |_| {
+            if let Some(split) = split.upgrade() {
+                split.set_show_sidebar(!split.shows_sidebar())
+            }
+        });
+        header.pack_start(&sidebar);
+        let weak = sidebar.downgrade();
+        self.split.connect_collapsed_notify(move |s| {
+            if let Some(b) = weak.upgrade() {
+                b.set_visible(s.is_collapsed())
+            }
+        });
+        self.title.add_css_class("flat");
+        self.title.add_css_class("conversation-title");
+        self.weak_button(&self.title, |s| s.show_info());
+        header.pack_start(&self.title);
+        self.titles.add_named(&self.section_title, Some("normal"));
+        self.titles.add_named(&self.search, Some("search"));
+        self.titles.set_hexpand(true);
+        header.set_title_widget(Some(&self.titles));
+        let menu = gio::Menu::new();
+        for (t, a) in [
+            ("Conversation Security", "security"),
+            ("Conversation Info", "info"),
+        ] {
+            menu.append(Some(t), Some(&format!("win.{a}")))
+        }
+        let mute = gio::Menu::new();
+        for (t, v) in [
+            ("All Messages", "all"),
+            ("Mentions Only", "mentions"),
+            ("For 1 Hour", "1h"),
+            ("For 8 Hours", "8h"),
+            ("For 2 Days", "2d"),
+            ("Until I Turn It On", "forever"),
+        ] {
+            let item = gio::MenuItem::new(Some(t), None);
+            item.set_action_and_target_value(Some("win.notifications"), Some(&v.to_variant()));
+            mute.append_item(&item)
+        }
+        menu.append_submenu(Some("Mute"), &mute);
+        for (t, a) in [
+            ("Shared Media", "shared-media"),
+            ("Call", "call"),
+            ("Archive Conversation", "archive"),
+        ] {
+            menu.append(Some(t), Some(&format!("win.{a}")))
+        }
+        header.pack_end(
+            &gtk::MenuButton::builder()
+                .icon_name("view-more-symbolic")
+                .menu_model(&menu)
+                .build(),
+        );
+        view.add_top_bar(&header);
+        let chat = bx(true, 0);
+        chat.add_css_class("conversation");
+        chat.append(&self.banner);
+        self.weak_button(&self.history, |s| s.load_history(false));
+        self.history.add_css_class("flat");
+        chat.append(&self.history);
+        self.timeline.add_css_class("messages");
+        self.timeline.add_css_class("message-list");
+        self.scroll.set_child(Some(&self.timeline));
+        chat.append(&self.scroll);
+        self.selection.pack_start(&self.selection_count);
+        let clear = icon_button("window-close-symbolic", "Clear selection");
+        self.weak_button(&clear, |s| s.clear_selection());
+        self.selection.pack_start(&clear);
+        for (icon, title, action) in [
+            ("edit-select-all-symbolic", "Select all", "select-all"),
+            ("edit-copy-symbolic", "Copy selected", "copy"),
+            ("mail-forward-symbolic", "Forward selected", "forward"),
+            ("user-trash-symbolic", "Delete selected", "delete"),
+        ] {
+            let b = icon_button(icon, title);
+            self.weak_button(&b, move |s| s.selection_action(action));
+            self.selection.pack_end(&b)
+        }
+        chat.append(&self.selection);
+        let shell = bx(true, 0);
+        shell.add_css_class("composer-shell");
+        let context = bx(false, 8);
+        self.reply_label.set_hexpand(true);
+        context.append(&self.reply_label);
+        let cancel = icon_button("window-close-symbolic", "Cancel reply");
+        self.weak_button(&cancel, |s| s.cancel_reply());
+        context.append(&cancel);
+        self.reply_bar.set_child(Some(&context));
+        shell.append(&self.reply_bar);
+        self.chips.set_visible(false);
+        shell.append(&self.chips);
+        let line = bx(false, 8);
+        let composer = bx(false, 2);
+        composer.set_hexpand(true);
+        composer.add_css_class("composer");
+        let attach = gtk::MenuButton::builder()
+            .icon_name("mail-attachment-symbolic")
+            .valign(gtk::Align::Center)
+            .build();
+        attach.add_css_class("flat");
+        let menu = gio::Menu::new();
+        for (t, a) in [
+            ("Photo or Video…", "attach-media"),
+            ("File…", "attach-file"),
+            ("Poll…", "poll"),
+            ("Payment…", "payment"),
+            ("Location…", "location"),
+            ("Article…", "article"),
+        ] {
+            menu.append(Some(t), Some(&format!("win.{a}")))
+        }
+        attach.set_menu_model(Some(&menu));
+        composer.append(&attach);
+        self.input_scroll.set_child(Some(&self.composer));
+        self.input_scroll
+            .set_policy(gtk::PolicyType::Never, gtk::PolicyType::Never);
+        composer.append(&self.input_scroll);
+        let emoji = icon_button("face-smile-symbolic", "Emoji, stickers and GIFs · F9");
+        self.weak_button(&emoji, |s| s.toggle_media());
+        composer.append(&emoji);
+        line.append(&composer);
+        self.send_button.remove_css_class("flat");
+        self.send_button.add_css_class("suggested-action");
+        self.send_button.add_css_class("send");
+        let plane = gtk::Image::from_file(asset("paper-plane-symbolic.svg"));
+        plane.set_pixel_size(20);
+        self.send_button.set_child(Some(&plane));
+        self.weak_button(&self.send_button, |s| s.send());
+        line.append(&self.send_button);
+        shell.append(&line);
+        chat.append(&shell);
+        self.pages.add_named(&chat, Some("chat"));
+        self.pages
+            .add_named(&scroll(&self.search_page), Some("search"));
+        view.set_content(Some(&self.pages));
+        self.split.set_content(Some(&view));
+        let weak = Rc::downgrade(self);
+        self.banner.connect_button_clicked(move |_| {
+            if let Some(s) = weak.upgrade() {
+                s.accounts_dialog()
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.composer.buffer().connect_changed(move |_| {
+            if let Some(s) = weak.upgrade() {
+                s.compose_changed()
+            }
+        });
+        let key = gtk::EventControllerKey::new();
+        let weak = Rc::downgrade(self);
+        key.connect_key_pressed(move |_, key, _, state| {
+            let Some(s) = weak.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
+            if matches!(key, gdk::Key::Return | gdk::Key::KP_Enter)
+                && !state.contains(gdk::ModifierType::SHIFT_MASK)
+            {
+                s.send();
+                glib::Propagation::Stop
+            } else if key == gdk::Key::Escape {
+                s.cancel_reply();
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        self.composer.add_controller(key);
+    }
+    pub fn composer_text(&self) -> String {
+        let b = self.composer.buffer();
+        b.text(&b.start_iter(), &b.end_iter(), true).into()
+    }
+    pub fn compose_changed(self: &Rc<Self>) {
+        let lines = self.composer.buffer().line_count();
+        self.input_scroll
+            .set_min_content_height((lines * 20).clamp(28, 96));
+        self.input_scroll.set_vscrollbar_policy(if lines > 4 {
+            gtk::PolicyType::Automatic
+        } else {
+            gtk::PolicyType::Never
+        });
+        self.send_button.set_sensitive(
+            !self.composer_text().trim().is_empty() || !self.attachments.borrow().is_empty(),
+        );
+        if self.loading.get() {
+            return;
+        }
+        if let Some(id) = self.draft_timer.borrow_mut().take() {
+            id.remove()
+        }
+        let weak = Rc::downgrade(self);
+        self.draft_timer.replace(Some(glib::timeout_add_local_once(
+            Duration::from_millis(750),
+            move || {
+                if let Some(s) = weak.upgrade() {
+                    s.draft_timer.borrow_mut().take();
+                    s.save_draft();
+                    s.refresh_chats(None)
+                }
+            },
+        )));
+        if self.online.get()
+            && self.preference("typing", true)
+            && self
+                .last_typing
+                .get()
+                .is_none_or(|t| t.elapsed() > Duration::from_secs(5))
+        {
+            self.last_typing.set(Some(Instant::now()));
+            let peer = self.state.borrow().current().jid.clone();
+            self.command(Command::Typing {
+                peer,
+                composing: !self.composer_text().is_empty(),
+            });
+        }
+    }
+    pub fn save_draft(&self) {
+        if self.loading.get() {
+            return;
+        }
+        if let Some(id) = self.draft_timer.borrow_mut().take() {
+            id.remove()
+        }
+        let text = self.composer_text();
+        let mut state = self.state.borrow_mut();
+        let chat = state.current_mut();
+        chat.draft = text;
+        chat.draft_reply = self.replying.borrow().clone().unwrap_or_default();
+        drop(state);
+        self.persist();
+    }
+    pub fn select_chat(self: &Rc<Self>, id: &str) {
+        if !self.state.borrow().chats.iter().any(|c| c.id == id) {
+            return;
+        }
+        self.save_draft();
+        {
+            let mut state = self.state.borrow_mut();
+            state.active = id.into();
+            let c = state.current_mut();
+            c.unread = 0;
+            c.unread_mark = false;
+        }
+        self.clear_selection();
+        self.attachments.borrow_mut().clear();
+        clear(&self.chips);
+        self.chips.set_visible(false);
+        self.load_current();
+        self.refresh_chats(None);
+        self.persist();
+        if self.split.is_collapsed() {
+            self.split.set_show_sidebar(false)
+        }
+        if self.online.get() {
+            self.load_history(true)
+        }
+    }
+    pub fn load_current(self: &Rc<Self>) {
+        let chat = self.state.borrow().current().clone();
+        self.loading.set(true);
+        self.composer.buffer().set_text(&chat.draft);
+        self.replying
+            .replace((!chat.draft_reply.is_empty()).then_some(chat.draft_reply));
+        self.loading.set(false);
+        self.update_reply();
+        self.render_messages(true);
+        self.show_chat();
+    }
+    pub fn show_chat(&self) {
+        self.search_toggle.set_active(false);
+        self.pages.set_visible_child_name("chat");
+        self.title.set_visible(true);
+        self.section_title.set_text("");
+        let state = self.state.borrow();
+        let chat = state.current();
+        let title = bx(false, 8);
+        title.append(&avatar(chat, 28));
+        let words = bx(true, 0);
+        words.append(&text(&chat.name, "chat-title"));
+        let subtitle = if self
+            .typing
+            .borrow()
+            .get(&chat.jid)
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(10))
+        {
+            "Typing…"
+        } else {
+            &chat.subtitle
+        };
+        words.append(&text(subtitle, "chat-subtitle dim-label"));
+        title.append(&words);
+        self.title.set_child(Some(&title));
+        if let Some(a) = self
+            .window
+            .lookup_action("notifications")
+            .and_downcast::<gio::SimpleAction>()
+        {
+            a.set_state(&chat.notifications.to_variant())
+        }
+    }
+    pub fn show_page(&self, title: &str, widget: &impl IsA<gtk::Widget>) {
+        self.search_toggle.set_active(false);
+        if let Some(old) = self.pages.child_by_name("section") {
+            self.pages.remove(&old)
+        }
+        self.pages.add_named(widget, Some("section"));
+        self.pages.set_visible_child_name("section");
+        self.title.set_visible(false);
+        self.section_title.set_text(title);
+    }
+    fn search_mode(self: &Rc<Self>, active: bool) {
+        self.stories
+            .set_visible(!active && self.state.borrow().account.is_empty());
+        if active {
+            self.title.set_visible(false);
+            self.titles.set_visible_child_name("search");
+            self.pages.set_visible_child_name("search");
+            self.search_results();
+            self.search.grab_focus();
+        } else {
+            self.titles.set_visible_child_name("normal");
+            self.pages.set_visible_child_name("chat");
+            self.title.set_visible(true);
+            self.search.set_text("");
+        }
+    }
+    pub fn search_results(self: &Rc<Self>) {
+        clear(&self.search_page);
+        margins(&self.search_page, 24);
+        let query = self.search.text().to_lowercase();
+        if query.trim().is_empty() {
+            self.search_page.append(
+                &adw::StatusPage::builder()
+                    .title("Search Chats and Messages")
+                    .icon_name("system-search-symbolic")
+                    .build(),
+            );
+            return;
+        }
+        let chats = self.state.borrow().chats.clone();
+        let mut count = 0;
+        for c in chats {
+            if c.name.to_lowercase().contains(&query) {
+                let row = adw::ActionRow::builder()
+                    .title(&c.name)
+                    .subtitle(&c.subtitle)
+                    .activatable(true)
+                    .build();
+                let id = c.id.clone();
+                let weak = Rc::downgrade(self);
+                row.connect_activated(move |_| {
+                    if let Some(s) = weak.upgrade() {
+                        s.select_chat(&id)
+                    }
+                });
+                self.search_page.append(&row);
+                count += 1
+            }
+            for m in c.messages {
+                if m.text.to_lowercase().contains(&query) {
+                    let row = adw::ActionRow::builder()
+                        .title(&m.text)
+                        .subtitle(format!("{} · {} · {}", c.name, m.author, m.time))
+                        .title_lines(2)
+                        .use_markup(false)
+                        .activatable(true)
+                        .build();
+                    let chat = c.id.clone();
+                    let id = m.id;
+                    let weak = Rc::downgrade(self);
+                    row.connect_activated(move |_| {
+                        if let Some(s) = weak.upgrade() {
+                            s.select_chat(&chat);
+                            s.highlight(&id);
+                        }
+                    });
+                    self.search_page.append(&row);
+                    count += 1
+                }
+            }
+        }
+        if count == 0 {
+            self.search_page.append(
+                &adw::StatusPage::builder()
+                    .title("No Results")
+                    .description("Try another search")
+                    .icon_name("system-search-symbolic")
+                    .build(),
+            )
+        }
+    }
+    pub fn command(&self, c: Command) -> bool {
+        self.session.borrow().as_ref().is_some_and(|s| s.send(c))
+    }
+    pub fn send_content(self: &Rc<Self>, value: &str, kind: &str) -> Option<String> {
+        let live = !self.state.borrow().account.is_empty();
+        if live && (kind != "text" || !self.online.get()) {
+            self.notice(if kind != "text" {
+                "Live media and rich messages are not available yet."
+            } else {
+                "Connect before sending. Your draft is kept."
+            });
+            return None;
+        }
+        let id = self.state.borrow_mut().send(value, kind)?;
+        if live {
+            let state = self.state.borrow();
+            let message = state.message(&id).unwrap().clone();
+            let peer = state.current().jid.clone();
+            drop(state);
+            if !self.persist() {
+                self.state
+                    .borrow_mut()
+                    .current_mut()
+                    .messages
+                    .retain(|m| m.id != id);
+                return None;
+            }
+            self.command(Command::Send {
+                peer,
+                message,
+                quote: String::new(),
+            });
+        }
+        self.render_messages(true);
+        self.refresh_chats(None);
+        Some(id)
+    }
+    pub fn send(self: &Rc<Self>) {
+        let value = self.composer_text();
+        if value.trim().is_empty() && self.attachments.borrow().is_empty() {
+            return;
+        }
+        let reply = self
+            .replying
+            .borrow()
+            .as_ref()
+            .and_then(|id| self.state.borrow().message(id).cloned());
+        let live = !self.state.borrow().account.is_empty();
+        if live && !self.online.get() {
+            self.notice("Connect before sending. Your draft is kept.");
+            return;
+        }
+        if !value.trim().is_empty() {
+            let Some(id) = self.state.borrow_mut().send(&value, "text") else {
+                return;
+            };
+            let mut state = self.state.borrow_mut();
+            let peer = state.current().jid.clone();
+            let owner = state.account.clone();
+            let message = state
+                .current_mut()
+                .messages
+                .iter_mut()
+                .find(|m| m.id == id)
+                .unwrap();
+            if let Some(ref r) = reply {
+                message.reply = format!(
+                    "{} · {}",
+                    r.author,
+                    r.text.chars().take(80).collect::<String>()
+                );
+                message.reply_id = if live {
+                    r.wire_id.clone()
+                } else {
+                    r.id.clone()
+                };
+                message.reply_to = if r.own { owner } else { peer.clone() };
+            }
+            let message = message.clone();
+            drop(state);
+            if live {
+                if !self.persist() {
+                    self.state
+                        .borrow_mut()
+                        .current_mut()
+                        .messages
+                        .retain(|m| m.id != id);
+                    return;
+                }
+                self.command(Command::Send {
+                    peer,
+                    message,
+                    quote: reply.map(|r| r.text).unwrap_or_default(),
+                });
+            }
+        }
+        if !live {
+            let files = self.attachments.borrow().clone();
+            for file in files {
+                self.state.borrow_mut().send(
+                    file.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .as_ref(),
+                    "file",
+                );
+            }
+        }
+        self.loading.set(true);
+        self.composer.buffer().set_text("");
+        self.loading.set(false);
+        self.attachments.borrow_mut().clear();
+        clear(&self.chips);
+        self.chips.set_visible(false);
+        self.cancel_reply();
+        self.save_draft();
+        self.render_messages(true);
+        self.refresh_chats(None);
+    }
+    pub fn update_reply(&self) {
+        let reply = self
+            .replying
+            .borrow()
+            .as_ref()
+            .and_then(|id| self.state.borrow().message(id).cloned());
+        if let Some(m) = reply {
+            self.reply_label.set_text(&format!(
+                "Reply to {} · {}",
+                m.author,
+                m.text.chars().take(60).collect::<String>()
+            ));
+            self.reply_bar.set_reveal_child(true);
+        } else {
+            self.reply_bar.set_reveal_child(false)
+        }
+    }
+    pub fn cancel_reply(&self) {
+        self.replying.borrow_mut().take();
+        self.reply_bar.set_reveal_child(false);
+        if !self.loading.get() {
+            self.save_draft()
+        }
+    }
+    pub fn update_mode(&self) {
+        let live = !self.state.borrow().account.is_empty();
+        self.banner.set_revealed(live);
+        self.banner.set_title(&format!(
+            "{} · Messages are not end-to-end encrypted",
+            self.status.borrow()
+        ));
+        self.history.set_visible(live);
+        self.stories.set_visible(!live);
+        for name in [
+            "wallet",
+            "stories",
+            "spaces",
+            "profile",
+            "developer",
+            "call",
+            "attach-file",
+            "attach-media",
+            "poll",
+            "article",
+            "location",
+            "payment",
+        ] {
+            if let Some(a) = self
+                .window
+                .lookup_action(name)
+                .and_downcast::<gio::SimpleAction>()
+            {
+                a.set_enabled(!live)
+            }
+        }
+        for (name, t) in self.media_toggles.borrow().iter() {
+            t.set_enabled(name == "emoji" || !live)
+        }
+        if live {
+            self.media_stack.set_visible_child_name("emoji")
+        }
+    }
+    pub fn activate_state(self: &Rc<Self>, state: State) {
+        self.save_draft();
+        if self.state.borrow().account.is_empty() {
+            self.demo.replace(self.state.borrow().clone());
+        }
+        self.session.borrow_mut().take();
+        self.generation.set(self.generation.get() + 1);
+        self.online.set(false);
+        self.status.replace("Disconnected".into());
+        let dialogs = std::mem::take(&mut *self.dialogs.borrow_mut());
+        for d in dialogs {
+            d.close();
+        }
+        let media = self.active_media.borrow().clone();
+        if let Some(v) = media {
+            v.close()
+        }
+        let story = self.active_story.borrow().clone();
+        if let Some(v) = story {
+            v.close()
+        }
+        self.state.replace(state);
+        self.history_pages.borrow_mut().clear();
+        self.history_pending.borrow_mut().clear();
+        self.typing.borrow_mut().clear();
+        self.rebuild_folders();
+        self.refresh_chats(None);
+        self.refresh_stories();
+        self.load_current();
+        self.update_mode();
+        let _ = self
+            .store
+            .set_pref("active_account", &self.state.borrow().account);
+    }
+    pub fn connect_account(self: &Rc<Self>, config: Account, password: String) {
+        self.save_draft();
+        if self.store.save_account(&config).is_err() {
+            self.notice("Account storage is unavailable");
+            return;
+        }
+        let state = if self.state.borrow().account == config.jid {
+            self.state.borrow().clone()
+        } else {
+            self.store.load(&config.jid)
+        };
+        self.activate_state(state);
+        self.status.replace("Connecting…".into());
+        let session = Session::start(
+            config,
+            password,
+            self.generation.get(),
+            self.event_tx.clone(),
+        );
+        self.session.replace(Some(session));
+        self.update_mode();
+    }
+    pub fn backend_event(self: &Rc<Self>, generation: u64, owner: &str, event: BackendEvent) {
+        if generation != self.generation.get() || owner != self.state.borrow().account {
+            return;
+        }
+        match event {
+            BackendEvent::Status {
+                online,
+                error,
+                text,
+            } => {
+                self.online.set(online);
+                self.status.replace(text.clone());
+                if !online {
+                    self.typing.borrow_mut().clear();
+                    let mut s = self.state.borrow_mut();
+                    for c in &mut s.chats {
+                        c.subtitle = "Offline".into();
+                        for m in &mut c.messages {
+                            if m.delivery == "sending" {
+                                m.delivery = "uncertain".into()
+                            }
+                        }
+                    }
+                }
+                self.update_mode();
+                if online {
+                    self.load_history(true)
+                } else if error {
+                    self.notice(&text)
+                }
+            }
+            BackendEvent::Roster(contacts) => {
+                let mut s = self.state.borrow_mut();
+                for (jid, name, subscription) in contacts {
+                    let c = s.chat_for(&jid);
+                    if !name.is_empty() {
+                        c.name = name
+                    }
+                    c.contact = subscription != "none";
+                }
+            }
+            BackendEvent::Message {
+                peer,
+                mut message,
+                historical,
+                receipt_to,
+            } => {
+                let visible = self.state.borrow().current().jid == peer
+                    && self.window.is_active()
+                    && self.pages.visible_child_name().as_deref() == Some("chat");
+                let known = self
+                    .store
+                    .known(owner, &peer, message.own, &message.aliases);
+                let mut s = self.state.borrow_mut();
+                let c = s.chat_for(&peer);
+                let receipt_id = message.wire_id.clone();
+                let notify = known.is_none()
+                    && !visible
+                    && !message.own
+                    && !historical
+                    && c.notifications == "all";
+                let notification_title = c.name.clone();
+                let notification_body = message.text.clone();
+                if let Some(known) = known {
+                    if let Some(old) = c.messages.iter_mut().find(|m| m.id == known) {
+                        for a in message.aliases {
+                            if !old.aliases.contains(&a) {
+                                old.aliases.push(a)
+                            }
+                        }
+                    }
+                } else {
+                    message.author = if message.own {
+                        "You".into()
+                    } else {
+                        c.name.clone()
+                    };
+                    if !message.reply_id.is_empty() {
+                        if let Some(target) = c.messages.iter().find(|m| {
+                            m.wire_id == message.reply_id
+                                || m.aliases.iter().any(|a| {
+                                    a == &format!("origin:{}", message.reply_id)
+                                        || a == &format!("server:{}", message.reply_id)
+                                })
+                        }) {
+                            message.reply = format!(
+                                "{} · {}",
+                                target.author,
+                                target.text.chars().take(80).collect::<String>()
+                            )
+                        } else if message.reply.is_empty() {
+                            message.reply = "Original message is not loaded".into()
+                        }
+                    }
+                    if !visible && !message.own && !historical {
+                        c.unread += 1
+                    }
+                    c.messages.push(message);
+                    c.messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+                }
+                let active = s.current().jid == peer;
+                drop(s);
+                let saved = self.persist();
+                if saved {
+                    if let Some(to) = receipt_to {
+                        if self.preference("delivery_receipts", false) {
+                            self.command(Command::Receipt {
+                                peer: to,
+                                id: receipt_id,
+                            });
+                        }
+                    }
+                }
+                if saved && notify && self.preference("notifications", true) {
+                    if let Some(app) = self.window.application() {
+                        let notification = gio::Notification::new(&notification_title);
+                        notification.set_body(Some(
+                            if self.preference("message_previews", false) {
+                                &notification_body
+                            } else {
+                                "New message"
+                            },
+                        ));
+                        app.send_notification(None, &notification);
+                    }
+                }
+                if active {
+                    self.render_messages(!historical)
+                }
+            }
+            BackendEvent::Presence { peer, online } => {
+                let mut s = self.state.borrow_mut();
+                if let Some(c) = s.chats.iter_mut().find(|c| c.jid == peer) {
+                    c.subtitle = if online { "Online" } else { "Offline" }.into();
+                }
+                drop(s);
+                if self.pages.visible_child_name().as_deref() == Some("chat") {
+                    self.show_chat()
+                }
+            }
+            BackendEvent::Typing { peer, composing } => {
+                if composing {
+                    self.typing.borrow_mut().insert(peer, Instant::now());
+                } else {
+                    self.typing.borrow_mut().remove(&peer);
+                }
+                if self.pages.visible_child_name().as_deref() == Some("chat") {
+                    self.show_chat()
+                }
+            }
+            BackendEvent::Sent { peer, id } => self.delivery(&peer, &id, "sent"),
+            BackendEvent::Receipt { peer, id } => self.delivery(&peer, &id, "delivered"),
+            BackendEvent::Failed { peer, id } => {
+                self.delivery(&peer, &id, "failed");
+                self.notice("Message could not be sent. Retry from its menu.");
+            }
+            BackendEvent::History {
+                peer,
+                before,
+                complete,
+                error,
+            } => {
+                self.history_pending.borrow_mut().remove(&peer);
+                self.history.set_sensitive(true);
+                self.history.set_label(if error {
+                    "Retry Server History"
+                } else {
+                    "Load Earlier Messages"
+                });
+                if error {
+                    self.notice("Server history unavailable or unsupported")
+                } else {
+                    self.history_pages
+                        .borrow_mut()
+                        .insert(peer, (before, complete));
+                }
+            }
+            BackendEvent::Request(peer) => {
+                let item = (peer, "Presence subscription request".into());
+                if !self.state.borrow().requests.contains(&item) {
+                    self.state.borrow_mut().requests.push(item)
+                }
+            }
+        }
+        self.persist();
+        self.refresh_chats(None);
+    }
+    pub fn delivery(self: &Rc<Self>, peer: &str, id: &str, status: &str) {
+        let mut s = self.state.borrow_mut();
+        if let Some(c) = s.chats.iter_mut().find(|c| c.jid == peer) {
+            if let Some(m) = c.messages.iter_mut().find(|m| m.own && m.wire_id == id) {
+                if m.delivery != "delivered" || status == "delivered" {
+                    m.delivery = status.into()
+                }
+            }
+        }
+        drop(s);
+        self.persist();
+        self.render_messages(false);
+    }
+    pub fn load_history(self: &Rc<Self>, initial: bool) {
+        let s = self.state.borrow();
+        if s.account.is_empty() {
+            return;
+        }
+        let c = s.current();
+        if !initial {
+            if let Some(first) = c.messages.first() {
+                let older = self.store.history(
+                    &s.account,
+                    &c.jid,
+                    Some((&first.timestamp, &first.id)),
+                    100,
+                );
+                if !older.is_empty() {
+                    drop(s);
+                    self.state
+                        .borrow_mut()
+                        .current_mut()
+                        .messages
+                        .splice(0..0, older);
+                    self.render_messages(false);
+                    return;
+                }
+            }
+        }
+        let peer = c.jid.clone();
+        drop(s);
+        let page = if initial {
+            None
+        } else {
+            self.history_pages.borrow().get(&peer).cloned()
+        };
+        if page.as_ref().is_some_and(|(_, done)| *done) {
+            self.notice("Beginning of available history");
+            return;
+        }
+        if !self.online.get() || self.history_pending.borrow().contains(&peer) {
+            return;
+        }
+        self.history_pending.borrow_mut().insert(peer.clone());
+        self.history.set_sensitive(false);
+        self.history.set_label("Loading History…");
+        self.command(Command::History {
+            peer,
+            before: page.map(|(b, _)| b).unwrap_or_default(),
+        });
+    }
+    pub fn preference(&self, key: &str, default: bool) -> bool {
+        self.store.pref(
+            &format!("{key}:{}", self.state.borrow().account),
+            if default { "true" } else { "false" },
+        ) == "true"
+    }
+}

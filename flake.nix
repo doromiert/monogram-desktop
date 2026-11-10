@@ -16,8 +16,7 @@
         let pkgs = import nixpkgs { inherit system; };
         in { default = pkgs.mkShell {
           inputsFrom = [ self.packages.${system}.default ];
-          packages = with pkgs; [ (python3.withPackages (ps: [ ps.pygobject3 ps.pycairo ps.pyopengl ps.numpy ps.qrcode ps.slixmpp ])) gtk4 libadwaita gobject-introspection xorg-server xdotool imagemagick prosody openssl ];
-          shellHook = ''export PYTHONPATH="$PWD/src''${PYTHONPATH:+:$PYTHONPATH}"'';
+          packages = with pkgs; [ cargo rustc rustfmt clippy pkg-config sqlite libepoxy python3 gtk4 libadwaita gobject-introspection xorg-server xdotool imagemagick prosody openssl ];
         }; });
       checks = eachSystem (system: {
         prototype = self.packages.${system}.default;

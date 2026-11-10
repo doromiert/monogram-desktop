@@ -4,6 +4,8 @@ Target: all shipped Monogram behavior, with desktop-specific presentation.
 Android baseline: `be6876c045163e32fe07a84416621770b0964b30` / 0.2.195.
 
 **Initial live direct-text XMPP messaging is implemented; full parity is open.**
+The desktop implementation is Rust with GTK 4/libadwaita; its Python predecessor
+is replaced, preserving the SQLite schema and account-specific data.
 See [LIVE_XMPP.md](LIVE_XMPP.md) for verified behavior and security limits.
 A form, switch or fixture is not a working server feature. "Preview" below means
 an in-memory interaction or surface; "planned" means it is still absent.
@@ -19,7 +21,8 @@ an in-memory interaction or surface; "planned" means it is still absent.
 | Polls and reactions | Interactive fixture poll controls/reaction toggles; local poll form | Exact public reaction poll grammar, durable ballots, revotes, author closure and timestamps |
 | Standard/custom emoji, stickers and GIFs | Standard emoji in live text; separate offline animated GIF/sticker fixtures | Live transfers/decoders, search/providers, packs/favorites/recents and full icon-pack replacement |
 | Files and media | Portal selection → removable filenames; artwork/file fixtures | Encrypted streaming transfers, real progress/resume/cancel, thumbnails, captions, cache lifecycle and account fences |
-| Viewer and playback | Native fixture dialog and navigation controls | Correct media switching, bounded 11-item window, video/audio/voice/round-video, zoom, download and editor behavior |
+| Viewer and playback | Three-column shared-media sidebar grid, thumbnail-triggered overlay, fly-in/fly-out and fullscreen fit | Correct media switching, bounded 11-item window, video/audio/voice/round-video, zoom, download and editor behavior |
+| HTML widgets | Upstream sandbox source audited; no renderer/runtime integrated | Resolve upstream licensing, GTK host and compatible XMPP proposal; enforce accepted **16 KiB compressed** budget plus independent expansion/memory/execution bounds on both clients |
 | Media authoring | Planned | Crop/trim/markup, compression, albums, camera capture and desktop permission/device flows |
 | Locations and previews | Location card/form preview | Real safe map rendering, provider privacy, coordinates, live/location selection and valid fallback removal |
 | OMEMO legacy and Monocles PQ in DMs/MUCs | Live mode explicitly unencrypted; encrypted payloads show an unavailable placeholder, never a decrypted fallback | Exact separate key stores, authenticated content, trust/block, key change prompts and compatible wire protocols |
@@ -29,10 +32,10 @@ an in-memory interaction or surface; "planned" means it is still absent.
 | Presence and typing | Roster multi-resource status and live direct typing with expiry/privacy control; clears on disconnect | Group states, full carbons/delay/archive rejection and broader interoperability |
 | Direct and MUJI group calls | Call-controls dialog preview | Real media transport, incoming calls, desktop device/portal permissions, mute/camera/speaker, lifecycle and group membership |
 | Contacts and profiles | Contact list, editable profile preview | Real roster/local overrides, vCard fields, avatar publication/suggestions, colors, notes and blocking |
-| Stories and persistent profile posts | Fixture list/viewer | Correct PEP/Atom access, expiry, persistent saves, edits/retractions, media and profile editing |
+| Stories and persistent profile posts | Horizontal chat-list avatar strip and timed native overlay viewer | Correct PEP/Atom access, expiry, persistent saves, edits/retractions, media and profile editing |
 | Notifications | Basic live desktop notifications, opt-in message previews, local chat mute and notification preferences | Actions/attention, mention matching, timed-mute expiry and background behavior |
 | Read state and archives | Local unread state, paged direct MAM retrieval and account/peer/direction-scoped dedup | Private read synchronization, public read-receipt consent, account-wide recovery, room readers |
-| Wallet overview / multiple wallets | Orange card, precision switch, local add/remove/switch and activity fixtures | Production 3D card, secure keyring/SDK integration, unlock/lock, durable wallet slots and removal semantics |
+| Wallet overview / multiple wallets | Source 3D meshes/GLSL rendered in Rust, precision/QR controls, local add/remove/animated switch and activity fixtures | Production 3D card, secure keyring/SDK integration, unlock/lock, durable wallet slots and removal semantics |
 | Wallet recovery and scan | Planned | Polyseed/default recovery, 2×8 words UI, restore/import, node configuration, parallel bounded scanning, checkpoints and useful progress |
 | Send/request and fiat pricing | Local amount/currency/note/request-card forms | Exact atomic amounts, online fiat list/formatting/rates, address reservation, fees, confirmation and transaction history |
 | Payment/claim links | No real link parsing or wallet material | Compatible formats, protected bearer secrets, external restore path, multi-wallet deposits, readiness/claimed status and independent verification |

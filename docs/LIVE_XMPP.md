@@ -27,8 +27,9 @@ drafts, authorization requests or transport.
 
 ## Implemented behavior
 
-- Slixmpp 1.17.0 runs on a disposable asyncio thread. GTK/model/database changes
-  stay on the main thread. Login can be cancelled by Disconnect or switching
+- Rust runs tokio-xmpp 6.0.0 TLS/SASL/XML on a cancellable Tokio thread.
+  The connection adapter keeps handshake failures observable and bounds
+  connection attempts and backoff. GTK/model/database changes stay on the main thread. Login can be cancelled by Disconnect or switching
   accounts; socket loss reconnects with backoff. Initial handshake attempts have
   a deadline, and authentication/certificate failures require user intervention.
 - Roster names and multi-resource presence update chats. Incoming subscription
@@ -85,13 +86,13 @@ loopback-only Prosody 13.0.6 fixture with a disposable trusted TLS certificate.
 The fixture exercises real login/roster/text/replies/receipts/carbons/MAM/typing,
 socket reconnect, invalid-password and certificate/hostname rejection, refusal to
 authenticate without TLS, and thread cancellation. A second check drives the real
-native window's composer against a fixture peer, then verifies reconnect/dedup,
+native Rust window's composer against a fixture peer, then verifies restoration/MAM dedup,
 draft+reply restoration, account isolation and stale-callback rejection.
 No real accounts or contacts are used. Public-server/provider interoperability,
 production notification behavior and end-to-end encryption are not established by
 these checks.
 
-References: [Slixmpp](https://slixmpp.com/),
+References: [tokio-xmpp](https://docs.rs/tokio-xmpp/6.0.0/tokio_xmpp/),
 [RFC 6120](https://www.rfc-editor.org/rfc/rfc6120),
 [Carbons](https://xmpp.org/extensions/xep-0280.html),
 [MAM](https://xmpp.org/extensions/xep-0313.html),

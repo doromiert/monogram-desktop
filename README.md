@@ -1,6 +1,6 @@
 # Monogram Desktop
 
-A native **GTK 4 / libadwaita** reimplementation of Monogram for Linux.
+A native **Rust / GTK 4 / libadwaita** reimplementation of Monogram for Linux.
 The app now includes **initial live XMPP direct-text messaging** and a separate
 offline demo with fictional conversations. Live mode supports verified TLS login,
 roster/presence, text, replies, carbons, archive history, receipts and local drafts.
@@ -23,14 +23,16 @@ Development and verification:
 
 ```sh
 nix develop
-PYTHONPATH=src python -m monogram_desktop
+cargo run
+cargo test
 nix flake check
 nix build
 ```
 
-The flake pins GTK, libadwaita, Python and PyGObject. Runtime UI dependencies are
-packaged with the application. No global Python installation or system activation
-is needed. The flake exports x86_64-linux and aarch64-linux; the current native
+The flake pins Rust, GTK and libadwaita; Cargo.lock pins Rust dependencies.
+Application logic and rendering run in a native Rust executable. A Python
+standard-library script in tests/ launches disposable Prosody verification fixtures.
+No system activation is needed. The flake exports x86_64-linux and aarch64-linux; the current native
 checks were run on x86_64-linux.
 
 ## Try it
@@ -43,7 +45,9 @@ checks were run on x86_64-linux.
 - Select chats; Ctrl+F replaces the header with search and shows message/chat results.
 - Filter All / Unread / Groups. Right click folders to edit chat-type/exclusion
   rules and explicit exceptions. Drag horizontally into gaps or empty space to
-  reorder folders, or use their Move Left/Right menu actions.
+  reorder folders, or use their Move Left/Right menu actions. Folder switches
+  animate horizontally. Vertical wheel input scrolls both folder and story strips
+  horizontally; horizontal trackpad input continues to work.
 - Compose, reply, copy, forward and inspect message details. Right
   click a message for its mobile-style reaction/action menu. Ctrl-click and
   Shift-click select messages; the action bar copies, forwards or deletes them.
@@ -59,6 +63,8 @@ checks were run on x86_64-linux.
 - Choose **Attach → Photo or Video / File** to use `Gtk.FileDialog`. The packaged
   app requests the desktop file portal; selected filenames appear as removable
   attachment chips. No selected file contents are uploaded or copied to a cache.
+- Choose **Conversation Info → Shared Media** for a three-column sidebar grid;
+  selecting a thumbnail opens the expanded viewer with its return animation.
 - Open the Requests button beside the main menu, or tap story avatars above the chat list.
 - Explore Contacts, Saved Messages, Wallet, Spaces and preferences from
   the main menu. Profile, security, device review, presence access, room creation,
@@ -84,11 +90,11 @@ when integration starts.
 
 [DESIGN.md](docs/DESIGN.md) records the GNOME HIG and Nautilus source references.
 This is real GTK: no WebView, browser shell, Android emulator, Telegram account
-or embedded Android backend is involved. The desktop transport uses Slixmpp.
+or embedded Android backend is involved. The desktop transport uses tokio-xmpp for verified TLS, SASL and XML/stanza handling.
 
 The prototype code is GPL-2.0-or-later. The imported Monero rendering components
 are GPL-3.0-or-later; the combined build is distributed under GPL-3.0-or-later.
 See [LICENSE](LICENSE), [GPL-3.0](LICENSES/GPL-3.0-or-later.txt), and
-[asset notices](src/monogram_desktop/assets/NOTICE.md).
+[asset notices](assets/NOTICE.md).
 
 See [UI_REVIEW.md](docs/UI_REVIEW.md) for review corrections, verification and prototype limits.

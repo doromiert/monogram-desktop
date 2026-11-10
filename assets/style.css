@@ -90,3 +90,7 @@
 .gif-button { padding: 0; border: none; border-radius: 10px; box-shadow: none; background: transparent; }
 .media-grid flowboxchild, .media-grid flowboxchild:hover { padding: 0; background: transparent; }
 .media-grid flowboxchild:focus, .media-grid flowboxchild:focus-visible { outline: none; box-shadow: none; }
+
+.message-list row.selected-message { background: alpha(@accent_bg_color,.14); color: @window_fg_color; }
+.shared-media-grid { padding: 12px; }
+.shared-media-tile { padding: 0; border: none; border-radius: 8px; background: transparent; box-shadow: none; }
