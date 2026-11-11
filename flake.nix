@@ -16,6 +16,8 @@
         let pkgs = import nixpkgs { inherit system; };
         in { default = pkgs.mkShell {
           inputsFrom = [ self.packages.${system}.default ];
+          MONOGRAM_PREBUILT_LOTTIE_HELPER = "${self.packages.${system}.default.stickerRenderer}/bin/monogram-sticker-renderer";
+          MONOGRAM_BWRAP = "${pkgs.bubblewrap}/bin/bwrap";
           JAVA_HOME = "${pkgs.jdk21}/lib/openjdk";
           shellHook = ''
             export XDG_DATA_DIRS="${pkgs.gtk4}/share/gsettings-schemas/${pkgs.gtk4.name}:${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:''${NIX_GLYCIN_LOADER_PATHS}:''${XDG_DATA_DIRS:-}"

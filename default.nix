@@ -5,6 +5,21 @@
 let
   src = monogramSrc;
   stickerRlottie = rlottie.overrideAttrs (old: { mesonFlags = (old.mesonFlags or []) ++ [ "-Dthread=false" ]; });
+  stickerRenderer = stdenv.mkDerivation {
+    pname = "monogram-sticker-renderer";
+    version = "0.2.0";
+    src = builtins.path { path = src + "/native/lottie_renderer.c"; name = "monogram-lottie-renderer.c"; };
+    dontUnpack = true;
+    strictDeps = true;
+    nativeBuildInputs = [ pkg-config ];
+    buildInputs = [ stickerRlottie zlib ];
+    buildPhase = ''
+      $CC -O2 -std=c11 "$src" -o monogram-sticker-renderer $(pkg-config --cflags --libs rlottie zlib) -lm
+    '';
+    installPhase = ''
+      install -Dm755 monogram-sticker-renderer $out/bin/monogram-sticker-renderer
+    '';
+  };
   fontConfig = makeFontsConf { fontDirectories = [ adwaita-fonts ]; };
   commonArgs = {
     pname = "monogram-desktop";
@@ -32,12 +47,11 @@ let
     cargoBuildExtraArgs = "--bin monogram-desktop";
   });
 in craneLib.buildPackage (commonArgs // {
-  buildInputs = commonArgs.buildInputs ++ [ stickerRlottie zlib ];
-  nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ bubblewrap ];
+  MONOGRAM_PREBUILT_LOTTIE_HELPER = "${stickerRenderer}/bin/monogram-sticker-renderer";
   MONOGRAM_BWRAP = "${bubblewrap}/bin/bwrap";
   inherit cargoArtifacts cargoVendorDir;
   cargoBuildExtraArgs = "--bin monogram-desktop";
-  passthru = { inherit cargoArtifacts; };
+  passthru = { inherit cargoArtifacts stickerRenderer; };
   nativeCheckInputs = [ xorg-server dbus prosody openssl python3 jdk21 gnome-keyring ];
   postCheck = ''
     export HOME=$TMPDIR/home XDG_CACHE_HOME=$TMPDIR/cache XDG_CONFIG_HOME=$TMPDIR/config XDG_STATE_HOME=$TMPDIR/state
@@ -81,9 +95,7 @@ in craneLib.buildPackage (commonArgs // {
     cp -r LICENSE LICENSES $out/share/doc/monogram-desktop/
     cp native/NOTICE.md $out/share/doc/monogram-desktop/native-NOTICE.md
     mkdir -p $out/libexec
-    lottie_helper=$(find target -path '*/release/build/monogram-desktop-*/out/monogram-sticker-renderer' -type f | head -n 1)
-    test -n "$lottie_helper"
-    cp "$lottie_helper" $out/libexec/monogram-sticker-renderer
+    cp ${stickerRenderer}/bin/monogram-sticker-renderer $out/libexec/monogram-sticker-renderer
     gappsWrapperArgs+=(
       --set MONOGRAM_LOTTIE_HELPER $out/libexec/monogram-sticker-renderer
       --set MONOGRAM_BWRAP ${bubblewrap}/bin/bwrap

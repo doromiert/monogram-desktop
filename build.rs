@@ -1,15 +1,24 @@
 fn main() {
-    let lottie = pkg_config::Config::new().cargo_metadata(false).atleast_version("0.2").probe("rlottie").expect("rlottie 0.2 C API");
-    let zlib = pkg_config::Config::new().cargo_metadata(false).probe("zlib").expect("zlib");
-    let helper = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("monogram-sticker-renderer");
-    let mut command = cc::Build::new().get_compiler().to_command();
-    command.args(["-O2", "-std=c11", "native/lottie_renderer.c", "-o"]).arg(&helper);
-    for path in lottie.include_paths.iter().chain(&zlib.include_paths) { command.arg("-I").arg(path); }
-    for path in lottie.link_paths.iter().chain(&zlib.link_paths) { command.arg("-L").arg(path).arg(format!("-Wl,-rpath,{}", path.display())); }
-    for library in lottie.libs.iter().chain(&zlib.libs) { command.arg(format!("-l{library}")); }
-    command.arg("-lm");
-    assert!(command.status().expect("build sticker renderer").success(), "build rlottie sticker renderer");
+    let helper = if let Some(helper) = std::env::var_os("MONOGRAM_PREBUILT_LOTTIE_HELPER") {
+        let helper = std::path::PathBuf::from(helper);
+        assert!(helper.is_file(), "prebuilt sticker renderer must exist");
+        helper
+    } else {
+        let lottie = pkg_config::Config::new().cargo_metadata(false).atleast_version("0.2").probe("rlottie").expect("rlottie 0.2 C API");
+        let zlib = pkg_config::Config::new().cargo_metadata(false).probe("zlib").expect("zlib");
+        let helper = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("monogram-sticker-renderer");
+        let mut command = cc::Build::new().get_compiler().to_command();
+        command.args(["-O2", "-std=c11", "native/lottie_renderer.c", "-o"]).arg(&helper);
+        for path in lottie.include_paths.iter().chain(&zlib.include_paths) { command.arg("-I").arg(path); }
+        for path in lottie.link_paths.iter().chain(&zlib.link_paths) { command.arg("-L").arg(path).arg(format!("-Wl,-rpath,{}", path.display())); }
+        for library in lottie.libs.iter().chain(&zlib.libs) { command.arg(format!("-l{library}")); }
+        command.arg("-lm");
+        assert!(command.status().expect("build sticker renderer").success(), "build rlottie sticker renderer");
+        helper
+    };
     println!("cargo:rustc-env=MONOGRAM_BUILT_LOTTIE_HELPER={}", helper.display());
+    println!("cargo:rerun-if-env-changed=MONOGRAM_PREBUILT_LOTTIE_HELPER");
+    println!("cargo:rerun-if-env-changed=MONOGRAM_BWRAP");
     println!("cargo:rerun-if-changed=native/lottie_renderer.c");
     let bwrap = std::env::var_os("MONOGRAM_BWRAP").map(std::path::PathBuf::from).or_else(|| std::env::var_os("PATH").and_then(|paths|std::env::split_paths(&paths).map(|path|path.join("bwrap")).find(|path|path.is_file()))).expect("bubblewrap");
     println!("cargo:rustc-env=MONOGRAM_BUILT_BWRAP={}", bwrap.display());
