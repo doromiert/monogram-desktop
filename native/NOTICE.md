@@ -18,7 +18,7 @@ Its upstream GPL-3.0-only license and retained third-party notices apply. The li
 is provided through the pinned Nix package, rather than copied into this tree.
 OpenSSL supplies the existing mobile-compatible cryptographic provider.
 
-The adapter/provider are GPL-3.0-or-later; the combined build uses GPL-3.0. See
+The adapter/provider are GPL-3.0-or-later. See
 `LICENSES/GPL-3.0-or-later.txt`. The Java/JNI comparison fixtures are test-only;
 see `tests/mobile-reference/README.md` for their provenance.
 
@@ -33,3 +33,19 @@ by Galeria's `video_ui.py`, while adapting their paintable for Monogram's shared
 inline/focus rendering. No Clapper implementation is vendored here.
 
 `lottie_renderer.c` calls the upstream [Samsung rlottie C API](https://github.com/Samsung/rlottie), linked from Nix rlottie 0.2-unstable-2026-10-01. rlottie is MIT with its retained upstream third-party notices; no library source is copied. The GPL-3.0-or-later helper parses TGS only inside bubblewrap and renders one requested RGBA frame at a time.
+
+## Monocles PQ OMEMO
+
+The independent `src/crypto/pq/` provider adapts Monogram mobile's Monocles
+PQ-OMEMO profile adapters and the Monocles wire profile. These adaptations and
+the pinned libsignal fork are licensed under AGPL-3.0-only.
+
+- Monocles libsignal fork: <https://codeberg.org/monocles/pq-omemo-2>, revision
+  `10861bff671740174f4e99f7e30dc492fcf6ec8b`. Upstream copyright Signal Messenger,
+  LLC and its contributors; Monocles PQ identity, PQXDH and SPQR adaptations
+  retain their upstream notices.
+- Mobile adapter contract: `monogram/xmpp-core` classes `PqOmemoBundle`,
+  `PqOmemoMessage`, `PqOmemoPayload`, `PqOmemoPep`, and `XmppPqOmemo`; Monocles
+  protocol/codec reference revision `49c0e78045532a78033ffd448ca4316859267bf2`.
+- The AGPL text is included in `LICENSES/AGPL-3.0-only.txt`. Existing components
+  retain their own licenses and attribution.

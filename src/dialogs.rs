@@ -18,10 +18,26 @@ fn set_switch(row: &adw::SwitchRow, changing: &Cell<bool>, active: bool) {
     row.set_active(active);
     changing.set(false);
 }
+fn grouped_fingerprint(value: &str) -> String {
+    value
+        .as_bytes()
+        .chunks(8)
+        .enumerate()
+        .map(|(index, chunk)| {
+            let chunk = std::str::from_utf8(chunk).unwrap_or("");
+            match index {
+                0 => chunk.into(),
+                index if index % 4 == 0 => format!("\n{chunk}"),
+                _ => format!(" {chunk}"),
+            }
+        })
+        .collect()
+}
 pub struct SecurityControls {
     generation: u64,
     room: bool,
     pub(crate) sending: adw::ComboRow,
+    pub(crate) pq: DeviceControls,
     pub(crate) modern: DeviceControls,
     legacy: DeviceControls,
 }
@@ -39,6 +55,7 @@ impl Ui {
             return;
         }
         for (controls, status, supported) in [
+            (&w.pq, self.pq_crypto.borrow(), true),
             (&w.modern, self.crypto.borrow(), !w.room),
             (&w.legacy, self.legacy_crypto.borrow(), true),
         ] {
@@ -59,13 +76,7 @@ impl Ui {
                 format!(
                     "Device {}\n{}",
                     status.device,
-                    status
-                        .fingerprint
-                        .as_bytes()
-                        .chunks(8)
-                        .map(|c| std::str::from_utf8(c).unwrap())
-                        .collect::<Vec<_>>()
-                        .join(" ")
+                    grouped_fingerprint(&status.fingerprint)
                 )
             };
             controls.fingerprint.set_text(&fingerprint);
@@ -78,6 +89,11 @@ impl Ui {
     ) -> (adw::PreferencesGroup, DeviceControls) {
         use crate::crypto::{legacy::service::Request as Legacy, service::Request as Modern};
         let group = adw::PreferencesGroup::builder().title(mode.name()).build();
+        if mode == Mode::Omemo2 {
+            group.set_description(Some(
+                "Incoming Classic OMEMO2 messages and fingerprints remain available independently of the sending choice",
+            ));
+        }
         let row = adw::ActionRow::builder()
             .title("This Device")
             .use_markup(false)
@@ -111,10 +127,17 @@ impl Ui {
                 .filter(|ui| ui.generation.get() == generation)
             {
                 button.set_sensitive(false);
-                ui.command(if mode == Mode::Legacy {
-                    protocol::Command::Legacy(Legacy::Enable)
-                } else {
-                    protocol::Command::Crypto(Modern::Enable)
+                if mode == Mode::Pq {
+                    button.set_child(Some(&gtk::Spinner::builder().spinning(true).build()));
+                    button.set_tooltip_text(Some("Preparing OMEMO2…"));
+                }
+                ui.command(match mode {
+                    Mode::Legacy => protocol::Command::Legacy(Legacy::Enable),
+                    Mode::Omemo2 => protocol::Command::Crypto(Modern::Enable),
+                    Mode::Pq => {
+                        protocol::Command::PqCrypto(crate::crypto::pq::service::Request::Enable)
+                    }
+                    Mode::Plain => return,
                 });
             }
         });
@@ -128,14 +151,16 @@ impl Ui {
             {
                 ui.review_request.replace(Some((target.clone(), mode)));
                 ui.notice(&format!("Looking up {} fingerprints…", mode.name()));
-                ui.command(if mode == Mode::Legacy && room {
-                    protocol::Command::ReviewRoom {
+                ui.command(match mode {
+                    Mode::Legacy if room => protocol::Command::ReviewRoom {
                         peer: target.clone(),
-                    }
-                } else if mode == Mode::Legacy {
-                    protocol::Command::Legacy(Legacy::Review(target.clone()))
-                } else {
-                    protocol::Command::Crypto(Modern::Review(target.clone()))
+                    },
+                    Mode::Legacy => protocol::Command::Legacy(Legacy::Review(target.clone())),
+                    Mode::Omemo2 => protocol::Command::Crypto(Modern::Review(target.clone())),
+                    Mode::Pq => protocol::Command::PqCrypto(
+                        crate::crypto::pq::service::Request::Review(target.clone()),
+                    ),
+                    Mode::Plain => return,
                 });
             }
         });
@@ -162,7 +187,7 @@ impl Ui {
             .subtitle("Incoming messages use the version they were sent with")
             .model(&gtk::StringList::new(&[
                 "Automatic",
-                "OMEMO 2",
+                "OMEMO2",
                 "Legacy OMEMO",
                 "Unencrypted",
             ]))
@@ -180,7 +205,7 @@ impl Ui {
             let contact_access = crate::contact_access::valid_peer(&owner, &peer);
             let trust = adw::SwitchRow::builder()
                 .title("Blindly Trust This Contact")
-                .subtitle("Applies to Legacy OMEMO and OMEMO 2")
+                .subtitle("Applies to Legacy OMEMO, Classic OMEMO2, and OMEMO2")
                 .active(self.store.blind_trust(&owner, &peer).unwrap_or(false))
                 .build();
             let weak = Rc::downgrade(self);
@@ -239,9 +264,11 @@ impl Ui {
             }
         }
         page.add(&choices);
-        let (modern_group, modern) = self.fingerprint_group(Mode::Omemo2, &peer);
+        let (pq_group, pq) = self.fingerprint_group(Mode::Pq, &peer);
+        let (classic_group, modern) = self.fingerprint_group(Mode::Omemo2, &peer);
         let (legacy_group, legacy) = self.fingerprint_group(Mode::Legacy, &peer);
-        page.add(&modern_group);
+        page.add(&pq_group);
+        page.add(&classic_group);
         page.add(&legacy_group);
         let weak = Rc::downgrade(self);
         let target = peer;
@@ -260,6 +287,7 @@ impl Ui {
             generation,
             room,
             sending,
+            pq,
             modern,
             legacy,
         }));
@@ -286,6 +314,9 @@ impl Ui {
             ));
             self.command(protocol::Command::Crypto(
                 crate::crypto::service::Request::RefreshTrust(peer.into()),
+            ));
+            self.command(protocol::Command::PqCrypto(
+                crate::crypto::pq::service::Request::RefreshTrust(peer.into()),
             ));
         }
         true

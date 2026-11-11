@@ -5,6 +5,7 @@ pub enum Mode {
     Plain,
     Legacy,
     Omemo2,
+    Pq,
 }
 impl Mode {
     pub fn encrypted(self) -> bool {
@@ -14,7 +15,8 @@ impl Mode {
         match self {
             Self::Plain => "Unencrypted",
             Self::Legacy => "Legacy OMEMO",
-            Self::Omemo2 => "OMEMO 2",
+            Self::Omemo2 => "Classic OMEMO2",
+            Self::Pq => "OMEMO2",
         }
     }
 }
@@ -34,7 +36,7 @@ impl Preference {
             Self::Automatic => None,
             Self::Plain => Some(Mode::Plain),
             Self::Legacy => Some(Mode::Legacy),
-            Self::Omemo2 => Some(Mode::Omemo2),
+            Self::Omemo2 => Some(Mode::Pq),
         }
     }
 }
@@ -49,6 +51,7 @@ impl Selection {
         const DAY_MS: i64 = 24 * 60 * 60 * 1000;
         now.checked_sub(self.time_ms)
             .filter(|age| (0..DAY_MS).contains(age))
+            .filter(|_| self.mode != Mode::Omemo2)
             .map(|_| self.mode)
     }
 }
@@ -56,11 +59,11 @@ impl Selection {
 /// A probe returns false only after a definitive protocol or key-availability
 /// result. An I/O, storage or connection error must stop selection.
 pub async fn select<E>(
-    modern: impl Future<Output = Result<bool, E>>,
+    pq: impl Future<Output = Result<bool, E>>,
     legacy: impl Future<Output = Result<bool, E>>,
 ) -> Result<Mode, E> {
-    if modern.await? {
-        Ok(Mode::Omemo2)
+    if pq.await? {
+        Ok(Mode::Pq)
     } else if legacy.await? {
         Ok(Mode::Legacy)
     } else {

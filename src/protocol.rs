@@ -1,5 +1,5 @@
 //! Standards-only XMPP boundary. No GTK or implicit plaintext fallback.
-use crate::crypto::{legacy, service as modern};
+use crate::crypto::{legacy, service as modern, pq::service as pq};
 use crate::encryption_policy::Mode;
 use crate::model::{Account, Message};
 use crate::rooms::archive;
@@ -222,7 +222,7 @@ fn normalize_content(
         crate::polls::Poll::parse(xml).ok().flatten()
     };
     let raw = if unsupported_pq {
-        "PQ-OMEMO message — this desktop does not support this encryption version yet.".into()
+        "Encrypted message — waiting for OMEMO2 decryption.".into()
     } else if unavailable {
         "Encrypted message — this encryption format is unavailable or needs device review.".into()
     } else if control {
@@ -548,6 +548,18 @@ pub enum BackendEvent {
         id: String,
     },
     CryptoStatus(crate::crypto::service::Status),
+    PqCrypto(crate::crypto::service::Status),
+    PqDevices {
+        peer: String,
+        devices: Vec<crate::crypto::pq::service::Review>,
+    },
+    PqEncrypted {
+        peer: String,
+        message: Message,
+        historical: bool,
+        receipt_to: Option<String>,
+        token: crate::crypto::pq::wire::Token,
+    },
     CryptoReview {
         peer: String,
         rows: Vec<crate::crypto::service::Review>,
@@ -652,17 +664,20 @@ pub enum RoomPreparation {
         reply: tokio::sync::oneshot::Sender<crate::crypto::Result<Mode>>,
     },
     Review,
+    PqReview,
 }
 #[derive(Debug)]
 pub enum Command {
     CryptoReady(bool),
     LegacyReady(bool),
+    PqReady(bool),
     ChooseEncryption {
         peer: String,
         reply: tokio::sync::oneshot::Sender<crate::crypto::Result<crate::encryption_policy::Mode>>,
     },
     Crypto(crate::crypto::service::Request),
     Legacy(crate::crypto::legacy::service::Request),
+    PqCrypto(crate::crypto::pq::service::Request),
     LoadRoomBookmarks,
     UpdateRoomChoices(Vec<crate::rooms::LocalBookmark>),
     RoomServices {
@@ -1020,6 +1035,7 @@ impl Session {
                 let mut client = Client::new(config, password);
                 let crypto=modern::Handle::start(owner.clone(),generation,network.clone(),events.clone());
                 let legacy=legacy::service::Handle::start(owner.clone(),generation,network.clone(),events.clone());
+                let pq=pq::Handle::start(owner.clone(),generation,network.clone(),events.clone());
                 let contacts=crate::contact_access::Manager::new(owner.clone(),generation,events.clone()).await;
                 let mut contact_queries=HashMap::<String,(u64,std::time::Instant,u64)>::new();
                 let mut displayed_policy=crate::read_markers::load_policy(&owner).await;
@@ -1035,15 +1051,18 @@ impl Session {
                 let mut room_epoch=0u64;
                 let mut loading_rooms=false;
                 let mut subscribing_rooms=false;
-                let mut crypto_ready=false;let mut legacy_ready=false;let mut online=false;let mut mam:HashMap<String,archive::Page>=HashMap::new();let mut timer=tokio::time::interval(Duration::from_secs(1));let mut handshake=std::time::Instant::now();
+                let mut crypto_ready=false;let mut legacy_ready=false;let mut pq_ready=false;let mut online=false;let mut mam:HashMap<String,archive::Page>=HashMap::new();let mut timer=tokio::time::interval(Duration::from_secs(1));let mut handshake=std::time::Instant::now();
                 emit(BackendEvent::Status{online:false,error:false,text:"Connecting…".into()});
                 loop{tokio::select!{
                     command=rx.recv()=>{match command{
                         None=>break,
                         Some(Command::CryptoReady(ready))=>crypto_ready=ready,
                         Some(Command::LegacyReady(ready))=>legacy_ready=ready,
+                        Some(Command::PqReady(ready))=>pq_ready=ready,
                         Some(Command::Crypto(request))=>crypto.send(request),
                         Some(Command::Legacy(request))=>legacy.send(request),
+                        Some(Command::PqCrypto(pq::Request::Review(peer))) if rooms.known(&peer)=>prepare_room(&rooms,peer,room_epoch,RoomPreparation::PqReview,&network),
+                        Some(Command::PqCrypto(request))=>pq.send(request),
                         Some(Command::UpdateRoomChoices(choices))=>{
                             rooms.update_choices(choices);
                             if online {for peer in rooms.autojoin(){let _=network.send(Command::JoinRoom{peer,nick:None});}}
@@ -1168,17 +1187,25 @@ impl Session {
                             } else { Err(crate::rooms::Error::NotJoined) };
                             match recipients {
                                 Ok(recipients)=>match purpose {
-                                    RoomPreparation::Send{message,quote}=>legacy.send(legacy::service::Request::SendRoom{recipients,message,quote,epoch}),
+                                    RoomPreparation::Send{message,quote}=>{if message.mode()==Mode::Pq {pq.send(pq::Request::SendRoom{recipients,message,quote,epoch});}else{legacy.send(legacy::service::Request::SendRoom{recipients,message,quote,epoch});}},
                                     RoomPreparation::Probe{reply}=>{
                                         let (checked,response)=tokio::sync::oneshot::channel();
-                                        legacy.send(legacy::service::Request::ProbeRoom{recipients,reply:checked});
+                                        pq.send(pq::Request::ProbeRoom{recipients:recipients.clone(),reply:checked});
+                                        let legacy_tx=legacy.sender();
                                         tokio::spawn(async move {
-                                            let result=response.await.unwrap_or(Err(crate::crypto::Error::Unavailable("Room encryption check interrupted")))
-                                                .map(|supported|if supported{Mode::Legacy}else{Mode::Plain});
+                                            let result=crate::encryption_policy::select(
+                                                async { response.await.unwrap_or(Err(crate::crypto::Error::Unavailable("OMEMO2 room check interrupted"))) },
+                                                async {
+                                                    let (checked,response)=tokio::sync::oneshot::channel();
+                                                    legacy_tx.send(legacy::service::Request::ProbeRoom{recipients,reply:checked}).map_err(|_|crate::crypto::Error::Unavailable("Legacy room check interrupted"))?;
+                                                    response.await.unwrap_or(Err(crate::crypto::Error::Unavailable("Legacy room check interrupted")))
+                                                },
+                                            ).await;
                                             let _=reply.send(result);
                                         });
                                     },
                                     RoomPreparation::Review=>legacy.send(legacy::service::Request::ReviewRoom{peer,members:recipients.members.into_keys().collect()}),
+                                    RoomPreparation::PqReview=>pq.send(pq::Request::ReviewRoom{peer,members:recipients.members.into_keys().collect()}),
                                 },
                                 Err(error)=>{
                                     let text=error.to_string();
@@ -1186,6 +1213,7 @@ impl Session {
                                         RoomPreparation::Send{message,..}=>emit(BackendEvent::Failed{peer:peer.clone(),id:message.wire_id}),
                                         RoomPreparation::Probe{reply}=>{let _=reply.send(Err(crate::crypto::Error::Unavailable("Could not establish complete room recipients. Join a nonanonymous members-only room and check its member permissions.")));},
                                         RoomPreparation::Review=>emit(BackendEvent::LegacyReview{peer:peer.clone(),rows:vec![],errors:vec![text.clone()]}),
+                                        RoomPreparation::PqReview=>emit(BackendEvent::PqDevices{peer:peer.clone(),devices:vec![]}),
                                     }
                                     emit(BackendEvent::RoomError(text));
                                 },
@@ -1197,7 +1225,7 @@ impl Session {
                                 && rooms.recipients(&peer).is_ok_and(|current|current.revision==revision)
                                 && xml.is("message",NS) && xml.attr("type")==Some("groupchat")
                                 && xml.attr("to")==Some(peer.as_str()) && xml.attr("from")==Some(owner.as_str())
-                                && xml.get_child("encrypted",legacy::NS).is_some();
+                                && ((legacy_ready && xml.get_child("encrypted",legacy::NS).is_some()) || (pq_ready && xml.get_child("encrypted",crate::crypto::pq::NS).is_some()));
                             let _=reply.send(allowed && send(&mut client,xml).await);
                         },
                         Some(Command::JoinRoom{peer,nick})=>{
@@ -1231,7 +1259,7 @@ impl Session {
                                 continue;
                             }
                             let (checked, first) = tokio::sync::oneshot::channel();
-                            crypto.send(modern::Request::Probe{peer:peer.clone(),reply:checked});
+                            pq.send(pq::Request::Probe{peer:peer.clone(),reply:checked});
                             let legacy_tx = legacy.sender();
                             tokio::spawn(async move {
                                 let result = crate::encryption_policy::select(
@@ -1254,7 +1282,7 @@ impl Session {
                         Some(Command::Send{peer,message,quote})=>{
                             if !online || message.unavailable || message.upload.is_some() || message.attachment.as_ref().is_some_and(|file|!file.valid_outgoing(message.encrypted)||message.poll.is_some()||message.action.is_some()){emit(BackendEvent::Failed{peer,id:message.wire_id});continue}
                             if rooms.known(&peer) {
-                                if message.mode()==Mode::Legacy {
+                                if matches!(message.mode(),Mode::Legacy|Mode::Pq) {
                                     prepare_room(&rooms,peer,room_epoch,RoomPreparation::Send{message,quote},&network);
                                     continue;
                                 }
@@ -1267,6 +1295,7 @@ impl Session {
                             match message.mode() {
                                 Mode::Legacy => { legacy.send(legacy::service::Request::Send{peer,message,quote}); continue; },
                                 Mode::Omemo2 => { crypto.send(modern::Request::Send{peer,message,quote}); continue; },
+                                Mode::Pq => { pq.send(pq::Request::Send{peer,message,quote}); continue; },
                                 Mode::Plain => {},
                             }
                             let root=outgoing(&peer,&message,&quote);
@@ -1353,8 +1382,8 @@ impl Session {
                         Some(Command::Receipt{peer,id})=>{if online{send(&mut client,Element::builder("message",NS).attr("to".try_into().expect("static XML attribute"),peer).attr("type".try_into().expect("static XML attribute"),"chat").append(Element::builder("received","urn:xmpp:receipts").attr("id".try_into().expect("static XML attribute"),id).build()).build()).await;}},
                     }},
                     event=client.next()=>{match event{
-                        Some(Event::Online)=>{online=true;let contact_epoch=contacts.online();let (manager,contact_network)=(contacts.clone(),network.clone());tokio::spawn(async move{if let Err(error)=manager.refresh(&contact_network,contact_epoch).await{if manager.valid(contact_epoch){manager.error(error)}}});room_epoch=room_epoch.wrapping_add(1);preview_epoch.send_replace(room_epoch);let _=network.send(Command::LoadRoomBookmarks);crypto.send(modern::Request::Online(true));legacy.send(legacy::service::Request::Online(true));emit(BackendEvent::Status{online:true,error:false,text:"Connected · TLS".into()});send(&mut client,el("presence",NS)).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"set").attr("id".try_into().expect("static XML attribute"),"carbons").append(el("enable","urn:xmpp:carbons:2")).build()).await;},
-                        Some(Event::Disconnected(error))=>{#[cfg(test)] eprintln!("fixture disconnect: {error:?}");online=false;preview_epoch.send_modify(|epoch|*epoch=epoch.wrapping_add(1));contacts.disconnect();contact_queries.clear();room_jobs.disconnect();rooms.disconnect();loading_rooms=false;subscribing_rooms=false;crypto_ready=false;legacy_ready=false;crypto.send(modern::Request::Online(false));legacy.send(legacy::service::Request::Online(false));iq.disconnect();for (_,job) in preview_jobs.drain(){finish_preview_history(&mut preview_active,job,false);}preview_active.clear();mam.clear();handshake=std::time::Instant::now();let fatal = fatal_error(&error);emit(BackendEvent::Status{online:false,error:fatal,text:if fatal{"Sign-in failed. Check credentials, TLS certificate and server configuration."}else{"Disconnected. Reconnecting…"}.into()});if fatal{break}},
+                        Some(Event::Online)=>{online=true;let contact_epoch=contacts.online();let (manager,contact_network)=(contacts.clone(),network.clone());tokio::spawn(async move{if let Err(error)=manager.refresh(&contact_network,contact_epoch).await{if manager.valid(contact_epoch){manager.error(error)}}});room_epoch=room_epoch.wrapping_add(1);preview_epoch.send_replace(room_epoch);let _=network.send(Command::LoadRoomBookmarks);crypto.send(modern::Request::Online(true));legacy.send(legacy::service::Request::Online(true));pq.send(pq::Request::Online(true));emit(BackendEvent::Status{online:true,error:false,text:"Connected · TLS".into()});send(&mut client,el("presence",NS)).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"set").attr("id".try_into().expect("static XML attribute"),"carbons").append(el("enable","urn:xmpp:carbons:2")).build()).await;},
+                        Some(Event::Disconnected(error))=>{#[cfg(test)] eprintln!("fixture disconnect: {error:?}");online=false;preview_epoch.send_modify(|epoch|*epoch=epoch.wrapping_add(1));contacts.disconnect();contact_queries.clear();room_jobs.disconnect();rooms.disconnect();loading_rooms=false;subscribing_rooms=false;crypto_ready=false;legacy_ready=false;pq_ready=false;crypto.send(modern::Request::Online(false));legacy.send(legacy::service::Request::Online(false));pq.send(pq::Request::Online(false));iq.disconnect();for (_,job) in preview_jobs.drain(){finish_preview_history(&mut preview_active,job,false);}preview_active.clear();mam.clear();handshake=std::time::Instant::now();let fatal = fatal_error(&error);emit(BackendEvent::Status{online:false,error:fatal,text:if fatal{"Sign-in failed. Check credentials, TLS certificate and server configuration."}else{"Disconnected. Reconnecting…"}.into()});if fatal{break}},
                         None=>break,
                         Some(Event::Stanza(stanza))=>{
                             let root:Element=stanza.into();if iq.receive(&root,&owner){if let Some((epoch,_,serial))=contact_queries.remove(root.attr("id").unwrap_or("")){if root.attr("type")==Some("result")&&root.children().count()==1{if let Some(query)=root.get_child("query",crate::contact_access::ROSTER){if let Err(error)=crate::contact_access::parse_roster(query,true).and_then(|update|contacts.finish_full(epoch,serial,update)){contacts.clear_full(epoch,Some(serial));if contacts.valid(epoch){contacts.error(error)}}}else{contacts.clear_full(epoch,Some(serial));}}else{contacts.clear_full(epoch,Some(serial));}}continue}let from=root.attr("from").unwrap_or("");
@@ -1381,15 +1410,15 @@ impl Session {
                                             let Some((peer,_,_))=normalize(result.xml,&owner,Some((result.uid,result.stamp)))else{continue};
                                             if peer!=page.peer{job.failed=true;continue}
                                         }
-                                        match preview_metadata(&rooms,&crypto,&legacy,&emit,result.xml,&owner,(result.uid,result.stamp)){
+                                        match preview_metadata(&rooms,&crypto,&legacy,&pq,&emit,result.xml,&owner,(result.uid,result.stamp)){
                                             Ok(Some(reply))=>job.pending.push(reply),Ok(None)=>{},Err(())=>job.failed=true,
                                         }
                                         continue;
                                     }
                                     if page.room {
-                                        deliver_room(&rooms,&legacy,&emit,result.xml,&owner,Some((result.uid,result.stamp)));
+                                        deliver_room(&rooms,&legacy,&pq,&emit,result.xml,&owner,Some((result.uid,result.stamp)));
                                     } else if normalize(result.xml,&owner,Some((result.uid,result.stamp))).is_some_and(|(peer,_,_)| peer==page.peer) {
-                                        deliver(&crypto,&legacy,&emit,result.xml,&owner,Some((result.uid,result.stamp)),true,None);
+                                        deliver(&crypto,&legacy,&pq,&emit,result.xml,&owner,Some((result.uid,result.stamp)),true,None);
                                     }
                                     continue;
                                 }
@@ -1400,7 +1429,7 @@ impl Session {
                                     continue;
                                 }
                                 if root.attr("type")==Some("groupchat"){
-                                    deliver_room(&rooms,&legacy,&emit,&root,&owner,None);
+                                    deliver_room(&rooms,&legacy,&pq,&emit,&root,&owner,None);
                                     continue;
                                 }
                                 if crate::avatar::pep_changed(&root) && bare(from).ok().as_deref()==Some(from) {
@@ -1419,10 +1448,10 @@ impl Session {
                                             if let Some(notice)=crate::read_markers::incoming_receipt(inner,&owner).filter(|n|!rooms.known(&n.peer)){emit(BackendEvent::Receipt{peer:notice.peer,id:notice.id});}
                                             if let Some(notice)=crate::read_markers::incoming(inner,&owner).filter(|n|!rooms.known(&n.peer)){emit(BackendEvent::Read{peer:notice.peer,id:notice.id});}
                                         }
-                                        deliver(&crypto,&legacy,&emit,inner,&owner,None,historical,None);
+                                        deliver(&crypto,&legacy,&pq,&emit,inner,&owner,None,historical,None);
                                     }continue
                                 }
-                                if let Some((_peer,message,historical))=normalize(&root,&owner,None){let receipt_to=(!historical&&!message.own&&!message.wire_id.is_empty()&&root.get_child("request","urn:xmpp:receipts").is_some()).then(||from.to_string());deliver(&crypto,&legacy,&emit,&root,&owner,None,historical,receipt_to);}
+                                if let Some((_peer,message,historical))=normalize(&root,&owner,None){let receipt_to=(!historical&&!message.own&&!message.wire_id.is_empty()&&root.get_child("request","urn:xmpp:receipts").is_some()).then(||from.to_string());deliver(&crypto,&legacy,&pq,&emit,&root,&owner,None,historical,receipt_to);}
                                 if root.get_child("delay","urn:xmpp:delay").is_none(){for name in ["composing","paused","active","inactive","gone"]{if root.get_child(name,"http://jabber.org/protocol/chatstates").is_some(){emit(BackendEvent::Typing{peer:bare_of(from),composing:name=="composing"})}}}
                             }else if root.is("presence",NS){
                                 let room_presence=rooms.presence(&root);
@@ -1475,7 +1504,7 @@ impl Session {
                                     }
                                     continue;
                                 }
-                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in ["urn:xmpp:receipts",crate::read_markers::NS,REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT,crate::polls::NS,crate::forwarding::NS,crate::file_share::NS,crate::rooms::invitations::DIRECT]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if legacy_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),legacy::NS).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
+                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in ["urn:xmpp:receipts",crate::read_markers::NS,REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT,crate::polls::NS,crate::forwarding::NS,crate::file_share::NS,crate::rooms::invitations::DIRECT]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if legacy_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),legacy::NS).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}if pq_ready {for suffix in ["",":devices+notify",":bundles+notify",":pqxdh",":spqr",":bundle-v4",":kex-auth"]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),format!("{}{suffix}",crate::crypto::pq::NS)).build());}}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
                             }
                         }
                     }},
@@ -1525,6 +1554,7 @@ fn preview_metadata(
     rooms: &crate::rooms::Rooms,
     crypto: &modern::Handle,
     legacy: &legacy::service::Handle,
+    pq: &pq::Handle,
     emit: &impl Fn(BackendEvent),
     xml: &Element,
     owner: &str,
@@ -1542,6 +1572,12 @@ fn preview_metadata(
         ) else {
             return Ok(None);
         };
+        if xml.get_child("encrypted", crate::crypto::pq::NS).is_some() {
+            let sender = rooms.sender(xml, true).map_err(|_| ())?;
+            metadata.own = sender.author == owner;
+            let frame = modern::Frame { xml: xml.clone(), archive: Some((archive.0.into(), archive.1.into())), historical: true, receipt_to: None };
+            return pq.preview_with_room(frame, Some(crate::crypto::journal::RoomContext { sender, metadata })).map(Some).ok_or(());
+        }
         if xml.get_child("encrypted", legacy::NS).is_some() {
             let sender = rooms.sender(xml, true).map_err(|_| ())?;
             metadata.own = sender.author == owner;
@@ -1570,14 +1606,17 @@ fn preview_metadata(
     }
     let modern = xml.get_child("encrypted", "urn:xmpp:omemo:2").is_some();
     let classic = xml.get_child("encrypted", legacy::NS).is_some();
-    if modern != classic {
+    let post_quantum = xml.get_child("encrypted", crate::crypto::pq::NS).is_some();
+    if u8::from(modern) + u8::from(classic) + u8::from(post_quantum) == 1 {
         let frame = modern::Frame {
             xml: xml.clone(),
             archive: Some((archive.0.into(), archive.1.into())),
             historical: true,
             receipt_to: None,
         };
-        return if modern {
+        return if post_quantum {
+            pq.preview(frame)
+        } else if modern {
             crypto.preview(frame)
         } else {
             legacy.preview(frame, None)
@@ -1585,12 +1624,13 @@ fn preview_metadata(
         .map(Some)
         .ok_or(());
     }
-    deliver(crypto, legacy, emit, xml, owner, Some(archive), true, None);
+    deliver(crypto, legacy, pq, emit, xml, owner, Some(archive), true, None);
     Ok(None)
 }
 fn deliver_room(
     rooms: &crate::rooms::Rooms,
     legacy: &legacy::service::Handle,
+    pq: &pq::Handle,
     emit: &impl Fn(BackendEvent),
     xml: &Element,
     owner: &str,
@@ -1607,6 +1647,20 @@ fn deliver_room(
     let Some((peer, mut metadata, historical)) = parsed else {
         return;
     };
+    if xml.get_child("encrypted", crate::crypto::pq::NS).is_some() {
+        if let Ok(sender) = rooms.sender(xml, archive.is_some()) {
+            metadata.own = sender.author == owner;
+            if metadata.own { metadata.author = "You".into(); }
+            pq.send(pq::Request::IncomingRoom {
+                frame: modern::Frame { xml: xml.clone(), archive: archive.map(|(id,stamp)|(id.into(),stamp.into())), historical, receipt_to: None },
+                sender, metadata,
+            });
+            return;
+        }
+        metadata.text = "The room did not disclose this sender's identity. Refresh room history after reconnecting.".into();
+        metadata.set_encryption(Mode::Pq, String::new());
+        metadata.ciphertext = crate::crypto::bundle::xml(xml, crate::crypto::pq::wire::MAX_WIRE).ok().and_then(|xml|String::from_utf8(xml).ok()).unwrap_or_default();
+    }
     if xml.get_child("encrypted", legacy::NS).is_some() {
         if let Ok(sender) = rooms.sender(xml, archive.is_some()) {
             metadata.own = sender.author == owner;
@@ -1645,6 +1699,7 @@ fn deliver_room(
 fn deliver(
     crypto: &modern::Handle,
     legacy: &legacy::service::Handle,
+    pq: &pq::Handle,
     emit: &impl Fn(BackendEvent),
     xml: &Element,
     owner: &str,
@@ -1669,14 +1724,17 @@ fn deliver(
     }
     let modern = xml.get_child("encrypted", "urn:xmpp:omemo:2").is_some();
     let classic = xml.get_child("encrypted", legacy::NS).is_some();
-    if modern != classic {
+    let post_quantum = xml.get_child("encrypted", crate::crypto::pq::NS).is_some();
+    if u8::from(modern) + u8::from(classic) + u8::from(post_quantum) == 1 {
         let frame = modern::Frame {
             xml: xml.clone(),
             archive: archive.map(|(id, stamp)| (id.into(), stamp.into())),
             historical,
             receipt_to,
         };
-        if modern {
+        if post_quantum {
+            pq.send(pq::Request::Incoming(frame));
+        } else if modern {
             crypto.send(modern::Request::Incoming(frame));
         } else {
             legacy.send(legacy::service::Request::Incoming(frame));
@@ -1702,12 +1760,12 @@ async fn send(client: &mut Client, root: Element) -> bool {
 mod tests {
     use super::*;
     #[test]
-    fn unsupported_pq_messages_are_visible_without_trusting_outside_content() {
+    fn pq_messages_are_visible_without_trusting_outside_content() {
         for body in ["", "<body>Untrusted outside text</body><x xmlns='jabber:x:oob'><url>https://example.org/fake.png</url></x>"] {
             let xml: Element = format!("<message xmlns='jabber:client' id='pq-message' type='chat' from='friend@example.org/phone' to='me@example.org'><encrypted xmlns='urn:monocles:omemo-pq:1'/>{body}</message>").parse().unwrap();
             let (_, message, _) = normalize(&xml, "me@example.org", None).unwrap();
             assert!(message.unavailable);
-            assert!(message.text.starts_with("PQ-OMEMO message"));
+            assert!(message.text.starts_with("Encrypted message"));
             assert!(message.attachment.is_none());
         }
     }

@@ -1,4 +1,4 @@
-//! OMEMO 2-only state; never shares identities, trust or sessions with legacy/PQ.
+//! Independent classic, Legacy and PQ OMEMO identities, trust and sessions.
 pub mod bundle;
 pub mod device;
 pub mod engine;
@@ -8,6 +8,7 @@ pub mod lifecycle;
 pub mod native;
 pub mod payload;
 pub mod pep;
+pub mod pq;
 pub mod records;
 pub mod service;
 pub mod vault;

@@ -20,8 +20,8 @@ impl Ui {
         !state.current().group
             && (current.mode() == crate::encryption_policy::Mode::Legacy
                 || selected == Some(crate::encryption_policy::Mode::Legacy))
-            && base.mode() != crate::encryption_policy::Mode::Omemo2
-            && selected != Some(crate::encryption_policy::Mode::Omemo2)
+            && !matches!(base.mode(), crate::encryption_policy::Mode::Omemo2 | crate::encryption_policy::Mode::Pq)
+            && !matches!(selected, Some(crate::encryption_policy::Mode::Omemo2 | crate::encryption_policy::Mode::Pq))
             && !self.store.action_protected(owner, peer, id)
     }
     pub(crate) fn public_reaction_consent_required(&self, id: &str) -> bool {
@@ -151,9 +151,10 @@ impl Ui {
             self.notice("Message changed; reopen its menu");
             return false;
         }
-        let legacy = current.mode() == crate::encryption_policy::Mode::Legacy
+        let protected_original = matches!(base.mode(), crate::encryption_policy::Mode::Omemo2 | crate::encryption_policy::Mode::Pq);
+        let legacy = !protected_original && (current.mode() == crate::encryption_policy::Mode::Legacy
             || self.sending_mode(self.state.borrow().current())
-                == Some(crate::encryption_policy::Mode::Legacy);
+                == Some(crate::encryption_policy::Mode::Legacy));
         if legacy && (kind == "correct" || self.state.borrow().current().group) {
             self.notice("Legacy OMEMO does not support protected message actions here");
             return false;
@@ -177,8 +178,10 @@ impl Ui {
             base.mode()
         } else if public_reaction {
             crate::encryption_policy::Mode::Plain
+        } else if protected_original {
+            base.mode()
         } else if encrypted {
-            crate::encryption_policy::Mode::Omemo2
+            crate::encryption_policy::Mode::Pq
         } else {
             crate::encryption_policy::Mode::Plain
         };

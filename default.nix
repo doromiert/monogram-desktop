@@ -109,7 +109,7 @@ in craneLib.buildPackage (commonArgs // {
   meta = {
     description = "Native Rust GTK/libadwaita Monogram client";
     mainProgram = "monogram-desktop";
-    license = [ lib.licenses.gpl3Plus lib.licenses.gpl3Only ];
+    license = [ lib.licenses.gpl3Plus lib.licenses.gpl3Only lib.licenses.agpl3Only ];
     platforms = lib.platforms.linux;
   };
 })

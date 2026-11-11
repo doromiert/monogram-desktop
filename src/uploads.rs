@@ -504,7 +504,7 @@ pub async fn run(
     job: Arc<Job>,
 ) -> Result<Uploaded> {
     let encrypted = mode.encrypted();
-    let opaque = mode == crate::encryption_policy::Mode::Omemo2;
+    let opaque = matches!(mode, crate::encryption_policy::Mode::Omemo2 | crate::encryption_policy::Mode::Pq);
     job.check()?;
     let provider = discover(iq, owner).await?;
     job.check()?;

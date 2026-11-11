@@ -84,6 +84,8 @@ pub struct Ui {
     pub online: Cell<bool>,
     pub crypto: RefCell<crate::crypto::service::Status>,
     pub legacy_crypto: RefCell<crate::crypto::service::Status>,
+    pub pq_crypto: RefCell<crate::crypto::service::Status>,
+    pub pq_reviews: RefCell<HashMap<String, Vec<crate::crypto::pq::service::Review>>>,
     pub encryption_checks: RefCell<HashMap<String, String>>,
     pub encryption_revision: Cell<u64>,
     pub room_syncing: RefCell<Option<(u64, String, u64)>>,
@@ -367,6 +369,8 @@ impl Ui {
             online: Cell::new(false),
             crypto: RefCell::new(Default::default()),
             legacy_crypto: RefCell::new(Default::default()),
+            pq_crypto: RefCell::new(Default::default()),
+            pq_reviews: RefCell::new(HashMap::new()),
             encryption_checks: RefCell::new(HashMap::new()),
             encryption_revision: Cell::new(0),
             room_syncing: RefCell::new(None),
@@ -1910,6 +1914,8 @@ impl Ui {
         self.online.set(false);
         self.crypto.replace(Default::default());
         self.legacy_crypto.replace(Default::default());
+        self.pq_crypto.replace(Default::default());
+        self.pq_reviews.borrow_mut().clear();
         self.encryption_checks.borrow_mut().clear();
         self.security_widgets.borrow_mut().take();
         self.contact_access_widgets.borrow_mut().take();
@@ -2108,6 +2114,7 @@ impl Ui {
                     self.encryption_revision
                         .set(self.encryption_revision.get().wrapping_add(1));
                     self.legacy_crypto.borrow_mut().ready = false;
+                    self.pq_crypto.borrow_mut().ready = false;
                     self.history_pages.borrow_mut().clear();
                     self.history_pending.borrow_mut().clear();
                     self.update_history_spinner();
@@ -2238,6 +2245,28 @@ impl Ui {
                 self.update_mode();
                 self.flush_send_queue();
             }
+            BackendEvent::PqCrypto(status) => {
+                let became_ready = status.ready && !self.pq_crypto.borrow().ready;
+                self.pq_crypto.replace(status);
+                if became_ready {
+                    self.encryption_revision
+                        .set(self.encryption_revision.get().wrapping_add(1));
+                    for chat in &mut self.state.borrow_mut().chats {
+                        if chat.encryption_preference()
+                            == crate::encryption_policy::Preference::Automatic
+                        {
+                            chat.automatic_encryption = None;
+                        }
+                    }
+                }
+                self.update_crypto_controls();
+                self.update_mode();
+                self.flush_send_queue();
+            }
+            BackendEvent::PqDevices { peer, devices } => {
+                self.pq_reviews.borrow_mut().insert(peer.clone(), devices);
+                self.handle_pq_review(&peer);
+            }
             BackendEvent::AvatarChanged { peer, hint } => {
                 self.avatars.borrow_mut().invalidate(&peer, hint);
                 return;
@@ -2360,6 +2389,21 @@ impl Ui {
                     self.command(Command::Crypto(crate::crypto::service::Request::Accepted(
                         token,
                     )));
+                }
+                self.queue_chat_refresh();
+                return;
+            }
+            BackendEvent::PqEncrypted {
+                peer,
+                message,
+                historical,
+                receipt_to,
+                token,
+            } => {
+                if self.receive_message(owner, peer, message, historical, receipt_to) {
+                    self.command(Command::PqCrypto(
+                        crate::crypto::pq::service::Request::Accepted(token),
+                    ));
                 }
                 self.queue_chat_refresh();
                 return;

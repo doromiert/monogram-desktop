@@ -119,6 +119,8 @@ impl Message {
             Mode::Plain
         } else if self.encryption_mode == Some(Mode::Legacy) {
             Mode::Legacy
+        } else if self.encryption_mode == Some(Mode::Pq) {
+            Mode::Pq
         } else {
             Mode::Omemo2
         }

@@ -12,7 +12,7 @@ impl Ui {
     pub fn sending_mode(&self, chat: &Chat) -> Option<Mode> {
         if self.smoke && chat.sending_preference.is_none() {
             return Some(if chat.encryption {
-                Mode::Omemo2
+                Mode::Pq
             } else {
                 Mode::Plain
             });
@@ -33,6 +33,11 @@ impl Ui {
                 .borrow()
                 .ready
                 .then(|| self.crypto.borrow().fingerprint.clone()),
+            Mode::Pq => self
+                .pq_crypto
+                .borrow()
+                .ready
+                .then(|| self.pq_crypto.borrow().fingerprint.clone()),
         }
     }
 
@@ -52,10 +57,6 @@ impl Ui {
         if chat.group {
             if !chat.room_can_send {
                 self.notice("Join the room before sending");
-                return;
-            }
-            if chat.encryption_preference() == Preference::Omemo2 {
-                self.notice("OMEMO 2 room sending is unavailable. Choose Legacy OMEMO or Automatic in Conversation Security.");
                 return;
             }
         }

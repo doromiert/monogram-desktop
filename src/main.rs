@@ -45,6 +45,7 @@ mod packs;
 mod polls;
 mod polls_ui;
 mod protocol;
+mod pq_security_ui;
 mod read_markers;
 mod read_state;
 mod request_logic;
