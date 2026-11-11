@@ -60,4 +60,24 @@ fn main() {
         println!("cargo:rustc-link-lib={library}");
     }
     println!("cargo:rerun-if-changed=native/image_loader.c");
+    let clapper = pkg_config::Config::new()
+        .atleast_version("0.10.0")
+        .probe("clapper-gtk-0.0")
+        .expect("Clapper GTK 0.10 (same player as Galeria)");
+    let mut video = cc::Build::new();
+    video.opt_level(2).file("native/video_player.c");
+    for path in &clapper.include_paths {
+        video.include(path);
+    }
+    video
+        .flag_if_supported("-Wno-unused-parameter")
+        .compile("monogram_video_player");
+    // Shared providers must follow the archive under --as-needed.
+    for path in &clapper.link_paths {
+        println!("cargo:rustc-link-search=native={}", path.display());
+    }
+    for library in &clapper.libs {
+        println!("cargo:rustc-link-lib={library}");
+    }
+    println!("cargo:rerun-if-changed=native/video_player.c");
 }

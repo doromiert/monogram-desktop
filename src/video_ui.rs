@@ -1,33 +1,56 @@
 //! Native playback of authenticated cached media. The open descriptor pins the verified bytes.
 use crate::{downloads::VerifiedFile, model::Message, ui::Ui, widgets::*};
 use adw::prelude::*;
+use glib::translate::{from_glib_full, from_glib_none};
 use gtk::{gio, glib};
+use std::ffi::CString;
+
+unsafe extern "C" {
+    fn monogram_playback_init() -> i32;
+    fn monogram_video_new(
+        uri: *const std::ffi::c_char,
+        controls: *mut *mut gtk::ffi::GtkWidget,
+        replay: *mut *mut gtk::ffi::GtkWidget,
+    ) -> *mut gtk::ffi::GtkMediaStream;
+}
 use std::{cell::Cell, os::fd::AsRawFd, rc::Rc, time::Duration};
 
 pub(crate) struct Playback {
-    pub(crate) media: gtk::MediaFile,
+    pub(crate) media: gtk::MediaStream,
+    pub(crate) controls: gtk::Widget,
+    pub(crate) replay: gtk::Button,
     _input: VerifiedFile,
     pub(crate) expanded: Cell<bool>,
     inline_users: Cell<usize>,
 }
 impl Playback {
-    fn new(input: VerifiedFile) -> Rc<Self> {
+    fn new(input: VerifiedFile) -> Option<Rc<Self>> {
         let file = gio::File::for_path(format!("/proc/self/fd/{}", input.0.as_raw_fd()));
-        let media = gtk::MediaFile::for_file(&file);
+        let uri = CString::new(file.uri().as_str()).ok()?;
+        let mut controls = std::ptr::null_mut();
+        let mut replay = std::ptr::null_mut();
+        let pointer = unsafe { monogram_video_new(uri.as_ptr(), &mut controls, &mut replay) };
+        if pointer.is_null() {
+            return None;
+        }
+        let media: gtk::MediaStream = unsafe { from_glib_full(pointer) };
+        let controls: gtk::Widget = unsafe { from_glib_none(controls) };
+        let replay: gtk::Button = unsafe { from_glib_none(replay.cast::<gtk::ffi::GtkButton>()) };
         media.set_muted(true);
         media.set_loop(true);
-        Rc::new(Self {
+        Some(Rc::new(Self {
             media,
+            controls,
+            replay,
             _input: input,
             expanded: Cell::new(false),
             inline_users: Cell::new(0),
-        })
+        }))
     }
 }
 impl Drop for Playback {
     fn drop(&mut self) {
         self.media.pause();
-        self.media.clear();
     }
 }
 struct InlinePlayback {
@@ -111,7 +134,12 @@ impl Ui {
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
             let verified = gio::spawn_blocking(move || {
-                crate::downloads::verified_input(&path, &source, &cancel)
+                let input = crate::downloads::verified_input(&path, &source, &cancel)?;
+                // Plugin scanning and Clapper initialization must never block GTK input.
+                if unsafe { monogram_playback_init() } == 0 {
+                    return Err("Video playback initialization failed");
+                }
+                Ok(input)
             })
             .await;
             let Some(ui) = weak.upgrade().filter(|ui| {
@@ -121,10 +149,16 @@ impl Ui {
             };
             ui.images.borrow_mut().video_tasks.remove(&key);
             match verified {
-                Ok(Ok(input)) => ui
-                    .images
-                    .borrow_mut()
-                    .remember_video(key, Playback::new(input)),
+                Ok(Ok(input)) => {
+                    if let Some(player) = Playback::new(input) {
+                        ui.images.borrow_mut().remember_video(key, player);
+                    } else {
+                        ui.images
+                            .borrow_mut()
+                            .video_failures
+                            .insert(key, "Video playback unavailable");
+                    }
+                }
                 _ => {
                     ui.images
                         .borrow_mut()

@@ -1,4 +1,4 @@
-{ lib, stdenv, rustPlatform, pkg-config, libomemo-c, openssl, gtk4, libadwaita, libepoxy, libglycin-gtk4, glycin-loaders, sqlite, wrapGAppsHook4, xorg-server, dbus, makeFontsConf, adwaita-fonts, gsettings-desktop-schemas, mesa, librsvg, prosody, cacert, python3, jdk21, gnome-keyring, gst_all_1 }:
+{ lib, stdenv, rustPlatform, pkg-config, libomemo-c, openssl, gtk4, libadwaita, libepoxy, libglycin-gtk4, glycin-loaders, sqlite, wrapGAppsHook4, xorg-server, dbus, makeFontsConf, adwaita-fonts, gsettings-desktop-schemas, mesa, librsvg, prosody, cacert, python3, jdk21, gnome-keyring, gst_all_1, clapper-unwrapped }:
 let fontConfig = makeFontsConf { fontDirectories = [ adwaita-fonts ]; };
 in rustPlatform.buildRustPackage {
   pname = "monogram-desktop";
@@ -6,7 +6,7 @@ in rustPlatform.buildRustPackage {
   src = lib.cleanSource ./.;
   cargoHash = "sha256-xgg3aNJEywGo819ZCoSRoVoZfDRPPHEENj9R3rgkN4E=";
   nativeBuildInputs = [ pkg-config wrapGAppsHook4 ];
-  buildInputs = [ gtk4 libadwaita libepoxy libglycin-gtk4 glycin-loaders sqlite libomemo-c openssl librsvg gsettings-desktop-schemas gst_all_1.gstreamer gst_all_1.gst-plugins-base gst_all_1.gst-plugins-good gst_all_1.gst-plugins-bad gst_all_1.gst-plugins-ugly gst_all_1.gst-libav ];
+  buildInputs = [ clapper-unwrapped clapper-unwrapped.lib gtk4 libadwaita libepoxy libglycin-gtk4 glycin-loaders sqlite libomemo-c openssl librsvg gsettings-desktop-schemas gst_all_1.gstreamer gst_all_1.gst-plugins-base gst_all_1.gst-plugins-good gst_all_1.gst-plugins-bad gst_all_1.gst-plugins-ugly gst_all_1.gst-libav ];
   nativeCheckInputs = [ xorg-server dbus prosody openssl python3 jdk21 gnome-keyring ];
   doCheck = true;
   postCheck = ''

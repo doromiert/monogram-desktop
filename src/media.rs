@@ -808,7 +808,8 @@ pub struct MediaViewer {
     previous: gtk::Button,
     next: gtk::Button,
     video_controls: gtk::Revealer,
-    media_controls: gtk::MediaControls,
+    controls_mount: gtk::Box,
+    replay_mount: gtk::Box,
     active_video: RefCell<Option<Rc<crate::video_ui::Playback>>>,
     playbacks: RefCell<HashMap<String, Rc<crate::video_ui::Playback>>>,
     progress: Cell<f64>,
@@ -911,14 +912,21 @@ impl MediaViewer {
         next.set_halign(gtk::Align::End);
         let next_revealer = reveal(next.upcast_ref(), gtk::Align::End, gtk::Align::Center);
         root.add_overlay(&next_revealer);
-        let media_controls = gtk::MediaControls::new(None::<&gtk::MediaStream>);
-        margins(&media_controls, 12);
-        let bottom = bx(true, 0);
-        bottom.add_css_class("media-controls-bottom");
-        bottom.append(&media_controls);
-        let video_controls = reveal(bottom.upcast_ref(), gtk::Align::Fill, gtk::Align::End);
+        // Galeria keeps Clapper's real SimpleControls inside its owning Video widget.
+        let controls_mount = bx(true, 0);
+        controls_mount.add_css_class("galeria-video-controls");
+        controls_mount.add_css_class("galeria-video");
+        let video_controls = reveal(
+            controls_mount.upcast_ref(),
+            gtk::Align::Fill,
+            gtk::Align::End,
+        );
         video_controls.set_reveal_child(false);
         root.add_overlay(&video_controls);
+        let replay_mount = bx(true, 0);
+        replay_mount.set_halign(gtk::Align::Center);
+        replay_mount.set_valign(gtk::Align::Center);
+        root.add_overlay(&replay_mount);
         let preview_status = label("Loading preview…", "");
         preview_status.set_halign(gtk::Align::Center);
         preview_status.set_valign(gtk::Align::Center);
@@ -961,7 +969,8 @@ impl MediaViewer {
             previous,
             next,
             video_controls,
-            media_controls,
+            controls_mount,
+            replay_mount,
             active_video: RefCell::new(None),
             playbacks: RefCell::new(HashMap::new()),
             progress: Cell::new(0.),
@@ -1058,7 +1067,7 @@ impl MediaViewer {
             let mut target = viewer.root.pick(x, y, gtk::PickFlags::DEFAULT);
             while let Some(widget) = target {
                 if widget.is::<gtk::Button>()
-                    || widget.is::<gtk::MediaControls>()
+                    || widget.has_css_class("galeria-video-controls")
                     || widget.is::<adw::HeaderBar>()
                 {
                     return;
@@ -1124,6 +1133,7 @@ impl MediaViewer {
             control.set_opacity(p);
         }
         self.preview_status.set_opacity(p);
+        self.replay_mount.set_opacity(p);
         self.video_controls.set_opacity(p);
         for f in self.frames.borrow().iter() {
             f.imp().progress.set(p);
@@ -1139,6 +1149,7 @@ impl MediaViewer {
             control.set_opacity(0.);
         }
         self.preview_status.set_opacity(0.);
+        self.replay_mount.set_opacity(0.);
         self.video_controls.set_opacity(0.);
         self.root.grab_focus();
         let weak = Rc::downgrade(self);
@@ -1543,10 +1554,16 @@ impl MediaViewer {
             return;
         }
         if let Some(current) = self.active_video.borrow_mut().take() {
+            if current.controls.parent().as_ref() == Some(self.controls_mount.upcast_ref()) {
+                self.controls_mount.remove(&current.controls);
+            }
+            if current.replay.parent().as_ref() == Some(self.replay_mount.upcast_ref()) {
+                self.replay_mount.remove(&current.replay);
+            }
             let poster = current.media.current_image();
             for picture in self.pictures.borrow().iter() {
                 if picture.paintable().is_some_and(|image| {
-                    image.downcast_ref::<gtk::MediaFile>() == Some(&current.media)
+                    image.downcast_ref::<gtk::MediaStream>() == Some(&current.media)
                 }) {
                     picture.set_paintable(Some(&poster));
                 }
@@ -1560,13 +1577,12 @@ impl MediaViewer {
             player.expanded.set(true);
             player.media.set_loop(false);
             player.media.set_muted(false);
-            self.media_controls.set_media_stream(Some(&player.media));
+            self.controls_mount.append(&player.controls);
+            self.replay_mount.append(&player.replay);
             self.video_controls.set_reveal_child(true);
             player.media.play();
             self.active_video.replace(Some(player));
         } else {
-            self.media_controls
-                .set_media_stream(None::<&gtk::MediaStream>);
             self.video_controls.set_reveal_child(false);
         }
     }

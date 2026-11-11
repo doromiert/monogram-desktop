@@ -1,4 +1,4 @@
-# OMEMO native components
+# Native components
 
 `crypto_provider.c` is copied unchanged from Monogram Android
 `xmpp-core/src/main/c/crypto_provider.c` at commit
@@ -25,3 +25,9 @@ see `tests/mobile-reference/README.md` for their provenance.
 `image_loader.c` is a thin adapter to [GNOME Glycin](https://gnome.pages.gitlab.gnome.org/glycin/)
 2.1.5 from Nix. It hands verified descriptors to the upstream sandbox and returns
 decoded textures to Rust.
+
+`video_player.c` links [Clapper and Clapper GTK](https://github.com/Rafostar/clapper)
+0.10.0 through the pinned Nix package (LGPL-2.1-or-later, copyright Rafał Dzięgiel).
+It reuses `ClapperGtk.Video` and `SimpleControls`, the same upstream widgets used
+by Galeria's `video_ui.py`, while adapting their paintable for Monogram's shared
+inline/focus rendering. No Clapper implementation is vendored here.

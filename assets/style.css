@@ -112,9 +112,11 @@
 .media-bubble .message-author { margin: 3px 7px; }
 .media-viewer .media-controls-top { background: linear-gradient(to bottom, rgba(0,0,0,.5), transparent); padding-bottom: 24px; }
 .media-viewer .media-controls-top headerbar { color: white; }
-.media-viewer .media-controls-bottom { background: linear-gradient(to top, rgba(0,0,0,.5), transparent); padding-top: 24px; }
 .media-viewer button.circular { color: white; }
 .media-viewer button.media-viewer-arrow { background: rgba(28,28,28,.85); margin: 14px; min-width: 32px; min-height: 32px; }
+/* Mirrored from Galeria's NAPL-1.1 Clapper presentation; the widget stays upstream. */
+.galeria-video clapper-gtk-buffering-animation { opacity: 0; }
+.galeria-video clapper-gtk-video .osd popover modelbutton arrow { background: none; box-shadow: none; }
 
 .message-bubble.media-bubble { border-bottom-left-radius: 5px; }
 .message-bubble.media-bubble.own { border-bottom-left-radius: 12px; border-bottom-right-radius: 5px; }

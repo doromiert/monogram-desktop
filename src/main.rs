@@ -165,7 +165,7 @@ fn main() -> gtk::glib::ExitCode {
         }
         if let Some(path) = std::env::var_os("MONOGRAM_CAPTURE_PATH") {
             let window = ui.window.downgrade();
-            gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(6), move || {
+            gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || {
                 let Some(window) = window.upgrade().filter(|window| window.is_mapped()) else {
                     return;
                 };
