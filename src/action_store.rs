@@ -144,9 +144,20 @@ impl Store {
                         |r| r.get(0),
                     )
                     .optional()?;
-                if unavailable
-                    .is_some_and(|body| Message::decode(&body).is_ok_and(|m| m.unavailable))
-                {
+                if unavailable.is_some_and(|body| {
+                    Message::decode(&body).is_ok_and(|previous| {
+                        previous.unavailable
+                            || matches!(m.action, Some(Action::Retract { .. }))
+                                && m.mode() == crate::encryption_policy::Mode::Legacy
+                                && previous.mode() == m.mode()
+                                && !m.fingerprint.is_empty()
+                                && previous.fingerprint == m.fingerprint
+                                && previous.sender.split('/').next() == m.sender.split('/').next()
+                                && previous.aliases.iter().any(|alias| {
+                                    alias.starts_with("legacy-omemo:") && m.aliases.contains(alias)
+                                })
+                    })
+                }) {
                     for table in ["messages", "message_bases"] {
                         tx.execute(
                             &format!("DELETE FROM {table} WHERE account=? AND peer=? AND id=?"),
@@ -306,6 +317,47 @@ impl Store {
             |r| r.get(0),
         )?;
         Message::decode(&body).map_err(|_| rusqlite::Error::InvalidQuery)
+    }
+    pub fn deletion_targets(
+        &self,
+        account: &str,
+        peer: &str,
+        ids: &[String],
+    ) -> rusqlite::Result<Vec<String>> {
+        let mut targets = ids.to_vec();
+        for id in ids {
+            let Some(parent) = self.message(account, peer, id).filter(|m| {
+                m.own
+                    && m.mode() == crate::encryption_policy::Mode::Legacy
+                    && m.attachment.is_some()
+                    && !m.retracted
+                    && !m.unavailable
+                    && actions::valid_id(&m.wire_id)
+                    && m.sender.split('/').next() == Some(account)
+            }) else {
+                continue;
+            };
+            let mut query = self.db.prepare("SELECT body FROM messages WHERE account=? AND peer=? AND json_extract(body,'$.upload_caption_for')=? AND json_extract(body,'$.own')=1")?;
+            let rows = query.query_map(params![account, peer, parent.wire_id], |row| {
+                row.get::<_, String>(0)
+            })?;
+            for body in rows {
+                let child = Message::decode(&body?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+                if child.mode() == parent.mode()
+                    && child.fingerprint == parent.fingerprint
+                    && child.sender.split('/').next() == Some(account)
+                    && !child.retracted
+                    && !child.unavailable
+                    && child.action.is_none()
+                    && child.attachment.is_none()
+                    && child.upload.is_none()
+                    && !targets.contains(&child.id)
+                {
+                    targets.push(child.id);
+                }
+            }
+        }
+        Ok(targets)
     }
     pub fn action_target(
         &self,

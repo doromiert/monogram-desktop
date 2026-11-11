@@ -513,6 +513,10 @@ impl Ui {
         self.action("security", |s| s.security());
         self.action("info", |s| s.show_info());
         self.action("requests", |s| s.requests());
+        self.action("sync-history", |s| {
+            let peer = s.state.borrow().current().jid.clone();
+            s.request_server_history(&peer);
+        });
         self.action("contacts", |s| s.contacts());
         self.action("archives", |s| s.archives());
         self.action("saved", |s| s.select_chat("saved"));

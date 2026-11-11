@@ -7,6 +7,11 @@ manual Download, Cancel, Retry and native Save As. The reference is mobile's
 Direct and room uploads now use XEP-0363 service discovery and slot requests. Live photos have inline previews, a shared media grid and an expanded viewer.
 Other rich media and complete transfer/settings parity remain open.
 
+Inline media preserves aspect ratio within 420 × 360 pixels; stickers stay
+borderless within 256 × 256 pixels. Known metadata sizes the progress placeholder
+before decode. Retained rows keep following account-owned download/decode jobs
+across reconnects and map/unmap cycles.
+
 ## Wire profile
 
 The existing [XEP-0447](https://xmpp.org/extensions/xep-0447.html) SFS description

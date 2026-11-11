@@ -3,13 +3,13 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 const A: &str = "alice@example.invalid";
 const B: &str = "bob@example.invalid";
-fn fixture(owner: &str, id: u32) -> (Store, Journal, Bundle) {
+pub(super) fn fixture(owner: &str, id: u32) -> (Store, Journal, Bundle) {
     let mut store = Store::open(None, owner, id, MasterKey::new(random().unwrap())).unwrap();
     let bundle = device::prepare_for(&mut store, 1, true).unwrap();
     let journal = Journal::new(&mut store).unwrap();
     (store, journal, bundle)
 }
-fn approve(store: &mut Store, peer: &str, id: u32, bundle: &Bundle) {
+pub(super) fn approve(store: &mut Store, peer: &str, id: u32, bundle: &Bundle) {
     store
         .transaction(|tx| tx.save(SEEN, peer, id, Some(&bundle.identity)))
         .unwrap();
@@ -20,7 +20,7 @@ fn approve(store: &mut Store, peer: &str, id: u32, bundle: &Bundle) {
     )
     .unwrap();
 }
-fn device(peer: &str, id: u32, bundle: &Bundle) -> Device {
+pub(super) fn device(peer: &str, id: u32, bundle: &Bundle) -> Device {
     Device {
         peer: peer.into(),
         id,

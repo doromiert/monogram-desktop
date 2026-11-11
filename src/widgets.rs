@@ -191,14 +191,36 @@ impl MessageText {
     }
 }
 
+const INLINE_MEDIA_MAX_WIDTH: i32 = 420;
+const INLINE_MEDIA_MAX_HEIGHT: i32 = 360;
+const STICKER_MAX_SIZE: i32 = 256;
+
 mod image_imp {
     use super::*;
+    fn fit_box(max_width: i32, max_height: i32, ratio: f64) -> (i32, i32) {
+        let max_width = max_width.max(1);
+        let max_height = max_height.max(1);
+        let ratio = ratio.max(0.01);
+        if ratio >= f64::from(max_width) / f64::from(max_height) {
+            (
+                max_width,
+                (f64::from(max_width) / ratio).round().max(1.) as i32,
+            )
+        } else {
+            (
+                (f64::from(max_height) * ratio).round().max(1.) as i32,
+                max_height,
+            )
+        }
+    }
+
     #[derive(Default)]
     pub struct AspectImage {
         pub paintable: RefCell<Option<gdk::Paintable>>,
         pub ratio: Cell<f64>,
         pub cover: Cell<bool>,
         pub max_width: Cell<i32>,
+        pub max_height: Cell<i32>,
         pub borderless: Cell<bool>,
     }
     #[glib::object_subclass]
@@ -222,16 +244,22 @@ mod image_imp {
                     }
                 };
             }
-            let width = self.max_width.get().max(1);
+            let (width, height) = fit_box(
+                self.max_width.get(),
+                self.max_height.get(),
+                self.ratio.get(),
+            );
             if o == gtk::Orientation::Horizontal {
                 (0, width, -1, -1)
             } else {
-                // ListBox measures a start-aligned row against the entire viewport.
-                // Its photo is at most its natural width, even in a wide window.
-                let h = ((if size >= 0 { size.min(width) } else { width }) as f64
-                    / self.ratio.get().max(0.01))
-                .round() as i32;
-                (if size >= 0 { h } else { 0 }, h, -1, -1)
+                let height = if size >= 0 {
+                    let allocated_width = size.min(width).max(0);
+                    ((f64::from(allocated_width) / self.ratio.get().max(0.01)).round() as i32)
+                        .min(height)
+                } else {
+                    height
+                };
+                (0, height, -1, -1)
             }
         }
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
@@ -319,7 +347,17 @@ impl AspectImage {
     }
     pub fn thumbnail(width: i32, borderless: bool) -> Self {
         let obj: Self = glib::Object::new();
-        obj.imp().max_width.set(width);
+        let max_size = if borderless {
+            STICKER_MAX_SIZE
+        } else {
+            INLINE_MEDIA_MAX_WIDTH
+        };
+        obj.imp().max_width.set(width.min(max_size).max(1));
+        obj.imp().max_height.set(if borderless {
+            STICKER_MAX_SIZE
+        } else {
+            INLINE_MEDIA_MAX_HEIGHT
+        });
         obj.imp().borderless.set(borderless);
         obj.imp().ratio.set(1.);
         obj
@@ -338,6 +376,39 @@ impl AspectImage {
         obj.set_valign(gtk::Align::Start);
         obj.set_halign(gtk::Align::Center);
         obj
+    }
+}
+
+#[cfg(test)]
+mod media_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn inline_media_fits_caps_and_narrow_widths() {
+        gtk::init().expect("GTK initializes");
+        for (width, borderless, ratio, expected, narrow) in [
+            (320, false, 0.5, (180, 360), (120, 240)),
+            (320, false, 2.0, (320, 160), (120, 60)),
+            (512, true, 1.0, (256, 256), (120, 120)),
+        ] {
+            let image = AspectImage::thumbnail(width, borderless);
+            image.set_ratio(ratio);
+            assert_eq!(
+                image.measure(gtk::Orientation::Horizontal, -1).1,
+                expected.0
+            );
+            assert_eq!(
+                image.measure(gtk::Orientation::Vertical, expected.0).1,
+                expected.1
+            );
+            assert_eq!(
+                image.measure(gtk::Orientation::Vertical, narrow.0).1,
+                narrow.1
+            );
+            assert_eq!(image.measure(gtk::Orientation::Vertical, narrow.0).0, 0);
+        }
+        let sticker = AspectImage::thumbnail(512, true);
+        assert!(sticker.imp().borderless.get());
     }
 }
 

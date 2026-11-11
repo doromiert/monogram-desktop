@@ -74,11 +74,51 @@ fn empty(element: &Element) -> bool {
 fn reply_fallback(element: &Element) -> bool {
     element.is("fallback", FALLBACK) && element.attr("for") == Some(REPLY)
 }
+fn recovered_retraction(
+    outer: &Element,
+    stored: &Message,
+    metadata: &Message,
+) -> Result<Option<Message>> {
+    let Some(action @ crate::message_actions::Action::Retract { .. }) =
+        crate::message_actions::parse(outer).map_err(|_| Error::Invalid("legacy retraction"))?
+    else {
+        return Ok(None);
+    };
+    if stored.mode() != Mode::Legacy
+        || stored.unavailable
+        || stored.fingerprint.is_empty()
+        || stored.own != metadata.own
+        || stored.sender.split('/').next() != metadata.sender.split('/').next()
+    {
+        return Ok(None);
+    }
+    let mut message = Message {
+        action: Some(action),
+        id: stored.id.clone(),
+        wire_id: stored.wire_id.clone(),
+        sender: stored.sender.clone(),
+        own: stored.own,
+        timestamp: stored.timestamp.clone(),
+        delivery: stored.delivery.clone(),
+        aliases: stored.aliases.clone(),
+        ..Default::default()
+    };
+    message.aliases.extend(metadata.aliases.clone());
+    message.set_encryption(Mode::Legacy, stored.fingerprint.clone());
+    Ok(Some(message))
+}
 fn outgoing_content(peer: &str, message: &Message, quote: &str) -> Result<Element> {
     if message.mode() != Mode::Legacy {
         return Err(Error::Invalid("wrong outgoing Legacy OMEMO mode"));
     }
-    if message.upload.is_some() || message.poll.is_some() || message.action.is_some() {
+    if message.upload.is_some()
+        || message.poll.is_some()
+        || message
+            .action
+            .as_ref()
+            .is_some_and(|action| !matches!(action, crate::message_actions::Action::Retract { .. }))
+        || message.action.is_some() && message.attachment.is_some()
+    {
         return Err(Error::Unavailable(
             "This message cannot be sent with Legacy OMEMO",
         ));
@@ -100,6 +140,9 @@ fn outgoing_content(peer: &str, message: &Message, quote: &str) -> Result<Elemen
     }
 }
 fn decorate_outgoing(xml: &mut Element, clear: &Element, message: &Message) {
+    if let Some(action @ crate::message_actions::Action::Retract { .. }) = &message.action {
+        crate::message_actions::decorate(xml, action);
+    }
     for child in clear
         .children()
         .filter(|child| child.is("reply", REPLY) || reply_fallback(child))
@@ -631,6 +674,17 @@ impl Worker {
                         .message(&self.owner, peer, &id)
                         .filter(|m| !m.unavailable)
                     {
+                        if room.is_none()
+                            && let Some(retraction) =
+                                recovered_retraction(&frame.xml, &stored, message)?
+                        {
+                            self.emit(BackendEvent::Message {
+                                peer: peer.clone(),
+                                message: retraction,
+                                historical: true,
+                                receipt_to: None,
+                            });
+                        }
                         let legacy_reply = if stored.mode() == Mode::Legacy
                             && stored.reply_id.is_empty()
                             && stored.kind == "text"
@@ -731,6 +785,15 @@ impl Worker {
             };
             let (peer, metadata, historical) = outer_metadata(&self.owner, &metadata_frame, room)
                 .ok_or(Error::Invalid("legacy envelope metadata"))?;
+            // Mobile Legacy OMEMO encrypts the body and keeps XEP-0424 outside it.
+            // Projection still requires the original author's exact protocol and fingerprint.
+            if room.is_none()
+                && let Some(action @ crate::message_actions::Action::Retract { .. }) =
+                    crate::message_actions::parse(outer)
+                        .map_err(|_| Error::Invalid("legacy retraction"))?
+            {
+                crate::message_actions::decorate(&mut content, &action);
+            }
             let reply = content.get_child("body", payload::CLIENT).and_then(|body| {
                 LegacyReply::parse(outer, &body.text(), &self.owner, &peer, room.is_some())
             });
@@ -1039,6 +1102,210 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mobile_legacy_retraction_send_receive_and_cached_mam_repair() {
+        use super::super::{
+            encrypt_for, receive_for,
+            tests::{approve, device, fixture},
+            wire::Envelope,
+        };
+        use crate::message_actions::{self as actions, Action};
+        let owner = "owner@example.org";
+        let peer = "peer@example.org";
+        let (mut sender, _sender_journal, sender_bundle) = fixture(peer, 101);
+        let (mut receiver, receiver_journal, receiver_bundle) = fixture(owner, 202);
+        approve(&mut sender, owner, 202, &receiver_bundle);
+        approve(&mut receiver, peer, 101, &sender_bundle);
+        let fingerprint = lifecycle::hex(&sender_bundle.identity);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for (metadata, legacy) in [
+            (
+                "<retract xmlns='urn:xmpp:message-retract:1' id='original'/><fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:message-retract:1'/>",
+                false,
+            ),
+            (
+                "<apply-to xmlns='urn:xmpp:fasten:0' id='original'><retract xmlns='urn:xmpp:message-retract:0'/></apply-to><fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:message-retract:0'/>",
+                true,
+            ),
+        ] {
+            // Literal metadata matches mobile MessageRetraction, independently of our serializer.
+            let mut outer = encrypt_for(
+                &mut sender,
+                owner,
+                "A previous message was retracted.",
+                "control",
+                &[(
+                    device(owner, 202, &receiver_bundle),
+                    receiver_bundle.clone(),
+                )],
+            )
+            .unwrap();
+            let literal: Element = format!("<message xmlns='jabber:client'>{metadata}</message>")
+                .parse()
+                .unwrap();
+            for child in literal.children() {
+                outer.append_child(child.clone());
+            }
+            let envelope = Envelope::parse(&outer, owner, 202).unwrap();
+            let authenticated_alias = alias(envelope.digest);
+            let received = receive_for(
+                &mut receiver,
+                &receiver_journal,
+                &outer,
+                &envelope,
+                1794355200000,
+                None,
+            )
+            .unwrap();
+            let (events, result) = mpsc::channel();
+            let (network, _requests) = channel::unbounded_channel();
+            let mut worker = Worker {
+                owner: owner.into(),
+                generation: 1,
+                network,
+                events,
+                root: PathBuf::new(),
+                local: None,
+                online: false,
+                ready: false,
+            };
+            runtime
+                .block_on(worker.deliver(received, None, authenticated_alias))
+                .unwrap();
+            let (
+                _,
+                _,
+                BackendEvent::LegacyEncryptedMessage {
+                    message: control, ..
+                },
+            ) = result.recv().unwrap()
+            else {
+                panic!("missing decrypted control")
+            };
+            assert!(control.text.is_empty());
+            assert_eq!(
+                control.action,
+                Some(Action::Retract {
+                    target: "original".into(),
+                    legacy
+                })
+            );
+            let clear = outgoing_content(owner, &control, "").unwrap();
+            assert_eq!(
+                clear.get_child("body", payload::CLIENT).unwrap().text(),
+                "A previous message was retracted."
+            );
+            let mut outgoing = Element::builder("message", payload::CLIENT)
+                .append(Element::builder("encrypted", NS).build())
+                .build();
+            decorate_outgoing(&mut outgoing, &clear, &control);
+            assert_eq!(actions::parse(&outgoing).unwrap(), control.action);
+            assert!(outgoing.get_child("body", payload::CLIENT).is_none());
+            let db = crate::storage::Store::open(true).unwrap();
+            db.save_account(&crate::model::Account {
+                jid: owner.into(),
+                host: String::new(),
+                port: 5222,
+                direct_tls: false,
+            })
+            .unwrap();
+            let mut original = Message {
+                id: "base".into(),
+                wire_id: "original".into(),
+                aliases: vec!["wire:original".into(), "origin:original".into()],
+                sender: format!("{peer}/mobile"),
+                text: "private original".into(),
+                ..Default::default()
+            };
+            original.set_encryption(Mode::Legacy, fingerprint.clone());
+            let chat = crate::model::Chat {
+                jid: peer.into(),
+                ..Default::default()
+            };
+            db.save_chat_message(owner, &chat, Some(&original)).unwrap();
+            let mut fallback = control.clone();
+            fallback.action = None;
+            fallback.text = "A previous message was retracted.".into();
+            db.save_chat_message(owner, &chat, Some(&fallback)).unwrap();
+            let recovered = recovered_retraction(&outer, &fallback, &control)
+                .unwrap()
+                .unwrap();
+            for (mode, key, own) in [
+                (Mode::Plain, "", false),
+                (Mode::Omemo2, fingerprint.as_str(), false),
+                (Mode::Legacy, "another-device", false),
+                (Mode::Legacy, fingerprint.as_str(), true),
+            ] {
+                let mut invalid = recovered.clone();
+                invalid.set_encryption(mode, key.into());
+                invalid.own = own;
+                assert!(
+                    !actions::project(
+                        vec![original.clone()],
+                        vec![actions::Event {
+                            row: 1,
+                            message: invalid,
+                            failed: false,
+                            resolved: None
+                        }],
+                        owner,
+                        peer
+                    )
+                    .messages[0]
+                        .retracted
+                );
+            }
+            for _ in 0..2 {
+                db.record_action(owner, peer, &recovered, "received")
+                    .unwrap();
+                db.reconcile_actions(owner, peer).unwrap();
+            }
+            assert!(db.message(owner, peer, "base").unwrap().retracted);
+            assert!(db.message(owner, peer, &fallback.id).is_none());
+            assert!(db.history(owner, peer, None, 20).is_empty());
+            let mut media = original.clone();
+            media.id = "own-media".into();
+            media.wire_id = "media-wire".into();
+            media.aliases = vec!["wire:media-wire".into()];
+            media.own = true;
+            media.sender = owner.into();
+            media.attachment =
+                crate::file_share::Attachment::bare("https://files.example.org/file");
+            let mut caption = fallback.clone();
+            caption.id = "own-caption".into();
+            caption.wire_id = "caption-wire".into();
+            caption.aliases = vec!["wire:caption-wire".into()];
+            caption.own = true;
+            caption.sender = owner.into();
+            caption.upload_caption_for = media.wire_id.clone();
+            db.save_chat_message(owner, &chat, Some(&media)).unwrap();
+            db.save_chat_message(owner, &chat, Some(&caption)).unwrap();
+            let mut unrelated = caption.clone();
+            unrelated.id = "unrelated".into();
+            unrelated.wire_id = "unrelated-wire".into();
+            unrelated.aliases = vec!["wire:unrelated-wire".into()];
+            unrelated.fingerprint = "other-device".into();
+            db.save_chat_message(owner, &chat, Some(&unrelated))
+                .unwrap();
+            let targets = db
+                .deletion_targets(owner, peer, &[media.id.clone()])
+                .unwrap();
+            assert_eq!(targets, vec![media.id.clone(), caption.id.clone()]);
+            for target in targets {
+                assert!(db.action_target(owner, peer, &target, "retract").is_ok());
+            }
+            let plain_text: Element = format!("<message xmlns='jabber:client' from='{peer}' to='{owner}' type='chat'><body>A previous message was retracted.</body></message>").parse().unwrap();
+            assert!(
+                recovered_retraction(&plain_text, &fallback, &control)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
 
     #[test]
     fn legacy_attachment_authenticates_only_uri_and_reply_without_exposing_metadata() {

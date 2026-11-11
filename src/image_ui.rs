@@ -137,7 +137,6 @@ impl Ui {
         if !allow_decode {
             self.images.borrow_mut().disk_checked.insert(key.clone());
         }
-        let generation = self.generation.get();
         let owner = self.state.borrow().account.clone();
         if owner.is_empty() {
             return None;
@@ -162,9 +161,10 @@ impl Ui {
             })
             .await
             .unwrap_or(Err("Image preview unavailable"));
-            let Some(ui) = weak.upgrade().filter(|ui| {
-                ui.generation.get() == generation && ui.state.borrow().account == owner
-            }) else {
+            let Some(ui) = weak
+                .upgrade()
+                .filter(|ui| ui.state.borrow().account == owner)
+            else {
                 return;
             };
             let mut images = ui.images.borrow_mut();
@@ -277,6 +277,24 @@ impl Ui {
             let _ = store.remember_image(&owner, &peer, &id, &file, &mime, width, height, animated);
         });
     }
+    pub(crate) fn attachment_is_current(
+        &self,
+        owner: &str,
+        peer: &str,
+        id: &str,
+        file: &Attachment,
+    ) -> bool {
+        let state = self.state.borrow();
+        state.account == owner
+            && state
+                .chats
+                .iter()
+                .find(|chat| chat.jid == peer)
+                .and_then(|chat| chat.messages.iter().find(|message| message.id == id))
+                .filter(|message| !message.retracted)
+                .and_then(|message| message.attachment.as_ref())
+                .is_some_and(|attachment| attachment.key() == file.key())
+    }
     pub(crate) fn in_chat_viewport(&self, widget: &impl IsA<gtk::Widget>) -> bool {
         widget.is_mapped()
             && widget.compute_bounds(&self.scroll).is_some_and(|bounds| {
@@ -301,7 +319,6 @@ impl Ui {
         let id = message.id.clone();
         let owner = self.state.borrow().account.clone();
         let peer = self.state.borrow().current().jid.clone();
-        let generation = self.generation.get();
         let picture =
             crate::widgets::AspectImage::thumbnail(if sticker { 168 } else { 320 }, sticker);
         let button = gtk::Button::builder()
@@ -338,7 +355,7 @@ impl Ui {
             else {
                 return glib::ControlFlow::Break;
             };
-            if ui.generation.get() != generation || ui.state.borrow().account != owner {
+            if !ui.attachment_is_current(&owner, &peer, &id, &file) {
                 return glib::ControlFlow::Break;
             }
             if picture.paintable().is_some() {

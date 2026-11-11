@@ -184,7 +184,7 @@ impl Ui {
         self.rendered_rows.borrow_mut().render_request.take();
         self.bubbles.borrow_mut().clear();
         let state = self.state.borrow();
-        let messages = state.current().messages.clone();
+        let messages = crate::media_caption::display_messages(&state.current().messages);
         let group = state.current().group;
         let scope = (state.account.clone(), state.current().jid.clone());
         let messages: Vec<_> = messages
@@ -878,9 +878,13 @@ impl Ui {
     pub fn delete_confirmation(self: &Rc<Self>, ids: Vec<String>) {
         let owner = self.state.borrow().account.clone();
         let chat = self.state.borrow().active.clone();
+        let peer = self.state.borrow().current().jid.clone();
+        let Ok(ids) = self.store.deletion_targets(&owner, &peer, &ids) else {
+            self.notice("Message deletion could not be prepared");
+            return;
+        };
         let d=adw::AlertDialog::builder().heading(format!("Delete {} messages?",ids.len())).body("This removes the messages locally. Server history and other devices are unaffected.").build();
         d.add_responses(&[("cancel", "Cancel"), ("delete", "Delete Locally")]);
-        let peer = self.state.borrow().current().jid.clone();
         if !owner.is_empty()
             && !ids.is_empty()
             && ids.iter().all(|id| {
@@ -931,8 +935,13 @@ impl Ui {
     pub fn delete_messages(self: &Rc<Self>, ids: &[String]) {
         let mut s = self.state.borrow_mut();
         let peer = s.current().jid.clone();
+        let Ok(ids) = self.store.deletion_targets(&s.account, &peer, ids) else {
+            drop(s);
+            self.notice("Message deletion could not be prepared");
+            return;
+        };
         if !s.account.is_empty() {
-            for id in ids {
+            for id in &ids {
                 let message = self.store.message(&s.account, &peer, id);
                 if self.store.delete(&s.account, &peer, id).is_err() {
                     drop(s);

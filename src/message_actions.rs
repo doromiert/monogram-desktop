@@ -387,7 +387,9 @@ pub fn project(
         }
         let base = candidates[0];
         if base.encrypted
-            && (!m.encrypted || base.fingerprint.is_empty() || base.fingerprint != m.fingerprint)
+            && (base.mode() != m.mode()
+                || base.fingerprint.is_empty()
+                || base.fingerprint != m.fingerprint)
         {
             continue;
         }

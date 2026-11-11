@@ -167,7 +167,7 @@ impl Ui {
         let file = message.attachment.as_ref().unwrap().clone();
         let owner = self.state.borrow().account.clone();
         let peer = self.state.borrow().current().jid.clone();
-        let generation = self.generation.get();
+        let id = message.id.clone();
         let width = if file.sticker { 168 } else { 320 };
         let placeholder = AspectImage::thumbnail(width, file.sticker);
         let dimensions = self
@@ -264,10 +264,13 @@ impl Ui {
         let account = owner.clone();
         let source = file.clone();
         let error_panel = controls.downgrade();
+        let action_peer = peer.clone();
+        let action_id = id.clone();
         button.connect_clicked(move |_| {
-            let Some(ui) = weak.upgrade().filter(|ui| {
-                ui.state.borrow().account == account && ui.generation.get() == generation
-            }) else {
+            let Some(ui) = weak
+                .upgrade()
+                .filter(|ui| ui.attachment_is_current(&account, &action_peer, &action_id, &source))
+            else {
                 return;
             };
             let preview_error = error_panel.upgrade().is_some_and(|controls| {
@@ -314,13 +317,11 @@ impl Ui {
             ) else {
                 return glib::ControlFlow::Break;
             };
-            if ui.generation.get() != generation
-                || ui.state.borrow().account != owner
-                || !controls.is_visible()
-            {
+            if !ui.attachment_is_current(&owner, &peer, &id, &file) {
                 return glib::ControlFlow::Break;
             }
-            if !ui.in_chat_viewport(&controls) {
+            // Video preparation/playback may fail after a preview has been revealed.
+            if !controls.is_visible() || !ui.in_chat_viewport(&controls) {
                 return glib::ControlFlow::Continue;
             }
             let mut state = if cancelled.get() {

@@ -156,10 +156,11 @@ impl Ui {
                 if images
                     .video_tasks
                     .get(&key)
-                    .is_some_and(|token| Arc::ptr_eq(token, &cancel))
+                    .is_none_or(|token| !Arc::ptr_eq(token, &cancel))
                 {
-                    images.video_tasks.remove(&key);
+                    return;
                 }
+                images.video_tasks.remove(&key);
             }
             // A network reconnect does not invalidate authenticated local bytes.
             if ui.state.borrow().account != owner || cancel.load(Ordering::Acquire) {
@@ -229,18 +230,7 @@ impl Ui {
             ) else {
                 return glib::ControlFlow::Break;
             };
-            let valid = {
-                let state = ui.state.borrow();
-                state.account == owner
-                    && state
-                        .chats
-                        .iter()
-                        .find(|chat| chat.jid == peer)
-                        .and_then(|chat| chat.messages.iter().find(|message| message.id == id))
-                        .and_then(|message| message.attachment.as_ref())
-                        .is_some_and(|attachment| attachment.key() == file.key())
-            };
-            if !valid {
+            if !ui.attachment_is_current(&owner, &peer, &id, &file) {
                 return glib::ControlFlow::Break;
             }
             if let Some(binding) = attached.as_ref()

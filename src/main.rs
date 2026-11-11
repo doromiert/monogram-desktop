@@ -22,6 +22,7 @@ mod iq;
 mod legacy_polls;
 mod live_actions;
 mod media;
+mod media_caption;
 mod media_store;
 mod message_actions;
 mod messages;

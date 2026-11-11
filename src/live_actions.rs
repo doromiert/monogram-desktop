@@ -117,24 +117,29 @@ impl Ui {
             self.notice("Message changed; reopen its menu");
             return false;
         }
-        if current.mode() == crate::encryption_policy::Mode::Legacy
+        let legacy = current.mode() == crate::encryption_policy::Mode::Legacy
             || self.sending_mode(self.state.borrow().current())
-                == Some(crate::encryption_policy::Mode::Legacy)
-        {
+                == Some(crate::encryption_policy::Mode::Legacy);
+        if legacy && (kind != "retract" || self.state.borrow().current().group) {
             self.notice("Legacy OMEMO does not support protected message actions here");
             return false;
         }
         let encrypted = current.encrypted
             || self.state.borrow().current().encryption
             || kind == "react" && self.store.action_protected(&owner, &peer, id);
-        let crypto = self.crypto.borrow();
-        if encrypted && !crypto.ready {
-            drop(crypto);
-            self.notice("Enable OMEMO 2 and review devices before changing this message");
+        // Retractions use the original protocol and identity, as on mobile.
+        let mode = if kind == "retract" {
+            base.mode()
+        } else if encrypted {
+            crate::encryption_policy::Mode::Omemo2
+        } else {
+            crate::encryption_policy::Mode::Plain
+        };
+        let Some(fingerprint) = self.fingerprint_for_send(mode) else {
+            self.notice("The original message's OMEMO version is not ready");
             return false;
-        }
-        if kind == "retract" && base.encrypted && base.fingerprint != crypto.fingerprint {
-            drop(crypto);
+        };
+        if kind == "retract" && base.encrypted && base.fingerprint != fingerprint {
             self.notice("An encrypted message can only be retracted by its original device");
             return false;
         }
@@ -159,12 +164,9 @@ impl Ui {
             wire_id: wire.clone(),
             aliases: vec![format!("wire:{wire}"), format!("origin:{wire}")],
             own: true,
-            encrypted,
-            fingerprint: if encrypted {
-                crypto.fingerprint.clone()
-            } else {
-                String::new()
-            },
+            encrypted: mode.encrypted(),
+            encryption_mode: Some(mode),
+            fingerprint,
             text: legacy_body.unwrap_or_else(|| text.into()),
             delivery: "sending".into(),
             reply_id: if kind == "correct" {
@@ -184,7 +186,6 @@ impl Ui {
             },
             ..Default::default()
         };
-        drop(crypto);
         // Pending retractions only hide content after the transport confirms the send.
         if self
             .store
