@@ -336,7 +336,7 @@ impl Ui {
             input_scroll: gtk::ScrolledWindow::builder()
                 .min_content_height(32)
                 .max_content_height(108)
-                .propagate_natural_height(true)
+                .propagate_natural_height(false)
                 .hexpand(true)
                 .build(),
             reply_bar: gtk::Revealer::new(),
@@ -1207,6 +1207,7 @@ impl Ui {
         let line = bx(false, 8);
         let composer = bx(false, 2);
         composer.set_hexpand(true);
+        composer.set_valign(gtk::Align::Center);
         composer.add_css_class("composer");
         let attach = gtk::MenuButton::builder()
             .icon_name("mail-attachment-symbolic")
@@ -1229,6 +1230,14 @@ impl Ui {
         self.input_scroll.set_child(Some(&self.composer));
         self.input_scroll
             .set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        let weak = Rc::downgrade(self);
+        self.input_scroll
+            .vadjustment()
+            .connect_changed(move |_| {
+                if let Some(s) = weak.upgrade() {
+                    s.queue_composer_height();
+                }
+            });
         let input = gtk::Overlay::builder()
             .child(&self.input_scroll)
             .hexpand(true)
@@ -1293,10 +1302,41 @@ impl Ui {
         let b = self.composer.buffer();
         b.text(&b.start_iter(), &b.end_iter(), true).into()
     }
+    fn queue_composer_height(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            if let Some(s) = weak.upgrade() {
+                s.sync_composer_height();
+            }
+        });
+    }
+    fn sync_composer_height(&self) {
+        let end = self.composer.buffer().end_iter();
+        let last_line = self.composer.iter_location(&end);
+        let content_height = last_line
+            .y()
+            .saturating_add(last_line.height())
+            .saturating_add(self.composer.top_margin())
+            .saturating_add(self.composer.bottom_margin());
+        let viewport_height = content_height.clamp(32, 108);
+        if self.input_scroll.min_content_height() != viewport_height {
+            self.input_scroll
+                .set_min_content_height(viewport_height);
+        }
+        let policy = if content_height > 108 {
+            gtk::PolicyType::Automatic
+        } else {
+            gtk::PolicyType::Never
+        };
+        if self.input_scroll.vscrollbar_policy() != policy {
+            self.input_scroll.set_vscrollbar_policy(policy);
+        }
+    }
     pub fn compose_changed(self: &Rc<Self>) {
         let composer_text = self.composer_text();
         self.composer_placeholder
             .set_visible(composer_text.is_empty());
+        self.queue_composer_height();
         self.send_button.set_sensitive(
             !composer_text.trim().is_empty() || !self.attachments.borrow().is_empty(),
         );
