@@ -108,10 +108,25 @@ pub fn horizontal_strip(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
 mod message_bubble_limit_imp {
     use super::*;
 
+    fn message_text_descendant(widget: &gtk::Widget) -> Option<super::MessageText> {
+        if let Ok(found) = widget.clone().downcast::<super::MessageText>() {
+            return Some(found);
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            if let Some(found) = message_text_descendant(&current) {
+                return Some(found);
+            }
+            child = current.next_sibling();
+        }
+        None
+    }
+
     #[derive(Default)]
     pub struct MessageBubbleLimit {
         pub child: RefCell<Option<gtk::Widget>>,
         pub own: Cell<bool>,
+        pub last_available: Cell<i32>,
     }
 
     #[glib::object_subclass]
@@ -158,6 +173,12 @@ mod message_bubble_limit_imp {
             let Some(child) = self.child.borrow().as_ref().cloned() else {
                 return;
             };
+            let text = message_text_descendant(&child);
+            if self.last_available.replace(width) != width {
+                if let Some(text) = text.as_ref() {
+                    text.set_compact(false);
+                }
+            }
             let cap = width.max(0).saturating_mul(2) / 5;
             let (_, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
             let child_width = natural.min(cap).max(1);
@@ -169,6 +190,14 @@ mod message_bubble_limit_imp {
             let transform =
                 gtk::gsk::Transform::new().translate(&gtk::graphene::Point::new(x as f32, 0.));
             child.allocate(child_width, height, baseline, Some(transform));
+            if let Some(text) = text {
+                let weak = text.downgrade();
+                glib::idle_add_local_once(move || {
+                    if let Some(text) = weak.upgrade() {
+                        text.refresh_compact();
+                    }
+                });
+            }
         }
 
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
@@ -203,6 +232,8 @@ mod message_text_imp {
         pub body: RefCell<Option<gtk::Label>>,
         pub status: RefCell<Option<gtk::Box>>,
         pub source: RefCell<String>,
+        pub rtl: Cell<bool>,
+        pub compact: Cell<bool>,
     }
     #[glib::object_subclass]
     impl ObjectSubclass for MessageText {
@@ -226,6 +257,7 @@ impl MessageText {
                 gtk::pango::Direction::Rtl | gtk::pango::Direction::WeakRtl
             )
         });
+        widget.imp().rtl.set(rtl);
         body.set_label(&format!("{source}{}\u{fffc}", if rtl { "\n" } else { " " }));
         body.set_yalign(0.);
         body.set_selectable(true);
@@ -279,6 +311,39 @@ impl MessageText {
         let attrs = gtk::pango::AttrList::new();
         attrs.insert(shape);
         body.set_attributes(Some(&attrs));
+    }
+
+    fn set_compact(&self, compact: bool) {
+        if self.imp().compact.replace(compact) != compact {
+            let source = self.imp().source.borrow();
+            if let Some(body) = self.imp().body.borrow().as_ref() {
+                body.set_label(&format!(
+                    "{source}{}\u{fffc}",
+                    if compact || self.imp().rtl.get() {
+                        "\n"
+                    } else {
+                        " "
+                    }
+                ));
+            }
+            drop(source);
+            self.refresh_shape();
+        }
+    }
+
+    fn refresh_compact(&self) {
+        let body = self.imp().body.borrow();
+        let Some(body) = body.as_ref() else {
+            return;
+        };
+        let source = self.imp().source.borrow();
+        let Some((last, _)) = source.char_indices().last() else {
+            return;
+        };
+        let layout = body.layout();
+        let (source_line, _) = layout.index_to_line_x(last as i32, false);
+        let (status_line, _) = layout.index_to_line_x(source.len() as i32 + 1, false);
+        self.set_compact(status_line > source_line);
     }
 }
 

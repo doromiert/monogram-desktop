@@ -553,6 +553,7 @@ impl Ui {
         let expanded = bx(true, 6);
         expanded.add_css_class("expanded-reactions");
         expanded.add_css_class("message-menu-panel");
+        expanded.set_width_request(300);
         let search = gtk::SearchEntry::builder()
             .placeholder_text("Search")
             .build();
@@ -573,8 +574,7 @@ impl Ui {
             .transition_type(gtk::StackTransitionType::Crossfade)
             .transition_duration(180)
             .vhomogeneous(false)
-            .hhomogeneous(true)
-            .width_request(300)
+            .hhomogeneous(false)
             .build();
         stack.add_named(&collapsed, Some("quick"));
         stack.add_named(&expanded, Some("all"));
