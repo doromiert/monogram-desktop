@@ -455,8 +455,13 @@ pub async fn receive(
     }
     let tx = device.begin()?;
     journal_space(&tx, 0)?;
-    let pin =
-        native::trust_record(&tx, sender, envelope.sender_device)?.ok_or(Error::TrustRequired)?;
+    let pin = native::trust_record(&tx, sender, envelope.sender_device)?.ok_or_else(|| {
+        if sender == tx.owner {
+            Error::OwnDeviceTrustRequired
+        } else {
+            Error::TrustRequired
+        }
+    })?;
     if pin.len() != 2625 {
         return Err(Error::Incomplete);
     }

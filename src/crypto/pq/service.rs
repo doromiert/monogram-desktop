@@ -493,6 +493,9 @@ impl Worker {
                 self.observe(peer, id, true).await?;
             }
         }
+        self.reviews(peer)
+    }
+    fn reviews(&mut self, peer: &str) -> Result<Vec<Review>> {
         Ok(self
             .local
             .as_mut()
@@ -768,15 +771,31 @@ impl Worker {
         let Ok(Some(history)) = self.history() else {
             return;
         };
-        let messages = history.history(&self.owner, peer, None, 150);
-        for message in messages.into_iter().filter(|message| {
-            message.unavailable
-                && message.mode() == crate::encryption_policy::Mode::Pq
-                && !message.ciphertext.is_empty()
-        }) {
+        let rows = (|| -> Result<Vec<Message>> {
+            let mut query = history.db.prepare("SELECT body FROM messages WHERE account=?1 AND (peer=?2 OR (?3=1 AND json_extract(body,'$.own')=1)) AND json_extract(body,'$.unavailable')=1 AND json_extract(body,'$.encryption_mode')='Pq' AND length(json_extract(body,'$.ciphertext'))>0 ORDER BY timestamp DESC LIMIT 128")?;
+            let bodies = query
+                .query_map(
+                    rusqlite::params![self.owner, peer, peer == self.owner],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(bodies
+                .into_iter()
+                .filter_map(|body| serde_json::from_str(&body).ok())
+                .collect())
+        })();
+        let Ok(messages) = rows else {
+            return;
+        };
+        for message in messages {
             let Ok(mut xml) = bundle::document(&message.ciphertext, wire::MAX_WIRE) else {
                 continue;
             };
+            if peer == self.owner
+                && !payload::routing(&xml).is_ok_and(|(sender, _)| sender == self.owner)
+            {
+                continue;
+            }
             if xml.get_child("delay", "urn:xmpp:delay").is_none() {
                 xml.append_child(
                     Element::builder("delay", "urn:xmpp:delay")
@@ -840,19 +859,7 @@ impl Worker {
                 }
                 self.bundles.retain(|(address, _), _| address != &peer);
                 self.lists.remove(&peer);
-                match self.discover(&peer).await {
-                    Ok(devices) => {
-                        self.emit(BackendEvent::PqDevices {
-                            peer: peer.clone(),
-                            devices,
-                        });
-                        self.retry(&peer).await;
-                    }
-                    Err(error) => self.emit(BackendEvent::CryptoError {
-                        peer,
-                        text: describe(&error),
-                    }),
-                }
+                self.process_review(&peer).await;
             }
             Request::ReviewRoom { peer, members } => {
                 let mut devices = Vec::new();
@@ -946,18 +953,31 @@ impl Worker {
     }
     async fn process_review(&mut self, peer: &str) {
         match self.discover(peer).await {
-            Ok(devices) => {
+            Ok(mut devices) => {
+                if peer != self.owner {
+                    let owner = self.owner.clone();
+                    match self.discover(&owner).await {
+                        Ok(own) => devices.extend(own),
+                        Err(error) => {
+                            devices.extend(self.reviews(&owner).unwrap_or_default());
+                            self.emit(BackendEvent::CryptoError {
+                                peer: owner,
+                                text: describe(&error),
+                            });
+                        }
+                    }
+                }
                 self.emit(BackendEvent::PqDevices {
                     peer: peer.into(),
                     devices,
                 });
-                self.retry(peer).await;
             }
             Err(error) => self.emit(BackendEvent::CryptoError {
                 peer: peer.into(),
                 text: describe(&error),
             }),
         }
+        self.retry(peer).await;
     }
     fn sent(&self, peer: String, id: String, result: Result<()>) {
         match result {
@@ -999,6 +1019,171 @@ mod actor_tests {
     use super::*;
     use crate::{encryption_policy::Mode, model::Account, protocol::Session};
     use std::sync::mpsc::Receiver;
+    #[test]
+    fn own_carbon_explicit_review_restores_original_contact_history_row() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let owner = "owner@example.invalid";
+                let peer = "contact@example.invalid";
+                let root = std::env::temp_dir()
+                    .join(format!("monogram-pq-own-carbon-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir_all(&root).unwrap();
+                let memory = crate::storage::Store::open(true).unwrap();
+                memory
+                    .db
+                    .execute(
+                        "VACUUM INTO ?",
+                        [root.join("history.sqlite3").to_str().unwrap()],
+                    )
+                    .unwrap();
+                let history = crate::storage::Store {
+                    db: rusqlite::Connection::open(root.join("history.sqlite3")).unwrap(),
+                };
+                history
+                    .save_account(&Account {
+                        jid: owner.into(),
+                        host: "example.invalid".into(),
+                        port: 5222,
+                        direct_tls: false,
+                    })
+                    .unwrap();
+                let mut local = Device::memory(owner, 81).unwrap();
+                let local_bundle = Bundle::from_parts(local.prepare().unwrap()).unwrap();
+                let mut phone = Device::memory(owner, 82).unwrap();
+                phone.prepare().unwrap();
+                phone
+                    .observe(owner, local.id, &local_bundle, false)
+                    .unwrap();
+                phone
+                    .decide(owner, local.id, &local_bundle.fingerprint().unwrap(), true)
+                    .unwrap();
+                let plain = Element::builder("message", payload::CLIENT)
+                    .attr("from".try_into().unwrap(), owner)
+                    .attr("to".try_into().unwrap(), peer)
+                    .attr("type".try_into().unwrap(), "chat")
+                    .attr("id".try_into().unwrap(), "own-carbon-regression")
+                    .append(
+                        Element::builder("body", payload::CLIENT)
+                            .append("Own carbon restored")
+                            .build(),
+                    )
+                    .build();
+                let encrypted = wire::encrypt(
+                    &mut phone,
+                    &plain,
+                    &[Target {
+                        peer: owner.into(),
+                        device: local.id,
+                        bundle: Some(local_bundle),
+                    }],
+                    false,
+                )
+                .await
+                .unwrap();
+                let mut outer = Element::builder("message", payload::CLIENT)
+                    .attr("from".try_into().unwrap(), owner)
+                    .attr("to".try_into().unwrap(), peer)
+                    .attr("type".try_into().unwrap(), "chat")
+                    .attr("id".try_into().unwrap(), "own-carbon-regression")
+                    .append(encrypted)
+                    .build();
+                outer.append_child(
+                    Element::builder("delay", "urn:xmpp:delay")
+                        .attr("stamp".try_into().unwrap(), chrono::Utc::now().to_rfc3339())
+                        .build(),
+                );
+                let frame = Frame {
+                    xml: outer,
+                    archive: None,
+                    historical: false,
+                    receipt_to: None,
+                };
+                let (network, _commands) = channel::unbounded_channel();
+                let (events, receive) = mpsc::channel();
+                let mut worker = Worker {
+                    owner: owner.into(),
+                    generation: 1,
+                    network,
+                    events,
+                    root: root.clone(),
+                    local: Some(local),
+                    online: false,
+                    ready: false,
+                    publication_pending: false,
+                    bundles: BTreeMap::new(),
+                    lists: BTreeMap::new(),
+                };
+                assert!(matches!(
+                    worker.incoming(frame.clone(), None).await,
+                    Err(Error::OwnDeviceTrustRequired)
+                ));
+                worker.receive(frame, None).await;
+                let BackendEvent::Message {
+                    peer: actual,
+                    message: pending,
+                    ..
+                } = receive.recv().unwrap().2
+                else {
+                    panic!("expected pending own carbon")
+                };
+                assert_eq!(actual, peer);
+                assert!(pending.own && pending.unavailable);
+                let mut state = history.load_windowed(owner);
+                history
+                    .save_chat_message(owner, state.chat_for(peer), Some(&pending))
+                    .unwrap();
+                let rows = worker.reviews(owner).unwrap();
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].trust, "undecided");
+                let keys = BTreeMap::from([(
+                    owner.to_string(),
+                    BTreeMap::from([(rows[0].device, rows[0].fingerprint.clone())]),
+                )]);
+                worker
+                    .process(Request::Decide {
+                        keys,
+                        approve: true,
+                    })
+                    .await;
+                let mut restored = receive
+                    .try_iter()
+                    .find_map(|(_, _, event)| match event {
+                        BackendEvent::PqEncrypted {
+                            peer: actual,
+                            message,
+                            token,
+                            ..
+                        } => Some((actual, message, token)),
+                        _ => None,
+                    })
+                    .expect("explicit own review must retry the actual contact chat");
+                assert_eq!(restored.0, peer);
+                restored.1.id = history.known_message(owner, peer, &restored.1).expect("original unavailable row must resolve through authenticated wire aliases");
+                assert_eq!(restored.1.id, pending.id);
+                assert_eq!(restored.1.text, "Own carbon restored");
+                assert!(!restored.1.unavailable);
+                history
+                    .save_chat_message(owner, state.chat_for(peer), Some(&restored.1))
+                    .unwrap();
+                worker.accept(restored.2).await.unwrap();
+                assert_eq!(
+                    history.message(owner, peer, &pending.id).unwrap().text,
+                    "Own carbon restored"
+                );
+                let count: i64 = history
+                    .db
+                    .query_row("SELECT count(*) FROM messages", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(count, 1);
+                drop(history);
+                drop(memory);
+                drop(worker);
+                std::fs::remove_dir_all(root).unwrap();
+            });
+    }
     fn wait(events: &Receiver<Envelope>, wanted: impl Fn(&BackendEvent) -> bool) -> BackendEvent {
         let deadline = Instant::now() + Duration::from_secs(35);
         loop {
