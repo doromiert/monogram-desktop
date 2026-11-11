@@ -183,6 +183,9 @@ impl Ui {
             .halign(gtk::Align::Start)
             .build();
         overlay.add_css_class("media-download");
+        if file.sticker {
+            overlay.add_css_class("sticker-download");
+        }
         let actual = bx(true, 0);
         overlay.add_overlay(&actual);
         let controls = bx(true, 4);

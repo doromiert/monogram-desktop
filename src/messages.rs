@@ -628,16 +628,20 @@ impl Ui {
                         "message-text"
                     };
                     let preview = self.link_preview_for_message(&m);
+                    let links =
+                        crate::link_previews::clickable_urls(&m.text, m.preview_spoilers.as_ref());
                     let inline = m.inline_emoji.as_ref().map(|emoji| {
                         self.inline_message_text(
                             &m.text,
                             emoji,
                             preview.is_none().then_some(&meta),
+                            &links,
                         )
                     });
                     let l = wrap(&m.text, css);
                     l.set_selectable(true);
                     if let Some(preview) = preview {
+                        linkify_message_label(&l, &m.text, &links);
                         // Keep the status row after the native card so time,
                         // encryption and delivery state follow the full bubble.
                         if let Some(inline) = inline.as_ref() {
@@ -649,7 +653,7 @@ impl Ui {
                     } else if let Some(inline) = inline {
                         bubble.append(&inline);
                     } else {
-                        bubble.append(&MessageText::new(&l, &meta));
+                        bubble.append(&MessageText::with_links(&l, &meta, links));
                     }
                 }
                 _ => {}

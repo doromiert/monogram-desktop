@@ -203,8 +203,8 @@ mod composer_tests {
         .unwrap();
         let status = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         status.append(&gtk::Label::new(Some("12:34 ✓")));
-        let short = InlineMessageText::new(&short_body, &short_emoji, Some(&status));
-        let text = InlineMessageText::new(&body, &emoji, None);
+        let short = InlineMessageText::new(&short_body, &short_emoji, Some(&status), &[]);
+        let text = InlineMessageText::new(&body, &emoji, None, &[]);
         let bytes = glib::Bytes::from_owned(
             [0x9c, 0x4d, 0xcc, 0xff]
                 .into_iter()
@@ -404,14 +404,24 @@ struct InlineSlot {
 }
 
 impl InlineMessageText {
-    pub(crate) fn new(body: &str, emoji: &InlineEmoji, status: Option<&gtk::Box>) -> Rc<Self> {
+    pub(crate) fn new(
+        body: &str,
+        emoji: &InlineEmoji,
+        status: Option<&gtk::Box>,
+        links: &[crate::link_previews::ClickableUrl],
+    ) -> Rc<Self> {
         let label = crate::widgets::wrap(body, "message-text");
         label.set_selectable(true);
         label.update_property(&[gtk::accessible::Property::Label(body)]);
         let root = InlineOverlay::new();
         if let Some(status) = status {
-            root.set_child(&crate::widgets::MessageText::new(&label, status));
+            root.set_child(&crate::widgets::MessageText::with_links(
+                &label,
+                status,
+                links.to_vec(),
+            ));
         } else {
+            crate::widgets::linkify_message_label(&label, body, links);
             root.set_child(&label);
         }
         root.add_css_class("inline-emoji-text");
@@ -677,8 +687,9 @@ impl Ui {
         body: &str,
         emoji: &InlineEmoji,
         status: Option<&gtk::Box>,
+        links: &[crate::link_previews::ClickableUrl],
     ) -> gtk::Widget {
-        let renderer = InlineMessageText::new(body, emoji, status);
+        let renderer = InlineMessageText::new(body, emoji, status, links);
         let owner = self.state.borrow().account.clone();
         let generation = self.generation.get();
         let mut seen = std::collections::HashSet::new();

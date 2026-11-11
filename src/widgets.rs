@@ -232,6 +232,7 @@ mod message_text_imp {
         pub body: RefCell<Option<gtk::Label>>,
         pub status: RefCell<Option<gtk::Box>>,
         pub source: RefCell<String>,
+        pub links: RefCell<Vec<crate::link_previews::ClickableUrl>>,
         pub rtl: Cell<bool>,
         pub compact: Cell<bool>,
     }
@@ -246,10 +247,80 @@ mod message_text_imp {
     impl BoxImpl for MessageText {}
 }
 glib::wrapper! {pub struct MessageText(ObjectSubclass<message_text_imp::MessageText>) @extends gtk::Box,gtk::Widget,@implements gtk::Accessible,gtk::Buildable,gtk::ConstraintTarget,gtk::Orientable;}
+
+fn link_markup(source: &str, suffix: &str, links: &[crate::link_previews::ClickableUrl]) -> String {
+    let mut markup = String::new();
+    let mut cursor = 0;
+    for link in links {
+        if link.range.start < cursor
+            || link.range.end > source.len()
+            || !source.is_char_boundary(link.range.start)
+            || !source.is_char_boundary(link.range.end)
+        {
+            continue;
+        }
+        markup.push_str(&glib::markup_escape_text(&source[cursor..link.range.start]));
+        markup.push_str("<a href=\"");
+        markup.push_str(&glib::markup_escape_text(&link.uri));
+        markup.push_str("\">");
+        markup.push_str(&glib::markup_escape_text(&source[link.range.clone()]));
+        markup.push_str("</a>");
+        cursor = link.range.end;
+    }
+    markup.push_str(&glib::markup_escape_text(&source[cursor..]));
+    markup.push_str(&glib::markup_escape_text(suffix));
+    markup
+}
+
+fn activate_links(label: &gtk::Label) {
+    label.connect_activate_link(|label, uri| {
+        let parent = label.root().and_downcast::<gtk::Window>();
+        let weak_parent = parent.as_ref().map(gtk::Window::downgrade);
+        gtk::UriLauncher::new(uri).launch(
+            parent.as_ref(),
+            None::<&gtk::gio::Cancellable>,
+            move |result| {
+                if result.is_err() {
+                    let parent = weak_parent.and_then(|parent| parent.upgrade());
+                    gtk::AlertDialog::builder()
+                        .message("Could Not Open Link")
+                        .detail("No application is available to open this web address.")
+                        .modal(true)
+                        .build()
+                        .show(parent.as_ref());
+                }
+            },
+        );
+        glib::Propagation::Stop
+    });
+}
+
+pub fn linkify_message_label(
+    label: &gtk::Label,
+    source: &str,
+    links: &[crate::link_previews::ClickableUrl],
+) {
+    if links.is_empty() {
+        return;
+    }
+    label.set_markup(&link_markup(source, "", links));
+    label.set_selectable(true);
+    label.update_property(&[gtk::accessible::Property::Label(source)]);
+    activate_links(label);
+}
+
 impl MessageText {
     pub fn new(body: &gtk::Label, status: &gtk::Box) -> Self {
+        Self::with_links(body, status, Vec::new())
+    }
+
+    pub fn with_links(
+        body: &gtk::Label,
+        status: &gtk::Box,
+        links: Vec<crate::link_previews::ClickableUrl>,
+    ) -> Self {
         let widget: Self = glib::Object::new();
-        let source = body.label().to_string();
+        let source = body.text().to_string();
         let layout = body.create_pango_layout(Some(&source));
         let rtl = layout.line_readonly(0).is_some_and(|line| {
             matches!(
@@ -258,7 +329,6 @@ impl MessageText {
             )
         });
         widget.imp().rtl.set(rtl);
-        body.set_label(&format!("{source}{}\u{fffc}", if rtl { "\n" } else { " " }));
         body.set_yalign(0.);
         body.set_selectable(true);
         body.update_property(&[gtk::accessible::Property::Label(&source)]);
@@ -285,11 +355,41 @@ impl MessageText {
         overlay.add_overlay(status);
         widget.append(&overlay);
         widget.imp().source.replace(source);
+        widget.imp().links.replace(links);
         widget.imp().body.replace(Some(body.clone()));
         widget.imp().status.replace(Some(status.clone()));
+        if !widget.imp().links.borrow().is_empty() {
+            activate_links(body);
+        }
+        widget.render_body();
         widget.refresh_shape();
         widget
     }
+
+    fn render_body(&self) {
+        let source = self.imp().source.borrow();
+        let suffix = format!(
+            "{}\u{fffc}",
+            if self.imp().compact.get() || self.imp().rtl.get() {
+                "\n"
+            } else {
+                " "
+            }
+        );
+        if let Some(body) = self.imp().body.borrow().as_ref() {
+            // Inline emoji shapes can arrive asynchronously; retain them when
+            // compact/status reflow rebuilds the native anchor markup.
+            let attributes = body.attributes();
+            let links = self.imp().links.borrow();
+            if links.is_empty() {
+                body.set_label(&format!("{source}{suffix}"));
+            } else {
+                body.set_markup(&link_markup(&source, &suffix, &links));
+            }
+            body.set_attributes(attributes.as_ref());
+        }
+    }
+
     pub fn refresh_shape(&self) {
         let body = self.imp().body.borrow();
         let status = self.imp().status.borrow();
@@ -308,25 +408,15 @@ impl MessageText {
         let mut shape = gtk::pango::AttrShape::new(&ink, &logical);
         shape.set_start_index(self.imp().source.borrow().len() as u32 + 1);
         shape.set_end_index(u32::MAX);
-        let attrs = gtk::pango::AttrList::new();
-        attrs.insert(shape);
+        // Preserve the native anchor attributes installed by set_markup.
+        let attrs = body.layout().attributes().unwrap_or_default();
+        attrs.change(shape);
         body.set_attributes(Some(&attrs));
     }
 
-    fn set_compact(&self, compact: bool) {
+    pub(crate) fn set_compact(&self, compact: bool) {
         if self.imp().compact.replace(compact) != compact {
-            let source = self.imp().source.borrow();
-            if let Some(body) = self.imp().body.borrow().as_ref() {
-                body.set_label(&format!(
-                    "{source}{}\u{fffc}",
-                    if compact || self.imp().rtl.get() {
-                        "\n"
-                    } else {
-                        " "
-                    }
-                ));
-            }
-            drop(source);
+            self.render_body();
             self.refresh_shape();
         }
     }

@@ -381,3 +381,141 @@ impl Ui {
         group
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        inline_emoji_ui::InlineMessageText,
+        packs::{InlineAsset, InlineEmoji, InlineRange},
+    };
+
+    fn labels(widget: &gtk::Widget, found: &mut Vec<gtk::Label>) {
+        if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+            found.push(label.clone());
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            labels(&current, found);
+            child = current.next_sibling();
+        }
+    }
+
+    fn pictures(widget: &gtk::Widget, found: &mut Vec<gtk::Picture>) {
+        if let Some(picture) = widget.downcast_ref::<gtk::Picture>() {
+            found.push(picture.clone());
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            pictures(&current, found);
+            child = current.next_sibling();
+        }
+    }
+
+    #[test]
+    fn native_links_selection_and_preview_clamp() {
+        gtk::init().unwrap();
+        let source = "😀 Open example.org/a?q=1 and https://second.example/path.";
+        let links =
+            crate::link_previews::clickable_urls(source, Some(&crate::spoilers::Context::clear()));
+        assert_eq!(links.len(), 2);
+
+        let body = wrap(source, "message-text");
+        let status = bx(false, 2);
+        status.append(&label("12:34", "message-meta"));
+        let message = MessageText::with_links(&body, &status, links.clone());
+        assert_eq!(body.text(), format!("{source} \u{fffc}"));
+        assert!(
+            body.label()
+                .contains("<a href=\"https://example.org/a?q=1\"")
+        );
+        assert!(
+            body.label()
+                .contains("<a href=\"https://second.example/path\"")
+        );
+        body.select_region(0, source.chars().count() as i32);
+        assert_eq!(
+            body.selection_bounds(),
+            Some((0, source.chars().count() as i32))
+        );
+        message.refresh_shape();
+        assert!(
+            body.attributes()
+                .is_some_and(|attrs| attrs.attributes().len() >= 3)
+        );
+
+        let plain = wrap(source, "message-text");
+        linkify_message_label(&plain, source, &links);
+        assert_eq!(plain.text(), source);
+        assert!(plain.is_selectable());
+
+        let asset = InlineAsset::new("image/png".into(), vec![1]).unwrap();
+        let emoji = InlineEmoji::new(
+            source.into(),
+            vec![InlineRange {
+                start: 0,
+                end: 1,
+                asset: asset.clone(),
+            }],
+        )
+        .unwrap();
+        let bytes = glib::Bytes::from_owned(vec![0x55; 20 * 20 * 4]);
+        let texture =
+            gtk::gdk::MemoryTexture::new(20, 20, gtk::gdk::MemoryFormat::R8g8b8a8, &bytes, 20 * 4);
+        let inline_status = bx(false, 2);
+        inline_status.append(&label("12:34", "message-meta"));
+        let linked_inline = InlineMessageText::new(source, &emoji, Some(&inline_status), &links);
+        linked_inline.set_texture(&asset.cid, texture.clone().upcast());
+        let inline_message = linked_inline
+            .root
+            .first_child()
+            .and_downcast::<MessageText>()
+            .unwrap();
+        inline_message.set_compact(true);
+        let mut inline_labels = Vec::new();
+        labels(linked_inline.root.upcast_ref(), &mut inline_labels);
+        assert!(inline_labels[0].label().contains("<a href="));
+        assert!(
+            inline_labels[0]
+                .attributes()
+                .is_some_and(|attrs| attrs.attributes().len() >= 4)
+        );
+        let mut inline_pictures = Vec::new();
+        pictures(linked_inline.root.upcast_ref(), &mut inline_pictures);
+        assert!(inline_pictures.iter().any(gtk::Picture::is_visible));
+
+        let preview_inline = InlineMessageText::new(source, &emoji, None, &links);
+        preview_inline.set_texture(&asset.cid, texture.upcast());
+        let mut preview_labels = Vec::new();
+        labels(preview_inline.root.upcast_ref(), &mut preview_labels);
+        assert!(preview_labels[0].label().contains("<a href="));
+        let mut preview_pictures = Vec::new();
+        pictures(preview_inline.root.upcast_ref(), &mut preview_pictures);
+        assert!(preview_pictures.iter().any(gtk::Picture::is_visible));
+
+        let preview = Preview {
+            url: "https://example.org/a?q=1".into(),
+            display_url: "example.org/a?q=1".into(),
+            site_name: "Example".into(),
+            title: "A deliberately long cached title that must stay inside the native card clamp even when the message bubble is narrow".into(),
+            description: "A deliberately long cached description that must stay inside four native lines. It remains metadata below the message text and never replaces the clickable source URL.".into(),
+            kind: Kind::Article,
+            thumbnail: None,
+            media: None,
+        };
+        let card = link_preview_card(&preview);
+        assert_eq!(card.uri(), preview.url);
+        let mut card_labels = Vec::new();
+        labels(card.upcast_ref(), &mut card_labels);
+        assert!(
+            card_labels
+                .iter()
+                .any(|label| label.text() == preview.title && label.lines() == 3)
+        );
+        assert!(
+            card_labels
+                .iter()
+                .any(|label| label.text() == preview.description && label.lines() == 4)
+        );
+    }
+}

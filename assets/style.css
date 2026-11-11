@@ -19,7 +19,7 @@
 .message-bubble.sticker-bubble { background: transparent; border: none; box-shadow: none; padding: 0; }
 .message-media-tile, .media-download { min-width: 0; min-height: 0; }
 .message-media-tile { padding: 0; }
-.message-sticker-tile { border-radius: 0; }
+.message-sticker-tile { background-color: transparent; background-image: none; border-radius: 0; box-shadow: none; }
 .message-meta.sticker-meta { background: alpha(black,.58); border-radius: 9px; color: white; opacity: 1; margin: 4px; padding: 2px 5px; }
 .message-author { color: @accent_color; font-weight: bold; font-size: 12px; margin-bottom: 4px; }
 .message-text { font-size: 14px; }
@@ -155,6 +155,10 @@
 .message-reply .reply-author { color: @accent_color; font-weight: bold; }
 .message-reply .reply-preview { font-size: 13px; font-weight: normal; }
 .message-reply { box-shadow: none; min-height: 0; }
+.link-preview { margin-top: 7px; padding: 8px 9px; }
+.link-preview:hover { background: alpha(@accent_bg_color,.14); }
+.link-preview:focus-visible { outline: 2px solid @accent_color; outline-offset: 2px; }
+.link-preview .heading { font-weight: 650; }
 
 .message-bubble.media-bubble { padding: 2px; border-radius: 12px; }
 .media-bubble .attachment-controls { padding: 8px; }
@@ -173,5 +177,6 @@
 .message-bubble.media-bubble.cluster-previous.own { border-top-left-radius: 12px; border-top-right-radius: 5px; }
 
 .media-download { background: alpha(@window_fg_color,.06); border-radius: 10px; }
+.media-download.sticker-download { background: transparent; border-radius: 0; }
 .media-download-controls { background: transparent; color: white; }
 .media-download-action { min-width: 40px; min-height: 40px; padding: 0; color: white; background: rgba(0,0,0,.48); border: none; box-shadow: none; }
