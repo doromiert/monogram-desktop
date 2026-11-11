@@ -20,6 +20,7 @@ fn set_switch(row: &adw::SwitchRow, changing: &Cell<bool>, active: bool) {
 }
 pub struct SecurityControls {
     generation: u64,
+    room: bool,
     pub(crate) sending: adw::ComboRow,
     pub(crate) modern: DeviceControls,
     legacy: DeviceControls,
@@ -37,9 +38,9 @@ impl Ui {
         if w.generation != self.generation.get() {
             return;
         }
-        for (controls, status) in [
-            (&w.modern, self.crypto.borrow()),
-            (&w.legacy, self.legacy_crypto.borrow()),
+        for (controls, status, supported) in [
+            (&w.modern, self.crypto.borrow(), !w.room),
+            (&w.legacy, self.legacy_crypto.borrow(), true),
         ] {
             controls.row.set_subtitle(&status.text);
             controls
@@ -51,7 +52,7 @@ impl Ui {
                 .set_sensitive(self.online.get() && !status.ready);
             controls
                 .review
-                .set_sensitive(status.ready && self.online.get());
+                .set_sensitive(supported && status.ready && self.online.get());
             let fingerprint = if status.fingerprint.is_empty() {
                 "No local identity yet".into()
             } else {
@@ -119,6 +120,7 @@ impl Ui {
         });
         let weak = Rc::downgrade(self);
         let target = peer.to_string();
+        let room = self.state.borrow().current().group;
         review.connect_clicked(move |_| {
             if let Some(ui) = weak
                 .upgrade()
@@ -126,7 +128,11 @@ impl Ui {
             {
                 ui.review_request.replace(Some((target.clone(), mode)));
                 ui.notice(&format!("Looking up {} fingerprints…", mode.name()));
-                ui.command(if mode == Mode::Legacy {
+                ui.command(if mode == Mode::Legacy && room {
+                    protocol::Command::ReviewRoom {
+                        peer: target.clone(),
+                    }
+                } else if mode == Mode::Legacy {
                     protocol::Command::Legacy(Legacy::Review(target.clone()))
                 } else {
                     protocol::Command::Crypto(Modern::Review(target.clone()))
@@ -145,6 +151,7 @@ impl Ui {
     }
     pub fn live_security(self: &Rc<Self>) {
         let page = adw::PreferencesPage::new();
+        let room = self.state.borrow().current().group;
         let peer = self.state.borrow().current().jid.clone();
         let generation = self.generation.get();
         let choices = adw::PreferencesGroup::builder()
@@ -233,6 +240,7 @@ impl Ui {
         });
         self.security_widgets.replace(Some(SecurityControls {
             generation,
+            room,
             sending,
             modern,
             legacy,
@@ -358,6 +366,14 @@ impl Ui {
                             })
                         });
                         ui.invalidate_sending_choice(&target);
+                        if mode == Mode::Legacy
+                            && ui.state.borrow().current().group
+                            && ui.state.borrow().current().jid == target
+                        {
+                            ui.command(protocol::Command::ReviewRoom {
+                                peer: target.clone(),
+                            });
+                        }
                     }
                     if let Some(d) = dialog.upgrade() {
                         d.close();

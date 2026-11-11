@@ -1,4 +1,4 @@
-# Legacy OMEMO direct messages
+# Legacy OMEMO direct and room messages
 
 The legacy option uses the same `eu.siacs.conversations.axolotl` protocol as
 Monogram Android’s Smack backend. It is the legacy profile from
@@ -31,3 +31,14 @@ Verification includes independent Java Smack/Signal exchange in both directions,
 local authenticated payload and journal regressions, and disposable Prosody over
 TLS. The live fixture selects Legacy automatically when OMEMO 2 is untrusted,
 then sends and decrypts a direct message and deduplicates its MAM copy.
+
+Nonanonymous, members-only MUCs now support encrypted text and replies using
+Android’s Legacy wire format. Automatic selects Legacy here; classical OMEMO 2
+room sending remains unavailable in both clients. Complete member/admin/owner
+lists include offline members and own other devices, are fetched before and
+after encryption, and are fenced against room/session changes before send.
+Live sender identities are captured from room presence; archived identities
+require the server’s historical real-JID metadata. Room contexts survive journal
+recovery and trust retries. Fingerprint review shows member devices. An isolated
+TLS Prosody check verified encrypted delivery and MAM with an offline member;
+independent mobile room interoperability and richer room content remain open.

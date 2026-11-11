@@ -312,8 +312,60 @@ impl Legacy {
         targets.retain(|(device, _)| device.trust == Trust::Trusted);
         encrypt_for(&mut self.store, peer, body, wire_id, &targets)
     }
+    pub async fn encrypt_room(
+        &mut self,
+        room: &str,
+        members: &BTreeSet<String>,
+        body: &str,
+        wire_id: &str,
+    ) -> Result<Element> {
+        address(room, 1)?;
+        if members.is_empty() || members.len() > 4096 || !members.contains(&self.store.owner) {
+            return Err(Error::Invalid("legacy complete room recipients"));
+        }
+        let owner = self.store.owner.clone();
+        let mut targets = vec![];
+        let mut seen = BTreeSet::new();
+        for peer in members {
+            address(peer, 1)?;
+            let devices = self.devices(peer).await?;
+            if devices
+                .iter()
+                .any(|(device, _)| device.trust == Trust::Undecided)
+            {
+                return Err(if peer == &owner {
+                    Error::OwnDeviceTrustRequired
+                } else {
+                    Error::TrustRequired
+                });
+            }
+            if peer != &owner
+                && !devices
+                    .iter()
+                    .any(|(device, _)| device.trust == Trust::Trusted)
+            {
+                return Err(Error::Unavailable(NO_DEVICES));
+            }
+            for (device, bundle) in devices {
+                if device.trust == Trust::Trusted {
+                    if targets.len() >= 1000 || !seen.insert((device.peer.clone(), device.id)) {
+                        return Err(Error::Invalid("legacy room recipient device limit"));
+                    }
+                    targets.push((device, bundle));
+                }
+            }
+        }
+        encrypt_for_kind(&mut self.store, room, body, wire_id, &targets, true)
+    }
     pub fn digest(&self, outer: &Element) -> Result<[u8; 32]> {
         Ok(Envelope::parse(outer, &self.store.owner, self.device())?.digest)
+    }
+    pub fn digest_room(
+        &self,
+        outer: &Element,
+        sender: &crate::rooms::members::RoomSender,
+    ) -> Result<[u8; 32]> {
+        Ok(Envelope::parse_room(outer, &self.store.owner, self.device(), sender)?.digest)
     }
     pub async fn receive(
         &mut self,
@@ -322,6 +374,27 @@ impl Legacy {
         context: Option<Context>,
     ) -> Result<Received> {
         let envelope = Envelope::parse(outer, &self.store.owner, self.device())?;
+        self.receive_envelope(outer, envelope, sent_time, context)
+            .await
+    }
+    pub async fn receive_room(
+        &mut self,
+        outer: &Element,
+        sender: &crate::rooms::members::RoomSender,
+        sent_time: i64,
+        context: Option<Context>,
+    ) -> Result<Received> {
+        let envelope = Envelope::parse_room(outer, &self.store.owner, self.device(), sender)?;
+        self.receive_envelope(outer, envelope, sent_time, context)
+            .await
+    }
+    async fn receive_envelope(
+        &mut self,
+        outer: &Element,
+        envelope: Envelope,
+        sent_time: i64,
+        context: Option<Context>,
+    ) -> Result<Received> {
         if let Some(cached) = self
             .store
             .transaction(|tx| self.journal.find(tx, &envelope.digest))?
@@ -380,6 +453,17 @@ fn encrypt_for(
     body: &str,
     id: &str,
     recipients: &[(Device, Bundle)],
+) -> Result<Element> {
+    encrypt_for_kind(store, peer, body, id, recipients, false)
+}
+
+fn encrypt_for_kind(
+    store: &mut Store,
+    peer: &str,
+    body: &str,
+    id: &str,
+    recipients: &[(Device, Bundle)],
+    room: bool,
 ) -> Result<Element> {
     if body.is_empty()
         || body.len() > payload::MAX
@@ -450,7 +534,10 @@ fn encrypt_for(
             )?;
             keys.push(wire::key_xml(device.id, prekey, &bytes));
         }
-        let message = wire::stanza(&owner, peer, id, local, keys, &iv, Some(&ciphertext));
+        let mut message = wire::stanza(&owner, peer, id, local, keys, &iv, Some(&ciphertext));
+        if room {
+            message = attr(message, "type", "groupchat");
+        }
         bundle::xml(&message, MAX_WIRE)?;
         Ok(message)
     })
@@ -519,7 +606,7 @@ fn receive_for(
                 )?;
                 Some(wire::stanza(
                     &owner,
-                    outer.attr("from").ok_or(Error::Incomplete)?,
+                    &envelope.ack_to,
                     &crate::model::new_id(),
                     local,
                     vec![wire::key_xml(envelope.sender, first, &bytes)],

@@ -50,17 +50,14 @@ impl Ui {
         }
         let chat = state.current();
         if chat.group {
-            let can_send = chat.room_can_send;
-            let explicit = chat.encryption_preference() == Preference::Plain;
-            drop(state);
-            if !can_send {
+            if !chat.room_can_send {
                 self.notice("Join the room before sending");
-            } else if !explicit {
-                self.notice("Encrypted rooms are unavailable. Choose Unencrypted in Conversation Security to send here.");
-            } else {
-                then(self, Mode::Plain);
+                return;
             }
-            return;
+            if chat.encryption_preference() == Preference::Omemo2 {
+                self.notice("OMEMO 2 room sending is unavailable. Choose Legacy OMEMO or Automatic in Conversation Security.");
+                return;
+            }
         }
         if let Some(mode) = self.sending_mode(chat) {
             drop(state);

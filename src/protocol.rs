@@ -553,6 +553,17 @@ pub enum BackendEvent {
     Request(String),
 }
 #[derive(Debug)]
+pub enum RoomPreparation {
+    Send {
+        message: Message,
+        quote: String,
+    },
+    Probe {
+        reply: tokio::sync::oneshot::Sender<crate::crypto::Result<Mode>>,
+    },
+    Review,
+}
+#[derive(Debug)]
 pub enum Command {
     CryptoReady(bool),
     LegacyReady(bool),
@@ -580,6 +591,23 @@ pub enum Command {
         peer: String,
         revision: u64,
         result: Result<crate::rooms::members::MemberSnapshot, crate::rooms::Error>,
+    },
+    RoomPrepared {
+        epoch: u64,
+        peer: String,
+        revision: u64,
+        result: Result<crate::rooms::members::MemberSnapshot, crate::rooms::Error>,
+        purpose: RoomPreparation,
+    },
+    ReviewRoom {
+        peer: String,
+    },
+    RoomWire {
+        xml: Element,
+        peer: String,
+        epoch: u64,
+        revision: u64,
+        reply: tokio::sync::oneshot::Sender<bool>,
     },
     Avatar {
         peer: String,
@@ -621,6 +649,32 @@ pub enum Command {
     },
 }
 pub type Envelope = (u64, String, BackendEvent);
+fn prepare_room(
+    rooms: &crate::rooms::Rooms,
+    peer: String,
+    epoch: u64,
+    purpose: RoomPreparation,
+    network: &channel::UnboundedSender<Command>,
+) {
+    let revision = rooms.recipient_revision(&peer);
+    let tx = network.clone();
+    tokio::spawn(async move {
+        let (revision, result) = match revision {
+            Ok(revision) => (
+                revision,
+                crate::rooms::members::fetch(&crate::iq::Client::new(tx.clone()), &peer).await,
+            ),
+            Err(error) => (0, Err(error)),
+        };
+        let _ = tx.send(Command::RoomPrepared {
+            epoch,
+            peer,
+            revision,
+            result,
+            purpose,
+        });
+    });
+}
 fn refresh_room_members(
     rooms: &mut crate::rooms::Rooms,
     peer: &str,
@@ -712,6 +766,44 @@ impl Session {
                                 refresh_room_members(&mut rooms,&peer,room_epoch,&network);
                             }
                         },
+                        Some(Command::RoomPrepared{epoch,peer,revision,result,purpose})=>{
+                            let recipients=if online && epoch==room_epoch {
+                                result.and_then(|snapshot| rooms.install_recipients(&peer,revision,snapshot))
+                            } else { Err(crate::rooms::Error::NotJoined) };
+                            match recipients {
+                                Ok(recipients)=>match purpose {
+                                    RoomPreparation::Send{message,quote}=>legacy.send(legacy::service::Request::SendRoom{recipients,message,quote,epoch}),
+                                    RoomPreparation::Probe{reply}=>{
+                                        let (checked,response)=tokio::sync::oneshot::channel();
+                                        legacy.send(legacy::service::Request::ProbeRoom{recipients,reply:checked});
+                                        tokio::spawn(async move {
+                                            let result=response.await.unwrap_or(Err(crate::crypto::Error::Unavailable("Room encryption check interrupted")))
+                                                .map(|supported|if supported{Mode::Legacy}else{Mode::Plain});
+                                            let _=reply.send(result);
+                                        });
+                                    },
+                                    RoomPreparation::Review=>legacy.send(legacy::service::Request::ReviewRoom{peer,members:recipients.members.into_keys().collect()}),
+                                },
+                                Err(error)=>{
+                                    let text=error.to_string();
+                                    match purpose {
+                                        RoomPreparation::Send{message,..}=>emit(BackendEvent::Failed{peer:peer.clone(),id:message.wire_id}),
+                                        RoomPreparation::Probe{reply}=>{let _=reply.send(Err(crate::crypto::Error::Unavailable("Could not establish complete room recipients. Join a nonanonymous members-only room and check its member permissions.")));},
+                                        RoomPreparation::Review=>emit(BackendEvent::LegacyReview{peer:peer.clone(),rows:vec![],errors:vec![text.clone()]}),
+                                    }
+                                    emit(BackendEvent::RoomError(text));
+                                },
+                            }
+                        },
+                        Some(Command::ReviewRoom{peer})=>prepare_room(&rooms,peer,room_epoch,RoomPreparation::Review,&network),
+                        Some(Command::RoomWire{xml,peer,epoch,revision,reply})=>{
+                            let allowed=online && epoch==room_epoch
+                                && rooms.recipients(&peer).is_ok_and(|current|current.revision==revision)
+                                && xml.is("message",NS) && xml.attr("type")==Some("groupchat")
+                                && xml.attr("to")==Some(peer.as_str()) && xml.attr("from")==Some(owner.as_str())
+                                && xml.get_child("encrypted",legacy::NS).is_some();
+                            let _=reply.send(allowed && send(&mut client,xml).await);
+                        },
                         Some(Command::JoinRoom{peer,nick})=>{
                             if !online { emit(BackendEvent::RoomError("Connect before joining a room".into())); continue; }
                             match rooms.join(&peer,nick.as_deref()){
@@ -753,6 +845,10 @@ impl Session {
                                 let _ = reply.send(Err(crate::crypto::Error::Unavailable("Connection interrupted")));
                                 continue;
                             }
+                            if rooms.known(&peer) {
+                                prepare_room(&rooms,peer,room_epoch,RoomPreparation::Probe{reply},&network);
+                                continue;
+                            }
                             let (checked, first) = tokio::sync::oneshot::channel();
                             crypto.send(modern::Request::Probe{peer:peer.clone(),reply:checked});
                             let legacy_tx = legacy.sender();
@@ -777,6 +873,10 @@ impl Session {
                         Some(Command::Send{peer,message,quote})=>{
                             if !online || message.unavailable || message.upload.is_some() || message.attachment.as_ref().is_some_and(|file|!file.valid_outgoing(message.encrypted)||message.poll.is_some()||message.action.is_some()){emit(BackendEvent::Failed{peer,id:message.wire_id});continue}
                             if rooms.known(&peer) {
+                                if message.mode()==Mode::Legacy {
+                                    prepare_room(&rooms,peer,room_epoch,RoomPreparation::Send{message,quote},&network);
+                                    continue;
+                                }
                                 match rooms.outgoing(&peer,&message,&quote){
                                     Ok(root)=>{let ok=send(&mut client,root).await;emit(if ok{BackendEvent::Sent{peer,id:message.wire_id}}else{BackendEvent::Failed{peer,id:message.wire_id}});}
                                     Err(error)=>{emit(BackendEvent::RoomError(error.to_string()));emit(BackendEvent::Failed{peer,id:message.wire_id});}
@@ -825,16 +925,14 @@ impl Session {
                                     let Some(page)=mam.get(query).filter(|page| page.accepts(&root,&owner)) else {continue};
                                     let Some(result)=page.result(wrapper) else {continue};
                                     if page.room {
-                                        if let Some(message)=rooms.archived_message(&page.peer,result) {
-                                            emit(BackendEvent::Message{peer:page.peer.clone(),message,historical:true,receipt_to:None});
-                                        }
+                                        deliver_room(&rooms,&legacy,&emit,result.xml,&owner,Some((result.uid,result.stamp)));
                                     } else if normalize(result.xml,&owner,Some((result.uid,result.stamp))).is_some_and(|(peer,_,_)| peer==page.peer) {
                                         deliver(&crypto,&legacy,&emit,result.xml,&owner,Some((result.uid,result.stamp)),true,None);
                                     }
                                     continue;
                                 }
                                 if root.attr("type")==Some("groupchat"){
-                                    if let Some((peer,message,historical))=rooms.message(&root){emit(BackendEvent::Message{peer,message,historical,receipt_to:None});}
+                                    deliver_room(&rooms,&legacy,&emit,&root,&owner,None);
                                     continue;
                                 }
                                 if crate::avatar::pep_changed(&root) && bare(from).ok().as_deref()==Some(from) {
@@ -915,6 +1013,60 @@ fn fatal_error(error: &tokio_xmpp::Error) -> bool {
         ),
         _ => false,
     }
+}
+fn deliver_room(
+    rooms: &crate::rooms::Rooms,
+    legacy: &legacy::service::Handle,
+    emit: &impl Fn(BackendEvent),
+    xml: &Element,
+    owner: &str,
+    archive: Option<(&str, &str)>,
+) {
+    let parsed = if let Some((uid, stamp)) = archive {
+        let room = bare_of(xml.attr("from").unwrap_or(""));
+        rooms
+            .archived_message(&room, archive::ResultStanza { xml, uid, stamp })
+            .map(|message| (room, message, true))
+    } else {
+        rooms.message(xml)
+    };
+    let Some((peer, mut metadata, historical)) = parsed else {
+        return;
+    };
+    if xml.get_child("encrypted", legacy::NS).is_some() {
+        if let Ok(sender) = rooms.sender(xml, archive.is_some()) {
+            metadata.own = sender.author == owner;
+            metadata.author = if metadata.own {
+                "You".into()
+            } else {
+                metadata.author
+            };
+            metadata.legacy_room_sender = Some(sender.clone());
+            legacy.send(legacy::service::Request::IncomingRoom {
+                frame: modern::Frame {
+                    xml: xml.clone(),
+                    archive: archive.map(|(id, stamp)| (id.into(), stamp.into())),
+                    historical,
+                    receipt_to: None,
+                },
+                sender,
+                metadata,
+            });
+            return;
+        }
+        metadata.text = "The room did not disclose this sender's identity. Refresh room history after reconnecting.".into();
+        metadata.set_encryption(Mode::Legacy, String::new());
+        metadata.ciphertext = crate::crypto::bundle::xml(xml, 1024 * 1024)
+            .ok()
+            .and_then(|xml| String::from_utf8(xml).ok())
+            .unwrap_or_default();
+    }
+    emit(BackendEvent::Message {
+        peer,
+        message: metadata,
+        historical,
+        receipt_to: None,
+    });
 }
 fn deliver(
     crypto: &modern::Handle,

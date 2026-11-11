@@ -485,6 +485,11 @@ impl Store {
     }
 }
 pub fn same_source(old: &Message, new: &Message) -> bool {
+    if let (Some(old), Some(new)) = (&old.legacy_room_sender, &new.legacy_room_sender)
+        && (old.room != new.room || old.author != new.author)
+    {
+        return false;
+    }
     let room_id = |message: &Message| {
         message
             .aliases

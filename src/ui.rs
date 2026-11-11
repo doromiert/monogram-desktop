@@ -1536,6 +1536,7 @@ impl Ui {
             };
             let mut state = self.state.borrow_mut();
             let peer = state.current().jid.clone();
+            let group = state.current().group;
             let owner = state.account.clone();
             let message = state
                 .current_mut()
@@ -1557,7 +1558,13 @@ impl Ui {
                 } else {
                     r.id.clone()
                 };
-                message.reply_to = if r.own { owner } else { peer.clone() };
+                message.reply_to = if group && !r.sender.is_empty() {
+                    r.sender.clone()
+                } else if r.own {
+                    owner
+                } else {
+                    peer.clone()
+                };
             }
             let message = message.clone();
             drop(state);
@@ -2255,6 +2262,10 @@ impl Ui {
                         c.messages.sort_by(|a, b| a.order_key().cmp(&b.order_key()));
                     }
                 } else if let Some(old) = c.messages.iter_mut().find(|m| m.id == known) {
+                    if old.own && message.own && message.legacy_room_sender.is_some() {
+                        old.sender = message.sender.clone();
+                        old.legacy_room_sender = message.legacy_room_sender.clone();
+                    }
                     for alias in &incoming_aliases {
                         if !old.aliases.contains(alias) {
                             old.aliases.push(alias.clone());

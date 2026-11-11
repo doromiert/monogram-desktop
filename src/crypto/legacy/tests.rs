@@ -29,6 +29,102 @@ fn device(peer: &str, id: u32, bundle: &Bundle) -> Device {
     }
 }
 #[test]
+fn room_body_includes_offline_and_own_devices_with_colliding_ids() {
+    use crate::rooms::members::RoomSender;
+    const C: &str = "carol@example.invalid";
+    const ROOM: &str = "room@conference.example.invalid";
+    let (mut alice, alice_journal, alice_bundle) = fixture(A, 101);
+    let (mut bob, bob_journal, bob_bundle) = fixture(B, 202);
+    let (mut carol, carol_journal, carol_bundle) = fixture(C, 202);
+    let (mut own, own_journal, own_bundle) = fixture(A, 202);
+    for (peer, bundle) in [(B, &bob_bundle), (C, &carol_bundle), (A, &own_bundle)] {
+        approve(&mut alice, peer, 202, bundle);
+    }
+    for store in [&mut bob, &mut carol, &mut own] {
+        approve(store, A, 101, &alice_bundle);
+    }
+    let wire = encrypt_for_kind(
+        &mut alice,
+        ROOM,
+        "Everyone, including offline Carol 🌿",
+        "group-wire",
+        &[
+            (device(B, 202, &bob_bundle), bob_bundle),
+            (device(C, 202, &carol_bundle), carol_bundle),
+            (device(A, 202, &own_bundle), own_bundle),
+        ],
+        true,
+    )
+    .unwrap();
+    assert_eq!(wire.attr("type"), Some("groupchat"));
+    assert_eq!(wire.attr("to"), Some(ROOM));
+    assert!(wire.get_child("body", payload::CLIENT).is_none());
+    let sender = RoomSender {
+        room: ROOM.into(),
+        occupant: format!("{ROOM}/Alice"),
+        author: A.into(),
+    };
+    for (store, journal, owner) in [
+        (&mut bob, &bob_journal, B),
+        (&mut carol, &carol_journal, C),
+        (&mut own, &own_journal, A),
+    ] {
+        let mut echo = attr(attr(wire.clone(), "from", &sender.occupant), "to", owner);
+        assert!(Envelope::parse(&echo, owner, 202).is_err());
+        let envelope = Envelope::parse_room(&echo, owner, 202, &sender).unwrap();
+        assert_eq!(envelope.keys.len(), 3);
+        assert_eq!(envelope.peer, A);
+        let archived = Element::builder("message", payload::CLIENT)
+            .attr("from".try_into().unwrap(), &sender.occupant)
+            .attr("type".try_into().unwrap(), "groupchat")
+            .append_all(echo.children().cloned())
+            .build();
+        assert_eq!(
+            Envelope::parse_room(&archived, owner, 202, &sender)
+                .unwrap()
+                .digest,
+            envelope.digest
+        );
+        let mut other_scope = sender.clone();
+        other_scope.room = "other@conference.example.invalid".into();
+        other_scope.occupant = format!("{}/Alice", other_scope.room);
+        let other_echo = attr(echo.clone(), "from", &other_scope.occupant);
+        assert_ne!(
+            Envelope::parse_room(&other_echo, owner, 202, &other_scope)
+                .unwrap()
+                .digest,
+            envelope.digest
+        );
+        assert!(Envelope::parse_room(&other_echo, owner, 202, &sender).is_err());
+        echo.append_child(
+            Element::builder("body", payload::CLIENT)
+                .append("outside text is unauthenticated")
+                .build(),
+        );
+        let decoded = receive_for(store, journal, &echo, &envelope, 42, None).unwrap();
+        let content = decoded.content.unwrap();
+        assert_eq!(content.attr("from"), Some(sender.occupant.as_str()));
+        assert_eq!(content.attr("type"), Some("groupchat"));
+        assert_eq!(
+            content.get_child("body", payload::CLIENT).unwrap().text(),
+            "Everyone, including offline Carol 🌿"
+        );
+        assert_eq!(decoded.fingerprint, alice_bundle.identity);
+        let ack = decoded.acknowledgement.unwrap();
+        assert_eq!(ack.attr("to"), Some(A));
+        assert_eq!(ack.attr("type"), Some("chat"));
+        // This key transport is addressed to the author, never to room/nickname.
+        let ack_envelope = Envelope::parse(&ack, A, 101).unwrap();
+        assert!(
+            receive_for(&mut alice, &alice_journal, &ack, &ack_envelope, 43, None)
+                .unwrap()
+                .content
+                .is_none()
+        );
+        assert_eq!(journal.pending(store).unwrap().len(), 1);
+    }
+}
+#[test]
 fn authenticated_body_and_other_device_copy_survive_failed_gcm_and_archive_redelivery() {
     let (mut alice, alice_journal, alice_bundle) = fixture(A, 101);
     let (mut bob, bob_journal, bob_bundle) = fixture(B, 202);

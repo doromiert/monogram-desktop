@@ -3,7 +3,7 @@ use super::{Legacy, MAX_WIRE, NS, exists, probe_unavailable};
 use crate::{
     crypto::{
         bundle,
-        journal::{Context, Received, Token},
+        journal::{Context, Received, RoomContext, Token},
         lifecycle, payload,
         service::{Frame, Review, Status},
         *,
@@ -12,8 +12,15 @@ use crate::{
     iq,
     model::Message,
     protocol::{self, BackendEvent, Command, Envelope},
+    rooms::members::{RoomRecipients, RoomSender},
 };
-use std::{collections::BTreeMap, path::PathBuf, sync::mpsc, thread, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::mpsc,
+    thread,
+    time::Duration,
+};
 use tokio::sync::{mpsc as channel, oneshot};
 use tokio_xmpp::{jid::Jid, minidom::Element};
 
@@ -28,7 +35,7 @@ pub struct LegacyReply {
     pub text: String,
 }
 impl LegacyReply {
-    fn from_envelope(outer: &Element, body: &str, owner: &str, peer: &str) -> Option<Self> {
+    fn parse(outer: &Element, body: &str, owner: &str, peer: &str, room: bool) -> Option<Self> {
         let mut replies = outer.children().filter(|child| child.is("reply", REPLY));
         let reply = replies.next()?;
         let id = reply
@@ -38,11 +45,15 @@ impl LegacyReply {
             return None;
         }
         let to = if let Some(value) = reply.attr("to") {
-            let author = value.parse::<Jid>().ok()?.to_bare().to_string();
-            if author != owner && author != peer {
+            let address = value.parse::<Jid>().ok()?;
+            let author = address.to_bare().to_string();
+            if address.node().is_none()
+                || (!room && author != owner && author != peer)
+                || (room && address.resource().is_some() && author != peer)
+            {
                 return None;
             }
-            author
+            if room { address.to_string() } else { author }
         } else {
             String::new()
         };
@@ -100,6 +111,10 @@ pub enum Request {
     Online(bool),
     Enable,
     Review(String),
+    ReviewRoom {
+        peer: String,
+        members: BTreeSet<String>,
+    },
     RefreshTrust(String),
     Decide {
         keys: BTreeMap<String, BTreeMap<u32, [u8; 32]>>,
@@ -114,12 +129,27 @@ pub enum Request {
         message: Message,
         quote: String,
     },
+    ProbeRoom {
+        recipients: RoomRecipients,
+        reply: oneshot::Sender<Result<bool>>,
+    },
+    SendRoom {
+        recipients: RoomRecipients,
+        message: Message,
+        quote: String,
+        epoch: u64,
+    },
     Incoming(Frame),
+    IncomingRoom {
+        frame: Frame,
+        sender: RoomSender,
+        metadata: Message,
+    },
     Accepted(Token),
 }
 pub struct Handle {
     tx: channel::UnboundedSender<Request>,
-    incoming: channel::Sender<Frame>,
+    incoming: channel::Sender<Request>,
     stop: Option<oneshot::Sender<()>>,
     owner: String,
     generation: u64,
@@ -154,7 +184,7 @@ impl Handle {
                             tokio::select! {
                                 biased;
                                 next = requests.recv() => match next { Some(request) => worker.process(request).await, None => break },
-                                next = frames.recv() => match next { Some(frame) => worker.process(Request::Incoming(frame)).await, None => break },
+                                next = frames.recv() => match next { Some(request) => worker.process(request).await, None => break },
                             }
                         }
                     } => {},
@@ -164,16 +194,31 @@ impl Handle {
         handle
     }
     pub fn send(&self, request: Request) {
-        if let Request::Incoming(frame) = request {
+        let frame = match &request {
+            Request::Incoming(frame) | Request::IncomingRoom { frame, .. } => Some(frame),
+            _ => None,
+        };
+        if let Some(frame) = frame {
             if bundle::xml(&frame.xml, MAX_WIRE).is_err() {
                 return;
             }
-            if let Err(error) = self.incoming.try_send(frame) {
+            if let Err(error) = self.incoming.try_send(request) {
+                let request = error.into_inner();
+                let (frame, room) = match request {
+                    Request::Incoming(frame) => (frame, None),
+                    Request::IncomingRoom {
+                        frame,
+                        sender,
+                        metadata,
+                    } => (frame, Some(RoomContext { sender, metadata })),
+                    _ => unreachable!(),
+                };
                 if let Some(event) = unavailable(
                     &self.owner,
-                    &error.into_inner(),
+                    &frame,
                     "Legacy OMEMO is busy. Reconnect or refresh fingerprints to retry.",
                     None,
+                    room.as_ref(),
                 ) {
                     let _ = self
                         .events
@@ -220,14 +265,18 @@ fn unavailable(
     frame: &Frame,
     text: &str,
     digest: Option<[u8; 32]>,
+    room: Option<&RoomContext>,
 ) -> Option<BackendEvent> {
     frame
         .xml
         .get_child("encrypted", NS)?
         .get_child("payload", NS)?;
-    let (peer, mut message, historical) = protocol::normalize(&frame.xml, owner, archive(frame))?;
+    let (peer, mut message, historical) = outer_metadata(owner, frame, room)?;
     message.text = text.into();
     message.ciphertext = String::from_utf8(bundle::xml(&frame.xml, MAX_WIRE).ok()?).ok()?;
+    message.set_encryption(Mode::Legacy, String::new());
+    message.unavailable = true;
+    message.legacy_room_sender = room.map(|room| room.sender.clone());
     if let Some(digest) = digest {
         message.aliases.push(alias(digest));
     }
@@ -237,6 +286,45 @@ fn unavailable(
         historical: frame.historical || historical,
         receipt_to: None,
     })
+}
+fn outer_metadata(
+    owner: &str,
+    frame: &Frame,
+    room: Option<&RoomContext>,
+) -> Option<(String, Message, bool)> {
+    let Some(room) = room else {
+        return protocol::normalize(&frame.xml, owner, archive(frame));
+    };
+    let sender = &room.sender;
+    let address = sender.occupant.parse::<Jid>().ok()?;
+    if !frame.xml.is("message", payload::CLIENT)
+        || frame.xml.attr("type") != Some("groupchat")
+        || frame.xml.attr("from") != Some(sender.occupant.as_str())
+        || address.resource().is_none()
+        || address.to_bare().as_str() != sender.room
+        || protocol::bare(&sender.author).ok().as_deref() != Some(sender.author.as_str())
+        || frame.xml.attr("to").is_some_and(|to| {
+            to.parse::<Jid>()
+                .ok()
+                .is_none_or(|jid| jid.to_bare().as_str() != owner)
+        })
+    {
+        return None;
+    }
+    let mut metadata = room.metadata.clone();
+    metadata.sender = sender.occupant.clone();
+    metadata.own = sender.author == owner;
+    metadata.author = if metadata.own {
+        "You".into()
+    } else {
+        address.resource()?.as_str().into()
+    };
+    metadata.legacy_room_sender = Some(sender.clone());
+    Some((
+        sender.room.clone(),
+        metadata,
+        frame.historical || frame.archive.is_some(),
+    ))
 }
 fn describe(error: &Error) -> String {
     match error {
@@ -321,12 +409,13 @@ impl Worker {
             .is_ok_and(|v| v.unwrap_or(false))
     }
     async fn review(&mut self, peer: &str) {
+        let peers = BTreeSet::from([peer.to_string(), self.owner.clone()]);
+        self.review_members(peer, peers).await;
+    }
+    async fn review_members(&mut self, peer: &str, mut peers: BTreeSet<String>) {
+        peers.insert(self.owner.clone());
         let mut rows = vec![];
         let mut errors = vec![];
-        let mut peers = vec![peer.to_string()];
-        if peer != self.owner {
-            peers.push(self.owner.clone());
-        }
         for address in peers {
             let result = match self.local.as_mut().filter(|_| self.ready) {
                 Some(local) => local.discover(&address).await,
@@ -415,16 +504,123 @@ impl Worker {
             Err(Error::Uncertain)
         }
     }
-    async fn incoming(&mut self, frame: &Frame) -> Result<()> {
+    async fn probe_room(&mut self, recipients: &RoomRecipients) -> Result<bool> {
+        if !self.ready {
+            self.initialize().await?;
+        }
+        let members = recipients.members.keys().cloned().collect();
+        match self
+            .local
+            .as_mut()
+            .ok_or(Error::Incomplete)?
+            .encrypt_room(
+                &recipients.room,
+                &members,
+                "Monogram encryption check",
+                &crate::model::new_id(),
+            )
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(Error::Unavailable(super::NO_DEVICES | super::UNSUPPORTED)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+    async fn send_room(
+        &mut self,
+        recipients: &RoomRecipients,
+        message: &Message,
+        quote: &str,
+        epoch: u64,
+    ) -> Result<()> {
+        if message.mode() != Mode::Legacy {
+            return Err(Error::Invalid("wrong room encryption mode"));
+        }
+        if message.upload.is_some()
+            || message.attachment.is_some()
+            || message.poll.is_some()
+            || message.action.is_some()
+        {
+            return Err(Error::Unavailable(
+                "Legacy encrypted room sending currently supports text and replies",
+            ));
+        }
+        if !self.ready || !self.online {
+            return Err(Error::Unavailable("Legacy OMEMO is not ready"));
+        }
+        let local = self.local.as_mut().ok_or(Error::Incomplete)?;
+        if !message.fingerprint.is_empty()
+            && lifecycle::hex(&local.fingerprint()?) != message.fingerprint
+        {
+            return Err(Error::Unavailable(
+                "The local Legacy OMEMO identity changed. Review it before retrying.",
+            ));
+        }
+        let clear = protocol::outgoing(&recipients.room, message, quote);
+        let body = clear
+            .get_child("body", payload::CLIENT)
+            .ok_or(Error::Invalid("legacy room body"))?
+            .text();
+        let members = recipients.members.keys().cloned().collect();
+        let mut xml = local
+            .encrypt_room(&recipients.room, &members, &body, &message.wire_id)
+            .await?;
+        for child in clear
+            .children()
+            .filter(|child| child.is("reply", REPLY) || reply_fallback(child))
+        {
+            xml.append_child(child.clone());
+        }
+        let current =
+            crate::rooms::members::fetch(&iq::Client::new(self.network.clone()), &recipients.room)
+                .await
+                .map_err(|_| {
+                    Error::Unavailable(
+                        "Could not verify final room membership; the message was not sent",
+                    )
+                })?;
+        if current.affiliations != recipients.members {
+            return Err(Error::Unavailable(
+                "Room membership changed while encrypting; retry after reviewing its members",
+            ));
+        }
+        let (reply, received) = oneshot::channel();
+        self.network
+            .send(Command::RoomWire {
+                xml,
+                peer: recipients.room.clone(),
+                epoch,
+                revision: recipients.revision,
+                reply,
+            })
+            .map_err(|_| {
+                Error::Unavailable(
+                    "The connection closed before sending the encrypted room message",
+                )
+            })?;
+        if tokio::time::timeout(Duration::from_secs(20), received)
+            .await
+            .is_ok_and(|value| value.unwrap_or(false))
+        {
+            Ok(())
+        } else {
+            Err(Error::Uncertain)
+        }
+    }
+    fn digest(&self, frame: &Frame, room: Option<&RoomContext>) -> Result<[u8; 32]> {
+        let local = self.local.as_ref().ok_or(Error::Incomplete)?;
+        if let Some(room) = room {
+            local.digest_room(&frame.xml, &room.sender)
+        } else {
+            local.digest(&frame.xml)
+        }
+    }
+    async fn incoming(&mut self, frame: &Frame, room: Option<&RoomContext>) -> Result<()> {
         if !self.ready {
             return Err(Error::Unavailable("Legacy OMEMO is not ready"));
         }
-        let digest = self
-            .local
-            .as_ref()
-            .ok_or(Error::Incomplete)?
-            .digest(&frame.xml)?;
-        let outer = protocol::normalize(&frame.xml, &self.owner, archive(frame));
+        let digest = self.digest(frame, room)?;
+        let outer = outer_metadata(&self.owner, frame, room);
         let alias = alias(digest);
         if let Some((peer, message, _)) = &outer {
             if let Some(history) = self.history()? {
@@ -439,7 +635,13 @@ impl Worker {
                             && !stored.edited
                             && !stored.retracted
                         {
-                            LegacyReply::from_envelope(&frame.xml, &stored.text, &self.owner, peer)
+                            LegacyReply::parse(
+                                &frame.xml,
+                                &stored.text,
+                                &self.owner,
+                                peer,
+                                room.is_some(),
+                            )
                         } else {
                             None
                         };
@@ -468,20 +670,29 @@ impl Worker {
             })
             .map(|stamp| stamp.timestamp_millis())
             .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-        let received = self
-            .local
-            .as_mut()
-            .unwrap()
-            .receive(
-                &frame.xml,
-                stamp,
-                Some(Context {
-                    archive: frame.archive.clone(),
-                    historical: frame.historical,
-                    receipt_to: frame.receipt_to.clone(),
-                }),
-            )
-            .await?;
+        let context = Some(Context {
+            archive: frame.archive.clone(),
+            historical: frame.historical,
+            receipt_to: if room.is_some() {
+                None
+            } else {
+                frame.receipt_to.clone()
+            },
+            room: room.cloned(),
+        });
+        let received = if let Some(room) = room {
+            self.local
+                .as_mut()
+                .unwrap()
+                .receive_room(&frame.xml, &room.sender, stamp, context)
+                .await?
+        } else {
+            self.local
+                .as_mut()
+                .unwrap()
+                .receive(&frame.xml, stamp, context)
+                .await?
+        };
         self.deliver(received, Some(frame), alias).await
     }
     async fn deliver(
@@ -501,14 +712,25 @@ impl Worker {
                     .as_ref()
                     .and_then(|ctx| ctx.archive.as_ref())
             });
-            let (peer, metadata, historical) = protocol::normalize(
-                outer,
-                &self.owner,
-                info.map(|(id, stamp)| (id.as_str(), stamp.as_str())),
-            )
-            .ok_or(Error::Invalid("legacy envelope metadata"))?;
+            let room = received
+                .context
+                .as_ref()
+                .and_then(|context| context.room.as_ref());
+            let metadata_frame = Frame {
+                xml: outer.clone(),
+                archive: info.cloned(),
+                historical: frame.map(|frame| frame.historical).unwrap_or_else(|| {
+                    received
+                        .context
+                        .as_ref()
+                        .is_none_or(|context| context.historical)
+                }),
+                receipt_to: None,
+            };
+            let (peer, metadata, historical) = outer_metadata(&self.owner, &metadata_frame, room)
+                .ok_or(Error::Invalid("legacy envelope metadata"))?;
             let reply = content.get_child("body", payload::CLIENT).and_then(|body| {
-                LegacyReply::from_envelope(outer, &body.text(), &self.owner, &peer)
+                LegacyReply::parse(outer, &body.text(), &self.owner, &peer, room.is_some())
             });
             if let Some(reply) = &reply {
                 content.append_child(outer.get_child("reply", REPLY).unwrap().clone());
@@ -522,8 +744,26 @@ impl Worker {
                     );
                 }
             }
+            if let Some(room) = room {
+                content.set_attr("".into(), "type".try_into().unwrap(), "chat");
+                content.set_attr(
+                    "".into(),
+                    "from".try_into().unwrap(),
+                    room.sender.author.as_str(),
+                );
+                content.set_attr("".into(), "to".try_into().unwrap(), self.owner.as_str());
+            }
             let (_, mut message, _) = protocol::normalize_protected(&content, &self.owner, None)
                 .ok_or(Error::Invalid("legacy body"))?;
+            if room.is_some() {
+                message.id = metadata.id.clone();
+                message.sender = metadata.sender.clone();
+                message.author = metadata.author.clone();
+                message.own = metadata.own;
+                message.wire_id = metadata.wire_id.clone();
+                message.legacy_room_sender = metadata.legacy_room_sender.clone();
+                message.aliases.clear();
+            }
             if let Some(reply) = reply {
                 message.reply_id = reply.id;
                 message.reply_to = reply.to;
@@ -548,12 +788,16 @@ impl Worker {
                 .with_timezone(&chrono::Local)
                 .format("%H:%M")
                 .to_string();
-            let receipt_to = frame.and_then(|f| f.receipt_to.clone()).or_else(|| {
-                received
-                    .context
-                    .as_ref()
-                    .and_then(|ctx| ctx.receipt_to.clone())
-            });
+            let receipt_to = if room.is_some() {
+                None
+            } else {
+                frame.and_then(|f| f.receipt_to.clone()).or_else(|| {
+                    received
+                        .context
+                        .as_ref()
+                        .and_then(|ctx| ctx.receipt_to.clone())
+                })
+            };
             let historical = historical
                 || frame
                     .map(|f| f.historical)
@@ -597,7 +841,18 @@ impl Worker {
             let alias = pending
                 .outer
                 .as_ref()
-                .and_then(|outer| self.local.as_ref().unwrap().digest(outer).ok())
+                .and_then(|outer| {
+                    let local = self.local.as_ref().unwrap();
+                    if let Some(room) = pending
+                        .context
+                        .as_ref()
+                        .and_then(|context| context.room.as_ref())
+                    {
+                        local.digest_room(outer, &room.sender).ok()
+                    } else {
+                        local.digest(outer).ok()
+                    }
+                })
                 .map(alias)
                 .unwrap_or_default();
             self.deliver(pending, None, alias).await?;
@@ -631,7 +886,7 @@ impl Worker {
                     xml.append_child(super::wire::attr(
                         super::wire::element("delay", "urn:xmpp:delay"),
                         "stamp",
-                        message.timestamp,
+                        message.timestamp.clone(),
                     ));
                 }
                 let frame = Frame {
@@ -640,7 +895,52 @@ impl Worker {
                     historical: true,
                     receipt_to: None,
                 };
-                let _ = tokio::time::timeout_at(deadline, self.incoming(&frame)).await;
+                let room = message.legacy_room_sender.as_ref().map(|sender| {
+                    let mut metadata = message.clone();
+                    metadata.ciphertext.clear();
+                    RoomContext {
+                        sender: sender.clone(),
+                        metadata,
+                    }
+                });
+                let _ =
+                    tokio::time::timeout_at(deadline, self.incoming(&frame, room.as_ref())).await;
+            }
+        }
+    }
+    fn sent(&self, peer: String, id: String, result: Result<()>) {
+        match result {
+            Ok(()) => self.emit(BackendEvent::Sent { peer, id }),
+            Err(error) => {
+                self.emit(if matches!(error, Error::Uncertain) {
+                    BackendEvent::Uncertain {
+                        peer: peer.clone(),
+                        id,
+                    }
+                } else {
+                    BackendEvent::Failed {
+                        peer: peer.clone(),
+                        id,
+                    }
+                });
+                self.emit(BackendEvent::CryptoError {
+                    peer,
+                    text: describe(&error),
+                });
+            }
+        }
+    }
+    async fn receive_request(&mut self, frame: Frame, room: Option<RoomContext>) {
+        if let Err(error) = self.incoming(&frame, room.as_ref()).await {
+            let digest = self.digest(&frame, room.as_ref()).ok();
+            if let Some(event) = unavailable(
+                &self.owner,
+                &frame,
+                &describe(&error),
+                digest,
+                room.as_ref(),
+            ) {
+                self.emit(event);
             }
         }
     }
@@ -695,38 +995,35 @@ impl Worker {
                 quote,
             } => {
                 let id = message.wire_id.clone();
-                match self.send_message(&peer, &message, &quote).await {
-                    Ok(()) => self.emit(BackendEvent::Sent { peer, id }),
-                    Err(error) => {
-                        self.emit(if matches!(error, Error::Uncertain) {
-                            BackendEvent::Uncertain {
-                                peer: peer.clone(),
-                                id,
-                            }
-                        } else {
-                            BackendEvent::Failed {
-                                peer: peer.clone(),
-                                id,
-                            }
-                        });
-                        self.emit(BackendEvent::CryptoError {
-                            peer,
-                            text: describe(&error),
-                        });
-                    }
+                let result = self.send_message(&peer, &message, &quote).await;
+                self.sent(peer, id, result);
+            }
+            Request::SendRoom {
+                recipients,
+                message,
+                quote,
+                epoch,
+            } => {
+                let id = message.wire_id.clone();
+                let result = self.send_room(&recipients, &message, &quote, epoch).await;
+                self.sent(recipients.room, id, result);
+            }
+            Request::ProbeRoom { recipients, reply } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(self.probe_room(&recipients).await);
                 }
             }
-            Request::Incoming(frame) => {
-                if let Err(error) = self.incoming(&frame).await {
-                    let digest = self
-                        .local
-                        .as_ref()
-                        .and_then(|local| local.digest(&frame.xml).ok());
-                    if let Some(event) = unavailable(&self.owner, &frame, &describe(&error), digest)
-                    {
-                        self.emit(event);
-                    }
-                }
+            Request::ReviewRoom { peer, members } => self.review_members(&peer, members).await,
+            Request::Incoming(frame) => self.receive_request(frame, None).await,
+            Request::IncomingRoom {
+                frame,
+                sender,
+                mut metadata,
+            } => {
+                metadata.ciphertext.clear();
+                metadata.legacy_room_sender = Some(sender.clone());
+                self.receive_request(frame, Some(RoomContext { sender, metadata }))
+                    .await;
             }
             Request::Accepted(token) => {
                 if let Err(error) = self.accept(token).await {
@@ -734,5 +1031,111 @@ impl Worker {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovered_room_content_keeps_captured_author_and_never_sends_room_receipts() {
+        let owner = "owner@example.org";
+        let room = "room@conference.example.org";
+        let occupant = format!("{room}/Old nickname");
+        let sender = RoomSender {
+            room: room.into(),
+            occupant: occupant.clone(),
+            author: "author@example.org".into(),
+        };
+        let metadata = Message {
+            sender: occupant.clone(),
+            author: "Old nickname".into(),
+            wire_id: "wire-id".into(),
+            aliases: vec!["room-archive:archive-id".into()],
+            own: true,
+            ..Default::default()
+        };
+        let outer: Element = format!("<message xmlns='jabber:client' from='{occupant}' type='groupchat' id='wire-id'><reply xmlns='{REPLY}' id='target-id' to='{room}/Other nickname'/><fallback xmlns='{FALLBACK}' for='{REPLY}'><body start='0' end='9'/></fallback></message>").parse().unwrap();
+        let content: Element = format!("<message xmlns='jabber:client' from='{occupant}' type='groupchat' id='wire-id'><body>&gt; quoted\nreply</body></message>").parse().unwrap();
+        let context = Context {
+            archive: Some(("archive-id".into(), "2026-11-11T00:00:00Z".into())),
+            historical: true,
+            receipt_to: Some(occupant.clone()),
+            room: Some(RoomContext {
+                sender: sender.clone(),
+                metadata,
+            }),
+        };
+        let context: Context =
+            serde_json::from_slice(&serde_json::to_vec(&context).unwrap()).unwrap();
+        let token = serde_json::from_value(
+            serde_json::json!({"epoch":vec![0u8;16],"slot":1,"digest":vec![0u8;32]}),
+        )
+        .unwrap();
+        let received = Received {
+            content: Some(content),
+            outer: Some(outer),
+            acknowledgement: None,
+            fingerprint: [1; 32],
+            replenish: false,
+            token: Some(token),
+            sent_time: 1794355200000,
+            context: Some(context),
+        };
+        let (events, result) = mpsc::channel();
+        let (network, _requests) = channel::unbounded_channel();
+        let mut worker = Worker {
+            owner: owner.into(),
+            generation: 1,
+            network,
+            events,
+            root: PathBuf::new(),
+            local: None,
+            online: false,
+            ready: false,
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(worker.deliver(received, None, "legacy-omemo:digest".into()))
+            .unwrap();
+        let (
+            _,
+            _,
+            BackendEvent::LegacyEncryptedMessage {
+                peer,
+                message,
+                historical,
+                receipt_to,
+                ..
+            },
+        ) = result.recv().unwrap()
+        else {
+            panic!("room content was not projected")
+        };
+        assert_eq!(peer, room);
+        assert_eq!(message.sender, occupant);
+        assert_eq!(message.author, "Old nickname");
+        assert!(
+            !message.own,
+            "snapshot ownership must follow captured real author"
+        );
+        assert_eq!(message.text, "reply");
+        assert_eq!(message.reply, "quoted");
+        assert_eq!(message.reply_to, format!("{room}/Other nickname"));
+        assert!(message.aliases.contains(&"room-archive:archive-id".into()));
+        assert!(!message.aliases.contains(&"wire:wire-id".into()));
+        assert_eq!(message.legacy_room_sender.unwrap(), sender);
+        assert!(historical);
+        assert!(receipt_to.is_none());
+        let old: Context =
+            serde_json::from_str(r#"{"archive":null,"historical":true,"receipt_to":null}"#)
+                .unwrap();
+        assert!(
+            old.room.is_none(),
+            "old direct journal contexts remain readable"
+        );
     }
 }

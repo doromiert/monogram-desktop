@@ -319,6 +319,29 @@ impl Rooms {
         }
         self.identities.recipients(room, &self.owner)
     }
+    pub fn recipient_revision(&self, room: &str) -> Result<u64> {
+        if !self.is_joined(room) {
+            return Err(Error::NotJoined);
+        }
+        if !self.status(room).can_send {
+            return Err(Error::Forbidden);
+        }
+        self.identities
+            .revision(room)
+            .ok_or(Error::RecipientsUnavailable)
+    }
+    pub fn install_recipients(
+        &mut self,
+        room: &str,
+        revision: u64,
+        snapshot: members::MemberSnapshot,
+    ) -> Result<members::RoomRecipients> {
+        if self.recipient_revision(room)? != revision {
+            return Err(Error::RecipientsUnavailable);
+        }
+        self.identities.install(room, revision, snapshot)?;
+        self.recipients(room)
+    }
     /// Capture this before crypto waits; historical nicknames never use today's map.
     pub fn sender(&self, xml: &Element, archived: bool) -> Result<members::RoomSender> {
         if !xml.is("message", CLIENT)
@@ -471,6 +494,20 @@ impl Rooms {
         if text.trim().is_empty() || text.len() > 256 * 1024 {
             return None;
         }
+        let (reply_id, mut reply_to, reply, text) = if unavailable {
+            (String::new(), String::new(), String::new(), text)
+        } else {
+            crate::protocol::reply_content(xml, &text)
+        };
+        if !reply_id.is_empty()
+            && let Some(address) = xml
+                .get_child("reply", "urn:xmpp:reply:0")
+                .and_then(|reply| reply.attr("to"))
+                .and_then(|to| to.parse::<Jid>().ok())
+            && address.to_bare().as_str() == jid
+        {
+            reply_to = address.to_string();
+        }
         let wire_id = xml
             .attr("id")
             .filter(|id| !id.is_empty() && id.len() <= 4096)
@@ -510,6 +547,9 @@ impl Rooms {
         }
         let message = Message {
             text,
+            reply_id,
+            reply_to,
+            reply,
             wire_id,
             aliases,
             own,
@@ -547,21 +587,23 @@ impl Rooms {
             || message.poll.is_some()
             || message.action.is_some()
             || message.forwarded.is_some()
-            || !message.reply_id.is_empty()
-            || !quote.is_empty()
+            || (!message.reply_id.is_empty()
+                && !crate::message_actions::valid_id(&message.reply_id))
         {
             return Err(Error::UnsupportedMessage);
         }
-        Ok(Element::builder("message", CLIENT)
+        let clear = crate::protocol::outgoing(&jid, message, quote);
+        let mut root = Element::builder("message", CLIENT)
             .attr("type".try_into().unwrap(), "groupchat")
             .attr("to".try_into().unwrap(), &jid)
             .attr("id".try_into().unwrap(), &message.wire_id)
-            .append(
-                Element::builder("body", CLIENT)
-                    .append(message.text.as_str())
-                    .build(),
-            )
-            .append(attr(el("origin-id", SID), "id", &message.wire_id))
-            .build())
+            .build();
+        for child in clear
+            .children()
+            .filter(|child| !child.is("request", "urn:xmpp:receipts"))
+        {
+            root.append_child(child.clone());
+        }
+        Ok(root)
     }
 }

@@ -668,6 +668,7 @@ impl Worker {
             &frame.xml,
             stamp,
             Some(super::journal::Context {
+                room: None,
                 archive: frame.archive.clone(),
                 historical: frame.historical,
                 receipt_to: frame.receipt_to.clone(),

@@ -36,7 +36,7 @@ pub struct RoomRecipients {
     pub members: BTreeMap<String, Affiliation>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RoomSender {
     pub room: String,
     pub occupant: String,
@@ -58,6 +58,26 @@ struct Identities {
     snapshot: Option<MemberSnapshot>,
 }
 impl Registry {
+    pub fn revision(&self, room: &str) -> Option<u64> {
+        self.rooms
+            .get(room)
+            .filter(|state| !state.invalid)
+            .map(|state| state.revision)
+    }
+    pub fn install(&mut self, room: &str, revision: u64, snapshot: MemberSnapshot) -> Result<()> {
+        let state = self.rooms.get_mut(room).ok_or(Error::NotJoined)?;
+        if state.invalid || state.revision != revision || snapshot.room != room {
+            return Err(Error::RecipientsUnavailable);
+        }
+        if state.snapshot.as_ref().is_some_and(|old| old != &snapshot) {
+            self.serial = self.serial.wrapping_add(1);
+            state.revision = self.serial;
+        }
+        state.snapshot = Some(snapshot);
+        state.pending = None;
+        state.attempted = Some(state.revision);
+        Ok(())
+    }
     pub fn reset(&mut self, room: &str) {
         self.serial = self.serial.wrapping_add(1);
         self.rooms.insert(

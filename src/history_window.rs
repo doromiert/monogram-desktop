@@ -16,6 +16,77 @@ pub enum Side {
     Newer,
 }
 
+#[cfg(test)]
+mod room_reply_tests {
+    use super::*;
+    use crate::{
+        model::{Account, Chat, State},
+        rooms::members::RoomSender,
+    };
+    #[test]
+    fn room_replies_respect_real_author_and_occupant_scope() {
+        let store = crate::storage::Store::open(true).unwrap();
+        let owner = "owner@example.org";
+        let room = "room@conference.example.org";
+        store
+            .save_account(&Account {
+                jid: owner.into(),
+                host: String::new(),
+                port: 5222,
+                direct_tls: false,
+            })
+            .unwrap();
+        let message = |nick: &str, author: &str| Message {
+            text: author.into(),
+            wire_id: "same-id".into(),
+            sender: format!("{room}/{nick}"),
+            aliases: vec!["wire:same-id".into()],
+            legacy_room_sender: Some(RoomSender {
+                room: room.into(),
+                occupant: format!("{room}/{nick}"),
+                author: author.into(),
+            }),
+            ..Default::default()
+        };
+        let alice = message("first", "alice@example.org");
+        let bob = message("second", "bob@example.org");
+        let state = State::live(
+            owner,
+            vec![Chat {
+                jid: room.into(),
+                group: true,
+                messages: vec![alice.clone(), bob.clone()],
+                ..Default::default()
+            }],
+        );
+        store.save(&state).unwrap();
+        assert_eq!(
+            store
+                .resolve_reply(owner, room, "alice@example.org", "same-id")
+                .unwrap()
+                .id,
+            alice.id
+        );
+        assert_eq!(
+            store
+                .resolve_reply(owner, room, &format!("{room}/second"), "same-id")
+                .unwrap()
+                .id,
+            bob.id
+        );
+        assert!(store.resolve_reply(owner, room, "", "same-id").is_none());
+        assert!(
+            store
+                .resolve_reply(owner, room, "mallory@example.org", "same-id")
+                .is_none()
+        );
+        let mut reused = bob;
+        reused.sender = alice.sender.clone();
+        reused.legacy_room_sender.as_mut().unwrap().occupant = alice.sender.clone();
+        assert!(!crate::storage::same_source(&alice, &reused));
+    }
+}
+
 #[derive(Default)]
 pub struct HistoryWindow {
     revision: Cell<u64>,
@@ -201,6 +272,35 @@ impl Store {
     ) -> Option<Message> {
         if reference.is_empty() {
             return None;
+        }
+        let group = self.db.query_row(
+            "SELECT COALESCE(json_extract(body,'$.group'),0) FROM chats WHERE account=? AND peer=?",
+            params![owner, peer], |row| row.get::<_, bool>(0),
+        ).unwrap_or(false);
+        if group {
+            let bare_to = to.split('/').next().unwrap_or_default();
+            let mut query = self.db.prepare("SELECT body FROM messages WHERE account=?1 AND peer=?2 AND (id=?3 OR id IN (SELECT message FROM action_refs WHERE account=?1 AND peer=?2 AND value=?3 UNION SELECT message FROM aliases WHERE account=?1 AND peer=?2 AND alias IN (?6,?7,?8,?9))) AND (?4='' OR json_extract(body,'$.sender')=?4 OR json_extract(body,'$.legacy_room_sender.author')=?5 OR (json_extract(body,'$.own')=1 AND ?5=?1) OR (?4=?2 AND json_extract(body,'$.own')=0)) LIMIT 2").ok()?;
+            let matches = query
+                .query_map(
+                    params![
+                        owner,
+                        peer,
+                        reference,
+                        to,
+                        bare_to,
+                        format!("server:{reference}"),
+                        format!("room-archive:{reference}"),
+                        format!("wire:{reference}"),
+                        format!("origin:{reference}")
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .ok()?;
+            return (matches.len() == 1)
+                .then(|| Message::decode(&matches[0]).ok())
+                .flatten();
         }
         let to = to.split('/').next().unwrap_or_default();
         if !to.is_empty() && to != owner && to != peer {

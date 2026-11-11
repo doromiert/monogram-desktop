@@ -125,6 +125,7 @@ pub(super) struct Envelope {
     pub keys: Vec<Key>,
     pub ciphertext: Option<Vec<u8>>,
     pub digest: [u8; 32],
+    pub ack_to: String,
 }
 impl Envelope {
     pub fn parse(message: &Element, owner: &str, device: u32) -> Result<Self> {
@@ -138,6 +139,55 @@ impl Envelope {
         {
             return Err(Error::Invalid("legacy direct routing"));
         }
+        Self::parse_routed(message, owner, device, from, to, None)
+    }
+    pub fn parse_room(
+        message: &Element,
+        owner: &str,
+        device: u32,
+        sender: &crate::rooms::members::RoomSender,
+    ) -> Result<Self> {
+        use tokio_xmpp::jid::Jid;
+        address(&sender.room, 1)?;
+        address(&sender.author, 1)?;
+        address(owner, device)?;
+        let occupant = sender
+            .occupant
+            .parse::<Jid>()
+            .map_err(|_| Error::Invalid("legacy room occupant"))?;
+        if !message.is("message", payload::CLIENT)
+            || message.attr("type") != Some("groupchat")
+            || occupant.resource().is_none()
+            || occupant.to_bare().as_str() != sender.room
+            || occupant.to_string() != sender.occupant
+            || message.attr("from") != Some(sender.occupant.as_str())
+            || message.attr("to").is_some_and(|to| {
+                to.parse::<Jid>()
+                    .ok()
+                    .is_none_or(|jid| jid.to_bare().as_str() != owner)
+            })
+        {
+            return Err(Error::Invalid("legacy room routing"));
+        }
+        // A verified MAM inner stanza omits `to`; its captured room sender is required.
+        bundle::xml(message, MAX_WIRE)?;
+        Self::parse_routed(
+            message,
+            owner,
+            device,
+            sender.author.clone(),
+            owner.into(),
+            Some(&sender.room),
+        )
+    }
+    fn parse_routed(
+        message: &Element,
+        owner: &str,
+        device: u32,
+        from: String,
+        to: String,
+        room: Option<&str>,
+    ) -> Result<Self> {
         let root = bundle::single(message, "encrypted", NS)?;
         if message
             .children()
@@ -172,7 +222,7 @@ impl Envelope {
                 _ => return Err(Error::Invalid("legacy prekey flag")),
             };
             let bytes = data(key, 16384)?;
-            if bytes.is_empty() || keys.len() >= 2 {
+            if bytes.is_empty() || keys.len() >= if room.is_some() { 1000 } else { 2 } {
                 return Err(Error::Invalid("legacy recipient key"));
             }
             keys.push(Key { prekey, bytes });
@@ -196,6 +246,10 @@ impl Envelope {
             digest.update(bytes);
         };
         add(NS.as_bytes());
+        if let Some(room) = room {
+            add(b"groupchat");
+            add(room.as_bytes());
+        }
         add(from.as_bytes());
         add(to.as_bytes());
         add(&sender.to_be_bytes());
@@ -211,11 +265,16 @@ impl Envelope {
         }
         Ok(Self {
             sender,
-            peer: from,
+            peer: from.clone(),
             iv,
             keys,
             ciphertext,
             digest: digest.finish(),
+            ack_to: if room.is_some() {
+                from.clone()
+            } else {
+                message.attr("from").ok_or(Error::Incomplete)?.into()
+            },
         })
     }
 }

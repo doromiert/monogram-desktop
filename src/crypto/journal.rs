@@ -17,6 +17,13 @@ pub struct Context {
     pub archive: Option<(String, String)>,
     pub historical: bool,
     pub receipt_to: Option<String>,
+    #[serde(default)]
+    pub room: Option<RoomContext>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RoomContext {
+    pub sender: crate::rooms::members::RoomSender,
+    pub metadata: crate::model::Message,
 }
 #[derive(Serialize, Deserialize)]
 struct Saved {
