@@ -1108,15 +1108,36 @@ impl Ui {
         history_view.add_overlay(&self.history);
         history_view.add_overlay(&self.history_latest);
         self.weak_button(&self.history_latest, |ui| ui.load_timeline(None));
+        let scroll_bounds = Rc::new(Cell::new(self.history_bounds()));
+        let previous_bounds = scroll_bounds.clone();
         let weak = Rc::downgrade(self);
-        self.scroll.vadjustment().connect_value_changed(move |_| {
+        self.scroll.vadjustment().connect_value_changed(move |adjustment| {
             if let Some(ui) = weak.upgrade() {
+                let (previous_value, page, upper) = previous_bounds.get();
+                if adjustment.value() < previous_value
+                    && adjustment.page_size() == page
+                    && adjustment.upper() == upper
+                    && !ui.history_window.moving.get()
+                    && matches!(ui.message_scroll.borrow().as_ref(), Some(crate::messages::ScrollTarget::Bottom))
+                {
+                    ui.message_scroll.borrow_mut().take();
+                }
+                previous_bounds.set((adjustment.value(), page, upper));
                 ui.schedule_history_maintenance();
             }
         });
         let weak = Rc::downgrade(self);
         self.scroll.vadjustment().connect_changed(move |_| {
             if let Some(ui) = weak.upgrade() {
+                let (value, page, upper) = scroll_bounds.replace(ui.history_bounds());
+                // Media can grow after its row is inserted; preserve the previous bottom position.
+                if upper - page - value < 24.
+                    && ui.history_window.newest()
+                    && ui.active_media.borrow().is_none()
+                    && !matches!(ui.message_scroll.borrow().as_ref(), Some(crate::messages::ScrollTarget::Message(_)))
+                {
+                    ui.queue_message_scroll(crate::messages::ScrollTarget::Bottom);
+                }
                 ui.schedule_history_maintenance();
             }
         });
