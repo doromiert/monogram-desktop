@@ -196,7 +196,7 @@ impl Ui {
         let p = picture.downgrade();
         let b = button.downgrade();
         let fallback = controls.downgrade();
-        glib::timeout_add_local(std::time::Duration::from_millis(150), move || {
+        let load = move || {
             let (Some(ui), Some(picture), Some(button)) =
                 (weak.upgrade(), p.upgrade(), b.upgrade())
             else {
@@ -282,7 +282,10 @@ impl Ui {
                 }
             }
             glib::ControlFlow::Continue
-        });
+        };
+        if load() == glib::ControlFlow::Continue {
+            glib::timeout_add_local(std::time::Duration::from_millis(150), load);
+        }
     }
 }
 

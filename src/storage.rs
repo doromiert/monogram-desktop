@@ -93,6 +93,10 @@ impl Store {
                 self.upsert_message(&s.account, &c.jid, m)?;
             }
         }
+        tx.execute(
+            "INSERT OR REPLACE INTO preferences VALUES (?,?)",
+            params![format!("active-chat:{}", s.account), s.active],
+        )?;
         let folders = serde_json::json!({"rules":s.folders,"order":s.folder_order});
         tx.execute(
             "INSERT OR REPLACE INTO preferences VALUES (?,?)",
@@ -134,6 +138,48 @@ impl Store {
             tx.execute(
                 &format!("UPDATE {table} SET body=json_set(body,'$.attachment.sticker',json('true')) WHERE account=? AND peer=? AND id=? AND json_type(body,'$.attachment')='object'"),
                 params![account, peer, id],
+            )?;
+        }
+        tx.commit()
+    }
+    pub fn restore_legacy_reply(
+        &self,
+        account: &str,
+        peer: &str,
+        id: &str,
+        reply: crate::crypto::legacy::service::LegacyReply,
+    ) -> rusqlite::Result<()> {
+        let original = if reply.quote.is_empty() {
+            reply.text.clone()
+        } else {
+            format!("> {}\n{}", reply.quote.replace('\n', "\n> "), reply.text)
+        };
+        if !self.message(account, peer, id).is_some_and(|m| {
+            m.mode() == crate::encryption_policy::Mode::Legacy
+                && !m.retracted
+                && !m.unavailable
+                && !m.edited
+                && m.reply_id.is_empty()
+                && m.text == original
+        }) {
+            return Ok(());
+        }
+        let quote = self
+            .resolve_reply(account, peer, &reply.to, &reply.id)
+            .filter(|target| !target.retracted)
+            .map(|target| {
+                format!(
+                    "{} · {}",
+                    target.author,
+                    target.preview().chars().take(80).collect::<String>()
+                )
+            })
+            .unwrap_or(reply.quote);
+        let tx = self.db.unchecked_transaction()?;
+        for table in ["messages", "message_bases"] {
+            tx.execute(
+                &format!("UPDATE {table} SET body=json_set(body,'$.reply_id',?1,'$.reply_to',?2,'$.reply',?3,'$.text',?4) WHERE account=?5 AND peer=?6 AND id=?7 AND json_extract(body,'$.text')=?8 AND COALESCE(json_extract(body,'$.retracted'),0)=0"),
+                params![reply.id, reply.to, quote, reply.text, account, peer, id, original],
             )?;
         }
         tx.commit()
@@ -208,9 +254,6 @@ impl Store {
             if let Ok(mut c) = serde_json::from_str::<Chat>(&body) {
                 if !windowed {
                     c.messages = self.history(a, &peer, None, 200);
-                } else if chats.is_empty() {
-                    c.messages = self.history(a, &peer, None, crate::history_window::PAGE);
-                    c.remember_latest();
                 } else {
                     c.latest = self
                         .history(a, &peer, None, 1)
@@ -221,6 +264,15 @@ impl Store {
             }
         }
         let mut s = State::live(a, chats);
+        let active = self.pref(&format!("active-chat:{a}"), "");
+        if s.chats.iter().any(|chat| chat.id == active) {
+            s.active = active;
+        }
+        if windowed {
+            let chat = s.current_mut();
+            chat.messages = self.history(a, &chat.jid, None, crate::history_window::PAGE);
+            chat.remember_latest();
+        }
         if let Ok(data) =
             serde_json::from_str::<serde_json::Value>(&self.pref(&format!("folders:{a}"), ""))
         {
@@ -278,6 +330,20 @@ impl Store {
     }
     // A client stanza ID is not unique across the author's resources.
     pub fn known_message(&self, a: &str, peer: &str, message: &Message) -> Option<String> {
+        if let Some(alias) = message
+            .aliases
+            .iter()
+            .find(|alias| alias.starts_with("room-archive:"))
+        {
+            let aliases = std::slice::from_ref(alias);
+            // A room-assigned ID survives an archive that withholds the sender's real JID.
+            if let Some(id) = self
+                .known(a, peer, message.own, aliases)
+                .or_else(|| self.known(a, peer, !message.own, aliases))
+            {
+                return Some(id);
+            }
+        }
         let mut aliases = message.aliases.clone();
         aliases.sort_by_key(|v| {
             !v.starts_with("omemo2:")
@@ -403,6 +469,18 @@ impl Store {
     }
 }
 pub fn same_source(old: &Message, new: &Message) -> bool {
+    let room_id = |message: &Message| {
+        message
+            .aliases
+            .iter()
+            .find(|alias| alias.starts_with("room-archive:"))
+            .cloned()
+    };
+    if let (Some(old), Some(new)) = (room_id(old), room_id(new))
+        && old != new
+    {
+        return false;
+    }
     old.own == new.own
         && (old.sender == new.sender
             || (!old.sender.contains('/') || !new.sender.contains('/'))

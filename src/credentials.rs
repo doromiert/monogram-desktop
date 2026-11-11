@@ -21,7 +21,6 @@ pub enum Error {
     Locked,
     Unavailable,
     Invalid,
-    Ambiguous,
 }
 
 impl fmt::Display for Error {
@@ -31,7 +30,6 @@ impl fmt::Display for Error {
             Self::Locked => "The system keyring is locked.",
             Self::Unavailable => "The system keyring could not complete the request.",
             Self::Invalid => "The XMPP account or its password is invalid.",
-            Self::Ambiguous => "More than one keyring entry matches this account.",
         })
     }
 }
@@ -102,41 +100,42 @@ fn attributes(account: &str) -> HashMap<&str, &str> {
     ])
 }
 
-async fn matching_item<'a>(
+async fn matching_items<'a>(
     service: &'a SecretService<'_>,
     attrs: &HashMap<&str, &str>,
-) -> Result<Option<Item<'a>>, Error> {
+) -> Result<Vec<Item<'a>>, Error> {
     let found = service.search_items(attrs.clone()).await?;
-    let mut matching = None;
+    let mut matching = Vec::new();
     for item in found.unlocked.into_iter().chain(found.locked) {
         let item_attrs = item.get_attributes().await?;
-        // SearchItems matches subsets. Never update or delete a different schema's item.
-        if item_attrs.len() != attrs.len()
+        // Secret Service may add its generic schema to otherwise exact attributes.
+        let platform_schema = item_attrs
+            .get("xdg:schema")
+            .is_some_and(|schema| schema == "org.freedesktop.Secret.Generic");
+        if item_attrs.len() != attrs.len() + usize::from(platform_schema)
             || !attrs
                 .iter()
                 .all(|(key, value)| item_attrs.get(*key).map(String::as_str) == Some(*value))
         {
             continue;
         }
-        if matching.replace(item).is_some() {
-            return Err(Error::Ambiguous);
-        }
+        matching.push((item.get_modified().await?, item));
     }
-    if let Some(item) = matching.as_ref() {
-        item.ensure_unlocked().await?;
-    }
-    Ok(matching)
+    // Earlier versions could create duplicates when the platform added xdg:schema.
+    matching.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    Ok(matching.into_iter().map(|(_, item)| item).collect())
 }
 
 async fn execute(account: &str, operation: Operation) -> Result<Option<Password>, Error> {
     let service = SecretService::connect(EncryptionType::Dh).await?;
     let attrs = attributes(account);
-    let item = matching_item(&service, &attrs).await?;
+    let mut items = matching_items(&service, &attrs).await?;
     match operation {
         Operation::Load => {
-            let Some(item) = item else {
+            let Some(item) = items.first() else {
                 return Ok(None);
             };
+            item.ensure_unlocked().await?;
             let bytes = Zeroizing::new(item.get_secret().await?);
             let password = std::str::from_utf8(&bytes).map_err(|_| Error::Invalid)?;
             if password.is_empty() {
@@ -145,7 +144,8 @@ async fn execute(account: &str, operation: Operation) -> Result<Option<Password>
             return Ok(Some(Zeroizing::new(password.to_owned())));
         }
         Operation::Store(password) => {
-            if let Some(item) = item {
+            if let Some(item) = items.first() {
+                item.ensure_unlocked().await?;
                 item.set_secret(password.as_bytes(), CONTENT_TYPE).await?;
             } else {
                 let collection = service.get_default_collection().await?;
@@ -162,7 +162,10 @@ async fn execute(account: &str, operation: Operation) -> Result<Option<Password>
             }
         }
         Operation::Remove => {
-            if let Some(item) = item {
+            for item in &items {
+                item.ensure_unlocked().await?;
+            }
+            for item in items.drain(..) {
                 item.delete().await?;
             }
         }

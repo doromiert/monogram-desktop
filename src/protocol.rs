@@ -2,6 +2,7 @@
 use crate::crypto::{legacy, service as modern};
 use crate::encryption_policy::Mode;
 use crate::model::{Account, Message, new_id};
+use crate::rooms::archive;
 use crate::transport::{Client, Event};
 use chrono::{DateTime, Utc};
 use std::{collections::HashMap, sync::mpsc, thread, time::Duration};
@@ -476,6 +477,7 @@ pub enum BackendEvent {
     },
     CryptoAliases {
         legacy_sticker: bool,
+        legacy_reply: Option<crate::crypto::legacy::service::LegacyReply>,
         peer: String,
         own: bool,
         id: String,
@@ -567,6 +569,10 @@ pub enum Command {
         peer: String,
         nick: Option<String>,
     },
+    RoomStableIds {
+        epoch: u64,
+        peer: String,
+    },
     Avatar {
         peer: String,
         source: crate::avatar::Source,
@@ -634,7 +640,7 @@ impl Session {
                 let mut room_epoch=0u64;
                 let mut loading_rooms=false;
                 let mut subscribing_rooms=false;
-                let mut crypto_ready=false;let mut legacy_ready=false;let mut online=false;let mut mam:HashMap<String,(String,std::time::Instant)>=HashMap::new();let mut resources:HashMap<String,std::collections::HashSet<String>>=HashMap::new();let mut timer=tokio::time::interval(Duration::from_secs(1));let mut handshake=std::time::Instant::now();
+                let mut crypto_ready=false;let mut legacy_ready=false;let mut online=false;let mut mam:HashMap<String,archive::Page>=HashMap::new();let mut resources:HashMap<String,std::collections::HashSet<String>>=HashMap::new();let mut timer=tokio::time::interval(Duration::from_secs(1));let mut handshake=std::time::Instant::now();
                 emit(BackendEvent::Status{online:false,error:false,text:"Connecting…".into()});
                 loop{tokio::select!{
                     command=rx.recv()=>{match command{
@@ -666,11 +672,32 @@ impl Session {
                             }
                         },
                         Some(Command::RoomBookmarksLoaded{..})=>{},
+                        Some(Command::RoomStableIds{epoch,peer})=>{
+                            if online && epoch==room_epoch { rooms.enable_stable_ids(peer); }
+                        },
                         Some(Command::JoinRoom{peer,nick})=>{
                             if !online { emit(BackendEvent::RoomError("Connect before joining a room".into())); continue; }
                             match rooms.join(&peer,nick.as_deref()){
                                 Ok(presence)=>{
                                     emit(BackendEvent::RoomPresence(rooms.status(&peer)));
+                                    let disco="http://jabber.org/protocol/disco#info";
+                                    let (reply,answer)=tokio::sync::oneshot::channel();
+                                    if let Some(query)=iq.start(peer.clone(),crate::iq::Kind::Get,el("query",disco),reply) {
+                                        let id=query.attr("id").expect("IQ ID").to_string();
+                                        if send(&mut client,query).await {
+                                            let (peer,tx,epoch)=(peer.clone(),network.clone(),room_epoch);
+                                            tokio::spawn(async move {
+                                                if let Ok(Ok(Some(info)))=answer.await
+                                                    && info.is("query",disco)
+                                                    && info.children().any(|item| item.is("feature",disco) && item.attr("var")==Some(SID))
+                                                {
+                                                    let _=tx.send(Command::RoomStableIds{epoch,peer});
+                                                }
+                                            });
+                                        } else {
+                                            iq.fail(&id);
+                                        }
+                                    }
                                     if !send(&mut client,presence).await { emit(BackendEvent::RoomError("Could not send the room join request".into())); }
                                 }
                                 Err(error)=>emit(BackendEvent::RoomError(error.to_string())),
@@ -728,9 +755,17 @@ impl Session {
                             let ok=send(&mut client,root).await;emit(if ok{BackendEvent::Sent{peer,id:message.wire_id}}else{BackendEvent::Failed{peer,id:message.wire_id}});
                         },
                         Some(Command::History{peer,before})=>{
-                            if !online{emit(BackendEvent::History{peer,before:String::new(),complete:false,error:true});continue}
-                            let id=new_id();let query=Element::builder("query","urn:xmpp:mam:2").attr("queryid".try_into().expect("static XML attribute"),&id).append(Element::builder("x","jabber:x:data").attr("type".try_into().expect("static XML attribute"),"submit").append(Element::builder("field","jabber:x:data").attr("var".try_into().expect("static XML attribute"),"FORM_TYPE").attr("type".try_into().expect("static XML attribute"),"hidden").append(Element::builder("value","jabber:x:data").append("urn:xmpp:mam:2").build()).build()).append(Element::builder("field","jabber:x:data").attr("var".try_into().expect("static XML attribute"),"with").append(Element::builder("value","jabber:x:data").append(peer.clone()).build()).build()).build()).append(Element::builder("set","http://jabber.org/protocol/rsm").append(Element::builder("max","http://jabber.org/protocol/rsm").append("50").build()).append(Element::builder("before","http://jabber.org/protocol/rsm").append(before).build()).build()).build();
-                            mam.insert(id.clone(),(peer,std::time::Instant::now()));send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"set").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;
+                            let room=rooms.known(&peer);
+                            if !online || (room && !rooms.is_joined(&peer)) {
+                                emit(archive::failed(peer));
+                                continue;
+                            }
+                            let (id,root,page)=archive::Page::query(peer,room,before);
+                            if send(&mut client,root).await {
+                                mam.insert(id,page);
+                            } else {
+                                emit(archive::failed(page.peer));
+                            }
                         },
                         Some(Command::Typing{peer,composing})=>{if online{send(&mut client,Element::builder("message",NS).attr("type".try_into().expect("static XML attribute"),"chat").attr("to".try_into().expect("static XML attribute"),peer).append(el(if composing{"composing"}else{"paused"},"http://jabber.org/protocol/chatstates")).build()).await;}},
                         Some(Command::Authorize{peer,allow})=>{if online{send(&mut client,Element::builder("presence",NS).attr("to".try_into().expect("static XML attribute"),peer).attr("type".try_into().expect("static XML attribute"),if allow{"subscribed"}else{"unsubscribed"}).build()).await;}},
@@ -738,12 +773,27 @@ impl Session {
                     }},
                     event=client.next()=>{match event{
                         Some(Event::Online)=>{online=true;room_epoch=room_epoch.wrapping_add(1);let _=network.send(Command::LoadRoomBookmarks);crypto.send(modern::Request::Online(true));legacy.send(legacy::service::Request::Online(true));emit(BackendEvent::Status{online:true,error:false,text:"Connected · TLS".into()});send(&mut client,el("presence",NS)).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"get").attr("id".try_into().expect("static XML attribute"),"roster").append(el("query","jabber:iq:roster")).build()).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"set").attr("id".try_into().expect("static XML attribute"),"carbons").append(el("enable","urn:xmpp:carbons:2")).build()).await;},
-                        Some(Event::Disconnected(error))=>{#[cfg(test)] eprintln!("fixture disconnect: {error:?}");online=false;rooms.disconnect();loading_rooms=false;subscribing_rooms=false;crypto_ready=false;legacy_ready=false;crypto.send(modern::Request::Online(false));legacy.send(legacy::service::Request::Online(false));iq.disconnect();resources.clear();handshake=std::time::Instant::now();let fatal = fatal_error(&error);emit(BackendEvent::Status{online:false,error:fatal,text:if fatal{"Sign-in failed. Check credentials, TLS certificate and server configuration."}else{"Disconnected. Reconnecting…"}.into()});if fatal{break}},
+                        Some(Event::Disconnected(error))=>{#[cfg(test)] eprintln!("fixture disconnect: {error:?}");online=false;rooms.disconnect();loading_rooms=false;subscribing_rooms=false;crypto_ready=false;legacy_ready=false;crypto.send(modern::Request::Online(false));legacy.send(legacy::service::Request::Online(false));iq.disconnect();mam.clear();resources.clear();handshake=std::time::Instant::now();let fatal = fatal_error(&error);emit(BackendEvent::Status{online:false,error:fatal,text:if fatal{"Sign-in failed. Check credentials, TLS certificate and server configuration."}else{"Disconnected. Reconnecting…"}.into()});if fatal{break}},
                         None=>break,
                         Some(Event::Stanza(stanza))=>{
                             let root:Element=stanza.into();if iq.receive(&root,&owner){continue}let from=root.attr("from").unwrap_or("");
                             if root.is("message",NS){
                                 if crate::rooms::bookmark_changed(&root,&owner) { let _=network.send(Command::LoadRoomBookmarks); }
+                                let mut results=root.children().filter(|child| child.is("result",archive::NS));
+                                if let Some(wrapper)=results.next() {
+                                    if results.next().is_some() { continue; }
+                                    let query=wrapper.attr("queryid").unwrap_or("");
+                                    let Some(page)=mam.get(query).filter(|page| page.accepts(&root,&owner)) else {continue};
+                                    let Some(result)=page.result(wrapper) else {continue};
+                                    if page.room {
+                                        if let Some(message)=rooms.archived_message(&page.peer,result) {
+                                            emit(BackendEvent::Message{peer:page.peer.clone(),message,historical:true,receipt_to:None});
+                                        }
+                                    } else if normalize(result.xml,&owner,Some((result.uid,result.stamp))).is_some_and(|(peer,_,_)| peer==page.peer) {
+                                        deliver(&crypto,&legacy,&emit,result.xml,&owner,Some((result.uid,result.stamp)),true,None);
+                                    }
+                                    continue;
+                                }
                                 if root.attr("type")==Some("groupchat"){
                                     if let Some((peer,message,historical))=rooms.message(&root){emit(BackendEvent::Message{peer,message,historical,receipt_to:None});}
                                     continue;
@@ -753,25 +803,42 @@ impl Session {
                                 }
                                 if root.attr("type")==Some("error"){emit(BackendEvent::Failed{peer:bare_of(from),id:root.attr("id").unwrap_or("").into()});continue}
                                 if let Some(r)=root.get_child("received","urn:xmpp:receipts"){emit(BackendEvent::Receipt{peer:bare_of(from),id:r.attr("id").unwrap_or("").into()})}
-                                if let Some(wrapper)=root.get_child("result","urn:xmpp:mam:2"){
-                                    if !(from.is_empty()||from==owner){continue}let query=wrapper.attr("queryid").unwrap_or("");let Some((expected,_))=mam.get(query)else{continue};let Some(forwarded)=wrapper.get_child("forwarded","urn:xmpp:forward:0")else{continue};let Some(inner)=forwarded.get_child("message",NS)else{continue};let stamp=forwarded.get_child("delay","urn:xmpp:delay").and_then(|d|d.attr("stamp")).unwrap_or("");if let Some((peer,_message,_))=normalize(inner,&owner,Some((wrapper.attr("id").unwrap_or(""),stamp))){if &peer==expected{deliver(&crypto,&legacy,&emit,inner,&owner,Some((wrapper.attr("id").unwrap_or(""),stamp)),true,None)}}continue
-                                }
                                 let carbon=root.get_child("received","urn:xmpp:carbons:2").or_else(||root.get_child("sent","urn:xmpp:carbons:2"));
                                 if let Some(wrapper)=carbon{if from!=owner{continue}if let Some(inner)=wrapper.get_child("forwarded","urn:xmpp:forward:0").and_then(|f|f.get_child("message",NS)){deliver(&crypto,&legacy,&emit,inner,&owner,None,true,None);}continue}
                                 if let Some((_peer,message,historical))=normalize(&root,&owner,None){let receipt_to=(!historical&&!message.own&&!message.wire_id.is_empty()&&root.get_child("request","urn:xmpp:receipts").is_some()).then(||from.to_string());deliver(&crypto,&legacy,&emit,&root,&owner,None,historical,receipt_to);}
                                 if root.get_child("delay","urn:xmpp:delay").is_none(){for name in ["composing","paused","active","inactive","gone"]{if root.get_child(name,"http://jabber.org/protocol/chatstates").is_some(){emit(BackendEvent::Typing{peer:bare_of(from),composing:name=="composing"})}}}
                             }else if root.is("presence",NS){
-                                if let Some(presence)=rooms.presence(&root){emit(BackendEvent::RoomPresence(presence));continue;}
+                                if let Some(presence)=rooms.presence(&root){
+                                    if !presence.joined {
+                                        mam.retain(|_,page| {
+                                            let left=page.room && page.peer==presence.jid;
+                                            if left { emit(archive::failed(page.peer.clone())); }
+                                            !left
+                                        });
+                                    }
+                                    emit(BackendEvent::RoomPresence(presence));
+                                    continue;
+                                }
                                 if root.get_child("x","http://jabber.org/protocol/muc#user").is_some(){continue;}
                                 let peer=bare_of(from);let kind=root.attr("type").unwrap_or("");if kind.is_empty() {if let Some(hint)=crate::avatar::presence_hash(&root){let avatar_peer=if root.get_child("x","http://jabber.org/protocol/muc#user").is_some(){from.to_string()}else{peer.clone()};if bare(&peer).ok().as_deref()==Some(&peer){emit(BackendEvent::AvatarChanged{peer:avatar_peer,hint:Some(hint)});}}}if kind=="subscribe"{emit(BackendEvent::Request(peer));continue}let set=resources.entry(peer.clone()).or_default();if kind=="unavailable"{set.remove(from);}else if kind.is_empty(){set.insert(from.into());}emit(BackendEvent::Presence{peer,online:!set.is_empty()});
                             }else if root.is("iq",NS){let id=root.attr("id").unwrap_or("");let trusted=from.is_empty()||from==owner;
                                 if trusted{if let Some(query)=root.get_child("query","jabber:iq:roster"){let contacts=query.children().filter(|c|c.is("item","jabber:iq:roster")).filter_map(|c|Some((c.attr("jid")?.into(),c.attr("name").unwrap_or("").into(),c.attr("subscription").unwrap_or("none").into()))).collect();emit(BackendEvent::Roster(contacts));if root.attr("type")==Some("set"){send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).build()).await;}}}
-                                if !trusted && mam.contains_key(id) { continue } if let Some((peer,_))=mam.remove(id){let fin=root.get_child("fin","urn:xmpp:mam:2");let before=fin.and_then(|f|f.get_child("set","http://jabber.org/protocol/rsm")).and_then(|s|s.get_child("first","http://jabber.org/protocol/rsm")).map(|f|f.text()).unwrap_or_default();let complete=fin.is_some_and(|f|matches!(f.attr("complete"),Some("true"|"1")))||before.is_empty();emit(BackendEvent::History{peer,before,complete,error:fin.is_none()});}
+                                if let Some(page)=mam.get(id) {
+                                    if page.accepts(&root,&owner) && matches!(root.attr("type"),Some("result"|"error")) {
+                                        let page=mam.remove(id).expect("matched archive query");
+                                        emit(page.finish(&root));
+                                    }
+                                    continue;
+                                }
                                 if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in ["urn:xmpp:receipts",REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT,crate::polls::NS,crate::forwarding::NS,crate::file_share::NS]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if legacy_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),legacy::NS).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
                             }
                         }
                     }},
-                    _=timer.tick()=>{iq.expire();for presence in rooms.expire(){emit(BackendEvent::RoomPresence(presence));}if !online&&handshake.elapsed()>Duration::from_secs(45){emit(BackendEvent::Status{online:false,error:true,text:"Connection timed out. Check the account settings.".into()});break}let expired:Vec<_>=mam.iter().filter(|(_,(_,start))|start.elapsed()>Duration::from_secs(20)).map(|(id,_)|id.clone()).collect();for id in expired{if let Some((peer,_))=mam.remove(&id){emit(BackendEvent::History{peer,before:String::new(),complete:false,error:true})}}}
+                    _=timer.tick()=>{iq.expire();for presence in rooms.expire(){emit(BackendEvent::RoomPresence(presence));}if !online&&handshake.elapsed()>Duration::from_secs(45){emit(BackendEvent::Status{online:false,error:true,text:"Connection timed out. Check the account settings.".into()});break}mam.retain(|_,page| {
+                        let expired=page.started.elapsed()>Duration::from_secs(20);
+                        if expired { emit(archive::failed(page.peer.clone())); }
+                        !expired
+                    });}
                 }}
                 iq.disconnect();
                 let _=tokio::time::timeout(Duration::from_secs(2),client.send_end()).await;

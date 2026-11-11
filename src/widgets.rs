@@ -105,6 +105,92 @@ pub fn horizontal_strip(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
     scroll.add_controller(controller);
     scroll
 }
+mod message_text_imp {
+    use super::*;
+    #[derive(Default)]
+    pub struct MessageText {
+        pub body: RefCell<Option<gtk::Label>>,
+        pub status: RefCell<Option<gtk::Box>>,
+        pub source: RefCell<String>,
+    }
+    #[glib::object_subclass]
+    impl ObjectSubclass for MessageText {
+        const NAME: &'static str = "MonogramMessageText";
+        type Type = super::MessageText;
+        type ParentType = gtk::Box;
+    }
+    impl ObjectImpl for MessageText {}
+    impl WidgetImpl for MessageText {}
+    impl BoxImpl for MessageText {}
+}
+glib::wrapper! {pub struct MessageText(ObjectSubclass<message_text_imp::MessageText>) @extends gtk::Box,gtk::Widget,@implements gtk::Accessible,gtk::Buildable,gtk::ConstraintTarget,gtk::Orientable;}
+impl MessageText {
+    pub fn new(body: &gtk::Label, status: &gtk::Box) -> Self {
+        let widget: Self = glib::Object::new();
+        let source = body.label().to_string();
+        let layout = body.create_pango_layout(Some(&source));
+        let rtl = layout.line_readonly(0).is_some_and(|line| {
+            matches!(
+                line.resolved_direction(),
+                gtk::pango::Direction::Rtl | gtk::pango::Direction::WeakRtl
+            )
+        });
+        body.set_label(&format!("{source}{}\u{fffc}", if rtl { "\n" } else { " " }));
+        body.set_yalign(0.);
+        body.set_selectable(true);
+        body.update_property(&[gtk::accessible::Property::Label(&source)]);
+        let original = source.clone();
+        body.connect_copy_clipboard(move |label| {
+            if let Some((start, end)) = label.selection_bounds() {
+                let (start, end) = (
+                    start.min(end).max(0) as usize,
+                    start.max(end).max(0) as usize,
+                );
+                let selected: String = original
+                    .chars()
+                    .skip(start)
+                    .take(end.saturating_sub(start))
+                    .collect();
+                label.clipboard().set_text(&selected);
+                label.stop_signal_emission_by_name("copy-clipboard");
+            }
+        });
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(body));
+        status.set_halign(gtk::Align::End);
+        status.set_valign(gtk::Align::End);
+        overlay.add_overlay(status);
+        widget.append(&overlay);
+        widget.imp().source.replace(source);
+        widget.imp().body.replace(Some(body.clone()));
+        widget.imp().status.replace(Some(status.clone()));
+        widget.refresh_shape();
+        widget
+    }
+    pub fn refresh_shape(&self) {
+        let body = self.imp().body.borrow();
+        let status = self.imp().status.borrow();
+        let (Some(body), Some(status)) = (body.as_ref(), status.as_ref()) else {
+            return;
+        };
+        let (_, width, _, _) = status.measure(gtk::Orientation::Horizontal, -1);
+        let (_, height, _, _) = status.measure(gtk::Orientation::Vertical, width);
+        let logical = gtk::pango::Rectangle::new(
+            0,
+            (3 - height) * gtk::pango::SCALE,
+            (width + 8) * gtk::pango::SCALE,
+            height * gtk::pango::SCALE,
+        );
+        let ink = gtk::pango::Rectangle::new(0, 0, 0, 0);
+        let mut shape = gtk::pango::AttrShape::new(&ink, &logical);
+        shape.set_start_index(self.imp().source.borrow().len() as u32 + 1);
+        shape.set_end_index(u32::MAX);
+        let attrs = gtk::pango::AttrList::new();
+        attrs.insert(shape);
+        body.set_attributes(Some(&attrs));
+    }
+}
+
 mod image_imp {
     use super::*;
     #[derive(Default)]
@@ -155,7 +241,27 @@ mod image_imp {
             if let Some(ref p) = *self.paintable.borrow() {
                 let bounds = gtk::graphene::Rect::new(0., 0., w as f32, h as f32);
                 if !self.borderless.get() {
-                    snapshot.push_rounded_clip(&gtk::gsk::RoundedRect::from_rect(bounds, 10.));
+                    let mut radii = [10.; 4];
+                    let mut parent = obj.parent();
+                    while let Some(widget) = parent {
+                        if widget.has_css_class("media-bubble") {
+                            let own = widget.has_css_class("own");
+                            radii[if own { 2 } else { 3 }] = 3.;
+                            if widget.has_css_class("cluster-previous") {
+                                radii[if own { 1 } else { 0 }] = 3.;
+                            }
+                            break;
+                        }
+                        parent = widget.parent();
+                    }
+                    let corner = |radius| gtk::graphene::Size::new(radius, radius);
+                    snapshot.push_rounded_clip(&gtk::gsk::RoundedRect::new(
+                        bounds,
+                        corner(radii[0]),
+                        corner(radii[1]),
+                        corner(radii[2]),
+                        corner(radii[3]),
+                    ));
                 }
                 if self.cover.get() {
                     let ratio = p.intrinsic_aspect_ratio();
@@ -195,8 +301,8 @@ impl AspectImage {
         if !self.imp().cover.get()
             && let Some(image) = paintable.as_ref()
         {
-            let ratio = image.intrinsic_aspect_ratio().max(0.01);
-            if (self.imp().ratio.replace(ratio) - ratio).abs() > 0.001 {
+            let ratio = image.intrinsic_aspect_ratio();
+            if ratio > 0. && (self.imp().ratio.replace(ratio) - ratio).abs() > 0.001 {
                 self.queue_resize();
             }
         }

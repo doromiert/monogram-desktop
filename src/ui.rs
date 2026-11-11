@@ -68,6 +68,7 @@ pub struct Ui {
     pub selected: RefCell<HashSet<String>>,
     pub anchor: RefCell<Option<String>>,
     pub bubbles: RefCell<HashMap<String, gtk::Widget>>,
+    pub(crate) rendered_rows: RefCell<crate::messages::RenderedRows>,
     pub media_stack: gtk::Stack,
     pub media_pane: adw::ToolbarView,
     pub media_mode: RefCell<String>,
@@ -303,6 +304,7 @@ impl Ui {
             selected: RefCell::new(HashSet::new()),
             anchor: RefCell::new(None),
             bubbles: RefCell::new(HashMap::new()),
+            rendered_rows: RefCell::new(Default::default()),
             media_stack: gtk::Stack::builder()
                 .hhomogeneous(false)
                 .vhomogeneous(false)
@@ -1186,13 +1188,11 @@ impl Ui {
         if self.online.get() {
             let state = self.state.borrow();
             let chat = state.current();
-            if chat.group {
-                if !chat.room_joined {
-                    self.command(Command::JoinRoom {
-                        peer: chat.jid.clone(),
-                        nick: None,
-                    });
-                }
+            if chat.group && !chat.room_joined {
+                self.command(Command::JoinRoom {
+                    peer: chat.jid.clone(),
+                    nick: None,
+                });
             } else {
                 drop(state);
                 self.load_history(true)
@@ -1874,6 +1874,8 @@ impl Ui {
                         .set(self.encryption_revision.get().wrapping_add(1));
                     self.legacy_crypto.borrow_mut().ready = false;
                     self.history_pages.borrow_mut().clear();
+                    self.history_pending.borrow_mut().clear();
+                    self.update_history_spinner();
                 }
                 self.online.set(online);
                 self.status.replace(text.clone());
@@ -1953,6 +1955,9 @@ impl Ui {
                 drop(state);
                 if active && self.pages.visible_child_name().as_deref() == Some("chat") {
                     self.show_chat();
+                    if presence.joined {
+                        self.load_history(true);
+                    }
                 }
             }
             BackendEvent::RoomError(error) => self.notice(&error),
@@ -1988,6 +1993,7 @@ impl Ui {
             BackendEvent::CryptoError { peer, text } => self.notice(&format!("{peer}: {text}")),
             BackendEvent::CryptoAliases {
                 legacy_sticker,
+                legacy_reply,
                 peer,
                 own,
                 id,
@@ -1999,6 +2005,9 @@ impl Ui {
                     .and_then(|_| {
                         if legacy_sticker {
                             self.store.restore_legacy_sticker(owner, &peer, &id)?;
+                        }
+                        if let Some(reply) = legacy_reply {
+                            self.store.restore_legacy_reply(owner, &peer, &id, reply)?;
                         }
                         Ok(())
                     })
@@ -2184,7 +2193,7 @@ impl Ui {
                 .last()
                 .is_some_and(|edge| new_key > edge.order_key() && !self.history_window.newest());
         let mut inserted = None;
-        let message_own = message.own;
+        let mut message_own = message.own;
         let receipt_id = message.wire_id.clone();
         let notify =
             known.is_none() && !visible && !message.own && !historical && c.notifications == "all";
@@ -2198,8 +2207,10 @@ impl Ui {
                 .cloned()
                 .or_else(|| self.store.message(owner, &peer, &known));
             if let Some(old) = old {
+                message_own = old.own;
                 if old.unavailable && !message.unavailable {
                     message.id = known.clone();
+                    message.own = old.own;
                     message.author = old.author;
                     message.timestamp = old.timestamp;
                     message.time = old.time;
@@ -2396,7 +2407,7 @@ impl Ui {
             .borrow()
             .chats
             .iter()
-            .any(|chat| chat.jid == peer && chat.group)
+            .any(|chat| chat.jid == peer && chat.group && !chat.room_joined)
         {
             return;
         }

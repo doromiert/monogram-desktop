@@ -610,6 +610,7 @@ impl Worker {
                     {
                         self.emit(BackendEvent::CryptoAliases {
                             legacy_sticker: false,
+                            legacy_reply: None,
                             peer: peer.clone(),
                             own: message.own,
                             id,

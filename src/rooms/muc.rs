@@ -3,7 +3,7 @@ use super::*;
 use crate::{encryption_policy::Mode, model::Message};
 use chrono::{DateTime, Local, SecondsFormat, Utc};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     time::{Duration, Instant},
 };
 
@@ -37,6 +37,7 @@ pub struct Rooms {
     owner: String,
     bookmarks: BTreeMap<String, Bookmark>,
     membership: BTreeMap<String, Membership>,
+    stable_ids: BTreeSet<String>,
 }
 pub(super) fn occupant(room: &str, nick: &str) -> Result<Jid> {
     if nick.is_empty() || nick.len() > 1023 {
@@ -92,6 +93,7 @@ impl Rooms {
             owner,
             bookmarks: BTreeMap::new(),
             membership: BTreeMap::new(),
+            stable_ids: BTreeSet::new(),
         }
     }
     /// Refresh bookmark metadata without discarding current verified membership.
@@ -147,6 +149,13 @@ impl Rooms {
     }
     pub fn disconnect(&mut self) {
         self.membership.clear();
+        self.stable_ids.clear();
+    }
+
+    pub fn enable_stable_ids(&mut self, room: String) {
+        if self.known(&room) {
+            self.stable_ids.insert(room);
+        }
     }
     pub fn status(&self, jid: &str) -> Presence {
         let (joined, can_send, detail) = match self.membership.get(jid) {
@@ -262,7 +271,33 @@ impl Rooms {
         }
         Some(self.status(&jid))
     }
+    pub fn is_joined(&self, jid: &str) -> bool {
+        matches!(self.membership.get(jid), Some(Membership::Joined { .. }))
+    }
+
+    pub fn archived_message(
+        &self,
+        room: &str,
+        archive: archive::ResultStanza<'_>,
+    ) -> Option<Message> {
+        let address = archive.xml.attr("from")?.parse::<Jid>().ok()?;
+        if address.to_bare().as_str() != room || archive.xml.attr("to").is_some() {
+            return None;
+        }
+        let (_, message, _) =
+            self.decode_message(archive.xml, Some((archive.uid, archive.stamp)))?;
+        Some(message)
+    }
+
     pub fn message(&self, xml: &Element) -> Option<(String, Message, bool)> {
+        self.decode_message(xml, None)
+    }
+
+    fn decode_message(
+        &self,
+        xml: &Element,
+        archive: Option<(&str, &str)>,
+    ) -> Option<(String, Message, bool)> {
         if !xml.is("message", CLIENT)
             || xml.attr("type") != Some("groupchat")
             || !addressed_to(xml, &self.owner)
@@ -276,12 +311,24 @@ impl Rooms {
         };
         let nick = address.resource()?.as_str();
         bounded(xml).ok()?;
-        let delay = child(xml, "delay", DELAY).ok().flatten();
-        // A current nickname never authenticates an archived sender.
-        let historical = delay.is_some() || xml.get_child("x", "jabber:x:delay").is_some();
-        let own = !historical && address == *occupant;
-        let date = delay
-            .and_then(|delay| delay.attr("stamp"))
+        let delay = child(xml, "delay", DELAY).ok()?;
+        let historical =
+            archive.is_some() || delay.is_some() || xml.get_child("x", "jabber:x:delay").is_some();
+        // Only the archive's sanitized MUC user element can establish historical ownership.
+        let own = if archive.is_some() {
+            child(xml, "x", USER)
+                .ok()?
+                .and_then(|user| child(user, "item", USER).ok().flatten())
+                .and_then(|item| item.attr("jid"))
+                .and_then(|real| real.parse::<Jid>().ok())
+                .is_some_and(|real| real.to_bare().as_str() == self.owner)
+        } else {
+            !historical && address == *occupant
+        };
+        let stamp = archive
+            .map(|(_, stamp)| stamp)
+            .or_else(|| delay.and_then(|delay| delay.attr("stamp")));
+        let date = stamp
             .and_then(|stamp| DateTime::parse_from_rfc3339(stamp).ok())
             .map(|date| date.with_timezone(&Utc))
             .unwrap_or_else(Utc::now);
@@ -306,6 +353,24 @@ impl Rooms {
             .unwrap_or_default()
             .to_owned();
         let mut aliases = vec![];
+        let uid = if let Some((uid, _)) = archive {
+            Some(uid)
+        } else if self.stable_ids.contains(&jid) {
+            let mut ids = xml
+                .children()
+                .filter(|id| id.is("stanza-id", SID) && id.attr("by") == Some(&jid));
+            let id = ids
+                .next()
+                .filter(|id| id.children().next().is_none() && id.text().is_empty());
+            id.filter(|_| ids.next().is_none())
+                .and_then(|id| id.attr("id"))
+                .filter(|uid| archive::valid_uid(uid))
+        } else {
+            None
+        };
+        if let Some(uid) = uid {
+            aliases.push(format!("room-archive:{uid}"));
+        }
         if !wire_id.is_empty() {
             aliases.push(format!("wire:{wire_id}"));
         }

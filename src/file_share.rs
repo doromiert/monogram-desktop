@@ -242,6 +242,20 @@ impl Attachment {
             );
         }
     }
+    pub fn media_candidate(&self) -> bool {
+        self.image_candidate() || self.video_candidate()
+    }
+    pub fn video_candidate(&self) -> bool {
+        self.mime.starts_with("video/") || self.video_extension()
+    }
+    pub fn video_extension(&self) -> bool {
+        self.name.rsplit_once('.').is_some_and(|(_, extension)| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "mp4" | "m4v" | "webm" | "mkv" | "mov" | "ogv"
+            )
+        })
+    }
     pub fn image_candidate(&self) -> bool {
         self.sticker || self.mime.starts_with("image/") || self.image_extension()
     }
@@ -254,7 +268,9 @@ impl Attachment {
         })
     }
     pub fn image_label(&self) -> &'static str {
-        if self.sticker {
+        if self.video_candidate() {
+            "Video"
+        } else if self.sticker {
             "Sticker"
         } else if self.mime == "image/gif" || self.name.to_ascii_lowercase().ends_with(".gif") {
             "GIF"

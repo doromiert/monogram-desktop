@@ -10,6 +10,7 @@
 .unread-badge { background: @accent_bg_color; color: @accent_fg_color; border-radius: 20px; padding: 2px 6px; font-size: 10px; font-weight: bold; min-width: 10px; }
 .folder-bar { margin: 0 12px; }
 .folder-bar button { padding: 5px 12px; border-radius: 18px; min-height: 22px; }
+.folder-bar button.dragging-folder { background: @popover_bg_color; }
 .folder-bar button:checked { background: alpha(@window_fg_color,.10); color: @window_fg_color; }
 .conversation, .conversation-view, .conversation-view headerbar { background: @view_bg_color; }
 .messages { padding: 20px 28px 12px; }
@@ -80,7 +81,7 @@
 .story-top progressbar progress { min-height: 3px; background: white; }
 .message-list { background: transparent; }
 .message-list row { padding: 0; }
-.message-list row.message-row { margin-bottom: 13px; border-radius: 12px; }
+.message-list row.message-row { margin-bottom: 9px; border-radius: 12px; }
 .message-list row:selected { background: alpha(@accent_bg_color,.14); color: @window_fg_color; }
 .message-menu > contents { padding: 0; background: transparent; border: none; box-shadow: none; }
 .message-menu-panel { background: @popover_bg_color; border-radius: 12px; padding: 4px; box-shadow: 0 2px 8px alpha(black,.2); }
@@ -97,3 +98,22 @@
 .message-list row.selected-message { background: alpha(@accent_bg_color,.14); color: @window_fg_color; }
 .shared-media-grid { padding: 12px; }
 .shared-media-tile { padding: 0; border: none; border-radius: 8px; background: transparent; box-shadow: none; }
+
+.message-list row.message-row.cluster-next { margin-bottom: 2px; }
+.message-bubble.cluster-previous { border-top-left-radius: 5px; }
+.message-bubble.cluster-previous.own { border-top-left-radius: 16px; border-top-right-radius: 5px; }
+.message-reply .reply-author { color: @accent_color; font-weight: bold; }
+.message-reply .reply-preview { font-size: 13px; font-weight: normal; }
+.message-reply { box-shadow: none; min-height: 0; }
+
+.message-bubble.media-bubble { padding: 2px; border-radius: 12px; }
+.media-bubble .attachment-controls { padding: 8px; }
+.media-bubble .message-author { margin: 3px 7px; }
+.media-viewer .media-controls-top { background: linear-gradient(to bottom, rgba(0,0,0,.72), transparent); padding-bottom: 24px; }
+.media-viewer .media-controls-top headerbar { color: white; }
+.media-viewer button.circular { background: rgba(0,0,0,.35); color: white; }
+
+.message-bubble.media-bubble { border-bottom-left-radius: 5px; }
+.message-bubble.media-bubble.own { border-bottom-left-radius: 12px; border-bottom-right-radius: 5px; }
+.message-bubble.media-bubble.cluster-previous { border-top-left-radius: 5px; }
+.message-bubble.media-bubble.cluster-previous.own { border-top-left-radius: 12px; border-top-right-radius: 5px; }

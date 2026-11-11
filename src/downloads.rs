@@ -35,8 +35,8 @@ pub enum Status {
     Cancelled,
 }
 const AUTO_MAX: u64 = 10 * 1024 * 1024;
-const AUTO_SIZE: &str = "Image exceeds the automatic download limit or its size is unknown";
-const AUTO_TYPE: &str = "The server did not identify this as an image";
+const AUTO_SIZE: &str = "Media exceeds the automatic download limit or its size is unknown";
+const AUTO_TYPE: &str = "The server did not identify this as media";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Policy {
@@ -96,7 +96,7 @@ impl Downloads {
         self.start_with_policy(account, file, Policy::Cache)
     }
     pub fn start_automatic(&mut self, account: &str, file: Attachment) {
-        if !file.manual && file.image_candidate() && self.status(account, &file).is_none() {
+        if !file.manual && file.media_candidate() && self.status(account, &file).is_none() {
             let _ = self.start_with_policy(account, file, Policy::Automatic);
         }
     }
@@ -369,8 +369,9 @@ async fn download(
             });
         if !mime.as_deref().is_some_and(|mime| {
             mime.starts_with("image/")
+                || mime.starts_with("video/")
                 || mime == "application/octet-stream"
-                    && (link.encrypted() || file.image_extension())
+                    && (link.encrypted() || file.image_extension() || file.video_extension())
         }) {
             return Err(AUTO_TYPE);
         }

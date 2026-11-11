@@ -1,7 +1,140 @@
 use crate::{model::*, ui::Ui, widgets::*};
 use adw::prelude::*;
 use gtk::{gdk, glib};
-use std::{cell::Cell, rc::Rc, time::Duration};
+use std::{
+    cell::Cell,
+    collections::{HashMap, HashSet},
+    rc::Rc,
+    time::Duration,
+};
+#[derive(Default)]
+pub(crate) struct RenderedRows {
+    scope: (String, String),
+    rows: HashMap<String, RenderedRow>,
+    dates: HashMap<String, gtk::ListBoxRow>,
+    big_emoji: bool,
+    group: bool,
+}
+struct RenderedRow {
+    message: Message,
+    row: gtk::ListBoxRow,
+    bubble: gtk::Box,
+    status: gtk::Box,
+    heading: gtk::Box,
+    avatar: Option<adw::Avatar>,
+}
+fn same_content(a: &Message, b: &Message) -> bool {
+    a.text == b.text
+        && a.kind == b.kind
+        && a.author == b.author
+        && a.sender == b.sender
+        && a.own == b.own
+        && a.reply == b.reply
+        && a.reply_id == b.reply_id
+        && a.reply_to == b.reply_to
+        && a.attachment == b.attachment
+        && a.forwarded == b.forwarded
+        && a.poll == b.poll
+        && a.poll_tally == b.poll_tally
+        && a.poll_closed_at == b.poll_closed_at
+        && a.reactions == b.reactions
+        && a.my_reactions == b.my_reactions
+        && a.unavailable == b.unavailable
+        && a.pinned == b.pinned
+        && a.options == b.options
+        && a.gif_index == b.gif_index
+        && a.upload.as_ref().map(|u| (&u.uri, &u.name, &u.error))
+            == b.upload.as_ref().map(|u| (&u.uri, &u.name, &u.error))
+}
+fn clustered(a: &Message, b: &Message, group: bool) -> bool {
+    if a.own != b.own
+        || group && a.sender != b.sender
+        || a.unavailable != b.unavailable
+        || a.forwarded != b.forwarded
+        || !a.unread && b.unread
+    {
+        return false;
+    }
+    match (
+        chrono::DateTime::parse_from_rfc3339(&a.timestamp),
+        chrono::DateTime::parse_from_rfc3339(&b.timestamp),
+    ) {
+        (Ok(a), Ok(b)) => {
+            let (a, b) = (
+                a.with_timezone(&chrono::Local),
+                b.with_timezone(&chrono::Local),
+            );
+            a.date_naive() == b.date_naive() && (b - a).num_seconds().abs() <= 300
+        }
+        _ => a.timestamp.is_empty() && b.timestamp.is_empty() && a.time == b.time,
+    }
+}
+fn cluster_style(row: &RenderedRow, previous: bool, next: bool, group: bool) {
+    for (class, enabled) in [("cluster-previous", previous), ("cluster-next", next)] {
+        if enabled {
+            row.bubble.add_css_class(class);
+        } else {
+            row.bubble.remove_css_class(class);
+        }
+    }
+    if next {
+        row.row.add_css_class("cluster-next");
+    } else {
+        row.row.remove_css_class("cluster-next");
+    }
+    row.heading
+        .set_visible(group && !row.message.own && !previous || row.message.pinned);
+    if let Some(avatar) = row.avatar.as_ref() {
+        avatar.set_visible(!next);
+    }
+}
+fn message_status(meta: &gtk::Box, m: &Message) {
+    clear(meta);
+    if m.encrypted && (!m.own || !matches!(m.delivery.as_str(), "sending" | "failed" | "uncertain"))
+    {
+        let image = gtk::Image::from_icon_name("channel-secure-symbolic");
+        image.set_pixel_size(11);
+        image.set_tooltip_text(Some(m.mode().name()));
+        meta.append(&image);
+    }
+    if m.edited {
+        meta.append(&label("edited", ""));
+    }
+    meta.append(&label(&m.time, ""));
+    if m.own {
+        let icon = match m.delivery.as_str() {
+            "sending" => "content-loading-symbolic",
+            "failed" | "uncertain" => "dialog-warning-symbolic",
+            _ => "object-select-symbolic",
+        };
+        let image = gtk::Image::from_icon_name(icon);
+        image.set_pixel_size(12);
+        image.set_tooltip_text(Some(match m.delivery.as_str() {
+            "sent" => "Sent",
+            "delivered" => "Delivered",
+            "uncertain" => "Delivery uncertain",
+            "failed" => "Send failed",
+            "sending" => "Sending",
+            _ => "Stored",
+        }));
+        meta.append(&image);
+    }
+    if let Some(parent) = meta.parent() {
+        if let Some(text) = parent.parent().and_downcast::<MessageText>() {
+            text.refresh_shape();
+        }
+        parent.queue_resize();
+    }
+}
+fn local_day(message: &Message) -> String {
+    chrono::DateTime::parse_from_rfc3339(&message.timestamp)
+        .map(|date| {
+            date.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .unwrap_or_else(|_| "Today".into())
+}
 pub enum ScrollTarget {
     Bottom,
     Message(String),
@@ -24,27 +157,80 @@ impl Ui {
         self.render_messages_at(position);
     }
     pub fn render_messages_at(self: &Rc<Self>, position: ScrollTarget) {
-        clear_list(&self.timeline);
         self.bubbles.borrow_mut().clear();
         let state = self.state.borrow();
         let messages = state.current().messages.clone();
         let group = state.current().group;
+        let scope = (state.account.clone(), state.current().jid.clone());
+        let messages: Vec<_> = messages
+            .into_iter()
+            .filter(|message| !message.retracted)
+            .collect();
         drop(state);
-        let mut last = String::new();
-        for m in messages.into_iter().filter(|m| !m.retracted) {
-            let day = if m.timestamp.is_empty() {
-                "Today"
-            } else {
-                m.timestamp.get(..10).unwrap_or("Today")
+        let mut rendered = self.rendered_rows.borrow_mut();
+        let big_emoji = self.big_emoji.get();
+        if rendered.scope != scope || rendered.big_emoji != big_emoji || rendered.group != group {
+            *rendered = RenderedRows {
+                scope,
+                big_emoji,
+                group,
+                ..Default::default()
             };
+        }
+        let ids: HashSet<_> = messages.iter().map(|message| message.id.as_str()).collect();
+        rendered.rows.retain(|id, _| ids.contains(id.as_str()));
+        let mut order = Vec::new();
+        let mut days = HashSet::new();
+        let mut last = String::new();
+        for (index, m) in messages.iter().enumerate() {
+            let day = local_day(m);
             if day != last {
-                let row = gtk::ListBoxRow::builder()
-                    .selectable(false)
-                    .activatable(false)
-                    .child(&label(day, "date-pill"))
-                    .build();
-                self.timeline.append(&row);
-                last = day.into();
+                let row = rendered.dates.entry(day.clone()).or_insert_with(|| {
+                    gtk::ListBoxRow::builder()
+                        .selectable(false)
+                        .activatable(false)
+                        .child(&label(&day, "date-pill"))
+                        .build()
+                });
+                order.push(row.clone());
+                days.insert(day.clone());
+                last = day;
+            }
+            let previous = index > 0 && clustered(&messages[index - 1], m, group);
+            let next = messages
+                .get(index + 1)
+                .is_some_and(|next| clustered(m, next, group));
+            if let Some(row) = rendered
+                .rows
+                .get_mut(&m.id)
+                .filter(|row| same_content(&row.message, m))
+            {
+                if row.message.delivery != m.delivery
+                    || row.message.time != m.time
+                    || row.message.edited != m.edited
+                    || row.message.encrypted != m.encrypted
+                    || row.message.encryption_mode != m.encryption_mode
+                {
+                    message_status(&row.status, m);
+                }
+                row.message = m.clone();
+                cluster_style(row, previous, next, group);
+                if self
+                    .history_window
+                    .highlighted
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|(id, _)| id == &m.id)
+                {
+                    row.bubble.add_css_class("reply-target");
+                } else {
+                    row.bubble.remove_css_class("reply-target");
+                }
+                self.bubbles
+                    .borrow_mut()
+                    .insert(m.id.clone(), row.bubble.clone().upcast());
+                order.push(row.row.clone());
+                continue;
             }
             let outer = bx(false, 8);
             outer.set_valign(gtk::Align::Start);
@@ -54,6 +240,7 @@ impl Ui {
             } else {
                 gtk::Align::Start
             });
+            let mut avatar = None;
             if group && !m.own {
                 let a = self.chat_avatar(
                     &Chat {
@@ -66,9 +253,18 @@ impl Ui {
                     26,
                 );
                 a.set_valign(gtk::Align::End);
-                outer.append(&a)
+                let slot = bx(false, 0);
+                slot.set_width_request(26);
+                slot.set_valign(gtk::Align::End);
+                slot.append(&a);
+                outer.append(&slot);
+                avatar = Some(a);
             }
             let sticker = m.attachment.as_ref().is_some_and(|file| file.sticker);
+            let media = m
+                .attachment
+                .as_ref()
+                .is_some_and(|file| file.media_candidate());
             let bubble = bx(true, 0);
             bubble.set_vexpand(false);
             bubble.set_valign(gtk::Align::Start);
@@ -87,6 +283,8 @@ impl Ui {
             }
             if sticker {
                 bubble.add_css_class("sticker-bubble");
+            } else if media {
+                bubble.add_css_class("media-bubble");
             }
             let heading = bx(false, 6);
             heading.set_margin_bottom(6);
@@ -100,42 +298,8 @@ impl Ui {
             let meta = bx(false, 4);
             meta.add_css_class("message-meta");
             meta.set_valign(gtk::Align::Center);
-            if m.encrypted
-                && (!m.own || !matches!(m.delivery.as_str(), "sending" | "failed" | "uncertain"))
-            {
-                let image = gtk::Image::from_icon_name("channel-secure-symbolic");
-                image.set_pixel_size(11);
-                image.set_tooltip_text(Some(m.mode().name()));
-                meta.append(&image)
-            }
-            if m.edited {
-                meta.append(&label("edited", ""));
-            }
-            meta.append(&label(&m.time, ""));
-            if m.own {
-                let icon = match m.delivery.as_str() {
-                    "sending" => "content-loading-symbolic",
-                    "failed" | "uncertain" => "dialog-warning-symbolic",
-                    _ => "object-select-symbolic",
-                };
-                let image = gtk::Image::from_icon_name(icon);
-                image.set_pixel_size(12);
-                image.set_tooltip_text(Some(match m.delivery.as_str() {
-                    "sent" => "Sent to stream; awaiting a delivery receipt",
-                    "delivered" => "Delivered to a recipient client; not a read receipt",
-                    "uncertain" => "Delivery uncertain; retry may duplicate it",
-                    "failed" => "Send failed",
-                    "sending" => "Sending",
-                    _ => "Stored in this preview",
-                }));
-                meta.append(&image)
-            }
-            if !sticker {
-                heading.append(&meta);
-            }
-            if !sticker || (group && !m.own) || m.pinned {
-                bubble.append(&heading);
-            }
+            message_status(&meta, m);
+            bubble.append(&heading);
             if let Some(attribution) = m.forwarded.clone() {
                 let header = gtk::Button::new();
                 header.add_css_class("flat");
@@ -155,10 +319,38 @@ impl Ui {
                 });
                 bubble.append(&header);
             }
-            if !m.reply.is_empty() {
+            if !m.reply.is_empty() || !m.reply_id.is_empty() {
                 let reply = gtk::Button::new();
                 reply.add_css_class("message-reply");
-                reply.set_child(Some(&wrap(&m.reply, "")));
+                let contents = bx(true, 2);
+                let (reply_author, quote) = m.reply.split_once(" · ").unwrap_or((
+                    if m.reply_to == self.state.borrow().account {
+                        "You"
+                    } else {
+                        "Reply"
+                    },
+                    &m.reply,
+                ));
+                let title = text(reply_author, "reply-author");
+                title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                let preview = quote
+                    .lines()
+                    .map(|line| line.strip_prefix("> ").unwrap_or(line))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let snippet = wrap(
+                    if preview.is_empty() {
+                        "Original message"
+                    } else {
+                        &preview
+                    },
+                    "reply-preview",
+                );
+                snippet.set_lines(2);
+                snippet.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                contents.append(&title);
+                contents.append(&snippet);
+                reply.set_child(Some(&contents));
                 let weak = Rc::downgrade(self);
                 let target = m.reply_id.clone();
                 let author = m.reply_to.clone();
@@ -263,12 +455,12 @@ impl Ui {
                 "file" if m.upload.is_some() => {
                     bubble.append(&self.upload_content(&m));
                     if !m.text.is_empty() {
-                        bubble.append(&wrap(&m.text, ""));
+                        bubble.append(&MessageText::new(&wrap(&m.text, "message-text"), &meta));
                     }
                 }
                 "file" if m.attachment.is_some() => {
                     let attachment = self.attachment_content(&m);
-                    if sticker {
+                    if sticker || media && m.text.is_empty() {
                         let overlay = gtk::Overlay::new();
                         overlay.set_child(Some(&attachment));
                         meta.add_css_class("sticker-meta");
@@ -281,7 +473,12 @@ impl Ui {
                         bubble.append(&attachment);
                     }
                     if !m.text.is_empty() {
-                        bubble.append(&wrap(&m.text, ""));
+                        let caption = MessageText::new(&wrap(&m.text, "message-text"), &meta);
+                        caption.set_margin_start(9);
+                        caption.set_margin_end(9);
+                        caption.set_margin_top(5);
+                        caption.set_margin_bottom(4);
+                        bubble.append(&caption);
                     }
                 }
                 "file" => {
@@ -337,9 +534,14 @@ impl Ui {
                     };
                     let l = wrap(&m.text, css);
                     l.set_selectable(true);
-                    bubble.append(&l)
+                    bubble.append(&MessageText::new(&l, &meta))
                 }
                 _ => {}
+            }
+            if meta.parent().is_none() {
+                meta.set_halign(gtk::Align::End);
+                meta.set_margin_top(3);
+                bubble.append(&meta);
             }
             if !m.reactions.is_empty() {
                 let row = bx(false, 4);
@@ -412,8 +614,38 @@ impl Ui {
                 }
             });
             bubble.add_controller(right);
-            self.timeline.append(&row);
+            let entry = RenderedRow {
+                message: m.clone(),
+                row: row.clone(),
+                bubble,
+                status: meta,
+                heading,
+                avatar,
+            };
+            cluster_style(&entry, previous, next, group);
+            rendered.rows.insert(m.id.clone(), entry);
+            order.push(row);
         }
+        rendered.dates.retain(|day, _| days.contains(day));
+        let mut child = self.timeline.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            if !order
+                .iter()
+                .any(|row| row.upcast_ref::<gtk::Widget>() == &widget)
+            {
+                self.timeline.remove(&widget);
+            }
+        }
+        for (index, row) in order.iter().enumerate() {
+            if row.parent().is_none() {
+                self.timeline.insert(row, index as i32);
+            } else if row.index() != index as i32 {
+                self.timeline.remove(row);
+                self.timeline.insert(row, index as i32);
+            }
+        }
+        drop(rendered);
         self.update_selection();
         self.queue_message_scroll(position);
     }

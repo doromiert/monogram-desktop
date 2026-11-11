@@ -15,7 +15,85 @@ use crate::{
 };
 use std::{collections::BTreeMap, path::PathBuf, sync::mpsc, thread, time::Duration};
 use tokio::sync::{mpsc as channel, oneshot};
-use tokio_xmpp::minidom::Element;
+use tokio_xmpp::{jid::Jid, minidom::Element};
+
+const REPLY: &str = "urn:xmpp:reply:0";
+const FALLBACK: &str = "urn:xmpp:fallback:0";
+
+#[derive(Clone, Debug)]
+pub struct LegacyReply {
+    pub id: String,
+    pub to: String,
+    pub quote: String,
+    pub text: String,
+}
+impl LegacyReply {
+    fn from_envelope(outer: &Element, body: &str, owner: &str, peer: &str) -> Option<Self> {
+        let mut replies = outer.children().filter(|child| child.is("reply", REPLY));
+        let reply = replies.next()?;
+        let id = reply
+            .attr("id")
+            .filter(|id| crate::message_actions::valid_id(id))?;
+        if replies.next().is_some() || !empty(reply) {
+            return None;
+        }
+        let to = if let Some(value) = reply.attr("to") {
+            let author = value.parse::<Jid>().ok()?.to_bare().to_string();
+            if author != owner && author != peer {
+                return None;
+            }
+            author
+        } else {
+            String::new()
+        };
+        let (quote, text) =
+            split_fallback(outer, body).unwrap_or_else(|| (String::new(), body.into()));
+        Some(Self {
+            id: id.into(),
+            to,
+            quote,
+            text,
+        })
+    }
+}
+
+fn empty(element: &Element) -> bool {
+    element.children().next().is_none() && element.text().trim().is_empty()
+}
+fn reply_fallback(element: &Element) -> bool {
+    element.is("fallback", FALLBACK) && element.attr("for") == Some(REPLY)
+}
+fn split_fallback(outer: &Element, body: &str) -> Option<(String, String)> {
+    // Legacy OMEMO authenticates the body, not the fallback range. Only move the
+    // bounded, leading quote emitted by both clients into the reply preview.
+    let mut fallbacks = outer.children().filter(|child| reply_fallback(child));
+    let fallback = fallbacks.next()?;
+    let mut children = fallback.children();
+    let range = children.next()?;
+    if fallbacks.next().is_some()
+        || children.next().is_some()
+        || !range.is("body", FALLBACK)
+        || !empty(range)
+        || range
+            .attr_ns("http://www.w3.org/XML/1998/namespace", "lang")
+            .is_some()
+        || range.attr("start") != Some("0")
+    {
+        return None;
+    }
+    let end = range.attr("end")?.parse::<usize>().ok()?;
+    if !(1..=2048).contains(&end) {
+        return None;
+    }
+    let (prefix, text) = body.split_at(body.char_indices().nth(end)?.0);
+    let quote = prefix
+        .strip_suffix('\n')?
+        .split('\n')
+        .map(|line| line.strip_prefix("> "))
+        .collect::<Option<Vec<_>>>()?
+        .join("\n");
+    (!quote.is_empty() && !text.is_empty()).then(|| (quote, text.into()))
+}
 
 #[derive(Debug)]
 pub enum Request {
@@ -324,6 +402,12 @@ impl Worker {
             .ok_or(Error::Invalid("legacy body"))?
             .text();
         let mut xml = local.encrypt(peer, &body, &message.wire_id).await?;
+        for child in clear
+            .children()
+            .filter(|child| child.is("reply", REPLY) || reply_fallback(child))
+        {
+            xml.append_child(child.clone());
+        }
         xml.append_child(protocol::el("request", "urn:xmpp:receipts"));
         if self.wire(xml).await {
             Ok(())
@@ -345,11 +429,22 @@ impl Worker {
         if let Some((peer, message, _)) = &outer {
             if let Some(history) = self.history()? {
                 if let Some(id) = history.known(&self.owner, peer, message.own, &[alias.clone()]) {
-                    if history
+                    if let Some(stored) = history
                         .message(&self.owner, peer, &id)
-                        .is_some_and(|m| !m.unavailable)
+                        .filter(|m| !m.unavailable)
                     {
+                        let legacy_reply = if stored.mode() == Mode::Legacy
+                            && stored.reply_id.is_empty()
+                            && stored.kind == "text"
+                            && !stored.edited
+                            && !stored.retracted
+                        {
+                            LegacyReply::from_envelope(&frame.xml, &stored.text, &self.owner, peer)
+                        } else {
+                            None
+                        };
                         self.emit(BackendEvent::CryptoAliases {
+                            legacy_reply,
                             legacy_sticker: crate::file_share::Attachment::sticker_marker(
                                 &frame.xml,
                             ),
@@ -395,7 +490,7 @@ impl Worker {
         frame: Option<&Frame>,
         alias: String,
     ) -> Result<()> {
-        if let Some(content) = received.content {
+        if let Some(mut content) = received.content {
             let outer = frame
                 .map(|f| &f.xml)
                 .or(received.outer.as_ref())
@@ -412,8 +507,28 @@ impl Worker {
                 info.map(|(id, stamp)| (id.as_str(), stamp.as_str())),
             )
             .ok_or(Error::Invalid("legacy envelope metadata"))?;
+            let reply = content.get_child("body", payload::CLIENT).and_then(|body| {
+                LegacyReply::from_envelope(outer, &body.text(), &self.owner, &peer)
+            });
+            if let Some(reply) = &reply {
+                content.append_child(outer.get_child("reply", REPLY).unwrap().clone());
+                if !reply.quote.is_empty() {
+                    content.append_child(
+                        outer
+                            .children()
+                            .find(|child| reply_fallback(child))
+                            .unwrap()
+                            .clone(),
+                    );
+                }
+            }
             let (_, mut message, _) = protocol::normalize_protected(&content, &self.owner, None)
                 .ok_or(Error::Invalid("legacy body"))?;
+            if let Some(reply) = reply {
+                message.reply_id = reply.id;
+                message.reply_to = reply.to;
+                message.reply = reply.quote;
+            }
             if let Some(file) = message.attachment.as_mut()
                 && file.link().is_some_and(|link| link.encrypted())
                 && crate::file_share::Attachment::sticker_marker(outer)

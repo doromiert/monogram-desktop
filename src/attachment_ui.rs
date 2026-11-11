@@ -7,10 +7,15 @@ impl Ui {
         let file = message.attachment.as_ref().unwrap().clone();
         let owner = self.state.borrow().account.clone();
         let id = message.id.clone();
-        let media = file.image_candidate();
+        let media = file.media_candidate();
         let content = bx(true, 8);
         let controls = bx(true, 8);
-        self.attach_image(message, &content, &controls);
+        controls.add_css_class("attachment-controls");
+        if file.video_candidate() {
+            self.attach_video(message, &content, &controls);
+        } else {
+            self.attach_image(message, &content, &controls);
+        }
         content.append(&controls);
         let line = bx(false, 10);
         let icon = if media {

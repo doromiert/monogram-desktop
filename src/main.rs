@@ -36,6 +36,7 @@ mod ui;
 mod upload_smoke;
 mod upload_ui;
 mod uploads;
+mod video_ui;
 mod wallet;
 mod widgets;
 fn main() -> gtk::glib::ExitCode {
@@ -114,6 +115,51 @@ fn main() -> gtk::glib::ExitCode {
             smoke::run_live(ui.clone());
         } else if ui.smoke {
             smoke::run(ui.clone());
+        }
+        if let Ok(peer) = std::env::var("MONOGRAM_CAPTURE_PEER") {
+            let weak = std::rc::Rc::downgrade(&ui);
+            gtk::glib::idle_add_local_once(move || {
+                if let Some(ui) = weak.upgrade() {
+                    let id = ui
+                        .state
+                        .borrow()
+                        .chats
+                        .iter()
+                        .find(|chat| chat.jid == peer)
+                        .map(|chat| chat.id.clone());
+                    if let Some(id) = id {
+                        ui.select_chat(&id);
+                    }
+                }
+            });
+        }
+        if let Some(path) = std::env::var_os("MONOGRAM_CAPTURE_PATH") {
+            let window = ui.window.downgrade();
+            gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(4), move || {
+                let Some(window) = window.upgrade().filter(|window| window.is_mapped()) else {
+                    return;
+                };
+                let (width, height) = (window.width() as f32, window.height() as f32);
+                let snapshot = gtk::Snapshot::new();
+                gtk::WidgetPaintable::new(Some(&window)).snapshot(
+                    &snapshot,
+                    width as f64,
+                    height as f64,
+                );
+                if let Some(node) = snapshot.to_node()
+                    && let Some(renderer) = window.renderer()
+                {
+                    let texture = renderer.render_texture(
+                        &node,
+                        Some(&gtk::graphene::Rect::new(0., 0., width, height)),
+                    );
+                    gtk::gio::spawn_blocking(move || {
+                        if texture.save_to_png(std::path::PathBuf::from(path)).is_ok() {
+                            eprintln!("Monogram progress screenshot saved");
+                        }
+                    });
+                }
+            });
         }
         ROOT.with(|root| root.replace(Some(ui)));
     });

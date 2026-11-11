@@ -749,6 +749,8 @@ pub struct MediaViewer {
     was_fullscreen: bool,
     animation: RefCell<Option<adw::TimedAnimation>>,
     fullscreen_signal: RefCell<Option<glib::SignalHandlerId>>,
+    controls: Vec<gtk::Revealer>,
+    controls_timer: RefCell<Option<glib::SourceId>>,
 }
 impl MediaViewer {
     pub fn new(
@@ -807,17 +809,34 @@ impl MediaViewer {
         header.set_title_widget(Some(&title));
         let fullscreen = icon_button("view-fullscreen-symbolic", "Fullscreen");
         header.pack_end(&fullscreen);
-        root.add_overlay(&header);
+        let top = bx(true, 0);
+        top.add_css_class("media-controls-top");
+        top.append(&header);
+        let reveal = |child: &gtk::Widget, horizontal, vertical| {
+            gtk::Revealer::builder()
+                .child(child)
+                .reveal_child(true)
+                .transition_type(gtk::RevealerTransitionType::Crossfade)
+                .transition_duration(180)
+                .halign(horizontal)
+                .valign(vertical)
+                .build()
+        };
+        let top_revealer = reveal(top.upcast_ref(), gtk::Align::Fill, gtk::Align::Start);
+        root.add_overlay(&top_revealer);
         let previous = icon_button("go-previous-symbolic", "Previous media");
         previous.add_css_class("circular");
         previous.set_halign(gtk::Align::Start);
         previous.set_margin_start(16);
-        root.add_overlay(&previous);
+        let previous_revealer =
+            reveal(previous.upcast_ref(), gtk::Align::Start, gtk::Align::Center);
+        root.add_overlay(&previous_revealer);
         let next = icon_button("go-next-symbolic", "Next media");
         next.add_css_class("circular");
         next.set_halign(gtk::Align::End);
         next.set_margin_end(16);
-        root.add_overlay(&next);
+        let next_revealer = reveal(next.upcast_ref(), gtk::Align::End, gtk::Align::Center);
+        root.add_overlay(&next_revealer);
         let preview_status = label("Loading preview…", "");
         preview_status.set_halign(gtk::Align::Center);
         preview_status.set_valign(gtk::Align::Center);
@@ -847,6 +866,8 @@ impl MediaViewer {
             was_fullscreen: ui.window.is_fullscreen(),
             animation: RefCell::new(None),
             fullscreen_signal: RefCell::new(None),
+            controls: vec![top_revealer, previous_revealer, next_revealer],
+            controls_timer: RefCell::new(None),
         });
         let weak = Rc::downgrade(&viewer);
         back.connect_clicked(move |_| {
@@ -883,10 +904,19 @@ impl MediaViewer {
             }
         });
         viewer.fullscreen_signal.replace(Some(signal));
+        let motion = gtk::EventControllerMotion::new();
+        let weak = Rc::downgrade(&viewer);
+        motion.connect_motion(move |_, _, _| {
+            if let Some(viewer) = weak.upgrade() {
+                viewer.reveal_controls();
+            }
+        });
+        viewer.root.add_controller(motion);
         let key = gtk::EventControllerKey::new();
         let weak = Rc::downgrade(&viewer);
         key.connect_key_pressed(move |_, key, _, _| {
             if let Some(v) = weak.upgrade() {
+                v.reveal_controls();
                 match key {
                     gdk::Key::Escape => v.close(),
                     gdk::Key::Left => v.move_by(-1),
@@ -933,6 +963,8 @@ impl MediaViewer {
                 });
             if !inside {
                 viewer.close();
+            } else {
+                viewer.reveal_controls();
             }
         });
         viewer.root.add_controller(click);
@@ -1274,7 +1306,32 @@ impl MediaViewer {
             glib::ControlFlow::Continue
         });
     }
-    fn fullscreen_changed(&self) {
+    fn reveal_controls(self: &Rc<Self>) {
+        for control in &self.controls {
+            control.set_reveal_child(true);
+        }
+        if let Some(timer) = self.controls_timer.borrow_mut().take() {
+            timer.remove();
+        }
+        if self
+            .ui
+            .upgrade()
+            .is_some_and(|ui| ui.window.is_fullscreen())
+        {
+            let weak = Rc::downgrade(self);
+            let timer = glib::timeout_add_local_once(Duration::from_secs(3), move || {
+                if let Some(viewer) = weak.upgrade() {
+                    viewer.controls_timer.borrow_mut().take();
+                    for control in &viewer.controls {
+                        control.set_reveal_child(false);
+                    }
+                }
+            });
+            self.controls_timer.replace(Some(timer));
+        }
+    }
+    fn fullscreen_changed(self: &Rc<Self>) {
+        self.reveal_controls();
         let Some(ui) = self.ui.upgrade() else { return };
         let full = ui.window.is_fullscreen();
         for pic in self.pictures.borrow().iter() {
@@ -1291,6 +1348,9 @@ impl MediaViewer {
     }
     pub fn close_immediate(self: &Rc<Self>) {
         self.closing.set(true);
+        if let Some(timer) = self.controls_timer.borrow_mut().take() {
+            timer.remove();
+        }
         if let Some(animation) = self.animation.borrow_mut().take() {
             animation.pause();
         }

@@ -1,15 +1,28 @@
 use gtk::{glib, graphene, prelude::*, subclass::prelude::*};
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-};
+use std::cell::{Cell, RefCell};
+
+struct Tab {
+    widget: gtk::Widget,
+    shift: f32,
+    target: f32,
+}
+
+struct Drag {
+    button: gtk::ToggleButton,
+    tabs: Vec<Tab>,
+    from: usize,
+    to: usize,
+    start: f32,
+    left: f32,
+    active: bool,
+}
+
 mod imp {
     use super::*;
     #[derive(Default)]
     pub struct FolderBar {
-        pub dragged: RefCell<Option<gtk::Button>>,
-        pub offset: Cell<f32>,
-        pub dragging: Cell<bool>,
+        pub(super) drag: RefCell<Option<Drag>>,
+        pub(super) ticking: Cell<bool>,
     }
     #[glib::object_subclass]
     impl ObjectSubclass for FolderBar {
@@ -19,35 +32,28 @@ mod imp {
     }
     impl ObjectImpl for FolderBar {}
     impl WidgetImpl for FolderBar {
-        fn snapshot(&self, s: &gtk::Snapshot) {
+        fn snapshot(&self, snapshot: &gtk::Snapshot) {
             let obj = self.obj();
-            let dragged = self.dragged.borrow();
-            let mut child = obj.first_child();
-            while let Some(c) = child {
-                child = c.next_sibling();
-                if !self.dragging.get()
-                    || dragged
-                        .as_ref()
-                        .is_none_or(|b| b.upcast_ref::<gtk::Widget>() != &c)
-                {
-                    obj.snapshot_child(&c, s)
+            let drag = self.drag.borrow();
+            let Some(drag) = drag.as_ref().filter(|drag| drag.active) else {
+                self.parent_snapshot(snapshot);
+                return;
+            };
+            for (index, tab) in drag.tabs.iter().enumerate() {
+                if index != drag.from && tab.widget.parent().as_ref() == Some(obj.upcast_ref()) {
+                    obj.snapshot_tab(&tab.widget, snapshot, tab.shift);
                 }
             }
-            if self.dragging.get() {
-                if let Some(ref b) = *dragged {
-                    if let Some(rect) = b.compute_bounds(&*obj) {
-                        s.save();
-                        s.translate(&graphene::Point::new(self.offset.get() - rect.x(), 0.));
-                        obj.snapshot_child(b, s);
-                        s.restore()
-                    }
-                }
+            if let Some(bounds) = drag.button.compute_bounds(&*obj) {
+                obj.snapshot_tab(&drag.button, snapshot, drag.left - bounds.x());
             }
         }
     }
     impl BoxImpl for FolderBar {}
 }
+
 glib::wrapper! {pub struct FolderBar(ObjectSubclass<imp::FolderBar>) @extends gtk::Box,gtk::Widget,@implements gtk::Accessible,gtk::Buildable,gtk::ConstraintTarget,gtk::Orientable;}
+
 impl FolderBar {
     pub fn new() -> Self {
         let bar: Self = glib::Object::new();
@@ -55,74 +61,198 @@ impl FolderBar {
         bar.add_css_class("folder-bar");
         bar
     }
+
     pub fn bind(&self, button: &gtk::ToggleButton, reorder: impl Fn(&str, usize) + 'static) {
-        let drag = gtk::GestureDrag::new();
-        drag.set_button(1);
-        drag.set_propagation_phase(gtk::PropagationPhase::Capture);
-        let origin = Rc::new(Cell::new(0f32));
-        let grabbed = Rc::new(Cell::new(0f32));
+        if button.label().as_deref() == Some("All") {
+            return;
+        }
+        let gesture = gtk::GestureDrag::new();
+        gesture.set_button(1);
+        gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+
         let bar = self.downgrade();
-        let b = button.downgrade();
-        let o = origin.clone();
-        let g = grabbed.clone();
-        drag.connect_drag_begin(move |gesture, x, _| {
-            if let (Some(bar), Some(b)) = (bar.upgrade(), b.upgrade()) {
-                o.set(b.compute_bounds(&bar).map(|r| r.x()).unwrap_or(0.));
-                g.set(x as f32);
-                bar.imp().dragged.replace(Some(b.upcast()));
-                bar.imp().dragging.set(false);
+        let button_ref = button.downgrade();
+        gesture.connect_drag_begin(move |gesture, _, _| {
+            if let (Some(bar), Some(button)) = (bar.upgrade(), button_ref.upgrade())
+                && bar.begin_drag(button)
+            {
                 gesture.set_state(gtk::EventSequenceState::Claimed);
             }
         });
+
         let bar = self.downgrade();
-        let b = button.downgrade();
-        let o = origin.clone();
-        drag.connect_drag_update(move |_, dx, _| {
-            if let (Some(bar), Some(b)) = (bar.upgrade(), b.upgrade()) {
-                if !bar.imp().dragging.get() && dx.abs() < 8. {
-                    return;
+        gesture.connect_drag_update(move |_, dx, _| {
+            if let Some(bar) = bar.upgrade() {
+                bar.update_drag(dx as f32);
+            }
+        });
+
+        let bar = self.downgrade();
+        gesture.connect_drag_end(move |_, dx, _| {
+            if let Some(bar) = bar.upgrade() {
+                if bar
+                    .imp()
+                    .drag
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|drag| drag.active)
+                {
+                    bar.update_drag(dx as f32);
                 }
-                bar.imp().dragging.set(true);
-                let pointer = o.get() + grabbed.get() + dx as f32;
-                let mut index = 0;
-                let mut child = bar.first_child();
-                while let Some(c) = child {
-                    child = c.next_sibling();
-                    if c != b.clone().upcast::<gtk::Widget>() {
-                        if let Some(r) = c.compute_bounds(&bar) {
-                            if pointer >= r.x() + r.width() / 2. {
-                                index += 1
-                            }
-                        }
+                let Some(drag) = bar.finish_drag() else {
+                    return;
+                };
+                if !drag.active {
+                    drag.button.set_active(true);
+                } else if drag.from != drag.to {
+                    reorder(drag.button.label().as_deref().unwrap_or(""), drag.to);
+                }
+            }
+        });
+
+        let bar = self.downgrade();
+        gesture.connect_cancel(move |_, _| {
+            if let Some(bar) = bar.upgrade() {
+                bar.finish_drag();
+            }
+        });
+        button.add_controller(gesture);
+    }
+
+    fn begin_drag(&self, button: gtk::ToggleButton) -> bool {
+        let Some(bounds) = button.compute_bounds(self) else {
+            return false;
+        };
+        if self.imp().drag.borrow().is_some() {
+            return false;
+        }
+        let mut tabs = Vec::new();
+        let mut child = self.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            tabs.push(Tab {
+                widget,
+                shift: 0.,
+                target: 0.,
+            });
+        }
+        let Some(from) = tabs
+            .iter()
+            .position(|tab| tab.widget == *button.upcast_ref::<gtk::Widget>())
+        else {
+            return false;
+        };
+        self.imp().drag.replace(Some(Drag {
+            button,
+            tabs,
+            from,
+            to: from,
+            start: bounds.x(),
+            left: bounds.x(),
+            active: false,
+        }));
+        true
+    }
+
+    fn update_drag(&self, dx: f32) {
+        let mut state = self.imp().drag.borrow_mut();
+        let Some(drag) = state.as_mut() else { return };
+        if !drag.active {
+            if dx.abs() < 8. {
+                return;
+            }
+            drag.active = true;
+            drag.button.add_css_class("dragging-folder");
+        }
+        // The child stays at its original allocation, so gesture deltas stay in one frame of reference.
+        drag.left = drag.start + dx;
+        let Some(bounds) = drag.button.compute_bounds(self) else {
+            return;
+        };
+        let center = drag.left + bounds.width() / 2.;
+        let direction = if self.direction() == gtk::TextDirection::Rtl {
+            -1.
+        } else {
+            1.
+        };
+        let target = drag
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(index, tab)| {
+                *index != drag.from
+                    && tab
+                        .widget
+                        .compute_bounds(self)
+                        .is_some_and(|r| direction * (center - (r.x() + r.width() / 2.)) >= 0.)
+            })
+            .count()
+            .clamp(1, drag.tabs.len().saturating_sub(1).max(1));
+        if target != drag.to {
+            drag.to = target;
+            let extent = direction * (bounds.width() + self.spacing() as f32);
+            let animate = self.settings().property::<bool>("gtk-enable-animations");
+            for (index, tab) in drag.tabs.iter_mut().enumerate() {
+                tab.target = if drag.from < index && index <= target {
+                    -extent
+                } else if target <= index && index < drag.from {
+                    extent
+                } else {
+                    0.
+                };
+                if !animate {
+                    tab.shift = tab.target;
+                }
+            }
+            if animate {
+                self.animate_tabs();
+            }
+        }
+        self.queue_draw();
+    }
+
+    fn animate_tabs(&self) {
+        if self.imp().ticking.replace(true) {
+            return;
+        }
+        let last = Cell::new(0);
+        self.add_tick_callback(move |bar, clock| {
+            let now = clock.frame_time();
+            let delta = now - last.replace(now);
+            let amount = (delta as f32 / 85_000.).clamp(0.16, 0.45);
+            let mut moving = false;
+            if let Some(drag) = bar.imp().drag.borrow_mut().as_mut() {
+                for tab in &mut drag.tabs {
+                    let distance = tab.target - tab.shift;
+                    if distance.abs() > 0.5 {
+                        tab.shift += distance * amount;
+                        moving = true;
+                    } else {
+                        tab.shift = tab.target;
                     }
                 }
-                reorder(b.label().as_deref().unwrap_or(""), index);
-                bar.imp()
-                    .offset
-                    .set((o.get() + dx as f32).clamp(0., (bar.width() - b.width()).max(0) as f32));
                 bar.queue_draw();
             }
-        });
-        let bar = self.downgrade();
-        let b = button.downgrade();
-        drag.connect_drag_end(move |_, _, _| {
-            if let (Some(bar), Some(b)) = (bar.upgrade(), b.upgrade()) {
-                if !bar.imp().dragging.get() {
-                    b.set_active(true)
-                }
-                bar.imp().dragged.take();
-                bar.imp().dragging.set(false);
-                bar.queue_draw();
+            if moving {
+                glib::ControlFlow::Continue
+            } else {
+                bar.imp().ticking.set(false);
+                glib::ControlFlow::Break
             }
         });
-        let bar = self.downgrade();
-        drag.connect_cancel(move |_, _| {
-            if let Some(bar) = bar.upgrade() {
-                bar.imp().dragged.take();
-                bar.imp().dragging.set(false);
-                bar.queue_draw();
-            }
-        });
-        button.add_controller(drag);
+    }
+
+    fn finish_drag(&self) -> Option<Drag> {
+        let drag = self.imp().drag.take()?;
+        drag.button.remove_css_class("dragging-folder");
+        self.queue_draw();
+        Some(drag)
+    }
+
+    fn snapshot_tab(&self, tab: &impl IsA<gtk::Widget>, snapshot: &gtk::Snapshot, shift: f32) {
+        snapshot.save();
+        snapshot.translate(&graphene::Point::new(shift, 0.));
+        self.snapshot_child(tab, snapshot);
+        snapshot.restore();
     }
 }
