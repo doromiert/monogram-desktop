@@ -74,6 +74,42 @@ fn empty(element: &Element) -> bool {
 fn reply_fallback(element: &Element) -> bool {
     element.is("fallback", FALLBACK) && element.attr("for") == Some(REPLY)
 }
+fn outgoing_content(peer: &str, message: &Message, quote: &str) -> Result<Element> {
+    if message.mode() != Mode::Legacy {
+        return Err(Error::Invalid("wrong outgoing Legacy OMEMO mode"));
+    }
+    if message.upload.is_some() || message.poll.is_some() || message.action.is_some() {
+        return Err(Error::Unavailable(
+            "This message cannot be sent with Legacy OMEMO",
+        ));
+    }
+    if let Some(file) = &message.attachment {
+        if !file.valid_outgoing(true) {
+            return Err(Error::Invalid(
+                "Legacy OMEMO attachment must be an encrypted file link",
+            ));
+        }
+        // XEP-0454 mobile receivers require URI-only content; captions are separate messages.
+        let mut content = message.clone();
+        content.text = file.wire_url.clone();
+        content.attachment = None;
+        content.forwarded = None;
+        Ok(protocol::outgoing(peer, &content, quote))
+    } else {
+        Ok(protocol::outgoing(peer, message, quote))
+    }
+}
+fn decorate_outgoing(xml: &mut Element, clear: &Element, message: &Message) {
+    for child in clear
+        .children()
+        .filter(|child| child.is("reply", REPLY) || reply_fallback(child))
+    {
+        xml.append_child(child.clone());
+    }
+    if message.attachment.as_ref().is_some_and(|file| file.sticker) {
+        xml.append_child(Element::builder("sticker", "urn:xmpp:stickers:0").build());
+    }
+}
 fn split_fallback(outer: &Element, body: &str) -> Option<(String, String)> {
     // Legacy OMEMO authenticates the body, not the fallback range. Only move the
     // bounded, leading quote emitted by both clients into the reply preview.
@@ -462,18 +498,7 @@ impl Worker {
             .await
     }
     async fn send_message(&mut self, peer: &str, message: &Message, quote: &str) -> Result<()> {
-        if message.mode() != Mode::Legacy {
-            return Err(Error::Invalid("wrong outgoing encryption mode"));
-        }
-        if message.upload.is_some()
-            || message.attachment.is_some()
-            || message.poll.is_some()
-            || message.action.is_some()
-        {
-            return Err(Error::Unavailable(
-                "This message needs OMEMO 2. Legacy OMEMO protects message text only.",
-            ));
-        }
+        let clear = outgoing_content(peer, message, quote)?;
         if !self.ready || !self.online {
             return Err(Error::Unavailable("Legacy OMEMO is not ready"));
         }
@@ -485,18 +510,12 @@ impl Worker {
                 "The local Legacy OMEMO identity changed. Review it before retrying.",
             ));
         }
-        let clear = protocol::outgoing(peer, message, quote);
         let body = clear
             .get_child("body", payload::CLIENT)
             .ok_or(Error::Invalid("legacy body"))?
             .text();
         let mut xml = local.encrypt(peer, &body, &message.wire_id).await?;
-        for child in clear
-            .children()
-            .filter(|child| child.is("reply", REPLY) || reply_fallback(child))
-        {
-            xml.append_child(child.clone());
-        }
+        decorate_outgoing(&mut xml, &clear, message);
         xml.append_child(protocol::el("request", "urn:xmpp:receipts"));
         if self.wire(xml).await {
             Ok(())
@@ -533,18 +552,7 @@ impl Worker {
         quote: &str,
         epoch: u64,
     ) -> Result<()> {
-        if message.mode() != Mode::Legacy {
-            return Err(Error::Invalid("wrong room encryption mode"));
-        }
-        if message.upload.is_some()
-            || message.attachment.is_some()
-            || message.poll.is_some()
-            || message.action.is_some()
-        {
-            return Err(Error::Unavailable(
-                "Legacy encrypted room sending currently supports text and replies",
-            ));
-        }
+        let clear = outgoing_content(&recipients.room, message, quote)?;
         if !self.ready || !self.online {
             return Err(Error::Unavailable("Legacy OMEMO is not ready"));
         }
@@ -556,7 +564,6 @@ impl Worker {
                 "The local Legacy OMEMO identity changed. Review it before retrying.",
             ));
         }
-        let clear = protocol::outgoing(&recipients.room, message, quote);
         let body = clear
             .get_child("body", payload::CLIENT)
             .ok_or(Error::Invalid("legacy room body"))?
@@ -565,12 +572,7 @@ impl Worker {
         let mut xml = local
             .encrypt_room(&recipients.room, &members, &body, &message.wire_id)
             .await?;
-        for child in clear
-            .children()
-            .filter(|child| child.is("reply", REPLY) || reply_fallback(child))
-        {
-            xml.append_child(child.clone());
-        }
+        decorate_outgoing(&mut xml, &clear, message);
         let current =
             crate::rooms::members::fetch(&iq::Client::new(self.network.clone()), &recipients.room)
                 .await
@@ -1037,6 +1039,65 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_attachment_authenticates_only_uri_and_reply_without_exposing_metadata() {
+        let uri = format!(
+            "aesgcm://files.example.org/opaque-object#{}",
+            "01".repeat(44)
+        );
+        let mut file = crate::file_share::Attachment::bare(&uri).unwrap();
+        file.name = "secret-display-name.png".into();
+        file.mime = "image/png".into();
+        file.size = Some(128);
+        file.hashes.insert("sha-256".into(), vec![2; 32]);
+        file.sticker = true;
+        assert!(file.valid_outgoing(true));
+        let mut message = Message {
+            text: "caption stays separate".into(),
+            attachment: Some(file),
+            wire_id: "file-message".into(),
+            reply_id: "original-message".into(),
+            reply_to: "peer@example.org".into(),
+            ..Default::default()
+        };
+        message.set_encryption(Mode::Legacy, String::new());
+        for peer in ["peer@example.org", "room@conference.example.org"] {
+            let clear = outgoing_content(peer, &message, "quoted").unwrap();
+            let body = clear.get_child("body", payload::CLIENT).unwrap().text();
+            assert_eq!(body, format!("> quoted\n{uri}"));
+            let parsed = crate::file_share::Attachment::incoming(&clear, &body, true).unwrap();
+            assert_eq!(parsed.wire_url, uri);
+            assert_eq!(parsed.mime, "application/octet-stream");
+            assert!(parsed.hashes.is_empty());
+            let mut wire = Element::builder("message", payload::CLIENT)
+                .append(Element::builder("encrypted", NS).build())
+                .build();
+            decorate_outgoing(&mut wire, &clear, &message);
+            let bytes = bundle::xml(&wire, MAX_WIRE).unwrap();
+            let wire_text = std::str::from_utf8(&bytes).unwrap();
+            for private in [
+                &uri,
+                "secret-display-name.png",
+                "image/png",
+                "caption stays separate",
+                crate::file_share::NS,
+                crate::file_share::OOB,
+                crate::file_share::META,
+                crate::file_share::HASH,
+            ] {
+                assert!(
+                    !wire_text.contains(private),
+                    "Legacy outer stanza leaked {private}"
+                );
+            }
+            assert!(crate::file_share::Attachment::sticker_marker(&wire));
+            assert_eq!(wire.children().count(), 4);
+        }
+        assert_eq!(message.text, "caption stays separate");
+        message.attachment = crate::file_share::Attachment::bare("https://files.example.org/plain");
+        assert!(outgoing_content("peer@example.org", &message, "").is_err());
+    }
 
     #[test]
     fn recovered_room_content_keeps_captured_author_and_never_sends_room_receipts() {

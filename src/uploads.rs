@@ -492,9 +492,11 @@ pub async fn run(
     owner: &str,
     id: &str,
     draft: &Draft,
-    encrypted: bool,
+    mode: crate::encryption_policy::Mode,
     job: Arc<Job>,
 ) -> Result<Uploaded> {
+    let encrypted = mode.encrypted();
+    let opaque = mode == crate::encryption_policy::Mode::Omemo2;
     job.check()?;
     let provider = discover(iq, owner).await?;
     job.check()?;
@@ -503,12 +505,12 @@ pub async fn run(
         .saturating_sub(if encrypted { 16 } else { 0 })
         .min(MAX);
     let prepared = prepare(snapshot_path(owner, id)?, draft, limit, &job)?;
-    let filename = if encrypted {
+    let filename = if opaque {
         format!("{}.bin", uuid::Uuid::new_v4())
     } else {
         prepared.name.clone()
     };
-    let mime = if encrypted {
+    let mime = if opaque {
         "application/octet-stream"
     } else {
         &prepared.mime

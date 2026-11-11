@@ -19,8 +19,10 @@ fingerprints on each device to read encrypted copies of sent messages.
 
 Legacy protects the message body. Quoted reply text and forwarding fallback
 text can travel inside that body. Outer reply, poll and action metadata do not
-become authenticated content. Legacy file sending and protected rich actions
-remain unavailable. Direct live, own-device carbons and MAM ciphertext route
+become authenticated content. Legacy files encrypt bytes with XEP-0454 and authenticate only the file URI
+plus an optional reply prefix. Captions follow as separate encrypted messages
+after successful media submission; pending companions survive failures/restarts.
+Protected rich actions remain unavailable. Direct live, own-device carbons and MAM ciphertext route
 according to the received namespace. Incoming ratchets, decoded bodies and key
 transport acknowledgements are committed to a separate authenticated journal
 before visible history is accepted. Missing or untrusted device keys can leave
@@ -42,3 +44,8 @@ require the server’s historical real-JID metadata. Room contexts survive journ
 recovery and trust retries. Fingerprint review shows member devices. An isolated
 TLS Prosody check verified encrypted delivery and MAM with an offline member;
 independent mobile room interoperability and richer room content remain open.
+
+Legacy upload requests retain the sanitized filename/MIME used by Android;
+OMEMO 2 retains opaque upload metadata. Outer SFS/OOB descriptions remain
+untrusted and cannot supply Legacy URLs, keys, sizes or hashes. A small isolated
+TLS/HTTPS check verified direct and room upload/download bytes and caption order.

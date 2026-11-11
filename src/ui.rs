@@ -1523,10 +1523,6 @@ impl Ui {
             String::new()
         };
         let files_sent = live && !self.attachments.borrow().is_empty();
-        if files_sent && mode == crate::encryption_policy::Mode::Legacy {
-            self.notice("Legacy OMEMO file sending is unavailable. Choose OMEMO 2 to send an encrypted file.");
-            return;
-        }
         if files_sent && !self.send_files(value) {
             return;
         }
@@ -1985,6 +1981,9 @@ impl Ui {
                         self.load_history(true);
                     }
                 }
+                if presence.joined {
+                    self.release_upload_captions();
+                }
             }
             BackendEvent::RoomError(error) => self.notice(&error),
             BackendEvent::CryptoStatus(status) => {
@@ -1999,6 +1998,7 @@ impl Ui {
             BackendEvent::LegacyStatus(status) => {
                 self.legacy_crypto.replace(status);
                 self.update_crypto_controls();
+                self.release_upload_captions();
             }
             BackendEvent::LegacyReview { peer, rows, errors } => {
                 self.handle_device_review(
@@ -2112,7 +2112,10 @@ impl Ui {
                 self.delivery(&peer, &id, "uncertain");
                 self.notice("Encrypted delivery is uncertain. Retrying may duplicate it.");
             }
-            BackendEvent::Sent { peer, id } => self.delivery(&peer, &id, "sent"),
+            BackendEvent::Sent { peer, id } => {
+                self.delivery(&peer, &id, "sent");
+                self.release_upload_captions();
+            }
             BackendEvent::Receipt { peer, id } => self.delivery(&peer, &id, "delivered"),
             BackendEvent::Failed { peer, id } => {
                 self.delivery(&peer, &id, "failed");

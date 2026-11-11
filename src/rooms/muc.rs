@@ -485,20 +485,25 @@ impl Rooms {
         let text = if unavailable {
             "Encrypted room message · this encryption is unavailable on desktop".into()
         } else {
-            let body = child(xml, "body", CLIENT).ok().flatten()?;
-            if body.children().next().is_some() {
-                return None;
+            match child(xml, "body", CLIENT).ok().flatten() {
+                Some(body) if body.children().next().is_none() => body.text(),
+                None => String::new(),
+                _ => return None,
             }
-            body.text()
         };
-        if text.trim().is_empty() || text.len() > 256 * 1024 {
+        let attachment = (!unavailable)
+            .then(|| crate::file_share::Attachment::incoming(xml, &text, false))
+            .flatten();
+        if (text.trim().is_empty() && attachment.is_none()) || text.len() > 256 * 1024 {
             return None;
         }
+        let caption = attachment.as_ref().map(|file| file.caption(xml, &text));
         let (reply_id, mut reply_to, reply, text) = if unavailable {
             (String::new(), String::new(), String::new(), text)
         } else {
             crate::protocol::reply_content(xml, &text)
         };
+        let text = caption.unwrap_or(text);
         if !reply_id.is_empty()
             && let Some(address) = xml
                 .get_child("reply", "urn:xmpp:reply:0")
@@ -546,6 +551,12 @@ impl Rooms {
             }
         }
         let message = Message {
+            kind: if attachment.is_some() { "file" } else { "text" }.into(),
+            attachment,
+            unsupported_attachment: xml
+                .get_child("file-sharing", crate::file_share::NS)
+                .is_some()
+                || xml.get_child("x", crate::file_share::OOB).is_some(),
             text,
             reply_id,
             reply_to,
@@ -576,13 +587,16 @@ impl Rooms {
             Some(Membership::Joined { .. }) => {}
             _ => return Err(Error::NotJoined),
         }
-        if message.text.trim().is_empty()
+        if (message.text.trim().is_empty() && message.attachment.is_none())
             || message.text.len() > 256 * 1024
             || message.wire_id.is_empty()
             || message.wire_id.len() > 4096
             || message.unavailable
-            || message.kind != "text"
-            || message.attachment.is_some()
+            || !matches!(message.kind.as_str(), "text" | "file")
+            || message
+                .attachment
+                .as_ref()
+                .is_some_and(|file| !file.valid_outgoing(false))
             || message.upload.is_some()
             || message.poll.is_some()
             || message.action.is_some()

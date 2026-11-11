@@ -4,6 +4,26 @@ use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 pub struct Store {
     pub db: Connection,
 }
+const READY_UPLOAD_CAPTIONS: &str = "SELECT dependency.peer,caption.body
+    FROM upload_captions AS dependency
+    CROSS JOIN messages AS caption CROSS JOIN messages AS parent
+    WHERE dependency.account=?1
+      AND caption.account=dependency.account AND caption.peer=dependency.peer AND caption.id=dependency.id
+      AND parent.account=dependency.account AND parent.peer=dependency.peer AND parent.id=dependency.parent
+      AND json_extract(caption.body,'$.own')=1
+      AND json_extract(caption.body,'$.encrypted')=1 AND json_extract(caption.body,'$.encryption_mode')='Legacy'
+      AND json_extract(caption.body,'$.delivery')='waiting-upload'
+      AND json_extract(caption.body,'$.upload_caption_for')=dependency.parent
+      AND COALESCE(json_extract(caption.body,'$.retracted'),0)=0
+      AND COALESCE(json_type(caption.body,'$.upload'),'null')='null'
+      AND COALESCE(json_type(caption.body,'$.action'),'null')='null'
+      AND json_extract(parent.body,'$.own')=1
+      AND json_extract(parent.body,'$.wire_id')=dependency.parent
+      AND json_extract(parent.body,'$.encrypted')=1 AND json_extract(parent.body,'$.encryption_mode')='Legacy'
+      AND json_extract(parent.body,'$.delivery') IN ('sent','delivered','read')
+      AND COALESCE(json_extract(parent.body,'$.retracted'),0)=0
+      AND COALESCE(json_type(parent.body,'$.upload'),'null')='null'
+      AND json_type(parent.body,'$.attachment')='object'";
 impl Store {
     pub fn open(memory: bool) -> rusqlite::Result<Self> {
         let db = if memory {
@@ -28,6 +48,7 @@ impl Store {
         let store = Self { db };
         store.init_actions()?;
         store.init_media()?;
+        store.db.execute_batch("CREATE TABLE IF NOT EXISTS upload_captions(account TEXT NOT NULL,peer TEXT NOT NULL,id TEXT NOT NULL,parent TEXT NOT NULL,PRIMARY KEY(account,peer,id),FOREIGN KEY(account,peer,id) REFERENCES messages(account,peer,id) ON DELETE CASCADE);")?;
         Ok(store)
     }
     pub fn accounts(&self) -> Vec<Account> {
@@ -132,7 +153,53 @@ impl Store {
                 params![account, peer, m.own, alias, m.id],
             )?;
         }
+        if m.own
+            && m.mode() == crate::encryption_policy::Mode::Legacy
+            && !m.upload_caption_for.is_empty()
+            && m.delivery == "waiting-upload"
+            && !m.retracted
+        {
+            self.db.execute("INSERT INTO upload_captions VALUES(?,?,?,?) ON CONFLICT(account,peer,id) DO UPDATE SET parent=excluded.parent",
+                params![account,peer,m.id,m.upload_caption_for])?;
+        } else {
+            self.db.execute(
+                "DELETE FROM upload_captions WHERE account=? AND peer=? AND id=?",
+                params![account, peer, m.id],
+            )?;
+        }
         Ok(())
+    }
+    pub fn ready_upload_captions(&self, owner: &str) -> rusqlite::Result<Vec<(String, Message)>> {
+        let mut query = self.db.prepare(&format!(
+            "{READY_UPLOAD_CAPTIONS} ORDER BY caption.timestamp,caption.id LIMIT 64"
+        ))?;
+        query.query_map([owner], upload_caption_row)?.collect()
+    }
+    pub fn claim_upload_caption(
+        &self,
+        owner: &str,
+        peer: &str,
+        id: &str,
+    ) -> rusqlite::Result<Option<Message>> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let caption = tx
+            .query_row(
+                &format!("{READY_UPLOAD_CAPTIONS} AND dependency.peer=?2 AND dependency.id=?3"),
+                params![owner, peer, id],
+                upload_caption_row,
+            )
+            .optional()?;
+        let Some((_, mut message)) = caption else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        message.delivery = "sending".into();
+        self.upsert_message(owner, peer, &message)?;
+        tx.commit()?;
+        Ok(Some(message))
     }
     pub fn restore_legacy_sticker(
         &self,
@@ -402,20 +469,31 @@ impl Store {
     }
     pub fn delete(&self, a: &str, peer: &str, id: &str) -> rusqlite::Result<()> {
         let tx = self.db.unchecked_transaction()?;
-        for table in ["messages", "message_bases"] {
+        let mut ids = vec![id.to_owned()];
+        {
+            let mut query = tx.prepare("SELECT pending.id FROM upload_captions pending JOIN messages caption ON caption.account=pending.account AND caption.peer=pending.peer AND caption.id=pending.id WHERE pending.account=?1 AND pending.peer=?2 AND pending.parent=?3 AND json_extract(caption.body,'$.upload_caption_for')=?3 AND json_extract(caption.body,'$.delivery')='waiting-upload' AND json_extract(caption.body,'$.own')=1 AND json_extract(caption.body,'$.encrypted')=1 AND json_extract(caption.body,'$.encryption_mode')='Legacy'")?;
+            ids.extend(
+                query
+                    .query_map(params![a, peer, id], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            );
+        }
+        for id in ids {
+            for table in ["messages", "message_bases"] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE account=? AND peer=? AND id=?"),
+                    params![a, peer, id],
+                )?;
+            }
             tx.execute(
-                &format!("DELETE FROM {table} WHERE account=? AND peer=? AND id=?"),
+                "DELETE FROM action_refs WHERE account=? AND peer=? AND message=?",
+                params![a, peer, id],
+            )?;
+            tx.execute(
+                "DELETE FROM action_events WHERE account=? AND peer=? AND resolved=?",
                 params![a, peer, id],
             )?;
         }
-        tx.execute(
-            "DELETE FROM action_refs WHERE account=? AND peer=? AND message=?",
-            params![a, peer, id],
-        )?;
-        tx.execute(
-            "DELETE FROM action_events WHERE account=? AND peer=? AND resolved=?",
-            params![a, peer, id],
-        )?;
         tx.commit()?;
         Ok(())
     }
@@ -484,6 +562,14 @@ impl Store {
         tx.commit()
     }
 }
+fn upload_caption_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, Message)> {
+    let body: String = row.get(1)?;
+    let message = Message::decode(&body).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    Ok((row.get(0)?, message))
+}
+
 pub fn same_source(old: &Message, new: &Message) -> bool {
     if let (Some(old), Some(new)) = (&old.legacy_room_sender, &new.legacy_room_sender)
         && (old.room != new.room || old.author != new.author)
@@ -512,6 +598,157 @@ pub fn same_source(old: &Message, new: &Message) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn upload_caption_claim_waits_for_scoped_parent_and_is_durable_once() {
+        let store = Store::open(true).unwrap();
+        let owner = "own@example.org";
+        let other = "other@example.org";
+        let peer = "peer@example.org";
+        let foreign = "foreign@example.org";
+        let chat = |jid: &str| Chat {
+            jid: jid.into(),
+            ..Default::default()
+        };
+        for account in [owner, other] {
+            store
+                .save_account(&Account {
+                    jid: account.into(),
+                    host: String::new(),
+                    port: 5222,
+                    direct_tls: false,
+                })
+                .unwrap();
+            for peer in [peer, foreign] {
+                store.save_chat_message(account, &chat(peer), None).unwrap();
+            }
+        }
+        let mut parent = Message {
+            id: "upload".into(),
+            wire_id: "upload".into(),
+            own: true,
+            delivery: "sent".into(),
+            attachment: crate::file_share::Attachment::bare("https://files.example.org/file"),
+            ..Default::default()
+        };
+        parent.set_encryption(crate::encryption_policy::Mode::Legacy, String::new());
+        store.upsert_message(other, peer, &parent).unwrap();
+        store.upsert_message(owner, foreign, &parent).unwrap();
+        let mut caption = Message {
+            id: "caption".into(),
+            wire_id: "caption".into(),
+            own: true,
+            delivery: "waiting-upload".into(),
+            upload_caption_for: parent.wire_id.clone(),
+            text: "Companion caption".into(),
+            ..Default::default()
+        };
+        caption.set_encryption(crate::encryption_policy::Mode::Legacy, String::new());
+        store.upsert_message(owner, peer, &caption).unwrap();
+        for index in 0..70 {
+            let mut blocked = caption.clone();
+            blocked.id = format!("blocked-{index}");
+            blocked.wire_id = blocked.id.clone();
+            blocked.upload_caption_for = format!("missing-parent-{index}");
+            blocked.timestamp = "2000-01-01T00:00:00Z".into();
+            store.upsert_message(owner, peer, &blocked).unwrap();
+        }
+        assert!(store.ready_upload_captions(owner).unwrap().is_empty());
+        assert!(
+            store
+                .claim_upload_caption(owner, peer, &caption.id)
+                .unwrap()
+                .is_none()
+        );
+        parent.delivery = "sending".into();
+        store.upsert_message(owner, peer, &parent).unwrap();
+        assert!(store.ready_upload_captions(owner).unwrap().is_empty());
+        parent.delivery = "sent".into();
+        store.upsert_message(owner, peer, &parent).unwrap();
+        let ready = store.ready_upload_captions(owner).unwrap();
+        assert_eq!(
+            ready.len(),
+            1,
+            "blocked earlier rows cannot starve a ready caption"
+        );
+        assert_eq!(ready[0].0, peer);
+        assert!(
+            store
+                .claim_upload_caption(other, peer, &caption.id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .claim_upload_caption(owner, foreign, &caption.id)
+                .unwrap()
+                .is_none()
+        );
+        let claimed = store
+            .claim_upload_caption(owner, peer, &caption.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.delivery, "sending");
+        assert_eq!(claimed.upload_caption_for, parent.wire_id);
+        assert_eq!(
+            store
+                .action_base(owner, peer, &caption.id)
+                .unwrap()
+                .delivery,
+            "sending"
+        );
+        assert!(
+            store
+                .claim_upload_caption(owner, peer, &caption.id)
+                .unwrap()
+                .is_none()
+        );
+        store.interrupt_messages(owner).unwrap();
+        assert_eq!(
+            store.message(owner, peer, &caption.id).unwrap().delivery,
+            "uncertain"
+        );
+        assert!(store.ready_upload_captions(owner).unwrap().is_empty());
+        for index in 0..70 {
+            let mut next = caption.clone();
+            next.id = format!("ready-{index}");
+            next.wire_id = next.id.clone();
+            store.upsert_message(owner, peer, &next).unwrap();
+        }
+        assert_eq!(store.ready_upload_captions(owner).unwrap().len(), 64);
+        let mut plan = store.db.prepare(&format!("EXPLAIN QUERY PLAN {READY_UPLOAD_CAPTIONS} ORDER BY caption.timestamp,caption.id LIMIT 64")).unwrap();
+        let steps: Vec<String> = plan
+            .query_map([owner], |row| row.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        for table in ["dependency", "caption", "parent"] {
+            assert!(
+                steps
+                    .iter()
+                    .any(|step| step.starts_with(&format!("SEARCH {table} "))),
+                "pending captions and their parents must use scoped indexed lookups: {steps:?}"
+            );
+        }
+        drop(plan);
+        parent.delivery = "failed".into();
+        store.upsert_message(owner, peer, &parent).unwrap();
+        assert!(
+            store
+                .claim_upload_caption(owner, peer, "ready-0")
+                .unwrap()
+                .is_none(),
+            "claim rechecks parent state after enumeration"
+        );
+        store.delete(owner, peer, &parent.id).unwrap();
+        assert!(store.message(owner, peer, "ready-0").is_none());
+        assert!(store.action_base(owner, peer, "ready-0").is_err());
+        assert!(
+            store.message(owner, peer, &caption.id).is_some(),
+            "already claimed captions survive parent deletion"
+        );
+        assert!(store.message(other, peer, &parent.id).is_some());
+        assert!(store.message(owner, foreign, &parent.id).is_some());
+    }
     #[test]
     fn save_migrate_and_isolate() {
         let db = Store::open(true).unwrap();

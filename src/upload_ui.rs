@@ -21,7 +21,7 @@ struct Work {
     peer: String,
     id: String,
     generation: u64,
-    encrypted: bool,
+    mode: Mode,
     fingerprint: String,
     draft: Draft,
 }
@@ -116,7 +116,7 @@ impl Uploads {
             let iq = task.iq.clone();
             std::thread::spawn(move || {
                 let result=match tokio::runtime::Builder::new_current_thread().enable_all().build(){
-                    Ok(rt)=>rt.block_on(async{tokio::select!{biased; _=stopped=>Err("Upload cancelled"), result=uploads::run(&iq,&work.owner,&work.id,&work.draft,work.encrypted,job)=>result}}),
+                    Ok(rt)=>rt.block_on(async{tokio::select!{biased; _=stopped=>Err("Upload cancelled"), result=uploads::run(&iq,&work.owner,&work.id,&work.draft,work.mode,job)=>result}}),
                     Err(_)=>Err("Upload runtime unavailable"),
                 };
                 let _ = tx.send(result);
@@ -126,6 +126,60 @@ impl Uploads {
     }
 }
 impl Ui {
+    pub fn release_upload_captions(self: &Rc<Self>) {
+        if !self.online.get() || !self.legacy_crypto.borrow().ready {
+            return;
+        }
+        let owner = self.state.borrow().account.clone();
+        let Ok(ready) = self.store.ready_upload_captions(&owner) else {
+            self.notice("Pending captions could not be read");
+            return;
+        };
+        let mut identity_changed = false;
+        for (peer, candidate) in ready {
+            if self
+                .state
+                .borrow()
+                .chats
+                .iter()
+                .any(|chat| chat.jid == peer && chat.group && !chat.room_can_send)
+            {
+                continue;
+            }
+            let Ok(Some(message)) = self
+                .store
+                .claim_upload_caption(&owner, &peer, &candidate.id)
+            else {
+                continue;
+            };
+            if let Some(row) = self
+                .state
+                .borrow_mut()
+                .chat_for(&peer)
+                .messages
+                .iter_mut()
+                .find(|row| row.id == message.id)
+            {
+                *row = message.clone();
+            }
+            if self.fingerprint_for_send(Mode::Legacy).as_deref()
+                != Some(message.fingerprint.as_str())
+            {
+                self.delivery(&peer, &message.wire_id, "failed");
+                identity_changed = true;
+            } else if !self.command(Command::Send {
+                peer: peer.clone(),
+                quote: String::new(),
+                message: message.clone(),
+            }) {
+                self.delivery(&peer, &message.wire_id, "failed");
+            }
+        }
+        if identity_changed {
+            self.notice("Caption kept for retry: the Legacy OMEMO identity changed");
+        }
+        self.render_messages(false);
+    }
     fn upload_row(&self, owner: &str, peer: &str, message: Message) -> bool {
         match self.store.update_upload(owner, peer, &message) {
             Ok(true) => {
@@ -202,15 +256,14 @@ impl Ui {
             self.notice("Check conversation encryption before uploading");
             return;
         };
-        if mode == Mode::Legacy {
-            self.notice("Legacy OMEMO file sending is unavailable");
+        if mode != message.mode() {
+            self.notice(&format!("Restore {} to retry this upload, or cancel and attach the file again with the new mode.", message.mode().name()));
             return;
         }
         let Some(fingerprint) = self.fingerprint_for_send(mode) else {
             self.notice("The selected OMEMO version is not ready");
             return;
         };
-        let encrypted = mode.encrypted();
         draft.error = None;
         message.upload = Some(draft.clone());
         message.set_encryption(mode, fingerprint.clone());
@@ -233,7 +286,7 @@ impl Ui {
                 peer: peer.into(),
                 id: id.into(),
                 generation: self.generation.get(),
-                encrypted,
+                mode,
                 fingerprint,
                 draft,
             },
@@ -268,17 +321,11 @@ impl Ui {
                 .iter()
                 .find(|c| c.jid == work.peer)
                 .and_then(|chat| self.sending_mode(chat));
-            let mode = if work.encrypted {
-                Mode::Omemo2
-            } else {
-                Mode::Plain
-            };
+            let mode = work.mode;
             let unchanged = selected == Some(mode)
                 && message.mode() == mode
                 && message.fingerprint == work.fingerprint
-                && (!work.encrypted
-                    || (self.crypto.borrow().ready
-                        && self.crypto.borrow().fingerprint == work.fingerprint));
+                && self.fingerprint_for_send(mode).as_deref() == Some(work.fingerprint.as_str());
             if !unchanged || !self.online.get() {
                 self.fail_upload(
                     &work.owner,
@@ -299,19 +346,83 @@ impl Ui {
                         continue;
                     }
                     // Metadata is durable before moving the snapshot or submitting the stanza.
-                    let cache = crate::downloads::account_root(&work.owner)
-                        .map(|p| p.join(uploaded.attachment.key()));
-                    if let Ok(cache) = cache {
-                        let _guard = crate::downloads::CACHE_IO.lock().unwrap();
-                        let _ = std::fs::rename(uploaded.snapshot, cache);
-                    }
-                    if !self.command(Command::Send {
-                        peer: work.peer.clone(),
-                        quote: message.reply.clone(),
-                        message: message.clone(),
-                    }) {
-                        self.delivery(&work.peer, &message.wire_id, "failed");
-                    }
+                    let weak = Rc::downgrade(self);
+                    let history = self.store.db.path().map(std::path::PathBuf::from);
+                    glib::MainContext::default().spawn_local(async move {
+                        let account = work.owner.clone();
+                        let file = uploaded.attachment.clone();
+                        let _ = gtk::gio::spawn_blocking(move || {
+                            let _guard = crate::downloads::CACHE_IO.lock().unwrap();
+                            let retained = history
+                                .as_ref()
+                                .and_then(|path| {
+                                    rusqlite::Connection::open_with_flags(
+                                        path,
+                                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                                    )
+                                    .ok()
+                                })
+                                .is_some_and(|db| {
+                                    db.query_row(
+                                        "SELECT EXISTS(SELECT 1 FROM accounts WHERE jid=?)",
+                                        [&account],
+                                        |row| row.get::<_, bool>(0),
+                                    )
+                                    .unwrap_or(false)
+                                });
+                            if !retained {
+                                let _ = std::fs::remove_file(&uploaded.snapshot);
+                                return;
+                            }
+                            let moved =
+                                crate::downloads::account_root(&account)
+                                    .ok()
+                                    .is_some_and(|root| {
+                                        std::fs::rename(&uploaded.snapshot, root.join(file.key()))
+                                            .is_ok()
+                                    });
+                            if !moved {
+                                let _ = std::fs::remove_file(&uploaded.snapshot);
+                            }
+                        })
+                        .await;
+                        let Some(ui) = weak.upgrade().filter(|ui| {
+                            ui.generation.get() == work.generation
+                                && ui.state.borrow().account == work.owner
+                        }) else {
+                            return;
+                        };
+                        if !ui.online.get()
+                            || ui.fingerprint_for_send(work.mode).as_deref()
+                                != Some(work.fingerprint.as_str())
+                            || ui
+                                .state
+                                .borrow()
+                                .chats
+                                .iter()
+                                .find(|chat| chat.jid == work.peer)
+                                .and_then(|chat| ui.sending_mode(chat))
+                                != Some(work.mode)
+                            || !ui
+                                .store
+                                .message(&work.owner, &work.peer, &message.id)
+                                .is_some_and(|stored| {
+                                    !stored.retracted
+                                        && stored.upload.is_none()
+                                        && stored.attachment == message.attachment
+                                })
+                        {
+                            ui.delivery(&work.peer, &message.wire_id, "failed");
+                            return;
+                        }
+                        if !ui.command(Command::Send {
+                            peer: work.peer.clone(),
+                            quote: message.reply.clone(),
+                            message: message.clone(),
+                        }) {
+                            ui.delivery(&work.peer, &message.wire_id, "failed");
+                        }
+                    });
                 }
             }
         }
@@ -326,16 +437,11 @@ impl Ui {
         let Some(mode) = self.sending_mode(self.state.borrow().current()) else {
             return false;
         };
-        if mode == Mode::Legacy {
-            self.notice("Legacy OMEMO file sending is unavailable");
-            return false;
-        }
         let encrypted = mode.encrypted();
-        if encrypted && (!self.crypto.borrow().ready || self.crypto.borrow().fingerprint.is_empty())
-        {
-            self.notice("Enable OMEMO 2 and review devices before uploading");
+        let Some(fingerprint) = self.fingerprint_for_send(mode) else {
+            self.notice("Enable the selected OMEMO version and review devices before uploading");
             return false;
-        }
+        };
         let files = self.attachments.borrow().clone();
         if files.len() + self.uploads.borrow().tasks.len() > 64 {
             self.notice("Send at most 64 queued attachments at a time");
@@ -346,9 +452,13 @@ impl Ui {
             .borrow()
             .as_ref()
             .and_then(|id| self.active_message(id));
-        let (owner, peer) = {
+        let (owner, peer, group) = {
             let s = self.state.borrow();
-            (s.account.clone(), s.current().jid.clone())
+            (
+                s.account.clone(),
+                s.current().jid.clone(),
+                s.current().group,
+            )
         };
         let mut ids = vec![];
         for (index, file) in files.into_iter().enumerate() {
@@ -365,17 +475,14 @@ impl Ui {
                 sender: owner.clone(),
                 own: true,
                 kind: "file".into(),
-                text: if index == 0 {
+                text: if index == 0 && mode != Mode::Legacy {
                     caption.trim().into()
                 } else {
                     String::new()
                 },
                 encrypted,
-                fingerprint: if encrypted {
-                    self.crypto.borrow().fingerprint.clone()
-                } else {
-                    String::new()
-                },
+                encryption_mode: Some(mode),
+                fingerprint: fingerprint.clone(),
                 unsupported_attachment: true,
                 delivery: "sending".into(),
                 upload: Some(Draft {
@@ -392,8 +499,34 @@ impl Ui {
                     r.preview().chars().take(80).collect::<String>()
                 );
                 message.reply_id = r.wire_id.clone();
-                message.reply_to = if r.own { owner.clone() } else { peer.clone() };
+                message.reply_to = if group && !r.sender.is_empty() {
+                    r.sender.clone()
+                } else if r.own {
+                    owner.clone()
+                } else {
+                    peer.clone()
+                };
             }
+            self.state.borrow_mut().current_mut().messages.push(message);
+            ids.push(id);
+        }
+        if mode == Mode::Legacy && !caption.trim().is_empty() && !ids.is_empty() {
+            let id = new_id();
+            let message = Message {
+                id: id.clone(),
+                wire_id: id.clone(),
+                aliases: vec![format!("wire:{id}"), format!("origin:{id}")],
+                text: caption.trim().into(),
+                author: "You".into(),
+                sender: owner.clone(),
+                own: true,
+                encrypted: true,
+                encryption_mode: Some(mode),
+                fingerprint,
+                upload_caption_for: ids[0].clone(),
+                delivery: "waiting-upload".into(),
+                ..Default::default()
+            };
             self.state.borrow_mut().current_mut().messages.push(message);
             ids.push(id);
         }

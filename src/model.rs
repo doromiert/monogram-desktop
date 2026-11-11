@@ -17,6 +17,7 @@ fn yes() -> bool {
 #[serde(default)]
 pub struct Message {
     pub upload: Option<UploadDraft>,
+    pub upload_caption_for: String,
     pub attachment: Option<crate::file_share::Attachment>,
     pub forwarded: Option<crate::forwarding::Attribution>,
     pub unsupported_attachment: bool,
@@ -60,6 +61,7 @@ impl Default for Message {
     fn default() -> Self {
         Self {
             upload: None,
+            upload_caption_for: String::new(),
             attachment: None,
             forwarded: None,
             unsupported_attachment: false,

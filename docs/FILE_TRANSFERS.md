@@ -1,10 +1,10 @@
 # Live attachment reception and downloads
 
-Desktop advertises SFS support, receives direct file messages in plaintext or
-explicit OMEMO 2 and offers
+Desktop advertises SFS support, receives direct/room file messages in plaintext,
+Legacy OMEMO and direct OMEMO 2, and offers
 manual Download, Cancel, Retry and native Save As. The reference is mobile's
 `FileLink`, `FileShare`, `FileTransfer` and account-owned transfer registry.
-Direct uploads now use XEP-0363 service discovery and slot requests. Live photos have inline previews, a shared media grid and an expanded viewer.
+Direct and room uploads now use XEP-0363 service discovery and slot requests. Live photos have inline previews, a shared media grid and an expanded viewer.
 Other rich media and complete transfer/settings parity remain open.
 
 ## Wire profile
@@ -19,7 +19,8 @@ encrypted attachments, nor can an encrypted link become a plaintext attachment.
 
 OMEMO 2 file descriptions and keys come exclusively from authenticated SCE
 content. Exposed outer extensions cannot introduce a private download URL. Legacy
-OMEMO and PQ transport are still unavailable on desktop; an unsupported ciphertext
+OMEMO accepts only authenticated URI-body files; PQ transport remains unavailable.
+An unsupported ciphertext
 never becomes a downloadable outer fallback. Plain OOB compatibility and supported
 protected body-only file links remain readable. Malformed descriptions stay text;
 attachment-looking text alone does not trigger a network request.
@@ -150,3 +151,12 @@ media authoring, albums, automatic-download preferences, automatic transfer resu
 complete cache management, caption edits, fresh media forwarding, room transport
 and physical mobile/desktop application exchange remain open. These receive and
 download paths do not establish complete file/media or client parity.
+
+Legacy uploads retain original sanitized filename/MIME while encrypting bytes.
+Their message body contains only the AES-GCM URI and optional reply prefix; no
+SFS/OOB key material is emitted outside encryption. A durable companion caption
+is released once the parent is durably sent, preserving its Legacy mode and
+identity. Interrupted claims become uncertain instead of being sent twice.
+Deleting a pending parent also removes its unsent companion. Cancelled uploads
+retain the caption for retry. Upload retries preserve their captured encryption
+mode; a new mode requires reattaching the file.

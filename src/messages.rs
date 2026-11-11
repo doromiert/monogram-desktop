@@ -91,7 +91,12 @@ fn cluster_style(row: &RenderedRow, previous: bool, next: bool, group: bool) {
 }
 fn message_status(meta: &gtk::Box, m: &Message) {
     clear(meta);
-    if m.encrypted && (!m.own || !matches!(m.delivery.as_str(), "sending" | "failed" | "uncertain"))
+    if m.encrypted
+        && (!m.own
+            || !matches!(
+                m.delivery.as_str(),
+                "sending" | "waiting-upload" | "failed" | "uncertain"
+            ))
     {
         let image = gtk::Image::from_icon_name("channel-secure-symbolic");
         image.set_pixel_size(11);
@@ -104,7 +109,7 @@ fn message_status(meta: &gtk::Box, m: &Message) {
     meta.append(&label(&m.time, ""));
     if m.own {
         let icon = match m.delivery.as_str() {
-            "sending" => "content-loading-symbolic",
+            "sending" | "waiting-upload" => "content-loading-symbolic",
             "failed" | "uncertain" => "dialog-warning-symbolic",
             _ => "object-select-symbolic",
         };
@@ -116,6 +121,7 @@ fn message_status(meta: &gtk::Box, m: &Message) {
             "uncertain" => "Delivery uncertain",
             "failed" => "Send failed",
             "sending" => "Sending",
+            "waiting-upload" => "Waiting for media to send",
             _ => "Stored",
         }));
         meta.append(&image);
@@ -935,10 +941,13 @@ impl Ui {
                 }
                 self.uploads.borrow_mut().cancel(id);
                 if message.as_ref().is_some_and(|m| m.upload.is_some()) {
-                    let _guard = crate::downloads::CACHE_IO.lock().unwrap();
-                    if let Ok(path) = crate::uploads::snapshot_path(&s.account, id) {
-                        let _ = std::fs::remove_file(path);
-                    }
+                    let (account, id) = (s.account.clone(), id.clone());
+                    gtk::gio::spawn_blocking(move || {
+                        let _guard = crate::downloads::CACHE_IO.lock().unwrap();
+                        if let Ok(path) = crate::uploads::snapshot_path(&account, &id) {
+                            let _ = std::fs::remove_file(path);
+                        }
+                    });
                 }
                 if let Some(file) = message.as_ref().and_then(|m| m.attachment.as_ref()) {
                     self.downloads.borrow_mut().cancel(&s.account, file);
@@ -946,7 +955,13 @@ impl Ui {
                 }
             }
         }
-        s.current_mut().messages.retain(|m| !ids.contains(&m.id));
+        s.current_mut().messages.retain(|m| {
+            !ids.contains(&m.id)
+                && !(m.own
+                    && m.mode() == crate::encryption_policy::Mode::Legacy
+                    && m.delivery == "waiting-upload"
+                    && ids.contains(&m.upload_caption_for))
+        });
         let owner = s.account.clone();
         drop(s);
         if !owner.is_empty() {
