@@ -77,6 +77,7 @@ pub struct Ui {
     pub media_pane: adw::ToolbarView,
     pub media_mode: RefCell<String>,
     pub media_toggles: RefCell<HashMap<String, adw::Toggle>>,
+    pub request_button: gtk::Button,
     pub request_badge: gtk::Label,
     pub session: RefCell<Option<Session>>,
     pub generation: Cell<u64>,
@@ -116,6 +117,7 @@ pub struct Ui {
     pub(crate) gif_library: RefCell<Option<crate::gifs::Library>>,
     pub(crate) gif_page: RefCell<Option<Rc<crate::media_library_ui::GifLibraryPage>>>,
 }
+
 impl Ui {
     pub fn new(app: &adw::Application, smoke: bool) -> Rc<Self> {
         Self::new_with_window(app, smoke, Self::new_window(app))
@@ -227,6 +229,10 @@ impl Ui {
             .bottom_margin(4)
             .build();
         let composer_inline = crate::inline_emoji_ui::ComposerInlineEmoji::new(&composer.buffer());
+        let request_button = icon_button("contact-new-symbolic", "Requests and invitations");
+        request_button.set_visible(false);
+        let request_badge = label("", "request-badge");
+        request_badge.set_visible(false);
         let ui = Rc::new(Self {
             avatars: RefCell::new(Default::default()),
             images: RefCell::new(Default::default()),
@@ -354,7 +360,8 @@ impl Ui {
             media_pane: adw::ToolbarView::new(),
             media_mode: RefCell::new("media".into()),
             media_toggles: RefCell::new(HashMap::new()),
-            request_badge: label("2", "request-badge"),
+            request_button,
+            request_badge,
             session: RefCell::new(None),
             generation: Cell::new(0),
             online: Cell::new(false),
@@ -706,16 +713,19 @@ impl Ui {
             .menu_model(&menu)
             .build();
         header.pack_end(&primary);
-        let requests = icon_button("contact-new-symbolic", "Requests and invitations");
         let icon = gtk::Overlay::builder()
             .child(&gtk::Image::from_icon_name("contact-new-symbolic"))
             .build();
         self.request_badge.set_halign(gtk::Align::End);
         self.request_badge.set_valign(gtk::Align::Start);
         icon.add_overlay(&self.request_badge);
-        requests.set_child(Some(&icon));
-        self.weak_button(&requests, |s| s.requests());
-        header.pack_end(&requests);
+        self.request_button.set_child(Some(&icon));
+        self.request_badge
+            .bind_property("visible", &self.request_button, "visible")
+            .sync_create()
+            .build();
+        self.weak_button(&self.request_button, |s| s.requests());
+        header.pack_end(&self.request_button);
         view.add_top_bar(&header);
         let content = bx(true, 6);
         let folders = horizontal_strip(&self.folder_bar);
@@ -888,8 +898,13 @@ impl Ui {
         list.set_valign(gtk::Align::Start);
         list.set_vexpand(false);
         let pending = self.request_count();
-        self.request_badge.set_label(&pending.to_string());
+        if pending > 0 {
+            self.request_badge.set_label(&pending.to_string());
+        } else {
+            self.request_badge.set_label("");
+        }
         self.request_badge.set_visible(pending > 0);
+        self.request_button.set_visible(pending > 0);
         let state = self.state.borrow();
         for chat in state.filtered(self.search.text().as_str()) {
             let latest = chat.latest_preview();
