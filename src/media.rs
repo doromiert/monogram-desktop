@@ -676,10 +676,9 @@ pub struct MediaViewer {
     stack: gtk::Stack,
     frames: RefCell<Vec<FlyFrame>>,
     pictures: RefCell<Vec<gtk::Picture>>,
-    source: Option<glib::WeakRef<gtk::Widget>>,
+    source: RefCell<Option<glib::WeakRef<gtk::Widget>>>,
     index: Cell<usize>,
     pub(crate) neighbours_pending: Cell<bool>,
-    initial_id: String,
     items: RefCell<Vec<MediaItem>>,
     owner: String,
     peer: String,
@@ -723,6 +722,22 @@ fn inline_media_radii(source: &gtk::Widget) -> Option<[f32; 4]> {
     Some([10.; 4])
 }
 
+fn message_media_source(widget: &gtk::Widget, id: &str) -> Option<gtk::Widget> {
+    if widget.widget_name() == id
+        && (widget.has_css_class("message-media-tile") || widget.is::<AspectImage>())
+    {
+        return Some(widget.clone());
+    }
+    let mut child = widget.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        if let Some(source) = message_media_source(&widget, id) {
+            return Some(source);
+        }
+    }
+    None
+}
+
 impl MediaViewer {
     pub fn new(
         ui: &Rc<Ui>,
@@ -751,7 +766,7 @@ impl MediaViewer {
         let mut frames = vec![];
         let origin = source.as_ref().and_then(|w| w.compute_bounds(&ui.overlay));
         let source_clip = source.as_ref().and_then(inline_media_radii);
-        for item in &items {
+        for (position, item) in items.iter().enumerate() {
             let pic = if item.message.is_some() {
                 gtk::Picture::new()
             } else {
@@ -768,11 +783,17 @@ impl MediaViewer {
             let frame: FlyFrame = glib::Object::new();
             frame.set_hexpand(true);
             frame.set_vexpand(true);
-            frame.imp().origin.replace(origin);
+            frame
+                .imp()
+                .origin
+                .replace((position == initial).then_some(origin).flatten());
             frame.imp().overlay.set(Some(&root));
             frame.imp().zoom.set(1.);
-            frame.imp().clip_enabled.set(source_clip.is_some());
-            if let Some(radii) = source_clip {
+            frame
+                .imp()
+                .clip_enabled
+                .set(position == initial && source_clip.is_some());
+            if position == initial && let Some(radii) = source_clip {
                 frame.imp().clip_radii.set(radii);
             }
             frame.append(&pic);
@@ -859,6 +880,16 @@ impl MediaViewer {
             gtk::Align::Start,
         );
         root.add_overlay(&zoom_revealer);
+        // Clapper's owning video widget spans the stage; keep visible chrome above its hit surface.
+        for chrome in [
+            &top_revealer,
+            &previous_revealer,
+            &next_revealer,
+            &zoom_revealer,
+        ] {
+            root.remove_overlay(chrome);
+            root.add_overlay(chrome);
+        }
         let viewer = Rc::new(Self {
             root,
             backdrop,
@@ -866,10 +897,9 @@ impl MediaViewer {
             stack,
             frames: RefCell::new(frames),
             pictures: RefCell::new(pictures),
-            source: source.map(|w| w.downgrade()),
+            source: RefCell::new(source.map(|w| w.downgrade())),
             index: Cell::new(initial),
             neighbours_pending: Cell::new(false),
-            initial_id: items[initial].id.clone(),
             owner: ui.state.borrow().account.clone(),
             peer: ui.state.borrow().current().jid.clone(),
             generation: ui.generation.get(),
@@ -968,6 +998,7 @@ impl MediaViewer {
         });
         viewer.root.add_controller(motion);
         let key = gtk::EventControllerKey::new();
+        key.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = Rc::downgrade(&viewer);
         key.connect_key_pressed(move |_, key, _, _| {
             if let Some(v) = weak.upgrade() {
@@ -993,6 +1024,7 @@ impl MediaViewer {
         viewer.root.add_controller(key);
         let click = gtk::GestureClick::new();
         click.set_button(gdk::BUTTON_PRIMARY);
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = Rc::downgrade(&viewer);
         click.connect_released(move |_, presses, x, y| {
             let Some(viewer) = weak
@@ -1004,7 +1036,8 @@ impl MediaViewer {
             let mut target = viewer.root.pick(x, y, gtk::PickFlags::DEFAULT);
             while let Some(widget) = target {
                 if widget.is::<gtk::Button>()
-                    || widget.has_css_class("galeria-video-controls")
+                    || widget.is::<gtk::Range>()
+                    || widget.is::<gtk::MediaControls>()
                     || widget.is::<adw::HeaderBar>()
                 {
                     return;
@@ -1036,7 +1069,12 @@ impl MediaViewer {
             for (item, picture) in items.iter().zip(&pictures) {
                 viewer.watch_image(item.id.clone(), picture);
             }
-            if let Some(source) = viewer.source.as_ref().and_then(|s| s.upgrade()) {
+            if let Some(source) = viewer
+                .source
+                .borrow()
+                .as_ref()
+                .and_then(|source| source.upgrade())
+            {
                 fn find(w: &gtk::Widget) -> Option<gdk::Paintable> {
                     if let Some(p) = w.downcast_ref::<gtk::Picture>() {
                         return p.paintable();
@@ -1062,6 +1100,46 @@ impl MediaViewer {
         viewer.fullscreen_changed();
         viewer
     }
+    fn replace_source(&self, source: Option<gtk::Widget>) {
+        let mut current = self.source.borrow_mut();
+        let old = current.as_ref().and_then(|source| source.upgrade());
+        if old == source {
+            return;
+        }
+        if let Some(old) = old {
+            old.set_opacity(1.);
+        }
+        if let Some(source) = source.as_ref() {
+            source.set_opacity(0.);
+        }
+        *current = source.map(|source| source.downgrade());
+    }
+    fn refresh_source(&self) -> Option<gtk::Widget> {
+        if self.owner.is_empty() {
+            return self
+                .source
+                .borrow()
+                .as_ref()
+                .and_then(|source| source.upgrade());
+        }
+        let ui = self.ui.upgrade()?;
+        let id = self.items.borrow().get(self.index.get())?.id.clone();
+        let source = ui
+            .bubbles
+            .borrow()
+            .get(&id)
+            .and_then(|bubble| message_media_source(bubble, &id))
+            .filter(|source| ui.in_chat_viewport(source));
+        self.replace_source(source.clone());
+        source
+    }
+    fn clear_close_targets(&self) {
+        for frame in self.frames.borrow().iter() {
+            frame.imp().origin.replace(None);
+            frame.imp().clip_enabled.set(false);
+            frame.set_opacity(1.);
+        }
+    }
     fn animate(&self, p: f64) {
         let p = p * p * (3. - 2. * p);
         self.progress.set(p);
@@ -1073,12 +1151,22 @@ impl MediaViewer {
         self.replay_mount.set_opacity(p);
         self.video_controls.set_opacity(p);
         for f in self.frames.borrow().iter() {
+            f.set_opacity(if f.imp().origin.borrow().is_some() {
+                1.
+            } else {
+                p
+            });
             f.imp().progress.set(p);
             f.queue_draw()
         }
     }
     pub fn open(self: &Rc<Self>) {
-        if let Some(source) = self.source.as_ref().and_then(|source| source.upgrade()) {
+        if let Some(source) = self
+            .source
+            .borrow()
+            .as_ref()
+            .and_then(|source| source.upgrade())
+        {
             source.set_opacity(0.);
         }
         self.backdrop.set_opacity(0.);
@@ -1116,8 +1204,13 @@ impl MediaViewer {
         }
         self.reset_zoom();
         self.set_active_video(None);
+        if index != previous {
+            self.replace_source(None);
+            self.clear_close_targets();
+        }
         self.index.set(index);
         self.update_position(delta);
+        self.root.grab_focus();
         if !self.owner.is_empty() {
             let Some(ui) = self.ui.upgrade().filter(|ui| {
                 ui.generation.get() == self.generation
@@ -1159,6 +1252,13 @@ impl MediaViewer {
                 }
             }
             self.refresh_neighbours();
+            let weak = Rc::downgrade(self);
+            glib::idle_add_local_once(move || {
+                if let Some(viewer) = weak.upgrade().filter(|viewer| !viewer.closing.get()) {
+                    viewer.refresh_source();
+                    viewer.root.grab_focus();
+                }
+            });
         }
     }
     fn refresh_neighbours(self: &Rc<Self>) {
@@ -1246,6 +1346,8 @@ impl MediaViewer {
         }
         self.fullscreen_changed();
         self.update_position(0);
+        self.refresh_source();
+        self.root.grab_focus();
     }
     fn update_position(&self, delta: i32) {
         let i = self.index.get();
@@ -1537,6 +1639,7 @@ impl MediaViewer {
             self.video_controls.set_reveal_child(true);
             player.media.play();
             self.active_video.replace(Some(player));
+            self.root.grab_focus();
         } else {
             self.video_controls.set_reveal_child(false);
         }
@@ -1544,7 +1647,12 @@ impl MediaViewer {
     pub fn close_immediate(self: &Rc<Self>) {
         self.closing.set(true);
         self.set_active_video(None);
-        if let Some(source) = self.source.as_ref().and_then(|source| source.upgrade()) {
+        if let Some(source) = self
+            .source
+            .borrow()
+            .as_ref()
+            .and_then(|source| source.upgrade())
+        {
             source.set_opacity(1.);
         }
         if let Some(timer) = self.controls_timer.borrow_mut().take() {
@@ -1583,16 +1691,18 @@ impl MediaViewer {
         if let Some(a) = self.animation.borrow().as_ref() {
             a.pause()
         }
-        let origin = if self.items.borrow()[self.index.get()].id == self.initial_id {
-            self.source
-                .as_ref()
-                .and_then(|s| s.upgrade())
-                .and_then(|s| s.compute_bounds(&ui.overlay))
-        } else {
-            None
-        };
-        for f in self.frames.borrow().iter() {
-            f.imp().origin.replace(origin);
+        let source = self.refresh_source();
+        let origin = source
+            .as_ref()
+            .and_then(|source| source.compute_bounds(&ui.overlay));
+        let radii = source.as_ref().and_then(inline_media_radii);
+        self.clear_close_targets();
+        if let Some(frame) = self.frames.borrow().get(self.index.get()) {
+            frame.imp().origin.replace(origin);
+            frame.imp().clip_enabled.set(radii.is_some());
+            if let Some(radii) = radii {
+                frame.imp().clip_radii.set(radii);
+            }
         }
         if let Some(signal) = self.fullscreen_signal.borrow_mut().take() {
             ui.window.disconnect(signal)
@@ -1614,7 +1724,12 @@ impl MediaViewer {
         );
         let v = self.clone();
         a.connect_done(move |_| {
-            if let Some(source) = v.source.as_ref().and_then(|source| source.upgrade()) {
+            if let Some(source) = v
+                .source
+                .borrow()
+                .as_ref()
+                .and_then(|source| source.upgrade())
+            {
                 source.set_opacity(1.);
             }
             if let Some(ui) = v.ui.upgrade() {
