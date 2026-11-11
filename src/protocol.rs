@@ -178,7 +178,8 @@ fn normalize_content(
     if bare(&peer).is_err() || (!own && to != account) {
         return None;
     }
-    let unavailable = xml.children().any(|c| {
+    let unsupported_pq = xml.get_child("encrypted", "urn:monocles:omemo-pq:1").is_some();
+    let unavailable = unsupported_pq || xml.children().any(|c| {
         c.is("encrypted", "urn:xmpp:omemo:2")
             || c.is("encrypted", "eu.siacs.conversations.axolotl")
             || c.is("encryption", "urn:xmpp:eme:0")
@@ -220,7 +221,9 @@ fn normalize_content(
     } else {
         crate::polls::Poll::parse(xml).ok().flatten()
     };
-    let raw = if unavailable {
+    let raw = if unsupported_pq {
+        "PQ-OMEMO message — this desktop does not support this encryption version yet.".into()
+    } else if unavailable {
         "Encrypted message — this encryption format is unavailable or needs device review.".into()
     } else if control {
         String::new()
@@ -1698,6 +1701,16 @@ async fn send(client: &mut Client, root: Element) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unsupported_pq_messages_are_visible_without_trusting_outside_content() {
+        for body in ["", "<body>Untrusted outside text</body><x xmlns='jabber:x:oob'><url>https://example.org/fake.png</url></x>"] {
+            let xml: Element = format!("<message xmlns='jabber:client' id='pq-message' type='chat' from='friend@example.org/phone' to='me@example.org'><encrypted xmlns='urn:monocles:omemo-pq:1'/>{body}</message>").parse().unwrap();
+            let (_, message, _) = normalize(&xml, "me@example.org", None).unwrap();
+            assert!(message.unavailable);
+            assert!(message.text.starts_with("PQ-OMEMO message"));
+            assert!(message.attachment.is_none());
+        }
+    }
     #[test]
     fn live_carbons_are_not_archive_messages() {
         for delay in ["", "<delay xmlns='urn:xmpp:delay' stamp='2026-11-11T18:00:00Z'/>"] {
