@@ -1,0 +1,454 @@
+//! Native reaction consent and shared emoji-picker presentation.
+use crate::{emoji_completion::EmojiEntry, model::Message, ui::Ui, widgets::*};
+use adw::prelude::*;
+use gtk::{gdk, gio, glib};
+use std::{
+    cell::RefCell,
+    rc::{Rc, Weak},
+};
+
+thread_local! {
+    static EMOJI_SURFACES: RefCell<Vec<(Weak<Ui>, Weak<EmojiSurface>)>> = const { RefCell::new(Vec::new()) };
+}
+
+type EmojiAction = dyn Fn(&Rc<Ui>, &str);
+
+struct EmojiSurface {
+    ui: Weak<Ui>,
+    root: gtk::Box,
+    favorites_label: gtk::Label,
+    favorites: gtk::FlowBox,
+    model: gio::ListStore,
+    query: RefCell<String>,
+    activate: Rc<EmojiAction>,
+}
+
+impl EmojiSurface {
+    fn new(
+        ui: &Rc<Ui>,
+        columns: u32,
+        height: Option<i32>,
+        activate: impl Fn(&Rc<Ui>, &str) + 'static,
+    ) -> Rc<Self> {
+        let surface = Rc::new_cyclic(|surface: &Weak<EmojiSurface>| {
+            let model = gio::ListStore::new::<glib::BoxedAnyObject>();
+            let factory = gtk::SignalListItemFactory::new();
+            let weak = surface.clone();
+            factory.connect_bind(move |_, item| {
+                let Some(surface) = weak.upgrade() else {
+                    return;
+                };
+                let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+                let Some(data) = item.item().and_downcast::<glib::BoxedAnyObject>() else {
+                    return;
+                };
+                let entry = data.borrow::<EmojiEntry>().clone();
+                item.set_child(Some(&surface.emoji_button(&entry.text, &entry.name)));
+            });
+            factory.connect_unbind(|_, item| {
+                item.downcast_ref::<gtk::ListItem>()
+                    .unwrap()
+                    .set_child(gtk::Widget::NONE);
+            });
+            let grid = gtk::GridView::new(
+                Some(gtk::NoSelection::new(Some(model.clone()))),
+                Some(factory),
+            );
+            grid.set_min_columns(columns);
+            grid.set_max_columns(columns);
+            grid.set_single_click_activate(false);
+            grid.add_css_class("emoji-picker-grid");
+
+            let favorites_label = text("Favorites", "caption dim-label");
+            let favorites = gtk::FlowBox::builder()
+                .selection_mode(gtk::SelectionMode::None)
+                .min_children_per_line(columns)
+                .max_children_per_line(columns)
+                .column_spacing(2)
+                .row_spacing(2)
+                .build();
+            favorites.add_css_class("emoji-favorites-grid");
+            let root = bx(true, 6);
+            root.add_css_class("emoji-picker-surface");
+            root.append(&favorites_label);
+            root.append(&favorites);
+            root.append(&text("Emoji", "caption dim-label"));
+            let scrolling = gtk::ScrolledWindow::builder()
+                .hscrollbar_policy(gtk::PolicyType::Never)
+                .vscrollbar_policy(gtk::PolicyType::Automatic)
+                .child(&grid)
+                .vexpand(height.is_none())
+                .build();
+            if let Some(height) = height {
+                scrolling.set_min_content_height(height);
+                scrolling.set_max_content_height(height);
+                scrolling.set_propagate_natural_height(true);
+            }
+            root.append(&scrolling);
+            Self {
+                ui: Rc::downgrade(ui),
+                root,
+                favorites_label,
+                favorites,
+                model,
+                query: RefCell::new(String::new()),
+                activate: Rc::new(activate),
+            }
+        });
+        EMOJI_SURFACES.with(|surfaces| {
+            surfaces
+                .borrow_mut()
+                .push((Rc::downgrade(ui), Rc::downgrade(&surface)));
+        });
+        surface.refresh();
+        surface
+    }
+
+    fn bind_search(self: &Rc<Self>, search: &gtk::SearchEntry, keep_alive: bool) {
+        if keep_alive {
+            let surface = self.clone();
+            search.connect_search_changed(move |search| {
+                surface.set_query(search.text().as_str());
+            });
+        } else {
+            let surface = Rc::downgrade(self);
+            search.connect_search_changed(move |search| {
+                if let Some(surface) = surface.upgrade() {
+                    surface.set_query(search.text().as_str());
+                }
+            });
+        }
+    }
+
+    fn set_query(self: &Rc<Self>, query: &str) {
+        if self.query.borrow().as_str() == query {
+            return;
+        }
+        self.query.replace(query.to_owned());
+        self.refresh();
+    }
+
+    fn refresh(self: &Rc<Self>) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let preferences = ui.store.emoji_preferences().unwrap_or_default();
+        let query = self.query.borrow().clone();
+        let entries = if query.trim().is_empty() {
+            crate::emoji_completion::catalog().to_vec()
+        } else {
+            crate::emoji_completion::search(&query)
+        };
+        self.model.remove_all();
+        for entry in &entries {
+            self.model.append(&glib::BoxedAnyObject::new(entry.clone()));
+        }
+        while let Some(child) = self.favorites.first_child() {
+            self.favorites.remove(&child);
+        }
+        let visible: std::collections::HashSet<_> =
+            entries.iter().map(|entry| entry.text.as_str()).collect();
+        let mut favorite_count = 0;
+        for emoji in &preferences.favorites {
+            if !query.trim().is_empty() && !visible.contains(emoji.as_str()) {
+                continue;
+            }
+            let name = crate::emoji_completion::catalog()
+                .iter()
+                .find(|entry| entry.text == *emoji)
+                .map(|entry| entry.name.as_str())
+                .unwrap_or("Favorite emoji");
+            self.favorites.insert(&self.emoji_button(emoji, name), -1);
+            favorite_count += 1;
+        }
+        self.favorites_label.set_visible(favorite_count > 0);
+        self.favorites.set_visible(favorite_count > 0);
+    }
+
+    fn emoji_button(self: &Rc<Self>, emoji: &str, name: &str) -> gtk::Button {
+        let button = gtk::Button::builder()
+            .label(emoji)
+            .tooltip_text(format!("{name} · right-click to favorite or pin"))
+            .build();
+        button.add_css_class("flat");
+        button.add_css_class("emoji-picker-item");
+        button.update_property(&[gtk::accessible::Property::Label(&format!(
+            "{name}, {emoji}"
+        ))]);
+        let value = emoji.to_owned();
+        let surface = Rc::downgrade(self);
+        let emoji = value.clone();
+        button.connect_clicked(move |_| {
+            let Some(surface) = surface.upgrade() else {
+                return;
+            };
+            let Some(ui) = surface.ui.upgrade() else {
+                return;
+            };
+            (surface.activate)(&ui, &emoji);
+        });
+        let secondary = gtk::GestureClick::new();
+        secondary.set_button(gdk::BUTTON_SECONDARY);
+        let surface = Rc::downgrade(self);
+        let target = button.downgrade();
+        let emoji = value.clone();
+        secondary.connect_pressed(move |gesture, _, x, y| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            if let (Some(surface), Some(button)) = (surface.upgrade(), target.upgrade()) {
+                surface.emoji_options(&button, &emoji, x, y);
+            }
+        });
+        button.add_controller(secondary);
+        let long_press = gtk::GestureLongPress::new();
+        let surface = Rc::downgrade(self);
+        let target = button.downgrade();
+        let emoji = value.clone();
+        long_press.connect_pressed(move |_, x, y| {
+            if let (Some(surface), Some(button)) = (surface.upgrade(), target.upgrade()) {
+                surface.emoji_options(&button, &emoji, x, y);
+            }
+        });
+        button.add_controller(long_press);
+        let keys = gtk::EventControllerKey::new();
+        let surface = Rc::downgrade(self);
+        let target = button.downgrade();
+        let emoji = value;
+        keys.connect_key_pressed(move |_, key, _, modifiers| {
+            if (key == gdk::Key::F10 && modifiers.contains(gdk::ModifierType::SHIFT_MASK))
+                || key == gdk::Key::Menu
+            {
+                if let (Some(surface), Some(button)) = (surface.upgrade(), target.upgrade()) {
+                    surface.emoji_options(
+                        &button,
+                        &emoji,
+                        f64::from(button.width()) / 2.,
+                        f64::from(button.height()) / 2.,
+                    );
+                }
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        button.add_controller(keys);
+        button
+    }
+
+    fn emoji_options(self: &Rc<Self>, button: &gtk::Button, emoji: &str, x: f64, y: f64) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let preferences = ui.store.emoji_preferences().unwrap_or_default();
+        let favorite = preferences.favorites.iter().any(|value| value == emoji);
+        let pinned = preferences.pinned.iter().any(|value| value == emoji);
+        let popover = gtk::Popover::builder().has_arrow(false).build();
+        popover.set_parent(button);
+        popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        let menu = bx(true, 2);
+        menu.add_css_class("message-menu-panel");
+        for (label, kind, enabled) in [
+            (
+                if favorite {
+                    "Remove from Favorites"
+                } else {
+                    "Add to Favorites"
+                },
+                "favorite",
+                favorite,
+            ),
+            (
+                if pinned {
+                    "Unpin Quick Reaction"
+                } else {
+                    "Pin as Quick Reaction"
+                },
+                "pin",
+                pinned,
+            ),
+        ] {
+            let choice = gtk::Button::with_label(label);
+            choice.add_css_class("flat");
+            let weak = Rc::downgrade(&ui);
+            let emoji = emoji.to_owned();
+            let popup = popover.downgrade();
+            choice.connect_clicked(move |_| {
+                let Some(ui) = weak.upgrade() else { return };
+                let saved = if kind == "favorite" {
+                    ui.store.set_emoji_favorite(&emoji, !enabled)
+                } else {
+                    ui.store.set_emoji_pinned(&emoji, !enabled)
+                };
+                if saved.is_err() {
+                    ui.notice("Emoji preferences could not be saved");
+                } else {
+                    refresh_emoji_surfaces(&ui);
+                }
+                if let Some(popup) = popup.upgrade() {
+                    popup.popdown();
+                    popup.unparent();
+                }
+            });
+            menu.append(&choice);
+        }
+        popover.set_child(Some(&menu));
+        popover.popup();
+    }
+}
+
+fn refresh_emoji_surfaces(ui: &Rc<Ui>) {
+    let surfaces = EMOJI_SURFACES.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        registry
+            .retain(|(owner, surface)| owner.upgrade().is_some() && surface.upgrade().is_some());
+        registry
+            .iter()
+            .filter_map(|(owner, surface)| {
+                owner
+                    .upgrade()
+                    .filter(|owner| Rc::ptr_eq(owner, ui))
+                    .and_then(|_| surface.upgrade())
+            })
+            .collect::<Vec<_>>()
+    });
+    for surface in surfaces {
+        surface.refresh();
+    }
+}
+
+pub(crate) struct ReactionPicker {
+    pub root: gtk::Stack,
+    actions: RefCell<glib::WeakRef<gtk::Widget>>,
+}
+
+impl ReactionPicker {
+    pub fn attach_actions(&self, actions: &impl IsA<gtk::Widget>) {
+        self.actions.replace(actions.as_ref().downgrade());
+    }
+}
+
+impl Ui {
+    pub(crate) fn confirm_public_reaction(self: &Rc<Self>, id: &str, emoji: &str) {
+        let state = self.state.borrow();
+        let owner = state.account.clone();
+        let peer = state.current().jid.clone();
+        drop(state);
+        if owner.is_empty() {
+            return;
+        }
+        let generation = self.generation.get();
+        let dialog = adw::AlertDialog::builder()
+            .heading("Allow Public Reactions?")
+            .body(format!(
+                "Reacting with {emoji} sends the emoji and the target message reference as public XMPP metadata. Your server and this conversation’s server or participants can see it, even when messages are end-to-end encrypted.\n\nAllow public reactions for this conversation?"
+            ))
+            .build();
+        dialog.add_responses(&[("cancel", "Cancel"), ("allow", "Allow and React")]);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        dialog.set_response_appearance("allow", adw::ResponseAppearance::Suggested);
+        let weak = Rc::downgrade(self);
+        let id = id.to_owned();
+        let emoji = emoji.to_owned();
+        dialog.connect_response(Some("allow"), move |_, _| {
+            let Some(ui) = weak.upgrade().filter(|ui| {
+                ui.generation.get() == generation
+                    && ui.state.borrow().account == owner
+                    && ui.state.borrow().current().jid == peer
+            }) else {
+                return;
+            };
+            let key = format!("plain-reactions:{owner}\n{peer}");
+            if ui.store.set_pref(&key, "true").is_err() {
+                ui.notice("Public reaction permission could not be saved");
+                return;
+            }
+            ui.react(&id, &emoji);
+        });
+        dialog.present(Some(&self.window));
+    }
+
+    pub(crate) fn emoji_sidebar(self: &Rc<Self>, search: &gtk::SearchEntry) -> gtk::Widget {
+        let surface = EmojiSurface::new(self, 6, None, |ui, emoji| {
+            ui.composer.buffer().insert_at_cursor(emoji);
+            ui.composer.grab_focus();
+        });
+        surface.root.add_css_class("emoji-sidebar");
+        surface.bind_search(search, true);
+        surface.root.clone().upcast()
+    }
+
+    pub(crate) fn message_reaction_picker(
+        self: &Rc<Self>,
+        popover: &gtk::Popover,
+        message: &Message,
+    ) -> Rc<ReactionPicker> {
+        let preferences = self.store.emoji_preferences().unwrap_or_default();
+        let quick = preferences.quick_reactions(&message.reactions);
+        let collapsed = bx(false, 0);
+        collapsed.add_css_class("message-menu-panel");
+        for emoji in quick.into_iter().take(7) {
+            let button = gtk::Button::with_label(&emoji);
+            button.add_css_class("flat");
+            button.add_css_class("reaction-choice");
+            let weak = Rc::downgrade(self);
+            let popup = popover.downgrade();
+            let id = message.id.clone();
+            button.connect_clicked(move |_| {
+                if let Some(popup) = popup.upgrade() {
+                    popup.popdown();
+                    popup.unparent();
+                }
+                if let Some(ui) = weak.upgrade() {
+                    ui.react(&id, &emoji);
+                }
+            });
+            collapsed.append(&button);
+        }
+        let expand = icon_button("go-down-symbolic", "Show all reactions");
+        expand.add_css_class("circular");
+        expand.add_css_class("reaction-expand");
+        collapsed.append(&expand);
+
+        let expanded = bx(true, 6);
+        expanded.add_css_class("expanded-reactions");
+        expanded.add_css_class("message-menu-panel");
+        let search = gtk::SearchEntry::builder()
+            .placeholder_text("Search")
+            .build();
+        expanded.append(&search);
+        let popup = popover.downgrade();
+        let id = message.id.clone();
+        let surface = EmojiSurface::new(self, 8, Some(330), move |ui, emoji| {
+            if let Some(popup) = popup.upgrade() {
+                popup.popdown();
+                popup.unparent();
+            }
+            ui.react(&id, emoji);
+        });
+        surface.bind_search(&search, false);
+        expanded.append(&surface.root);
+
+        let stack = gtk::Stack::builder()
+            .transition_type(gtk::StackTransitionType::Crossfade)
+            .transition_duration(180)
+            .width_request(300)
+            .build();
+        stack.add_named(&collapsed, Some("quick"));
+        stack.add_named(&expanded, Some("all"));
+        stack.set_visible_child_name("quick");
+        let picker = Rc::new(ReactionPicker {
+            root: stack,
+            actions: RefCell::new(glib::WeakRef::new()),
+        });
+        let weak = Rc::downgrade(&picker);
+        expand.connect_clicked(move |_| {
+            let Some(picker) = weak.upgrade() else { return };
+            if let Some(actions) = picker.actions.borrow().upgrade() {
+                actions.set_visible(false);
+            }
+            picker.root.set_visible_child_name("all");
+            search.grab_focus();
+        });
+        let keep_alive = picker.clone();
+        popover.connect_closed(move |_| {
+            let _ = &keep_alive;
+        });
+        picker
+    }
+}

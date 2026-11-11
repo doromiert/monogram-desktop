@@ -339,11 +339,13 @@ impl Ui {
         }
         content.append(&button);
         let weak = Rc::downgrade(self);
-        button.connect_clicked(move |button| {
-            if let Some(ui) = weak.upgrade() {
-                ui.media_viewer(Some(button.clone().upcast()));
-            }
-        });
+        if !sticker {
+            button.connect_clicked(move |button| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.media_viewer(Some(button.clone().upcast()));
+                }
+            });
+        }
         let weak = Rc::downgrade(self);
         let p = picture.downgrade();
         let b = button.downgrade();
@@ -490,10 +492,10 @@ impl Ui {
         let weak = Rc::downgrade(self);
         let account = owner.clone();
         let conversation = peer.clone();
+        let listed = model.clone();
         factory.connect_bind(move |_, item| {
             let Some(ui) = weak.upgrade().filter(|ui| {
-                ui.generation.get() == generation
-                    && ui.state.borrow().account == account
+                ui.state.borrow().account == account
                     && ui.state.borrow().current().jid == conversation
             }) else {
                 return;
@@ -527,18 +529,41 @@ impl Ui {
             let p = picture.downgrade();
             let icon = pending.downgrade();
             let account = account.clone();
+            let conversation = conversation.clone();
+            let listed = listed.clone();
+            let id = message.id.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(150), move || {
                 let (Some(ui), Some(p), Some(icon)) = (w.upgrade(), p.upgrade(), icon.upgrade())
                 else {
                     return glib::ControlFlow::Break;
                 };
-                if ui.generation.get() != generation || ui.state.borrow().account != account {
-                    return glib::ControlFlow::Break;
-                }
-                if p.paintable().is_some() {
+                if ui.state.borrow().account != account
+                    || ui.state.borrow().current().jid != conversation
+                {
                     return glib::ControlFlow::Break;
                 }
                 if !p.is_mapped() {
+                    return glib::ControlFlow::Continue;
+                }
+                if !ui
+                    .store
+                    .message(&account, &conversation, &id)
+                    .as_ref()
+                    .is_some_and(crate::media_store::carousel_candidate)
+                {
+                    for index in 0..listed.n_items() {
+                        if listed
+                            .item(index)
+                            .and_downcast::<glib::BoxedAnyObject>()
+                            .is_some_and(|item| item.borrow::<crate::model::Message>().id == id)
+                        {
+                            listed.remove(index);
+                            break;
+                        }
+                    }
+                    return glib::ControlFlow::Break;
+                }
+                if p.paintable().is_some() {
                     return glib::ControlFlow::Continue;
                 }
                 if let Some(path) = ui.cached_image_source(&file) {
@@ -550,14 +575,14 @@ impl Ui {
                         {
                             p.set_paintable(Some(player.media.current_image()));
                             icon.set_visible(false);
-                            return glib::ControlFlow::Break;
+                            return glib::ControlFlow::Continue;
                         }
                     } else if let Some(Ok(image)) =
                         ui.image(&file, &path, 384 * p.scale_factor() as u32)
                     {
                         p.set_paintable(Some(image.texture.upcast()));
                         icon.set_visible(false);
-                        return glib::ControlFlow::Break;
+                        return glib::ControlFlow::Continue;
                     }
                 }
                 glib::ControlFlow::Continue

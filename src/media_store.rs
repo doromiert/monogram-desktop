@@ -1,7 +1,14 @@
 //! Local decoded-media observations never rewrite the immutable received SFS payload.
 use crate::{file_share::Attachment, model::Message, storage::Store};
 use rusqlite::{OptionalExtension, params};
-const FILTER: &str = "m.account=?1 AND m.peer=?2 AND COALESCE(json_extract(m.body,'$.retracted'),0)=0 AND json_type(m.body,'$.attachment')='object' AND (json_extract(m.body,'$.attachment.mime') LIKE 'image/%' OR json_extract(m.body,'$.attachment.mime') LIKE 'video/%' OR lower(json_extract(m.body,'$.attachment.name')) LIKE '%.mp4' OR lower(json_extract(m.body,'$.attachment.name')) LIKE '%.webm' OR lower(json_extract(m.body,'$.attachment.name')) LIKE '%.mov' OR lower(json_extract(m.body,'$.attachment.name')) LIKE '%.mkv' OR EXISTS(SELECT 1 FROM image_metadata i WHERE i.account=m.account AND i.peer=m.peer AND i.id=m.id))";
+const FILTER: &str = "m.account=?1 AND m.peer=?2 AND COALESCE(json_extract(m.body,'$.retracted'),0)=0 AND json_type(m.body,'$.attachment')='object' AND COALESCE(json_extract(m.body,'$.attachment.sticker'),0)=0 AND (json_extract(m.body,'$.attachment.mime') LIKE 'image/%' OR json_extract(m.body,'$.attachment.mime') LIKE 'video/%' OR lower(json_extract(m.body,'$.attachment.name')) LIKE '%.mp4' OR lower(json_extract(m.body,'$.attachment.name')) LIKE '%.webm' OR lower(json_extract(m.body,'$.attachment.name')) LIKE '%.mov' OR lower(json_extract(m.body,'$.attachment.name')) LIKE '%.mkv' OR EXISTS(SELECT 1 FROM image_metadata i WHERE i.account=m.account AND i.peer=m.peer AND i.id=m.id))";
+pub(crate) fn carousel_candidate(message: &Message) -> bool {
+    !message.retracted
+        && message
+            .attachment
+            .as_ref()
+            .is_some_and(|file| !file.sticker)
+}
 #[derive(Default)]
 pub struct MediaWindow {
     pub messages: Vec<Message>,
@@ -168,6 +175,75 @@ impl Store {
 mod tests {
     use super::*;
     use crate::model::*;
+    #[test]
+    fn stickers_are_excluded_including_late_legacy_hints_but_gifs_remain_media() {
+        let store = Store::open(true).unwrap();
+        let owner = "owner@example.invalid";
+        let peer = "peer@example.invalid";
+        let mut state = State::live(owner, vec![]);
+        for (index, id) in ["photo", "gif", "structured-sticker", "legacy-sticker"]
+            .into_iter()
+            .enumerate()
+        {
+            let mut file = Attachment::bare(&format!(
+                "aesgcm://fixture.invalid/{id}.gif#{}",
+                "12".repeat(44)
+            ))
+            .unwrap();
+            file.mime = "image/gif".into();
+            file.sticker = id == "structured-sticker";
+            state.chat_for(peer).messages.push(Message {
+                id: id.into(),
+                wire_id: id.into(),
+                timestamp: format!("{index:06}"),
+                kind: "file".into(),
+                encrypted: true,
+                encryption_mode: Some(crate::encryption_policy::Mode::Legacy),
+                attachment: Some(file),
+                ..Default::default()
+            });
+        }
+        store
+            .save_account(&Account {
+                jid: owner.into(),
+                host: String::new(),
+                port: 5222,
+                direct_tls: false,
+            })
+            .unwrap();
+        store.save(&state).unwrap();
+        let before = store.media_window(owner, peer, "gif").unwrap();
+        assert_eq!((before.messages.len(), before.index), (3, 1));
+        assert_eq!(before.messages[before.index].id, "gif");
+        assert!(
+            store
+                .media_window(owner, peer, "structured-sticker")
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+        store
+            .restore_legacy_sticker(owner, peer, "legacy-sticker")
+            .unwrap();
+        assert!(
+            store
+                .media_window(owner, peer, "legacy-sticker")
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+        let after = store.media_window(owner, peer, "gif").unwrap();
+        assert_eq!((after.messages.len(), after.index), (2, 1));
+        let page = store.media_page(owner, peer, None).unwrap();
+        assert_eq!(
+            page.messages
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            ["gif", "photo"]
+        );
+        assert!(page.next.is_none());
+    }
     #[test]
     fn ten_neighbours_per_side_and_verified_observations() {
         let db = Store::open(true).unwrap();

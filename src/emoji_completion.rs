@@ -7,17 +7,19 @@ use std::{
     sync::OnceLock,
 };
 
-struct Emoji {
-    text: String,
-    name: String,
+#[derive(Clone)]
+pub struct EmojiEntry {
+    pub text: String,
+    pub name: String,
+    pub group: u32,
     terms: Vec<String>,
 }
-static EMOJI: OnceLock<Vec<Emoji>> = OnceLock::new();
+static EMOJI: OnceLock<Vec<EmojiEntry>> = OnceLock::new();
 
 fn normalized(value: &str) -> String {
     value.to_lowercase().replace(['_', '-'], " ")
 }
-fn index() -> &'static Vec<Emoji> {
+fn index() -> &'static Vec<EmojiEntry> {
     EMOJI.get_or_init(|| {
         // GTK 4's gtkemojichooser.c defines this resource and its GVariant schema.
         let Ok(bytes) = gio::resources_lookup_data(
@@ -33,7 +35,7 @@ fn index() -> &'static Vec<Emoji> {
         };
         items
             .into_iter()
-            .filter_map(|(codes, name, translation, keywords, annotations, _)| {
+            .filter_map(|(codes, name, translation, keywords, annotations, group)| {
                 let text: String = codes
                     .into_iter()
                     .filter_map(|code| match code {
@@ -51,10 +53,33 @@ fn index() -> &'static Vec<Emoji> {
                     .chain(annotations.iter().map(String::as_str))
                     .map(normalized)
                     .collect();
-                Some(Emoji { text, name, terms })
+                Some(EmojiEntry {
+                    text,
+                    name,
+                    group,
+                    terms,
+                })
             })
             .collect()
     })
+}
+
+pub fn catalog() -> &'static [EmojiEntry] {
+    index().as_slice()
+}
+
+pub fn search(query: &str) -> Vec<EmojiEntry> {
+    let query = normalized(query);
+    let words: Vec<_> = query.split_whitespace().collect();
+    index()
+        .iter()
+        .filter(|emoji| {
+            words.iter().all(|word| {
+                emoji.terms.iter().any(|term| term.contains(word)) || emoji.text.contains(word)
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 #[derive(Clone, PartialEq, Eq)]

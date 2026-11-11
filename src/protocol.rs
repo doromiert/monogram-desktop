@@ -1365,6 +1365,21 @@ fn deliver(
     historical: bool,
     receipt_to: Option<String>,
 ) {
+    match crate::message_actions::public_legacy_content(xml) {
+        Ok(Some(clear)) => {
+            if let Some((peer, message, delayed)) = normalize(&clear, owner, archive) {
+                emit(BackendEvent::Message {
+                    peer,
+                    message,
+                    historical: historical || delayed,
+                    receipt_to: None,
+                });
+            }
+            return;
+        }
+        Err(()) => return,
+        Ok(None) => {}
+    }
     let modern = xml.get_child("encrypted", "urn:xmpp:omemo:2").is_some();
     let classic = xml.get_child("encrypted", legacy::NS).is_some();
     if modern != classic {

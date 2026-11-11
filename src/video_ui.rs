@@ -208,11 +208,13 @@ impl Ui {
         button.add_css_class("shared-media-tile");
         button.add_css_class("message-media-tile");
         let weak = Rc::downgrade(self);
-        button.connect_clicked(move |button| {
-            if let Some(ui) = weak.upgrade() {
-                ui.media_viewer(Some(button.clone().upcast()));
-            }
-        });
+        if !file.sticker {
+            button.connect_clicked(move |button| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.media_viewer(Some(button.clone().upcast()));
+                }
+            });
+        }
         content.append(&button);
         let weak = Rc::downgrade(self);
         let view = image.downgrade();

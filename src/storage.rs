@@ -573,6 +573,11 @@ impl Store {
             "DELETE FROM preferences WHERE substr(key,1,length(?1))=?1",
             [trust_prefix],
         )?;
+        let reactions_prefix = format!("plain-reactions:{a}\n");
+        self.db.execute(
+            "DELETE FROM preferences WHERE substr(key,1,length(?1))=?1",
+            [reactions_prefix],
+        )?;
         tx.commit()
     }
 }

@@ -25,8 +25,10 @@ after successful media submission; pending companions survive failures/restarts.
 Explicit local companions render as a caption on their media and are included
 when deleting that media. Incoming nearby text is never guessed or hidden.
 Direct XEP-0424 retractions follow mobile’s encrypted-body/outer-metadata format,
-including archived retractions. They require the original protocol, author and
-device fingerprint. Other rich actions and room retractions remain unavailable. Direct live, own-device carbons and MAM ciphertext route
+including archived retractions. They require the original protocol and author plus an authenticated sending
+identity; another authenticated device on the same account can retract them.
+Legacy reactions use public XEP-0444 metadata after explicit per-chat consent,
+matching mobile. Other rich actions and room retractions remain unavailable. Direct live, own-device carbons and MAM ciphertext route
 according to the received namespace. Incoming ratchets, decoded bodies and key
 transport acknowledgements are committed to a separate authenticated journal
 before visible history is accepted. Missing or untrusted device keys can leave

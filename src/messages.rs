@@ -988,6 +988,10 @@ impl Ui {
         self.refresh_chats(None);
     }
     pub fn react(self: &Rc<Self>, id: &str, emoji: &str) {
+        if self.public_reaction_consent_required(id) {
+            self.confirm_public_reaction(id, emoji);
+            return;
+        }
         if !self.state.borrow().account.is_empty() {
             let state = self.state.borrow();
             let peer = state.current().jid.clone();
@@ -1057,29 +1061,14 @@ impl Ui {
         pop.add_css_class("message-menu");
         let content = bx(true, 8);
         content.set_width_request(260);
-        if !message.unavailable && !message.retracted {
-            let reactions = bx(false, 0);
-            reactions.set_homogeneous(true);
-            reactions.add_css_class("message-menu-panel");
-            for e in ["👍", "❤️", "😂", "😮", "😢", "🔥"] {
-                let b = gtk::Button::with_label(e);
-                b.add_css_class("flat");
-                b.add_css_class("reaction-choice");
-                let weak = Rc::downgrade(self);
-                let p = pop.downgrade();
-                let id = id.to_string();
-                b.connect_clicked(move |_| {
-                    if let Some(p) = p.upgrade() {
-                        p.popdown();
-                        p.unparent()
-                    }
-                    if let Some(ui) = weak.upgrade() {
-                        ui.react(&id, e)
-                    }
-                });
-                reactions.append(&b)
-            }
-            content.append(&reactions)
+        let reactions = (!message.unavailable && !message.retracted)
+            .then(|| self.message_reaction_picker(&pop, &message));
+        if let Some(reactions) = &reactions {
+            content.append(&reactions.root)
+        }
+        let action_menu = bx(true, 8);
+        if let Some(reactions) = &reactions {
+            reactions.attach_actions(&action_menu);
         }
         let items = bx(true, 2);
         items.set_halign(gtk::Align::Center);
@@ -1134,7 +1123,7 @@ impl Ui {
             self.menu_callback(&b, &pop, id, action);
             items.append(&b)
         }
-        content.append(&items);
+        action_menu.append(&items);
         let tools = bx(false, 0);
         tools.set_homogeneous(true);
         tools.set_halign(gtk::Align::Center);
@@ -1150,7 +1139,8 @@ impl Ui {
             self.menu_callback(&b, &pop, id, action);
             tools.append(&b)
         }
-        content.append(&tools);
+        action_menu.append(&tools);
+        content.append(&action_menu);
         pop.set_child(Some(&content));
         pop.connect_closed(|p| {
             if p.parent().is_some() {

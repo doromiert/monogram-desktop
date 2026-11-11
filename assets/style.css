@@ -26,7 +26,7 @@
 .message-meta { opacity: .65; font-size: 10px; }
 .message-reply { border-left: 3px solid @accent_bg_color; padding: 4px 8px; margin-bottom: 7px; background: alpha(@accent_bg_color,.08); border-radius: 4px; font-size: 12px; }
 .date-pill { background: alpha(@window_fg_color,.06); border-radius: 20px; padding: 4px 12px; font-size: 11px; opacity: .65; }
-.reaction { background: alpha(@accent_bg_color,.12); border-radius: 16px; padding: 2px 8px; font-size: 11px; min-height: 20px; }
+.reaction { background: alpha(@accent_bg_color,.12); border-radius: 16px; padding: 3px 9px; font-size: 11px; min-height: 20px; }
 .composer-shell { background: @view_bg_color; border-top: 1px solid alpha(@borders,.4); padding: 12px 20px 16px; }
 .composer { background: @card_bg_color; border-radius: 16px; padding: 4px 8px; border: 1px solid alpha(@borders,.5); }
 .composer textview, .composer textview text { background: transparent; }
@@ -59,7 +59,7 @@
 .message-reply { color: @window_fg_color; background: alpha(@window_fg_color,.10); padding: 7px 9px; border-left: 3px solid @accent_color; }
 .message-reply label { color: @window_fg_color; }
 .reply-target { outline: 2px solid @accent_color; }
-.reaction { color: @window_fg_color; background: alpha(@window_fg_color,.12); margin-top: 5px; }
+.reaction { color: @window_fg_color; background: alpha(@window_fg_color,.12); margin: 8px 1px 2px; }
 .reaction:checked { background: @accent_bg_color; color: @accent_fg_color; }
 .composer-shell { padding: 8px; }
 .composer { padding: 4px; border-radius: 12px; }
@@ -88,6 +88,17 @@
 .message-menu > contents { padding: 0; background: transparent; border: none; box-shadow: none; }
 .message-menu-panel { background: @popover_bg_color; border-radius: 12px; padding: 4px; box-shadow: 0 2px 8px alpha(black,.2); }
 .reaction-choice { font-size: 19px; padding: 4px; min-width: 24px; }
+.reaction-expand { margin: 2px; min-width: 28px; min-height: 28px; }
+.expanded-reactions { padding: 8px; }
+.emoji-picker-surface { padding: 2px; }
+.emoji-sidebar { margin: 0 10px 10px; }
+.emoji-picker-surface > label { margin: 4px 6px 2px; }
+.emoji-picker-grid { padding: 2px; }
+.emoji-picker-grid child, .emoji-picker-grid child:hover,
+.emoji-favorites-grid flowboxchild, .emoji-favorites-grid flowboxchild:hover {
+  padding: 0; background: transparent; box-shadow: none; outline: none;
+}
+.emoji-picker-item { font-size: 22px; padding: 4px; min-width: 28px; min-height: 28px; border-radius: 8px; }
 .message-bubble .message-author { margin-bottom: 0; }
 .media-viewer { background: transparent; color: white; }
 .media-viewer-backdrop { background: rgba(5,5,7,.88); }

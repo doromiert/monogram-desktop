@@ -11,6 +11,8 @@ mod dialogs;
 mod download_smoke;
 mod downloads;
 mod emoji_completion;
+mod emoji_picker_ui;
+mod emoji_preferences;
 mod encryption_policy;
 mod file_share;
 mod folders;

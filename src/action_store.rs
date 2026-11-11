@@ -72,6 +72,7 @@ impl Store {
         };
         if m.sender.split('/').next() != Some(if m.own { a } else { peer })
             || !actions::valid_id(action.target())
+            || m.encrypted && matches!(action, Action::Retract { .. }) && m.fingerprint.is_empty()
         {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -529,7 +530,7 @@ mod tests {
         );
     }
     #[test]
-    fn sender_scope_encryption_floor_and_exact_retraction_fingerprint() {
+    fn sender_scope_encryption_floor_and_cross_device_retraction() {
         let (db, mut s) = setup();
         let mut original = base("first", "wire", false);
         original.forwarded = crate::forwarding::Attribution::new("Original claim", 0);
@@ -573,13 +574,15 @@ mod tests {
             3,
         );
         deletion.encrypted = true;
-        deletion.fingerprint = "device-two".into();
-        record(&db, &deletion, "received");
+        assert!(
+            db.record_action(OWNER, PEER, &deletion, "received")
+                .is_err()
+        );
         assert!(!db.message(OWNER, PEER, "first").unwrap().retracted);
         deletion.id = "delete-correct-key".into();
         deletion.wire_id = deletion.id.clone();
         deletion.aliases = vec![format!("wire:{}", deletion.id)];
-        deletion.fingerprint = "device-one".into();
+        deletion.fingerprint = "device-two".into();
         record(&db, &deletion, "received");
         let wiped = db.message(OWNER, PEER, "first").unwrap();
         assert!(wiped.retracted);

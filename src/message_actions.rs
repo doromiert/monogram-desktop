@@ -55,6 +55,34 @@ fn target(element: &Element) -> Result<String, ()> {
     let id = element.attr("id").filter(|v| valid_id(v)).ok_or(())?;
     Ok(id.into())
 }
+pub fn public_legacy_content(xml: &Element) -> Result<Option<Element>, ()> {
+    if xml
+        .get_child("encrypted", crate::crypto::legacy::NS)
+        .is_none()
+        || xml.get_child("reactions", REACTIONS).is_none()
+        || xml
+            .children()
+            .any(|child| child.name() == "encrypted" && child.ns() != crate::crypto::legacy::NS)
+    {
+        return Ok(None);
+    }
+    // Legacy ciphertext protects no reaction metadata; keep its classification public.
+    let mut clear = xml.clone();
+    let nodes = clear.take_nodes();
+    for node in nodes {
+        if node.as_element().is_none_or(|child| {
+            !child.is("encrypted", crate::crypto::legacy::NS)
+                && !child.is("encryption", "urn:xmpp:eme:0")
+                && !child.is("body", CLIENT)
+        }) {
+            clear.append_node(node);
+        }
+    }
+    match parse(&clear)? {
+        Some(Action::React { .. }) => Ok(Some(clear)),
+        _ => Err(()),
+    }
+}
 pub fn parse(xml: &Element) -> Result<Option<Action>, ()> {
     let correction = one(xml, "replace", CORRECT)
         .ok()
@@ -386,11 +414,7 @@ pub fn project(
             continue;
         }
         let base = candidates[0];
-        if base.encrypted
-            && (base.mode() != m.mode()
-                || base.fingerprint.is_empty()
-                || base.fingerprint != m.fingerprint)
-        {
+        if base.encrypted && (base.mode() != m.mode() || m.fingerprint.is_empty()) {
             continue;
         }
         event.resolved = Some(base.id.clone());
@@ -548,6 +572,117 @@ mod tests {
                 .parse::<Element>()
                 .unwrap(),
         )
+    }
+    #[test]
+    fn legacy_public_reactions_and_author_scoped_cross_device_retractions() {
+        use crate::{
+            encryption_policy::Mode,
+            model::{Account, Chat},
+            storage::Store,
+        };
+        let owner = "owner@example.org";
+        let peer = "peer@example.org";
+        let db = Store::open(true).unwrap();
+        db.save_account(&Account {
+            jid: owner.into(),
+            host: String::new(),
+            port: 5222,
+            direct_tls: false,
+        })
+        .unwrap();
+        let mut original = Message {
+            id: "original".into(),
+            wire_id: "original-wire".into(),
+            aliases: vec!["wire:original-wire".into()],
+            sender: format!("{owner}/phone"),
+            own: true,
+            text: "own message from another device".into(),
+            ..Default::default()
+        };
+        original.set_encryption(Mode::Legacy, "phone-identity".into());
+        db.save_chat_message(
+            owner,
+            &Chat {
+                jid: peer.into(),
+                ..Default::default()
+            },
+            Some(&original),
+        )
+        .unwrap();
+
+        // Mobile treats outer Legacy reaction metadata as public even without decryption.
+        let outer: Element = format!("<message xmlns='jabber:client' type='chat' from='{peer}/mobile' to='{owner}' id='reaction'><body>Encrypted fallback</body><encrypted xmlns='eu.siacs.conversations.axolotl'><payload>opaque</payload></encrypted><reactions xmlns='urn:xmpp:reactions:0' id='original-wire'><reaction>👍</reaction></reactions></message>").parse().unwrap();
+        let clear = public_legacy_content(&outer).unwrap().unwrap();
+        let (_, reaction, _) = crate::protocol::normalize(&clear, owner, None).unwrap();
+        assert!(!reaction.encrypted);
+        assert!(reaction.text.is_empty());
+        db.record_action(owner, peer, &reaction, "received")
+            .unwrap();
+        db.reconcile_actions(owner, peer).unwrap();
+        assert_eq!(
+            db.message(owner, peer, "original").unwrap().reactions,
+            vec!["👍 1"]
+        );
+        let sent = crate::protocol::outgoing(peer, &reaction, "");
+        assert!(
+            sent.get_child("encrypted", crate::crypto::legacy::NS)
+                .is_none()
+        );
+        assert_eq!(parse(&sent).unwrap(), reaction.action);
+        let mixed: Element = format!("<message xmlns='jabber:client' type='chat' from='{peer}' to='{owner}'><encrypted xmlns='eu.siacs.conversations.axolotl'/><reactions xmlns='urn:xmpp:reactions:0' id='original-wire'/><retract xmlns='urn:xmpp:message-retract:1' id='original-wire'/></message>").parse().unwrap();
+        assert!(public_legacy_content(&mixed).is_err());
+
+        let mut deletion = Message {
+            id: "cross-device-delete".into(),
+            wire_id: "delete-wire".into(),
+            aliases: vec!["wire:delete-wire".into()],
+            sender: format!("{owner}/desktop"),
+            own: true,
+            action: Some(Action::Retract {
+                target: "original-wire".into(),
+                legacy: false,
+            }),
+            ..Default::default()
+        };
+        deletion.set_encryption(Mode::Legacy, "desktop-identity".into());
+        let mut foreign = deletion.clone();
+        foreign.sender = peer.into();
+        assert!(db.record_action(owner, peer, &foreign, "received").is_err());
+        foreign.own = false;
+        foreign.id = "foreign-delete".into();
+        foreign.wire_id = foreign.id.clone();
+        foreign.aliases = vec!["wire:foreign-delete".into()];
+        db.record_action(owner, peer, &foreign, "received").unwrap();
+        db.reconcile_actions(owner, peer).unwrap();
+        assert!(!db.message(owner, peer, "original").unwrap().retracted);
+        let mut unsigned = deletion.clone();
+        unsigned.fingerprint.clear();
+        assert!(
+            db.record_action(owner, peer, &unsigned, "received")
+                .is_err()
+        );
+        db.record_action(owner, peer, &deletion, "received")
+            .unwrap();
+        db.reconcile_actions(owner, peer).unwrap();
+        assert!(db.message(owner, peer, "original").unwrap().retracted);
+
+        let key = format!("plain-reactions:{owner}\n{peer}");
+        assert_eq!(db.pref(&key, "false"), "false");
+        db.set_pref(&key, "true").unwrap();
+        db.set_pref(
+            "plain-reactions:another@example.org\npeer@example.org",
+            "true",
+        )
+        .unwrap();
+        db.forget(owner).unwrap();
+        assert_eq!(db.pref(&key, "false"), "false");
+        assert_eq!(
+            db.pref(
+                "plain-reactions:another@example.org\npeer@example.org",
+                "false"
+            ),
+            "true"
+        );
     }
     #[test]
     fn grammar_matches_mobile_controls() {

@@ -64,6 +64,8 @@ impl Ui {
             .margin_end(12)
             .build();
         body.append(&search);
+        self.media_stack
+            .add_named(&self.emoji_sidebar(&search), Some("emoji"));
         let entries = Rc::new(RefCell::new(vec![]));
         let gifs_grid = gtk::Grid::builder()
             .column_homogeneous(true)
@@ -71,15 +73,6 @@ impl Ui {
             .row_spacing(4)
             .build();
         for (kind, items) in [
-            (
-                "emoji",
-                vec![
-                    "😀", "😄", "🥹", "😊", "😍", "🥰", "😎", "🤔", "🫡", "🙃", "😭", "😂", "❤️",
-                    "💜", "✨", "🎉", "👍", "👋", "☕", "🍀", "🌿", "🌸", "🌻", "🌈", "🌙", "🔥",
-                    "🦊", "🐈", "🐻", "🐸", "🍋", "🍊", "🍓", "🍕", "🎨", "📷", "💻", "🚀", "🎧",
-                    "🏕️", "🌊", "🏔️", "💫", "🙌", "🤝", "💬", "🫶", "😴",
-                ],
-            ),
             (
                 "stickers",
                 vec!["🦊", "🐻", "🐸", "🐈", "☕", "🎉", "🌸", "🚀"],
@@ -99,15 +92,8 @@ impl Ui {
             let area = bx(true, 8);
             margins(&area, 12);
             area.set_margin_top(0);
-            area.append(&text(
-                if kind == "emoji" {
-                    "Recently used"
-                } else {
-                    "Favorites"
-                },
-                "caption dim-label",
-            ));
-            let cols = if kind == "emoji" { 6 } else { 4 };
+            area.append(&text("Favorites", "caption dim-label"));
+            let cols = 4;
             let flow = gtk::FlowBox::builder()
                 .selection_mode(gtk::SelectionMode::None)
                 .column_spacing(4)
@@ -131,11 +117,7 @@ impl Ui {
                 } else {
                     b.set_label(item);
                     b.add_css_class("flat");
-                    b.add_css_class(if kind == "emoji" {
-                        "emoji-item"
-                    } else {
-                        "sticker-item"
-                    });
+                    b.add_css_class("sticker-item");
                     flow.insert(&b, -1);
                     let child = b.parent().unwrap();
                     child.set_focusable(false);
@@ -144,10 +126,7 @@ impl Ui {
                 let weak = Rc::downgrade(self);
                 b.connect_clicked(move |_| {
                     if let Some(ui) = weak.upgrade() {
-                        if kind == "emoji" {
-                            ui.composer.buffer().insert_at_cursor(item);
-                            ui.composer.grab_focus();
-                        } else if let Some(id) =
+                        if let Some(id) =
                             ui.send_content(item, if kind == "gifs" { "gif" } else { "sticker" })
                         {
                             if let Some(m) = ui
@@ -487,7 +466,7 @@ impl Ui {
             let selected = source
                 .as_ref()
                 .and_then(|widget| self.store.message(&owner, &peer, &widget.widget_name()))
-                .filter(|message| !message.retracted && message.attachment.is_some());
+                .filter(crate::media_store::carousel_candidate);
             (selected.into_iter().map(MediaItem::live).collect(), 0)
         };
         if items.is_empty() {
@@ -787,7 +766,7 @@ impl MediaItem {
             title: message
                 .attachment
                 .as_ref()
-                .map(|f| f.image_label())
+                .map(|file| file.image_label())
                 .unwrap_or("Image")
                 .into(),
             path: Default::default(),
@@ -811,7 +790,6 @@ pub struct MediaViewer {
     peer: String,
     generation: u64,
     preview_status: gtk::Label,
-    title: adw::WindowTitle,
     fullscreen: gtk::Button,
     previous: gtk::Button,
     next: gtk::Button,
@@ -866,7 +844,7 @@ impl MediaViewer {
             pic.set_can_shrink(true);
             pic.set_hexpand(true);
             pic.set_vexpand(true);
-            pic.set_margin_top(72);
+            pic.set_margin_top(20);
             pic.set_margin_bottom(20);
             pic.set_margin_start(20);
             pic.set_margin_end(20);
@@ -888,10 +866,14 @@ impl MediaViewer {
             .build();
         let back = icon_button("go-previous-symbolic", "Back");
         header.pack_start(&back);
-        let title = adw::WindowTitle::new("Riverside trail", "1 of 3");
-        header.set_title_widget(Some(&title));
+        header.set_title_widget(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));
+        let download = icon_button("folder-download-symbolic", "Download a copy");
+        download.set_visible(!ui.state.borrow().account.is_empty());
         let fullscreen = icon_button("view-fullscreen-symbolic", "Fullscreen");
-        header.pack_end(&fullscreen);
+        let end_controls = bx(false, 0);
+        end_controls.append(&download);
+        end_controls.append(&fullscreen);
+        header.pack_end(&end_controls);
         let top = bx(true, 0);
         top.add_css_class("media-controls-top");
         top.append(&header);
@@ -972,7 +954,6 @@ impl MediaViewer {
             generation: ui.generation.get(),
             preview_status,
             items: RefCell::new(items),
-            title,
             fullscreen,
             previous,
             next,
@@ -999,6 +980,33 @@ impl MediaViewer {
         back.connect_clicked(move |_| {
             if let Some(v) = weak.upgrade() {
                 v.close()
+            }
+        });
+        let weak = Rc::downgrade(&viewer);
+        download.connect_clicked(move |_| {
+            let Some(viewer) = weak.upgrade() else { return };
+            let Some(ui) = viewer.ui.upgrade().filter(|ui| {
+                ui.generation.get() == viewer.generation
+                    && ui.state.borrow().account == viewer.owner
+                    && ui.state.borrow().current().jid == viewer.peer
+            }) else {
+                return;
+            };
+            let id = viewer.items.borrow()[viewer.index.get()].id.clone();
+            let Some(file) = ui
+                .store
+                .message(&viewer.owner, &viewer.peer, &id)
+                .filter(|message| !message.retracted)
+                .and_then(|message| message.attachment)
+            else {
+                ui.notice("This media is no longer available");
+                return;
+            };
+            match ui.downloads.borrow().status(&viewer.owner, &file) {
+                Some(crate::downloads::Status::Ready(path)) if path.is_file() => {
+                    ui.save_attachment(&id, &path)
+                }
+                _ => ui.notice("Wait for this media to finish downloading"),
             }
         });
         let weak = Rc::downgrade(&viewer);
@@ -1195,7 +1203,7 @@ impl MediaViewer {
             let Some(message) = ui
                 .store
                 .message(&self.owner, &self.peer, &id)
-                .filter(|m| !m.retracted && m.attachment.is_some())
+                .filter(crate::media_store::carousel_candidate)
             else {
                 self.close();
                 return;
@@ -1271,7 +1279,7 @@ impl MediaViewer {
                     .hexpand(true)
                     .vexpand(true)
                     .build();
-                pic.set_margin_top(72);
+                pic.set_margin_top(20);
                 pic.set_margin_bottom(20);
                 pic.set_margin_start(20);
                 pic.set_margin_end(20);
@@ -1308,14 +1316,6 @@ impl MediaViewer {
             gtk::StackTransitionType::SlideRight
         });
         self.stack.set_visible_child_name(&items[i].id);
-        self.title.set_title(&items[i].title);
-        self.title.set_subtitle(
-            &items[i]
-                .message
-                .as_ref()
-                .map(|m| m.text.clone())
-                .unwrap_or_else(|| format!("{} of {}", i + 1, items.len())),
-        );
         self.previous.set_visible(items.len() > 1);
         self.next.set_visible(items.len() > 1);
         self.previous.set_sensitive(i > 0);
@@ -1352,6 +1352,22 @@ impl MediaViewer {
             }
             let current = index == active;
             let edge = if current { 4096 } else { 384 };
+            let Some(message) = ui
+                .store
+                .message(&viewer.owner, &viewer.peer, &id)
+                .filter(crate::media_store::carousel_candidate)
+            else {
+                if current {
+                    viewer.close();
+                } else {
+                    viewer.refresh_neighbours();
+                }
+                return glib::ControlFlow::Break;
+            };
+            let Some(file) = message.attachment else {
+                viewer.close();
+                return glib::ControlFlow::Break;
+            };
             if !current && loaded_edge.get() == edge {
                 return glib::ControlFlow::Continue;
             }
@@ -1362,20 +1378,6 @@ impl MediaViewer {
             {
                 return glib::ControlFlow::Continue;
             }
-            let Some(message) = ui
-                .store
-                .message(&viewer.owner, &viewer.peer, &id)
-                .filter(|m| !m.retracted)
-            else {
-                if index == viewer.index.get() {
-                    viewer.close();
-                }
-                return glib::ControlFlow::Break;
-            };
-            let Some(file) = message.attachment else {
-                viewer.close();
-                return glib::ControlFlow::Break;
-            };
             if file.video_candidate() {
                 if !current {
                     if let Some(player) = ui.images.borrow_mut().video(&file.key()) {
@@ -1544,10 +1546,11 @@ impl MediaViewer {
         let Some(ui) = self.ui.upgrade() else { return };
         let full = ui.window.is_fullscreen();
         for pic in self.pictures.borrow().iter() {
-            pic.set_margin_top(if full { 0 } else { 72 });
-            pic.set_margin_bottom(if full { 0 } else { 20 });
-            pic.set_margin_start(if full { 0 } else { 20 });
-            pic.set_margin_end(if full { 0 } else { 20 })
+            let margin = if full { 0 } else { 20 };
+            pic.set_margin_top(margin);
+            pic.set_margin_bottom(margin);
+            pic.set_margin_start(margin);
+            pic.set_margin_end(margin)
         }
         self.fullscreen.set_icon_name(if full {
             "view-restore-symbolic"

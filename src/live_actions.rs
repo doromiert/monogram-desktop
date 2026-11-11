@@ -7,6 +7,40 @@ use crate::{
 };
 use std::rc::Rc;
 impl Ui {
+    fn public_legacy_reaction(
+        &self,
+        owner: &str,
+        peer: &str,
+        id: &str,
+        base: &Message,
+        current: &Message,
+    ) -> bool {
+        let state = self.state.borrow();
+        let selected = self.sending_mode(state.current());
+        !state.current().group
+            && (current.mode() == crate::encryption_policy::Mode::Legacy
+                || selected == Some(crate::encryption_policy::Mode::Legacy))
+            && base.mode() != crate::encryption_policy::Mode::Omemo2
+            && selected != Some(crate::encryption_policy::Mode::Omemo2)
+            && !self.store.action_protected(owner, peer, id)
+    }
+    pub(crate) fn public_reaction_consent_required(&self, id: &str) -> bool {
+        let state = self.state.borrow();
+        let owner = state.account.clone();
+        let peer = state.current().jid.clone();
+        drop(state);
+        let (Ok(base), Ok(current)) = (
+            self.store.action_base(&owner, &peer, id),
+            self.store.action_target(&owner, &peer, id, "react"),
+        ) else {
+            return false;
+        };
+        self.public_legacy_reaction(&owner, &peer, id, &base, &current)
+            && self
+                .store
+                .pref(&format!("plain-reactions:{owner}\n{peer}"), "false")
+                != "true"
+    }
     pub fn sync_actions(&self, owner: &str, peer: &str) {
         let mut state = self.state.borrow_mut();
         if state.account == owner && state.current().jid == peer {
@@ -120,16 +154,29 @@ impl Ui {
         let legacy = current.mode() == crate::encryption_policy::Mode::Legacy
             || self.sending_mode(self.state.borrow().current())
                 == Some(crate::encryption_policy::Mode::Legacy);
-        if legacy && (kind != "retract" || self.state.borrow().current().group) {
+        if legacy && (kind == "correct" || self.state.borrow().current().group) {
             self.notice("Legacy OMEMO does not support protected message actions here");
             return false;
         }
-        let encrypted = current.encrypted
-            || self.state.borrow().current().encryption
-            || kind == "react" && self.store.action_protected(&owner, &peer, id);
-        // Retractions use the original protocol and identity, as on mobile.
+        let protected_reaction = kind == "react" && self.store.action_protected(&owner, &peer, id);
+        let encrypted =
+            current.encrypted || self.state.borrow().current().encryption || protected_reaction;
+        // Legacy reactions carry public XEP-0444 metadata, as on mobile.
+        let public_reaction =
+            kind == "react" && self.public_legacy_reaction(&owner, &peer, id, &base, &current);
+        if public_reaction
+            && self
+                .store
+                .pref(&format!("plain-reactions:{owner}\n{peer}"), "false")
+                != "true"
+        {
+            self.notice("Allow public reactions in this conversation before reacting");
+            return false;
+        }
         let mode = if kind == "retract" {
             base.mode()
+        } else if public_reaction {
+            crate::encryption_policy::Mode::Plain
         } else if encrypted {
             crate::encryption_policy::Mode::Omemo2
         } else {
@@ -139,10 +186,6 @@ impl Ui {
             self.notice("The original message's OMEMO version is not ready");
             return false;
         };
-        if kind == "retract" && base.encrypted && base.fingerprint != fingerprint {
-            self.notice("An encrypted message can only be retracted by its original device");
-            return false;
-        }
         let wire = new_id();
         let message = Message {
             forwarded: if kind == "correct" {

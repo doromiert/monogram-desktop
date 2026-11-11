@@ -1221,7 +1221,7 @@ mod tests {
                 text: "private original".into(),
                 ..Default::default()
             };
-            original.set_encryption(Mode::Legacy, fingerprint.clone());
+            original.set_encryption(Mode::Legacy, "different-original-device".into());
             let chat = crate::model::Chat {
                 jid: peer.into(),
                 ..Default::default()
@@ -1237,7 +1237,7 @@ mod tests {
             for (mode, key, own) in [
                 (Mode::Plain, "", false),
                 (Mode::Omemo2, fingerprint.as_str(), false),
-                (Mode::Legacy, "another-device", false),
+                (Mode::Legacy, "", false),
                 (Mode::Legacy, fingerprint.as_str(), true),
             ] {
                 let mut invalid = recovered.clone();
@@ -1273,6 +1273,7 @@ mod tests {
             media.aliases = vec!["wire:media-wire".into()];
             media.own = true;
             media.sender = owner.into();
+            media.fingerprint = fingerprint.clone();
             media.attachment =
                 crate::file_share::Attachment::bare("https://files.example.org/file");
             let mut caption = fallback.clone();

@@ -56,6 +56,7 @@ pub struct Ui {
     pub scroll: gtk::ScrolledWindow,
     pub message_scroll: RefCell<Option<crate::messages::ScrollTarget>>,
     pub composer: gtk::TextView,
+    composer_placeholder: gtk::Label,
     pub send_button: gtk::Button,
     pub input_scroll: gtk::ScrolledWindow,
     pub reply_bar: gtk::Revealer,
@@ -291,6 +292,15 @@ impl Ui {
                 .hexpand(true)
                 .top_margin(4)
                 .bottom_margin(4)
+                .build(),
+            composer_placeholder: gtk::Label::builder()
+                .label("Message…")
+                .xalign(0.)
+                .halign(gtk::Align::Fill)
+                .valign(gtk::Align::Center)
+                .margin_start(4)
+                .can_target(false)
+                .css_classes(["dim-label"])
                 .build(),
             send_button: icon_button("mail-send-symbolic", "Send"),
             input_scroll: gtk::ScrolledWindow::builder()
@@ -1071,7 +1081,12 @@ impl Ui {
         self.input_scroll.set_child(Some(&self.composer));
         self.input_scroll
             .set_policy(gtk::PolicyType::Never, gtk::PolicyType::Never);
-        composer.append(&self.input_scroll);
+        let input = gtk::Overlay::builder()
+            .child(&self.input_scroll)
+            .hexpand(true)
+            .build();
+        input.add_overlay(&self.composer_placeholder);
+        composer.append(&input);
         let emoji = icon_button("face-smile-symbolic", "Emoji, stickers and GIFs · F9");
         self.weak_button(&emoji, |s| s.toggle_media());
         composer.append(&emoji);
@@ -1127,6 +1142,9 @@ impl Ui {
         b.text(&b.start_iter(), &b.end_iter(), true).into()
     }
     pub fn compose_changed(self: &Rc<Self>) {
+        let composer_text = self.composer_text();
+        self.composer_placeholder
+            .set_visible(composer_text.is_empty());
         let lines = self.composer.buffer().line_count();
         self.input_scroll
             .set_min_content_height((lines * 20).clamp(28, 96));
@@ -1136,7 +1154,7 @@ impl Ui {
             gtk::PolicyType::Never
         });
         self.send_button.set_sensitive(
-            !self.composer_text().trim().is_empty() || !self.attachments.borrow().is_empty(),
+            !composer_text.trim().is_empty() || !self.attachments.borrow().is_empty(),
         );
         if self.loading.get() {
             return;
@@ -1166,7 +1184,7 @@ impl Ui {
             let peer = self.state.borrow().current().jid.clone();
             self.command(Command::Typing {
                 peer,
-                composing: !self.composer_text().is_empty(),
+                composing: !composer_text.is_empty(),
             });
         }
     }
@@ -1254,6 +1272,10 @@ impl Ui {
         self.section_title.set_text("");
         let state = self.state.borrow();
         let chat = state.current();
+        self.composer_placeholder
+            .set_text(&format!("Message {}…", chat.name));
+        self.composer_placeholder
+            .set_visible(self.composer_text().is_empty());
         let title = bx(false, 8);
         title.append(&self.chat_avatar(chat, 28));
         let words = bx(true, 0);
