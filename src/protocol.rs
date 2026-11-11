@@ -575,6 +575,12 @@ pub enum Command {
         epoch: u64,
         peer: String,
     },
+    RoomMembersLoaded {
+        epoch: u64,
+        peer: String,
+        revision: u64,
+        result: Result<crate::rooms::members::MemberSnapshot, crate::rooms::Error>,
+    },
     Avatar {
         peer: String,
         source: crate::avatar::Source,
@@ -615,6 +621,29 @@ pub enum Command {
     },
 }
 pub type Envelope = (u64, String, BackendEvent);
+fn refresh_room_members(
+    rooms: &mut crate::rooms::Rooms,
+    peer: &str,
+    epoch: u64,
+    network: &channel::UnboundedSender<Command>,
+) {
+    let Some(revision) = rooms.begin_member_refresh(peer) else {
+        return;
+    };
+    let peer = peer.to_owned();
+    let tx = network.clone();
+    tokio::spawn(async move {
+        let iq = crate::iq::Client::new(tx.clone());
+        let result = crate::rooms::members::fetch(&iq, &peer).await;
+        let _ = tx.send(Command::RoomMembersLoaded {
+            epoch,
+            peer,
+            revision,
+            result,
+        });
+    });
+}
+
 pub struct Session {
     pub tx: channel::UnboundedSender<Command>,
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
@@ -676,6 +705,12 @@ impl Session {
                         Some(Command::RoomBookmarksLoaded{..})=>{},
                         Some(Command::RoomStableIds{epoch,peer})=>{
                             if online && epoch==room_epoch { rooms.enable_stable_ids(peer); }
+                        },
+                        Some(Command::RoomMembersLoaded{epoch,peer,revision,result})=>{
+                            if online && epoch==room_epoch {
+                                rooms.member_refresh_finished(&peer,revision,result);
+                                refresh_room_members(&mut rooms,&peer,room_epoch,&network);
+                            }
                         },
                         Some(Command::JoinRoom{peer,nick})=>{
                             if !online { emit(BackendEvent::RoomError("Connect before joining a room".into())); continue; }
@@ -780,6 +815,8 @@ impl Session {
                         Some(Event::Stanza(stanza))=>{
                             let root:Element=stanza.into();if iq.receive(&root,&owner){continue}let from=root.attr("from").unwrap_or("");
                             if root.is("message",NS){
+                                rooms.configuration_changed(&root);
+                                refresh_room_members(&mut rooms,&bare_of(from),room_epoch,&network);
                                 if crate::rooms::bookmark_changed(&root,&owner) { let _=network.send(Command::LoadRoomBookmarks); }
                                 let mut results=root.children().filter(|child| child.is("result",archive::NS));
                                 if let Some(wrapper)=results.next() {
@@ -810,7 +847,9 @@ impl Session {
                                 if let Some((_peer,message,historical))=normalize(&root,&owner,None){let receipt_to=(!historical&&!message.own&&!message.wire_id.is_empty()&&root.get_child("request","urn:xmpp:receipts").is_some()).then(||from.to_string());deliver(&crypto,&legacy,&emit,&root,&owner,None,historical,receipt_to);}
                                 if root.get_child("delay","urn:xmpp:delay").is_none(){for name in ["composing","paused","active","inactive","gone"]{if root.get_child(name,"http://jabber.org/protocol/chatstates").is_some(){emit(BackendEvent::Typing{peer:bare_of(from),composing:name=="composing"})}}}
                             }else if root.is("presence",NS){
-                                if let Some(presence)=rooms.presence(&root){
+                                let room_presence=rooms.presence(&root);
+                                refresh_room_members(&mut rooms,&bare_of(from),room_epoch,&network);
+                                if let Some(presence)=room_presence{
                                     if !presence.joined {
                                         mam.retain(|_,page| {
                                             let left=page.room && page.peer==presence.jid;

@@ -1,6 +1,7 @@
 //! Live room bookmarks and XEP-0045 membership. A bookmark alone never authorizes sending.
 pub mod archive;
 mod bookmarks;
+pub mod members;
 mod muc;
 
 pub use bookmarks::{
@@ -24,6 +25,7 @@ pub enum Error {
     Forbidden,
     Locked,
     Encryption,
+    RecipientsUnavailable,
     UnsupportedMessage,
 }
 impl fmt::Display for Error {
@@ -31,10 +33,10 @@ impl fmt::Display for Error {
         f.write_str(match self {
             Self::Invalid => "Invalid room address, nickname or server response",
             Self::Request(iq::Error::Timeout) => {
-                "The server did not answer the room bookmark request"
+                "The server did not answer the room request"
             }
-            Self::Request(iq::Error::Closed) => "Reconnect to synchronize room bookmarks",
-            Self::Request(_) => "Could not synchronize room bookmarks",
+            Self::Request(iq::Error::Closed) => "Reconnect to synchronize room information",
+            Self::Request(_) => "Could not synchronize room information",
             Self::Joining => "Waiting for the room to confirm membership",
             Self::AlreadyJoined => "You already joined this room",
             Self::NotJoined => "Join the room before sending messages",
@@ -43,6 +45,7 @@ impl fmt::Display for Error {
             Self::Encryption => {
                 "Encrypted room sending is unavailable. Your encryption setting is unchanged."
             }
+            Self::RecipientsUnavailable => "The room must disclose a complete members-only recipient list before encryption can be prepared",
             Self::UnsupportedMessage => "This room message type is unavailable",
         })
     }

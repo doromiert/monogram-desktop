@@ -7,6 +7,8 @@ use std::{
     rc::{Rc, Weak},
     time::{Duration, Instant},
 };
+#[path = "media/zoom.rs"]
+mod zoom;
 impl Ui {
     pub fn track_sidebar(&self, widget: &impl IsA<gtk::Widget>) {
         widget.set_visible(self.utility.shows_sidebar());
@@ -654,6 +656,8 @@ mod fly_imp {
     #[derive(Default)]
     pub struct FlyFrame {
         pub progress: Cell<f64>,
+        pub zoom: Cell<f64>,
+        pub pan: Cell<(f64, f64)>,
         pub origin: RefCell<Option<graphene::Rect>>,
         pub overlay: glib::WeakRef<gtk::Overlay>,
     }
@@ -665,6 +669,10 @@ mod fly_imp {
     }
     impl ObjectImpl for FlyFrame {}
     impl WidgetImpl for FlyFrame {
+        fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
+            self.parent_size_allocate(width, height, baseline);
+            self.obj().clamp_pan();
+        }
         fn snapshot(&self, s: &gtk::Snapshot) {
             let obj = self.obj();
             let Some(picture) = obj.first_child() else {
@@ -720,6 +728,15 @@ mod fly_imp {
                             -(target_y + target_h / 2.) as f32,
                         ));
                     }
+                }
+            } else if self.zoom.get() > 1. {
+                if let Some(bounds) = obj.media_bounds() {
+                    let (x, y) = self.pan.get();
+                    let cx = bounds.x() + bounds.width() / 2.;
+                    let cy = bounds.y() + bounds.height() / 2.;
+                    s.translate(&graphene::Point::new(cx + x as f32, cy + y as f32));
+                    s.scale(self.zoom.get() as f32, self.zoom.get() as f32);
+                    s.translate(&graphene::Point::new(-cx, -cy));
                 }
             }
             obj.snapshot_child(&picture, s);
@@ -782,6 +799,7 @@ pub struct MediaViewer {
     fullscreen_signal: RefCell<Option<glib::SignalHandlerId>>,
     controls: Vec<gtk::Revealer>,
     controls_timer: RefCell<Option<glib::SourceId>>,
+    zoom_reset: gtk::Button,
 }
 impl MediaViewer {
     pub fn new(
@@ -829,6 +847,7 @@ impl MediaViewer {
             frame.set_vexpand(true);
             frame.imp().origin.replace(origin);
             frame.imp().overlay.set(Some(&root));
+            frame.imp().zoom.set(1.);
             frame.append(&pic);
             stack.add_named(&frame, Some(&item.id));
             pictures.push(pic);
@@ -886,6 +905,22 @@ impl MediaViewer {
         preview_status.set_valign(gtk::Align::Center);
         preview_status.set_visible(false);
         root.add_overlay(&preview_status);
+        let zoom_reset = gtk::Button::builder()
+            .label("100%")
+            .tooltip_text("Reset zoom (0)")
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Start)
+            .margin_top(56)
+            .visible(false)
+            .build();
+        zoom_reset.add_css_class("osd");
+        zoom_reset.add_css_class("pill");
+        let zoom_revealer = reveal(
+            zoom_reset.upcast_ref(),
+            gtk::Align::Center,
+            gtk::Align::Start,
+        );
+        root.add_overlay(&zoom_revealer);
         let viewer = Rc::new(Self {
             root,
             backdrop,
@@ -915,8 +950,14 @@ impl MediaViewer {
             was_fullscreen: ui.window.is_fullscreen(),
             animation: RefCell::new(None),
             fullscreen_signal: RefCell::new(None),
-            controls: vec![top_revealer, previous_revealer, next_revealer],
+            controls: vec![
+                top_revealer,
+                previous_revealer,
+                next_revealer,
+                zoom_revealer,
+            ],
             controls_timer: RefCell::new(None),
+            zoom_reset,
         });
         let weak = Rc::downgrade(&viewer);
         back.connect_clicked(move |_| {
@@ -970,6 +1011,9 @@ impl MediaViewer {
                     gdk::Key::Escape => v.close(),
                     gdk::Key::Left => v.move_by(-1),
                     gdk::Key::Right => v.move_by(1),
+                    gdk::Key::plus | gdk::Key::equal | gdk::Key::KP_Add => v.zoom_by(1.25),
+                    gdk::Key::minus | gdk::Key::KP_Subtract => v.zoom_by(0.8),
+                    gdk::Key::_0 | gdk::Key::KP_0 => v.reset_zoom(),
                     gdk::Key::space if v.active_video.borrow().is_some() => {
                         let video = v.active_video.borrow();
                         let media = &video.as_ref().unwrap().media;
@@ -1002,22 +1046,7 @@ impl MediaViewer {
                 }
                 target = widget.parent();
             }
-            let picture = &viewer.pictures.borrow()[viewer.index.get()];
-            let inside = picture
-                .paintable()
-                .zip(picture.compute_bounds(&viewer.root))
-                .is_some_and(|(paintable, bounds)| {
-                    let width = f64::from(bounds.width());
-                    let height = f64::from(bounds.height());
-                    let ratio = paintable.intrinsic_aspect_ratio();
-                    let (w, h) = if ratio > 0. {
-                        (width.min(height * ratio), height.min(width / ratio))
-                    } else {
-                        (width, height)
-                    };
-                    (x - f64::from(bounds.x()) - width / 2.).abs() <= w / 2.
-                        && (y - f64::from(bounds.y()) - height / 2.).abs() <= h / 2.
-                });
+            let inside = viewer.media_contains(x, y);
             if !inside {
                 viewer.close();
             } else {
@@ -1029,12 +1058,13 @@ impl MediaViewer {
         let weak = Rc::downgrade(&viewer);
         swipe.connect_swipe(move |_, x, y| {
             if x.abs() > y.abs() {
-                if let Some(v) = weak.upgrade() {
+                if let Some(v) = weak.upgrade().filter(|v| !v.is_zoomed()) {
                     v.move_by(if x > 0. { -1 } else { 1 })
                 }
             }
         });
         viewer.root.add_controller(swipe);
+        viewer.install_zoom();
         if !viewer.owner.is_empty() {
             let pictures = viewer.pictures.borrow().clone();
             let items = viewer.items.borrow().clone();
@@ -1117,6 +1147,7 @@ impl MediaViewer {
         if index == previous && delta != 0 {
             return;
         }
+        self.reset_zoom();
         self.set_active_video(None);
         self.index.set(index);
         self.update_position(delta);
@@ -1211,6 +1242,7 @@ impl MediaViewer {
                 frame.set_vexpand(true);
                 frame.imp().overlay.set(Some(&self.root));
                 frame.imp().progress.set(self.progress.get());
+                frame.imp().zoom.set(1.);
                 frame.append(&pic);
                 self.stack.add_named(&frame, Some(&item.id));
                 self.watch_image(item.id.clone(), &pic);
@@ -1465,6 +1497,7 @@ impl MediaViewer {
         }
     }
     fn fullscreen_changed(self: &Rc<Self>) {
+        self.reset_zoom();
         self.reveal_controls();
         let Some(ui) = self.ui.upgrade() else { return };
         let full = ui.window.is_fullscreen();
@@ -1554,6 +1587,7 @@ impl MediaViewer {
         if self.closing.replace(true) {
             return;
         }
+        self.reset_zoom();
         self.set_active_video(None);
         let Some(ui) = self.ui.upgrade() else { return };
         if let Some(a) = self.animation.borrow().as_ref() {

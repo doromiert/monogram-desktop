@@ -779,7 +779,8 @@ mod tests {
                     &untrusted,
                     &root,
                     &cancel,
-                    &progress
+                    &progress,
+                    Policy::Manual,
                 ))
                 .is_err()
             );

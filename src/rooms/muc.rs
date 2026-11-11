@@ -38,6 +38,7 @@ pub struct Rooms {
     bookmarks: BTreeMap<String, Bookmark>,
     membership: BTreeMap<String, Membership>,
     stable_ids: BTreeSet<String>,
+    identities: members::Registry,
 }
 pub(super) fn occupant(room: &str, nick: &str) -> Result<Jid> {
     if nick.is_empty() || nick.len() > 1023 {
@@ -94,6 +95,7 @@ impl Rooms {
             bookmarks: BTreeMap::new(),
             membership: BTreeMap::new(),
             stable_ids: BTreeSet::new(),
+            identities: members::Registry::default(),
         }
     }
     /// Refresh bookmark metadata without discarding current verified membership.
@@ -138,6 +140,7 @@ impl Rooms {
         }
         let mut stanza = attr(el("presence", CLIENT), "to", occupant.to_string());
         stanza.append_child(join);
+        self.identities.reset(&jid);
         self.membership.insert(
             jid,
             Membership::Joining {
@@ -150,6 +153,7 @@ impl Rooms {
     pub fn disconnect(&mut self) {
         self.membership.clear();
         self.stable_ids.clear();
+        self.identities.clear();
     }
 
     pub fn enable_stable_ids(&mut self, room: String) {
@@ -184,6 +188,7 @@ impl Rooms {
         expired
             .into_iter()
             .map(|jid| {
+                self.identities.remove(&jid);
                 self.membership.insert(
                     jid.clone(),
                     Membership::Failed("The room did not confirm your join".into()),
@@ -202,6 +207,7 @@ impl Rooms {
         if xml.attr("type") == Some("error") {
             if matches!(previous, Membership::Joining { occupant, .. } if address == *occupant || address.resource().is_none())
             {
+                self.identities.remove(&jid);
                 self.membership
                     .insert(jid.clone(), Membership::Failed(error_detail(xml).into()));
                 return Some(self.status(&jid));
@@ -209,7 +215,17 @@ impl Rooms {
             return None;
         }
         let user = child(xml, "x", USER).ok().flatten()?;
-        if address.resource().is_none() || !code(user, "110") {
+        if address.resource().is_none()
+            || matches!(previous, Membership::Failed(_))
+            || !matches!(xml.attr("type"), None | Some("available" | "unavailable"))
+            || xml.get_child("delay", DELAY).is_some()
+            || xml.get_child("x", "jabber:x:delay").is_some()
+        {
+            return None;
+        }
+        if !code(user, "110") {
+            self.identities
+                .presence(&jid, &address.to_string(), xml, user);
             return None;
         }
         let item = child(user, "item", USER).ok().flatten();
@@ -235,6 +251,8 @@ impl Rooms {
         if !expected {
             return None;
         }
+        self.identities
+            .presence(&jid, &address.to_string(), xml, user);
         match xml.attr("type") {
             Some("unavailable") => {
                 let replacement = if code(user, "303") {
@@ -251,6 +269,9 @@ impl Rooms {
                 } else {
                     Membership::Failed(left_detail(user).into())
                 };
+                if matches!(next, Membership::Failed(_)) {
+                    self.identities.remove(&jid);
+                }
                 self.membership.insert(jid.clone(), next);
             }
             None | Some("available") => {
@@ -273,6 +294,109 @@ impl Rooms {
     }
     pub fn is_joined(&self, jid: &str) -> bool {
         matches!(self.membership.get(jid), Some(Membership::Joined { .. }))
+    }
+
+    pub fn begin_member_refresh(&mut self, room: &str) -> Option<u64> {
+        if !self.status(room).can_send {
+            return None;
+        }
+        self.identities.begin(room)
+    }
+    pub fn member_refresh_finished(
+        &mut self,
+        room: &str,
+        revision: u64,
+        result: Result<members::MemberSnapshot>,
+    ) {
+        self.identities.finish(room, revision, result);
+    }
+    pub fn recipients(&self, room: &str) -> Result<members::RoomRecipients> {
+        if !self.is_joined(room) {
+            return Err(Error::NotJoined);
+        }
+        if !self.status(room).can_send {
+            return Err(Error::Forbidden);
+        }
+        self.identities.recipients(room, &self.owner)
+    }
+    /// Capture this before crypto waits; historical nicknames never use today's map.
+    pub fn sender(&self, xml: &Element, archived: bool) -> Result<members::RoomSender> {
+        if !xml.is("message", CLIENT)
+            || xml.attr("type") != Some("groupchat")
+            || !addressed_to(xml, &self.owner)
+        {
+            return Err(Error::Invalid);
+        }
+        bounded(xml)?;
+        let address = xml
+            .attr("from")
+            .ok_or(Error::Invalid)?
+            .parse::<Jid>()
+            .map_err(|_| Error::Invalid)?;
+        let room = address.to_bare().to_string();
+        if address.resource().is_none() || !self.is_joined(&room) {
+            return Err(Error::NotJoined);
+        }
+        let occupant = address.to_string();
+        let author = if archived
+            || xml.get_child("delay", DELAY).is_some()
+            || xml.get_child("x", "jabber:x:delay").is_some()
+            || xml.get_child("forwarded", "urn:xmpp:forward:0").is_some()
+            || xml.children().any(|child| {
+                matches!(
+                    child.ns().as_str(),
+                    "urn:xmpp:carbons:2" | "urn:xmpp:mam:2" | "urn:xmpp:mam:1"
+                )
+            }) {
+            let user = child(xml, "x", USER)?.ok_or(Error::Invalid)?;
+            let item = child(user, "item", USER)?.ok_or(Error::Invalid)?;
+            let real = item
+                .attr("jid")
+                .ok_or(Error::Invalid)?
+                .parse::<Jid>()
+                .map_err(|_| Error::Invalid)?;
+            if real.node().is_none() {
+                return Err(Error::Invalid);
+            }
+            real.to_bare().to_string()
+        } else {
+            self.identities
+                .author(&room, &occupant)
+                .ok_or(Error::RecipientsUnavailable)?
+        };
+        Ok(members::RoomSender {
+            room,
+            occupant,
+            author,
+        })
+    }
+    pub fn configuration_changed(&mut self, xml: &Element) {
+        if !xml.is("message", CLIENT)
+            || xml.attr("type") != Some("groupchat")
+            || !addressed_to(xml, &self.owner)
+            || xml.get_child("delay", DELAY).is_some()
+            || xml.get_child("x", "jabber:x:delay").is_some()
+            || xml.children().any(|child| {
+                matches!(
+                    child.ns().as_str(),
+                    "urn:xmpp:forward:0"
+                        | "urn:xmpp:carbons:2"
+                        | "urn:xmpp:mam:2"
+                        | "urn:xmpp:mam:1"
+                )
+            })
+            || bounded(xml).is_err()
+        {
+            return;
+        }
+        let Some(room) = xml.attr("from").filter(|room| self.is_joined(room)) else {
+            return;
+        };
+        if let Ok(Some(user)) = child(xml, "x", USER)
+            && ["104", "172", "173"].iter().any(|value| code(user, value))
+        {
+            self.identities.invalidate(room);
+        }
     }
 
     pub fn archived_message(
