@@ -1081,8 +1081,8 @@ impl Ui {
         self.timeline.add_css_class("message-list");
         let timeline_clamp = adw::Clamp::builder()
             .child(&self.timeline)
-            .maximum_size(900)
-            .tightening_threshold(700)
+            .maximum_size(1080)
+            .tightening_threshold(840)
             .build();
         timeline_clamp.add_css_class("timeline-clamp");
         self.scroll.set_child(Some(&timeline_clamp));
