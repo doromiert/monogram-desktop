@@ -21,6 +21,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 use tokio_xmpp::minidom::Element;
 use wire::{Envelope, attr, element};
@@ -44,6 +45,15 @@ pub struct Legacy {
     pep: Pep,
     history_path: PathBuf,
     _lock: File,
+    repairs: BTreeMap<(String, u32), Instant>,
+    pending_repairs: BTreeMap<(String, u32), Instant>,
+}
+#[derive(Debug)]
+pub struct Repair {
+    peer: String,
+    device: u32,
+    identity: [u8; 32],
+    started: Instant,
 }
 pub fn exists(root: &Path, owner: &str) -> bool {
     lifecycle::exists_for(root, owner, true)
@@ -104,6 +114,8 @@ impl Legacy {
             pep,
             history_path: root.join("history.sqlite3"),
             _lock: lock,
+            repairs: BTreeMap::new(),
+            pending_repairs: BTreeMap::new(),
         })
     }
     pub fn device(&self) -> u32 {
@@ -445,6 +457,141 @@ impl Legacy {
     pub fn acknowledge(&mut self, token: &Token) -> Result<()> {
         self.journal.acknowledge(&mut self.store, token)
     }
+
+    fn begin_repair(
+        &mut self,
+        outer: &Element,
+        room: Option<&crate::rooms::members::RoomSender>,
+    ) -> Result<Option<Repair>> {
+        let envelope = if let Some(room) = room {
+            Envelope::parse_room(outer, &self.store.owner, self.device(), room)?
+        } else {
+            Envelope::parse(outer, &self.store.owner, self.device())?
+        };
+        if !envelope.keys.iter().any(|key| key.prekey) || self.pending_repairs.len() >= 4 {
+            return Ok(None);
+        }
+        let identity = self.store.transaction(|tx| {
+            let Some(key) = tx.load(TRUSTED, &envelope.peer, envelope.sender)? else {
+                return Ok(None);
+            };
+            let key: [u8; 32] = key.as_slice().try_into().map_err(|_| Error::Incomplete)?;
+            if device::trust(tx, &envelope.peer, envelope.sender, &key)? != Trust::Trusted
+                || tx.load(SESSION, &envelope.peer, envelope.sender)?.is_some()
+            {
+                return Ok(None);
+            }
+            Ok(Some(key))
+        })?;
+        let Some(identity) = identity else {
+            return Ok(None);
+        };
+        self.repairs
+            .retain(|_, last| last.elapsed() < Duration::from_secs(600));
+        let key = (envelope.peer.clone(), envelope.sender);
+        if self.repairs.len() >= 128 && !self.repairs.contains_key(&key)
+            || self
+                .repairs
+                .get(&key)
+                .is_some_and(|last| last.elapsed() < Duration::from_secs(60))
+        {
+            return Ok(None);
+        }
+        let started = Instant::now();
+        self.repairs.insert(key.clone(), started);
+        self.pending_repairs.insert(key, started);
+        Ok(Some(Repair {
+            peer: envelope.peer,
+            device: envelope.sender,
+            identity,
+            started,
+        }))
+    }
+
+    fn cancel_repairs(&mut self) {
+        self.pending_repairs.clear();
+    }
+
+    fn complete_repair(&mut self, repair: Repair, bundle: Result<Bundle>) -> Result<Option<Token>> {
+        if self
+            .pending_repairs
+            .remove(&(repair.peer.clone(), repair.device))
+            != Some(repair.started)
+        {
+            return Ok(None);
+        }
+        let bundle = bundle?;
+        if bundle.identity != repair.identity {
+            return Err(Error::TrustRequired);
+        }
+        let owner = self.store.owner.clone();
+        let local = self.device();
+        self.store.transaction(|tx| {
+            if device::trust(tx, &repair.peer, repair.device, &repair.identity)? != Trust::Trusted
+                || tx.load(SESSION, &repair.peer, repair.device)?.is_some()
+            {
+                return Ok(None);
+            }
+            // XEP-0384 v0.3 §5 repairs a consumed-prekey collision with a new key transport.
+            // A session established while discovery was pending always takes precedence.
+            if bundle.prekeys.is_empty() || bundle.prekeys.len() > 1000 {
+                return Err(Error::InvalidBundle);
+            }
+            native::verify_legacy(&bundle)?;
+            let bound = (u64::from(u32::MAX) + 1) / bundle.prekeys.len() as u64
+                * bundle.prekeys.len() as u64;
+            let index = loop {
+                let value = u64::from(u32::from_ne_bytes(random::<4>()?));
+                if value < bound {
+                    break (value % bundle.prekeys.len() as u64) as usize;
+                }
+            };
+            let (id, prekey) = bundle
+                .prekeys
+                .iter()
+                .nth(index)
+                .ok_or(Error::InvalidBundle)?;
+            native::build_for(
+                true,
+                tx,
+                local,
+                &repair.peer,
+                repair.device,
+                *id,
+                prekey,
+                &bundle,
+            )?;
+            let material = Secret::new(random::<16>()?.to_vec());
+            let (prekey, bytes) =
+                native::encrypt_for(true, tx, local, &repair.peer, repair.device, &material)?;
+            if !prekey {
+                return Err(Error::Invalid("legacy repair prekey transport"));
+            }
+            let ack = wire::stanza(
+                &owner,
+                &repair.peer,
+                &crate::model::new_id(),
+                local,
+                vec![wire::key_xml(repair.device, prekey, &bytes)],
+                &random::<12>()?,
+                None,
+            );
+            let mut digest = b"legacy-session-repair\0".to_vec();
+            digest.extend(bundle::xml(&ack, 65536)?);
+            let received = self.journal.append(
+                tx,
+                openssl::sha::sha256(&digest),
+                &ack,
+                None,
+                Some(&ack),
+                repair.identity,
+                false,
+                chrono::Utc::now().timestamp_millis(),
+                None,
+            )?;
+            Ok(Some(received.token.ok_or(Error::Incomplete)?))
+        })
+    }
 }
 
 fn encrypt_for(
@@ -655,4 +802,141 @@ fn receive_for(
         }
     }
     Err(failure)
+}
+
+#[cfg(test)]
+mod repair_tests {
+    use super::tests::{approve, device, fixture};
+    use super::*;
+    const A: &str = "alice@example.invalid";
+    const B: &str = "bob@example.invalid";
+    const C: &str = "carol@example.invalid";
+
+    #[test]
+    fn consumed_prekey_repairs_only_the_approved_missing_session() {
+        let (mut alice, _, alice_bundle) = fixture(A, 101);
+        let (mut bob, journal, mut bob_bundle) = fixture(B, 202);
+        let (mut carol, carol_journal, carol_bundle) = fixture(C, 303);
+        approve(&mut alice, B, 202, &bob_bundle);
+        approve(&mut carol, B, 202, &bob_bundle);
+        approve(&mut bob, A, 101, &alice_bundle);
+        bob_bundle.prekeys.retain(|id, _| *id == 77);
+        let first = attr(
+            encrypt_for(
+                &mut alice,
+                B,
+                "first",
+                "first",
+                &[(device(B, 202, &bob_bundle), bob_bundle.clone())],
+            )
+            .unwrap(),
+            "from",
+            A,
+        );
+        let stale = attr(
+            encrypt_for(
+                &mut carol,
+                B,
+                "stale",
+                "stale",
+                &[(device(B, 202, &bob_bundle), bob_bundle.clone())],
+            )
+            .unwrap(),
+            "from",
+            C,
+        );
+        let (network, _requests) = tokio::sync::mpsc::unbounded_channel();
+        let mut receiver = Legacy {
+            store: bob,
+            journal,
+            pep: Pep::new(iq::Client::new(network), B, 202).unwrap(),
+            history_path: PathBuf::new(),
+            _lock: File::open("/dev/null").unwrap(),
+            repairs: BTreeMap::new(),
+            pending_repairs: BTreeMap::new(),
+        };
+        let envelope = Envelope::parse(&first, B, 202).unwrap();
+        let accepted = receiver.receive_for(&first, &envelope, 0, None).unwrap();
+        let token = accepted.token.unwrap();
+        receiver.accept(&token).unwrap();
+        receiver.acknowledge(&token).unwrap();
+        assert!(
+            receiver.begin_repair(&stale, None).unwrap().is_none(),
+            "untrusted devices never trigger discovery"
+        );
+        approve(&mut receiver.store, C, 303, &carol_bundle);
+        let envelope = Envelope::parse(&stale, B, 202).unwrap();
+        assert!(matches!(
+            receiver.receive_for(&stale, &envelope, 0, None),
+            Err(Error::Native(-1003))
+        ));
+        let repair = receiver.begin_repair(&stale, None).unwrap().unwrap();
+        for _ in 0..10 {
+            assert!(receiver.begin_repair(&stale, None).unwrap().is_none());
+        }
+        receiver.cancel_repairs();
+        assert!(
+            receiver
+                .complete_repair(repair, Ok(carol_bundle.clone()))
+                .unwrap()
+                .is_none(),
+            "disconnected lookup completion is discarded"
+        );
+        receiver.repairs.clear();
+        let repair = receiver.begin_repair(&stale, None).unwrap().unwrap();
+        let mut changed = carol_bundle.clone();
+        changed.identity = alice_bundle.identity;
+        assert!(matches!(
+            receiver.complete_repair(repair, Ok(changed)),
+            Err(Error::TrustRequired)
+        ));
+        receiver.repairs.clear();
+        let repair = receiver.begin_repair(&stale, None).unwrap().unwrap();
+        let token = receiver
+            .complete_repair(repair, Ok(carol_bundle))
+            .unwrap()
+            .unwrap();
+        let pending = receiver
+            .pending()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.token.as_ref() == Some(&token))
+            .unwrap();
+        assert!(
+            pending.content.is_none(),
+            "repair never resends old message content"
+        );
+        let ack = pending.acknowledgement.unwrap();
+        assert!(ack.get_child("payload", NS).is_none());
+        assert_eq!(receiver.fingerprint().unwrap(), bob_bundle.identity);
+        let ack = attr(ack, "from", B);
+        let envelope = Envelope::parse(&ack, C, 303).unwrap();
+        receive_for(&mut carol, &carol_journal, &ack, &envelope, 0, None).unwrap();
+        let fresh_bundle = device::prepare_for(&mut receiver.store, 2, true).unwrap();
+        let next = attr(
+            encrypt_for(
+                &mut carol,
+                B,
+                "next",
+                "next",
+                &[(device(B, 202, &fresh_bundle), fresh_bundle)],
+            )
+            .unwrap(),
+            "from",
+            C,
+        );
+        let envelope = Envelope::parse(&next, B, 202).unwrap();
+        assert!(
+            receiver
+                .receive_for(&next, &envelope, 0, None)
+                .unwrap()
+                .content
+                .is_some()
+        );
+        receiver.repairs.clear();
+        assert!(
+            receiver.begin_repair(&stale, None).unwrap().is_none(),
+            "a working session is never replaced by an old failure"
+        );
+    }
 }

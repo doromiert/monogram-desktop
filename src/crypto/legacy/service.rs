@@ -260,6 +260,10 @@ pub enum Request {
         metadata: Message,
     },
     Accepted(Token),
+    RepairComplete {
+        repair: super::Repair,
+        bundle: Result<bundle::Bundle>,
+    },
 }
 pub struct Handle {
     tx: channel::UnboundedSender<Request>,
@@ -290,9 +294,10 @@ impl Handle {
             generation,
             events: events.clone(),
         };
+        let repair_tx = handle.tx.downgrade();
         thread::Builder::new().name("monogram-legacy-omemo".into()).spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("Legacy OMEMO runtime");
-            let mut worker = Worker { owner, generation, network, events, root: lifecycle::root(), local: None, online: false, ready: false };
+            let mut worker = Worker { owner, generation, network, events, root: lifecycle::root(), local: None, online: false, ready: false, repair_tx: Some(repair_tx) };
             runtime.block_on(async move {
                 tokio::select! {
                     _ = stopped => {},
@@ -386,6 +391,7 @@ struct Worker {
     local: Option<Legacy>,
     online: bool,
     ready: bool,
+    repair_tx: Option<channel::WeakUnboundedSender<Request>>,
 }
 fn archive(frame: &Frame) -> Option<(&str, &str)> {
     frame
@@ -465,6 +471,9 @@ fn outer_metadata(
 fn describe(error: &Error) -> String {
     match error {
         Error::Invalid(_) => "Invalid Legacy OMEMO message or key data".into(),
+        Error::Native(-1003) => {
+            "This Legacy OMEMO message refers to a key that is no longer available".into()
+        }
         Error::Native(_) => "Could not open or encrypt the Legacy OMEMO message".into(),
         Error::Storage(_) => "Could not save Legacy OMEMO state".into(),
         Error::Crypto(_) => "Legacy OMEMO message authentication failed".into(),
@@ -473,6 +482,12 @@ fn describe(error: &Error) -> String {
         }
         _ => error.to_string(),
     }
+}
+fn repair_candidate(frame: &Frame, error: &Error) -> bool {
+    matches!(error, Error::Native(-1003))
+        && !frame.historical
+        && frame.archive.is_none()
+        && frame.xml.get_child("delay", "urn:xmpp:delay").is_none()
 }
 impl Worker {
     fn emit(&self, event: BackendEvent) {
@@ -1178,7 +1193,44 @@ impl Worker {
             ) {
                 self.emit(event);
             }
+            if self.online && self.ready && repair_candidate(&frame, &error) {
+                self.repair(&frame.xml, room.as_ref());
+            }
         }
+    }
+
+    fn repair(&mut self, outer: &Element, room: Option<&RoomContext>) {
+        let Some(reply) = self.repair_tx.as_ref().and_then(|tx| tx.upgrade()) else {
+            return;
+        };
+        let Some(local) = self.local.as_mut() else {
+            return;
+        };
+        let Ok(Some(repair)) = local.begin_repair(outer, room.map(|context| &context.sender))
+        else {
+            return;
+        };
+        let Ok(discovery) = crate::crypto::pep::Pep::new(
+            iq::Client::new(self.network.clone()),
+            &self.owner,
+            local.device(),
+        ) else {
+            return;
+        };
+        let peer = repair.peer.clone();
+        let own = peer == self.owner;
+        tokio::spawn(async move {
+            let bundle = async {
+                let data = discovery
+                    .item(&peer, &super::bundle_node(repair.device), None)
+                    .await
+                    .map_err(|error| super::lookup(error, own))?
+                    .ok_or(Error::InvalidBundle)?;
+                super::wire::parse_bundle(&data)
+            }
+            .await;
+            let _ = reply.send(Request::RepairComplete { repair, bundle });
+        });
     }
     async fn process(&mut self, request: Request) {
         match request {
@@ -1189,8 +1241,23 @@ impl Worker {
                         self.status(Some(describe(&error)));
                     }
                 } else {
+                    if let Some(local) = self.local.as_mut() {
+                        local.cancel_repairs();
+                    }
                     self.ready = false;
                     self.status(None);
+                }
+            }
+            Request::RepairComplete { repair, bundle } => {
+                let Some(local) = self.local.as_mut() else {
+                    return;
+                };
+                if !self.online || !self.ready {
+                    local.cancel_repairs();
+                    return;
+                }
+                if let Ok(Some(token)) = local.complete_repair(repair, bundle) {
+                    let _ = self.accept(token).await;
                 }
             }
             Request::Enable => {
@@ -1355,6 +1422,7 @@ mod tests {
                 local: None,
                 online: false,
                 ready: false,
+                repair_tx: None,
             };
             runtime
                 .block_on(worker.deliver(received, None, authenticated_alias))
@@ -1606,6 +1674,7 @@ mod tests {
             local: None,
             online: false,
             ready: false,
+            repair_tx: None,
         };
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1649,5 +1718,31 @@ mod tests {
             old.room.is_none(),
             "old direct journal contexts remain readable"
         );
+    }
+}
+
+#[cfg(test)]
+mod repair_gate_tests {
+    use super::*;
+    #[test]
+    fn invalid_prekeys_only_repair_live_non_delayed_frames() {
+        let mut frame = Frame {
+            xml: Element::builder("message", payload::CLIENT).build(),
+            archive: None,
+            historical: false,
+            receipt_to: None,
+        };
+        assert!(repair_candidate(&frame, &Error::Native(-1003)));
+        assert!(!repair_candidate(&frame, &Error::TrustRequired));
+        frame.historical = true;
+        assert!(!repair_candidate(&frame, &Error::Native(-1003)));
+        frame.historical = false;
+        frame.archive = Some(("archive".into(), "id".into()));
+        assert!(!repair_candidate(&frame, &Error::Native(-1003)));
+        frame.archive = None;
+        frame
+            .xml
+            .append_child(Element::builder("delay", "urn:xmpp:delay").build());
+        assert!(!repair_candidate(&frame, &Error::Native(-1003)));
     }
 }
