@@ -272,10 +272,99 @@ fn bare_host(host: &str) -> bool {
                     .is_some_and(u8::is_ascii_alphanumeric)
         })
 }
-fn url_match(body: &str) -> Option<(std::ops::Range<usize>, String)> {
-    if body.encode_utf16().count() > 65536 {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClickableUrl {
+    /// UTF-8 bytes, matching Pango's attribute indices.
+    pub range: std::ops::Range<usize>,
+    pub uri: String,
+}
+fn code_ranges(body: &str) -> Vec<std::ops::Range<usize>> {
+    let bytes = body.as_bytes();
+    let (mut index, mut opening, mut ranges) = (0, None, Vec::new());
+    while index < bytes.len() {
+        if bytes[index] != b'`' {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < bytes.len() && bytes[index] == b'`' {
+            index += 1;
+        }
+        let mut slash = start;
+        while slash > 0 && bytes[slash - 1] == b'\\' {
+            slash -= 1;
+        }
+        if (start - slash) % 2 == 1 {
+            continue;
+        }
+        let width = index - start;
+        match opening {
+            None => opening = Some((start, width)),
+            Some((begin, count)) if count == width => {
+                ranges.push(begin..index);
+                opening = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some((start, _)) = opening.filter(|(_, width)| *width >= 3) {
+        ranges.push(start..body.len());
+    }
+    ranges
+}
+fn trim_url_token(token: &str) -> &str {
+    let mut balance = [0i32; 3];
+    for ch in token.chars() {
+        match ch {
+            '(' => balance[0] += 1,
+            ')' => balance[0] -= 1,
+            '[' => balance[1] += 1,
+            ']' => balance[1] -= 1,
+            '{' => balance[2] += 1,
+            '}' => balance[2] -= 1,
+            _ => {}
+        }
+    }
+    let mut end = token.len();
+    while let Some(ch) = token[..end].chars().next_back() {
+        let closing = match ch {
+            ')' => Some(0),
+            ']' => Some(1),
+            '}' => Some(2),
+            _ => None,
+        };
+        if ".,;:!?".contains(ch) {
+            end -= ch.len_utf8();
+        } else if let Some(index) = closing.filter(|index| balance[*index] < 0) {
+            balance[index] += 1;
+            end -= ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    &token[..end]
+}
+fn clickable_uri(address: &str) -> Option<String> {
+    if address.encode_utf16().count() > 4096
+        || address
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace() || "\\<>\"{}|^`".contains(ch))
+    {
         return None;
     }
+    let url = Url::parse(address).ok()?;
+    (matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none())
+    .then(|| url.to_string())
+}
+fn url_matches(body: &str, clickable: bool) -> Vec<ClickableUrl> {
+    let mut found = Vec::new();
+    if body.encode_utf16().count() > 65536 {
+        return found;
+    }
+    let code = code_ranges(body);
     let mut segment_end = 0;
     let mut consumed = 0;
     for (start, ch) in body.char_indices() {
@@ -290,14 +379,19 @@ fn url_match(body: &str) -> Option<(std::ops::Range<usize>, String)> {
         if start >= segment_end {
             segment_end = body[start..]
                 .char_indices()
-                .find(|(_, c)| c.is_whitespace() || c.is_control() || "<>\"".contains(*c))
+                .find(|(_, c)| c.is_whitespace() || c.is_control() || "<>\"`".contains(*c))
                 .map_or(body.len(), |(offset, _)| start + offset);
         }
         let tail = &body[start..segment_end];
         let explicit = tail
             .as_bytes()
             .get(..8)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"https://"));
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"https://"))
+            || clickable
+                && tail
+                    .as_bytes()
+                    .get(..7)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"http://"));
         let end = if explicit {
             segment_end
         } else {
@@ -322,17 +416,55 @@ fn url_match(body: &str) -> Option<(std::ops::Range<usize>, String)> {
             }
         };
         consumed = end;
-        let token = body[start..end].trim_end_matches(|c| ".,;:!?)]}".contains(c));
+        let token = trim_url_token(&body[start..end]);
+        let span = start..start + token.len();
+        if code
+            .iter()
+            .any(|range| range.start < span.end && range.end > span.start)
+        {
+            continue;
+        }
         let address = if explicit {
             token.to_owned()
         } else {
             format!("https://{token}")
         };
-        if let Ok(url) = safe_url(&address) {
-            return Some((start..end, url.to_string()));
+        let uri = if clickable {
+            clickable_uri(&address)
+        } else {
+            safe_url(&address).ok().map(|url| url.to_string())
+        };
+        if let Some(uri) = uri {
+            found.push(ClickableUrl { range: span, uri });
+            if !clickable || found.len() >= 512 {
+                break;
+            }
         }
     }
-    None
+    found
+}
+fn url_match(body: &str) -> Option<(std::ops::Range<usize>, String)> {
+    url_matches(body, false)
+        .into_iter()
+        .next()
+        .map(|link| (link.range, link.uri))
+}
+pub fn clickable_urls(
+    body: &str,
+    spoilers: Option<&crate::spoilers::Context>,
+) -> Vec<ClickableUrl> {
+    let context = spoilers.filter(|context| context.matches(body));
+    url_matches(body, true)
+        .into_iter()
+        .filter(|link| {
+            context.is_none_or(|context| {
+                !context.intersects(
+                    body[..link.range.start].chars().count(),
+                    body[..link.range.end].chars().count(),
+                )
+            })
+        })
+        .collect()
 }
 pub fn first_url(body: &str) -> Option<String> {
     url_match(body).map(|(_, url)| url)
@@ -1564,6 +1696,47 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clickable_spans_preserve_unicode_urls_and_exclude_code_and_spoilers() {
+        let body = "😀 (https://example.org/a(b)). http://localhost:3000/#part example.org?q=a&b=2 `https://hidden.org/` me@example.org javascript:alert(1)";
+        let links = clickable_urls(body, None);
+        assert_eq!(
+            links
+                .iter()
+                .map(|link| &body[link.range.clone()])
+                .collect::<Vec<_>>(),
+            [
+                "https://example.org/a(b)",
+                "http://localhost:3000/#part",
+                "example.org?q=a&b=2"
+            ]
+        );
+        assert_eq!(links[1].uri, "http://localhost:3000/#part");
+        assert_eq!(links[2].uri, "https://example.org/?q=a&b=2");
+        let hidden = &links[1].range;
+        let spoilers = crate::spoilers::Context {
+            whole: false,
+            ranges: vec![crate::spoilers::Range {
+                start: body[..hidden.start].chars().count(),
+                end: body[..hidden.end].chars().count(),
+            }],
+            text_hash: Some(openssl::sha::sha256(body.as_bytes())),
+        };
+        assert_eq!(clickable_urls(body, Some(&spoilers)).len(), 2);
+        assert_eq!(
+            clickable_urls("http://[::1]:3000/", None)[0].uri,
+            "http://[::1]:3000/"
+        );
+        assert!(
+            clickable_urls("http://user:pass@example.org/ ftp://example.org/", None).is_empty()
+        );
+        assert!(clickable_urls("```\nhttps://hidden.org/", None).is_empty());
+        assert_eq!(
+            first_url("`https://hidden.org/` https://example.org/"),
+            Some("https://example.org/".into())
+        );
+        assert!(clickable_urls(&"a(".repeat(32769), None).is_empty());
+    }
     #[test]
     fn bounded_metadata_destination_cache_and_cancellation_check() {
         assert_eq!(
