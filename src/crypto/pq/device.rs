@@ -425,13 +425,11 @@ impl Device {
     ) -> Result<Trust> {
         let pin = identity_pin(classic, pq)?;
         let key = native::peer_key(peer, id)?;
-        let own = peer == self.owner;
         let tx = self.begin()?;
         tx.put(&format!("observed/{key}"), Some(&pin))?;
         let blocked = tx.get(&format!("blocked/{key}"))?.is_some();
         let previous = tx.get(&format!("trust/{key}"))?;
         if blind
-            && !own
             && !blocked
             && previous.as_ref().map(|value| value.as_slice()) != Some(pin.as_slice())
         {
@@ -559,8 +557,16 @@ mod tests {
         assert_eq!(alice.observe(B, 202, &bb, true).unwrap(), Trust::Trusted);
         assert_eq!(
             alice.observe(A, 303, &bb, true).unwrap(),
-            Trust::Undecided,
-            "contact blind trust never approves own devices"
+            Trust::Trusted,
+            "the caller's enabled conversation policy also approves authenticated own devices"
+        );
+        alice
+            .decide(A, 303, &bb.fingerprint().unwrap(), false)
+            .unwrap();
+        assert_eq!(
+            alice.observe(A, 303, &bb, true).unwrap(),
+            Trust::Rejected,
+            "conversation blind trust must preserve an explicit own-device block"
         );
         assert_eq!(bob.observe(A, 101, &ab, false).unwrap(), Trust::Undecided);
         bob.decide(A, 101, &ab.fingerprint().unwrap(), true)

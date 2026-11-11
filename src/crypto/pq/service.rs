@@ -396,14 +396,25 @@ impl Worker {
             .insert(peer.into(), (Instant::now(), ids.clone()));
         Ok(ids)
     }
-    async fn observe(&mut self, peer: &str, id: u32, force: bool) -> Result<Option<Bundle>> {
+    async fn observe(
+        &mut self,
+        peer: &str,
+        id: u32,
+        force: bool,
+        blind: bool,
+    ) -> Result<Option<Bundle>> {
         if !force {
             if let Some((_, bundle)) = self
                 .bundles
                 .get(&(peer.into(), id))
                 .filter(|(time, _)| time.elapsed() < Duration::from_secs(60))
             {
-                return Ok(Some(bundle.clone()));
+                let bundle = bundle.clone();
+                self.local
+                    .as_mut()
+                    .ok_or(Error::Incomplete)?
+                    .observe(peer, id, &bundle, blind)?;
+                return Ok(Some(bundle));
             }
         }
         self.bundles.remove(&(peer.into(), id));
@@ -416,7 +427,6 @@ impl Worker {
             return Ok(None);
         };
         let bundle = Bundle::parse(&xml)?;
-        let blind = self.blind(peer)?;
         self.local
             .as_mut()
             .ok_or(Error::Incomplete)?
@@ -433,6 +443,7 @@ impl Worker {
         peer: &str,
         optional: bool,
         force: bool,
+        blind: bool,
     ) -> Result<Option<Vec<Target>>> {
         let ids = self.devices(peer, force).await?;
         if ids.is_empty() {
@@ -444,7 +455,7 @@ impl Worker {
             if peer == self.owner && id == local_id {
                 continue;
             }
-            let bundle = self.observe(peer, id, force).await?;
+            let bundle = self.observe(peer, id, force, blind).await?;
             let local = self.local.as_mut().ok_or(Error::Incomplete)?;
             let tx = local.begin()?;
             let blocked = tx
@@ -485,12 +496,12 @@ impl Worker {
         }
         Ok(Some(result))
     }
-    async fn discover(&mut self, peer: &str) -> Result<Vec<Review>> {
+    async fn discover(&mut self, peer: &str, blind: bool) -> Result<Vec<Review>> {
         self.initialize().await?;
         let ids = self.devices(peer, true).await?;
         for id in ids {
             if peer != self.owner || id != self.local.as_ref().unwrap().id {
-                self.observe(peer, id, true).await?;
+                self.observe(peer, id, true, blind).await?;
             }
         }
         self.reviews(peer)
@@ -517,12 +528,17 @@ impl Worker {
     }
     async fn recipients(&mut self, peer: &str) -> Result<Option<Vec<Target>>> {
         self.initialize().await?;
-        let Some(mut targets) = self.targets(peer, false, false).await? else {
+        let blind = self.blind(peer)?;
+        let Some(mut targets) = self.targets(peer, false, false, blind).await? else {
             return Ok(None);
         };
         if peer != self.owner {
             let owner = self.owner.clone();
-            targets.extend(self.targets(&owner, true, false).await?.unwrap_or_default());
+            targets.extend(
+                self.targets(&owner, true, false, blind)
+                    .await?
+                    .unwrap_or_default(),
+            );
         }
         Ok(Some(targets))
     }
@@ -535,7 +551,15 @@ impl Worker {
         }
         let mut targets = Vec::new();
         for peer in recipients.members.keys() {
-            let Some(found) = self.targets(peer, peer == &self.owner, false).await? else {
+            let blind = self.blind(if peer == &self.owner {
+                &recipients.room
+            } else {
+                peer
+            })?;
+            let Some(found) = self
+                .targets(peer, peer == &self.owner, false, blind)
+                .await?
+            else {
                 return Ok(None);
             };
             targets.extend(found);
@@ -675,7 +699,11 @@ impl Worker {
         let stamp = chrono::DateTime::parse_from_rfc3339(&outer.timestamp)
             .map(|time| time.timestamp_millis())
             .unwrap_or_else(|_| chrono::Utc::now().timestamp_millis());
-        let blind = self.blind(&sender)?;
+        let blind = self.blind(if sender == self.owner {
+            &destination
+        } else {
+            &sender
+        })?;
         let received = wire::receive(
             self.local.as_mut().unwrap(),
             &frame.xml,
@@ -772,7 +800,7 @@ impl Worker {
             return;
         };
         let rows = (|| -> Result<Vec<Message>> {
-            let mut query = history.db.prepare("SELECT body FROM messages WHERE account=?1 AND (peer=?2 OR (?3=1 AND json_extract(body,'$.own')=1)) AND json_extract(body,'$.unavailable')=1 AND json_extract(body,'$.encryption_mode')='Pq' AND length(json_extract(body,'$.ciphertext'))>0 ORDER BY timestamp DESC LIMIT 128")?;
+            let mut query = history.db.prepare("SELECT body FROM (SELECT body,timestamp FROM messages WHERE account=?1 AND (peer=?2 OR (?3=1 AND json_extract(body,'$.own')=1)) AND json_extract(body,'$.unavailable')=1 AND json_extract(body,'$.encryption_mode')='Pq' AND length(json_extract(body,'$.ciphertext'))>0 ORDER BY timestamp DESC LIMIT 128) ORDER BY timestamp ASC")?;
             let bodies = query
                 .query_map(
                     rusqlite::params![self.owner, peer, peer == self.owner],
@@ -819,8 +847,12 @@ impl Worker {
                 self.bundles.clear();
                 self.lists.clear();
                 if online {
-                    if let Err(error) = self.initialize().await {
-                        self.status(Some(describe(&error)));
+                    match self.initialize().await {
+                        Ok(()) => {
+                            let owner = self.owner.clone();
+                            self.retry(&owner).await;
+                        }
+                        Err(error) => self.status(Some(describe(&error))),
                     }
                 } else {
                     self.ready = false;
@@ -865,7 +897,15 @@ impl Worker {
                 let mut devices = Vec::new();
                 let mut failed = None;
                 for member in members {
-                    match self.discover(&member).await {
+                    let blind = match self.blind(if member == self.owner { &peer } else { &member })
+                    {
+                        Ok(blind) => blind,
+                        Err(error) => {
+                            failed = Some(error);
+                            break;
+                        }
+                    };
+                    match self.discover(&member, blind).await {
                         Ok(found) => devices.extend(found),
                         Err(error) => {
                             failed = Some(error);
@@ -952,11 +992,21 @@ impl Worker {
         }
     }
     async fn process_review(&mut self, peer: &str) {
-        match self.discover(peer).await {
+        let blind = match self.blind(peer) {
+            Ok(blind) => blind,
+            Err(error) => {
+                self.emit(BackendEvent::CryptoError {
+                    peer: peer.into(),
+                    text: describe(&error),
+                });
+                return;
+            }
+        };
+        match self.discover(peer, blind).await {
             Ok(mut devices) => {
                 if peer != self.owner {
                     let owner = self.owner.clone();
-                    match self.discover(&owner).await {
+                    match self.discover(&owner, blind).await {
                         Ok(own) => devices.extend(own),
                         Err(error) => {
                             devices.extend(self.reviews(&owner).unwrap_or_default());
@@ -1077,7 +1127,7 @@ mod actor_tests {
                     &[Target {
                         peer: owner.into(),
                         device: local.id,
-                        bundle: Some(local_bundle),
+                        bundle: Some(local_bundle.clone()),
                     }],
                     false,
                 )
@@ -1161,7 +1211,9 @@ mod actor_tests {
                     })
                     .expect("explicit own review must retry the actual contact chat");
                 assert_eq!(restored.0, peer);
-                restored.1.id = history.known_message(owner, peer, &restored.1).expect("original unavailable row must resolve through authenticated wire aliases");
+                restored.1.id = history.known_message(owner, peer, &restored.1).expect(
+                    "original unavailable row must resolve through authenticated wire aliases",
+                );
                 assert_eq!(restored.1.id, pending.id);
                 assert_eq!(restored.1.text, "Own carbon restored");
                 assert!(!restored.1.unavailable);
@@ -1178,6 +1230,67 @@ mod actor_tests {
                     .query_row("SELECT count(*) FROM messages", [], |row| row.get(0))
                     .unwrap();
                 assert_eq!(count, 1);
+                // Enabling blind trust on this chat covers new authenticated own keys,
+                // but cannot override a device the user explicitly blocked.
+                history.set_blind_trust(owner, peer, true).unwrap();
+                worker
+                    .local
+                    .as_mut()
+                    .unwrap()
+                    .decide(owner, phone.id, &rows[0].fingerprint, false)
+                    .unwrap();
+                let local_bundle =
+                    Bundle::from_parts(worker.local.as_mut().unwrap().prepare().unwrap()).unwrap();
+                let mut other = Device::memory(owner, 83).unwrap();
+                other.prepare().unwrap();
+                other.observe(owner, 81, &local_bundle, false).unwrap();
+                other
+                    .decide(owner, 81, &local_bundle.fingerprint().unwrap(), true)
+                    .unwrap();
+                for (sender, blocked) in [(&mut phone, true), (&mut other, false)] {
+                    let encrypted = wire::encrypt(
+                        sender,
+                        &plain,
+                        &[Target {
+                            peer: owner.into(),
+                            device: 81,
+                            bundle: Some(local_bundle.clone()),
+                        }],
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                    let outer = Element::builder("message", payload::CLIENT)
+                        .attr("from".try_into().unwrap(), owner)
+                        .attr("to".try_into().unwrap(), peer)
+                        .attr("type".try_into().unwrap(), "chat")
+                        .attr("id".try_into().unwrap(), uuid::Uuid::new_v4().to_string())
+                        .append(encrypted)
+                        .build();
+                    let result = worker
+                        .incoming(
+                            Frame {
+                                xml: outer,
+                                archive: None,
+                                historical: false,
+                                receipt_to: None,
+                            },
+                            None,
+                        )
+                        .await;
+                    if blocked {
+                        assert!(matches!(result, Err(Error::OwnDeviceTrustRequired)));
+                    } else {
+                        result.unwrap();
+                    }
+                    let review = worker
+                        .reviews(owner)
+                        .unwrap()
+                        .into_iter()
+                        .find(|row| row.device == sender.id)
+                        .unwrap();
+                    assert_eq!(review.trust, if blocked { "rejected" } else { "trusted" });
+                }
                 drop(history);
                 drop(memory);
                 drop(worker);
