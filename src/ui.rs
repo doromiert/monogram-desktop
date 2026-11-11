@@ -1228,7 +1228,7 @@ impl Ui {
         composer.append(&attach);
         self.input_scroll.set_child(Some(&self.composer));
         self.input_scroll
-            .set_policy(gtk::PolicyType::Never, gtk::PolicyType::Never);
+            .set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         let input = gtk::Overlay::builder()
             .child(&self.input_scroll)
             .hexpand(true)
@@ -1297,14 +1297,6 @@ impl Ui {
         let composer_text = self.composer_text();
         self.composer_placeholder
             .set_visible(composer_text.is_empty());
-        let lines = self.composer.buffer().line_count();
-        self.input_scroll
-            .set_min_content_height((lines * 20 + 12).clamp(32, 108));
-        self.input_scroll.set_vscrollbar_policy(if lines > 4 {
-            gtk::PolicyType::Automatic
-        } else {
-            gtk::PolicyType::Never
-        });
         self.send_button.set_sensitive(
             !composer_text.trim().is_empty() || !self.attachments.borrow().is_empty(),
         );
