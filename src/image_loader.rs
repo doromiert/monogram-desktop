@@ -677,7 +677,8 @@ fn play_input<W: IsA<gtk::Widget> + Clone + 'static>(
             let _ = drop_animation_context(&state);
             return glib::ControlFlow::Continue;
         }
-        if let Some(receive) = state.pending.borrow_mut().take() {
+        let receive = state.pending.borrow_mut().take();
+        if let Some(receive) = receive {
             match receive.try_recv() {
                 Ok(Ok(frame)) => {
                     draw(&picture, frame.texture);
