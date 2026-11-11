@@ -35,7 +35,11 @@ impl Bookmark {
     /// When editing a server item, None preserves its password; Some(empty) clears it.
     pub fn new(mut info: BookmarkInfo, password: Option<Zeroizing<String>>) -> Result<Self> {
         info.jid = bare(&info.jid)?;
-        if info.name.len() > 1024 || password.as_ref().is_some_and(|value| value.len() > 1023) {
+        if info.name.len() > 1024
+            || password
+                .as_ref()
+                .is_some_and(|value| value.encode_utf16().count() > 4096)
+        {
             return Err(Error::Invalid);
         }
         info.nick = info
@@ -138,7 +142,11 @@ fn simple_text(xml: &Element, name: &str, ns: &str) -> Result<Option<String>> {
         return Err(Error::Invalid);
     }
     let text = value.text();
-    if text.len() > 1023 {
+    if if name == "password" {
+        text.encode_utf16().count() > 4096
+    } else {
+        text.len() > 1023
+    } {
         return Err(Error::Invalid);
     }
     Ok((!text.is_empty()).then_some(text))

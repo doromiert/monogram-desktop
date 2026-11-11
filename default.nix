@@ -4,7 +4,7 @@ in rustPlatform.buildRustPackage {
   pname = "monogram-desktop";
   version = "0.2.0";
   src = lib.cleanSource ./.;
-  cargoHash = "sha256-xgg3aNJEywGo819ZCoSRoVoZfDRPPHEENj9R3rgkN4E=";
+  cargoHash = "sha256-UryRp1nOeUCKo7YNNHk2A76DLnicMzeJt2n53nSGip0=";
   nativeBuildInputs = [ pkg-config wrapGAppsHook4 ];
   buildInputs = [ clapper-unwrapped clapper-unwrapped.lib gtk4 libadwaita libepoxy libglycin-gtk4 glycin-loaders sqlite libomemo-c openssl librsvg gsettings-desktop-schemas gst_all_1.gstreamer gst_all_1.gst-plugins-base gst_all_1.gst-plugins-good gst_all_1.gst-plugins-bad gst_all_1.gst-plugins-ugly gst_all_1.gst-libav ];
   nativeCheckInputs = [ xorg-server dbus prosody openssl python3 jdk21 gnome-keyring ];

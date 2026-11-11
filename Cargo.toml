@@ -40,3 +40,7 @@ debug = 0
 
 [profile.release]
 lto = "thin"
+
+[patch.crates-io]
+# Bounded tokens for mobile invitation passwords; see vendor/tokio-xmpp/MONOGRAM-NOTICE.md.
+tokio-xmpp = { path = "vendor/tokio-xmpp" }

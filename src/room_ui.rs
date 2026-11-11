@@ -119,7 +119,7 @@ impl Ui {
             }
         });
     }
-    fn remember_room(self: &Rc<Self>, info: &BookmarkInfo) -> bool {
+    pub(crate) fn remember_room(self: &Rc<Self>, info: &BookmarkInfo) -> bool {
         let owner = self.state.borrow().account.clone();
         if self.store.save_room_choice(&owner, info).is_err() {
             self.notice(&format!(
@@ -150,7 +150,7 @@ impl Ui {
         self.sync_room_bookmarks();
         true
     }
-    fn open_room(self: &Rc<Self>, info: &BookmarkInfo) {
+    pub(crate) fn open_room(self: &Rc<Self>, info: &BookmarkInfo) {
         let id = self.state.borrow_mut().chat_for(&info.jid).id.clone();
         self.select_chat(&id);
     }

@@ -25,6 +25,20 @@ pub fn bare(value: &str) -> Result<String, String> {
 fn bare_of(value: &str) -> String {
     value.split('/').next().unwrap_or("").to_string()
 }
+fn subscription_peer(presence: &Element, owner: &str) -> Option<String> {
+    if !presence.is("presence", NS)
+        || !matches!(presence.attr("type"), Some("subscribe" | "unsubscribe"))
+        || presence.attr("to").is_some_and(|to| {
+            to.parse::<tokio_xmpp::jid::Jid>()
+                .ok()
+                .is_none_or(|jid| jid.to_bare().as_str() != owner)
+        })
+    {
+        return None;
+    }
+    let from = presence.attr("from")?;
+    (from != owner && bare(from).ok().as_deref() == Some(from)).then(|| from.to_owned())
+}
 pub fn el(name: &str, ns: &str) -> Element {
     Element::builder(name, ns).build()
 }
@@ -121,6 +135,9 @@ fn normalize_content(
     if xml
         .get_child("x", "http://jabber.org/protocol/muc#user")
         .is_some()
+        || xml
+            .get_child("x", crate::rooms::invitations::DIRECT)
+            .is_some()
     {
         return None;
     }
@@ -549,6 +566,8 @@ pub enum BackendEvent {
         error: bool,
     },
     Request(String),
+    RequestCancelled(String),
+    RoomInvitation(crate::rooms::invitations::Incoming),
 }
 #[derive(Debug)]
 pub enum RoomPreparation {
@@ -719,6 +738,7 @@ pub enum Command {
     Authorize {
         peer: String,
         allow: bool,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
     Receipt {
         peer: String,
@@ -1091,7 +1111,15 @@ impl Session {
                             }
                         },
                         Some(Command::Typing{peer,composing})=>{if online{send(&mut client,Element::builder("message",NS).attr("type".try_into().expect("static XML attribute"),"chat").attr("to".try_into().expect("static XML attribute"),peer).append(el(if composing{"composing"}else{"paused"},"http://jabber.org/protocol/chatstates")).build()).await;}},
-                        Some(Command::Authorize{peer,allow})=>{if online{send(&mut client,Element::builder("presence",NS).attr("to".try_into().expect("static XML attribute"),peer).attr("type".try_into().expect("static XML attribute"),if allow{"subscribed"}else{"unsubscribed"}).build()).await;}},
+                        Some(Command::Authorize{peer,allow,reply})=>{
+                            if reply.is_closed() { continue; }
+                            let valid = bare(&peer).ok().as_deref() == Some(peer.as_str()) && peer != owner;
+                            let result = if !online { Err("Reconnect to respond to this request".into()) }
+                                else if !valid { Err("Invalid contact address".into()) }
+                                else if send(&mut client,Element::builder("presence",NS).attr("to".try_into().expect("static XML attribute"),peer).attr("type".try_into().expect("static XML attribute"),if allow{"subscribed"}else{"unsubscribed"}).build()).await { Ok(()) }
+                                else { Err("The request response could not be sent. Try again.".into()) };
+                            let _ = reply.send(result);
+                        },
                         Some(Command::Receipt{peer,id})=>{if online{send(&mut client,Element::builder("message",NS).attr("to".try_into().expect("static XML attribute"),peer).attr("type".try_into().expect("static XML attribute"),"chat").append(Element::builder("received","urn:xmpp:receipts").attr("id".try_into().expect("static XML attribute"),id).build()).build()).await;}},
                     }},
                     event=client.next()=>{match event{
@@ -1114,6 +1142,12 @@ impl Session {
                                         deliver_room(&rooms,&legacy,&emit,result.xml,&owner,Some((result.uid,result.stamp)));
                                     } else if normalize(result.xml,&owner,Some((result.uid,result.stamp))).is_some_and(|(peer,_,_)| peer==page.peer) {
                                         deliver(&crypto,&legacy,&emit,result.xml,&owner,Some((result.uid,result.stamp)),true,None);
+                                    }
+                                    continue;
+                                }
+                                if crate::rooms::invitations::recognized(&root) {
+                                    if let Some(invite) = crate::rooms::invitations::parse(&root, &owner) {
+                                        if !rooms.is_joined(&invite.room) { emit(BackendEvent::RoomInvitation(invite)); }
                                     }
                                     continue;
                                 }
@@ -1146,7 +1180,12 @@ impl Session {
                                     continue;
                                 }
                                 if root.get_child("x","http://jabber.org/protocol/muc#user").is_some(){continue;}
-                                let peer=bare_of(from);let kind=root.attr("type").unwrap_or("");if kind.is_empty() {if let Some(hint)=crate::avatar::presence_hash(&root){let avatar_peer=if root.get_child("x","http://jabber.org/protocol/muc#user").is_some(){from.to_string()}else{peer.clone()};if bare(&peer).ok().as_deref()==Some(&peer){emit(BackendEvent::AvatarChanged{peer:avatar_peer,hint:Some(hint)});}}}if kind=="subscribe"{emit(BackendEvent::Request(peer));continue}let set=resources.entry(peer.clone()).or_default();if kind=="unavailable"{set.remove(from);}else if kind.is_empty(){set.insert(from.into());}emit(BackendEvent::Presence{peer,online:!set.is_empty()});
+                                let peer=bare_of(from);let kind=root.attr("type").unwrap_or("");if kind.is_empty() {if let Some(hint)=crate::avatar::presence_hash(&root){let avatar_peer=if root.get_child("x","http://jabber.org/protocol/muc#user").is_some(){from.to_string()}else{peer.clone()};if bare(&peer).ok().as_deref()==Some(&peer){emit(BackendEvent::AvatarChanged{peer:avatar_peer,hint:Some(hint)});}}}if matches!(kind,"subscribe"|"unsubscribe") {
+                                    if let Some(peer)=subscription_peer(&root,&owner).filter(|peer| !rooms.known(peer)) {
+                                        emit(if kind=="subscribe" { BackendEvent::Request(peer) } else { BackendEvent::RequestCancelled(peer) });
+                                    }
+                                    continue;
+                                }let set=resources.entry(peer.clone()).or_default();if kind=="unavailable"{set.remove(from);}else if kind.is_empty(){set.insert(from.into());}emit(BackendEvent::Presence{peer,online:!set.is_empty()});
                             }else if root.is("iq",NS){let id=root.attr("id").unwrap_or("");let trusted=from.is_empty()||from==owner;
                                 if trusted{if let Some(query)=root.get_child("query","jabber:iq:roster"){let contacts=query.children().filter(|c|c.is("item","jabber:iq:roster")).filter_map(|c|Some((c.attr("jid")?.into(),c.attr("name").unwrap_or("").into(),c.attr("subscription").unwrap_or("none").into()))).collect();emit(BackendEvent::Roster(contacts));if root.attr("type")==Some("set"){send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).build()).await;}}}
                                 if let Some(page)=mam.get(id) {
@@ -1156,7 +1195,7 @@ impl Session {
                                     }
                                     continue;
                                 }
-                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in ["urn:xmpp:receipts",REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT,crate::polls::NS,crate::forwarding::NS,crate::file_share::NS]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if legacy_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),legacy::NS).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
+                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in ["urn:xmpp:receipts",REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT,crate::polls::NS,crate::forwarding::NS,crate::file_share::NS,crate::rooms::invitations::DIRECT]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if legacy_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),legacy::NS).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
                             }
                         }
                     }},
@@ -1299,6 +1338,37 @@ async fn send(client: &mut Client, root: Element) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn subscriptions_require_a_real_bare_contact_for_this_account() {
+        for kind in ["subscribe", "unsubscribe"] {
+            let xml: Element = format!("<presence xmlns='jabber:client' type='{kind}' from='friend@example.org' to='me@example.org/desktop'/>").parse().unwrap();
+            assert_eq!(
+                subscription_peer(&xml, "me@example.org").as_deref(),
+                Some("friend@example.org")
+            );
+            for from in ["friend@example.org/phone", "example.org", "me@example.org"] {
+                let mut invalid = xml.clone();
+                invalid.set_attr("".into(), "from".try_into().unwrap(), from);
+                assert!(subscription_peer(&invalid, "me@example.org").is_none());
+            }
+            let mut wrong_account = xml;
+            wrong_account.set_attr("".into(), "to".try_into().unwrap(), "other@example.org");
+            assert!(subscription_peer(&wrong_account, "me@example.org").is_none());
+        }
+    }
+    #[test]
+    fn invitations_never_become_fallback_direct_messages() {
+        let direct: Element = "<message xmlns='jabber:client' type='chat' from='friend@example.org' to='me@example.org'><body>Invitation fallback</body><x xmlns='jabber:x:conference' jid='room@conference.example.org'/></message>".parse().unwrap();
+        assert!(normalize(&direct, "me@example.org", None).is_none());
+        assert!(
+            normalize(
+                &direct,
+                "me@example.org",
+                Some(("archive-id", "2026-11-11T12:00:00Z"))
+            )
+            .is_none()
+        );
+    }
     #[test]
     fn empty_ids_are_not_shared_aliases() {
         let xml:Element="<message xmlns='jabber:client' from='b@example.org' to='a@example.org' id=''><body>Keep this message</body><origin-id xmlns='urn:xmpp:sid:0' id=''/><stanza-id xmlns='urn:xmpp:sid:0' by='a@example.org' id=''/></message>".parse().unwrap();

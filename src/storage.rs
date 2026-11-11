@@ -1,8 +1,11 @@
 use crate::model::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+#[path = "request_store.rs"]
+mod request_store;
 #[path = "rooms/store.rs"]
 mod room_store;
+pub use request_store::{ContactRequest, PendingRequests, RoomInvitation};
 pub struct Store {
     pub db: Connection,
 }
@@ -51,6 +54,7 @@ impl Store {
         store.init_actions()?;
         store.init_media()?;
         store.init_rooms()?;
+        store.init_requests()?;
         store.db.execute_batch("CREATE TABLE IF NOT EXISTS upload_captions(account TEXT NOT NULL,peer TEXT NOT NULL,id TEXT NOT NULL,parent TEXT NOT NULL,PRIMARY KEY(account,peer,id),FOREIGN KEY(account,peer,id) REFERENCES messages(account,peer,id) ON DELETE CASCADE);")?;
         Ok(store)
     }
@@ -350,6 +354,13 @@ impl Store {
             }
         }
         let mut s = State::live(a, chats);
+        if let Ok(requests) = self.pending_requests(a) {
+            s.requests = requests
+                .contacts
+                .into_iter()
+                .map(|request| (request.peer, request.description))
+                .collect();
+        }
         let active = self.pref(&format!("active-chat:{a}"), "");
         if s.chats.iter().any(|chat| chat.id == active) {
             s.active = active;

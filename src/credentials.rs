@@ -13,6 +13,7 @@ use zeroize::Zeroizing;
 const APP: &str = "com.negzero.MonogramDesktop";
 const PURPOSE: &str = "XMPP login password v1";
 const ROOM_PURPOSE: &str = "XMPP room password v1";
+const INVITATION_PURPOSE: &str = "XMPP room invitation password v1";
 const CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 static OPERATIONS: LazyLock<Arc<Mutex<()>>> = LazyLock::new(|| Arc::new(Mutex::new(())));
 
@@ -77,10 +78,45 @@ pub async fn load_room(account: &str, room: &str) -> Result<Password, Error> {
 }
 
 pub async fn store_room(account: &str, room: &str, password: Password) -> Result<(), Error> {
-    if password.len() > 1023 {
+    if password.encode_utf16().count() > 4096 {
         return Err(Error::Invalid);
     }
     run_scoped(account, Some(room), Operation::Store(password))
+        .await
+        .map(|_| ())
+}
+
+pub async fn load_invitation(
+    account: &str,
+    room: &str,
+    secret_id: &str,
+) -> Result<Password, Error> {
+    run_scope(account, Some(room), Some(secret_id), Operation::Load)
+        .await?
+        .ok_or(Error::Missing)
+}
+
+pub async fn store_invitation(
+    account: &str,
+    room: &str,
+    secret_id: &str,
+    password: Password,
+) -> Result<(), Error> {
+    if password.is_empty() || password.encode_utf16().count() > 4096 {
+        return Err(Error::Invalid);
+    }
+    run_scope(
+        account,
+        Some(room),
+        Some(secret_id),
+        Operation::Store(password),
+    )
+    .await
+    .map(|_| ())
+}
+
+pub async fn remove_invitation(account: &str, room: &str, secret_id: &str) -> Result<(), Error> {
+    run_scope(account, Some(room), Some(secret_id), Operation::Remove)
         .await
         .map(|_| ())
 }
@@ -94,14 +130,29 @@ async fn run_scoped(
     room: Option<&str>,
     operation: Operation,
 ) -> Result<Option<Password>, Error> {
+    run_scope(account, room, None, operation).await
+}
+
+async fn run_scope(
+    account: &str,
+    room: Option<&str>,
+    secret_id: Option<&str>,
+    operation: Operation,
+) -> Result<Option<Password>, Error> {
     if crate::protocol::bare(account).ok().as_deref() != Some(account) {
         return Err(Error::Invalid);
     }
     if room.is_some_and(|room| crate::protocol::bare(room).ok().as_deref() != Some(room)) {
         return Err(Error::Invalid);
     }
+    if secret_id.is_some_and(|id| uuid::Uuid::parse_str(id).is_err())
+        || secret_id.is_some() && room.is_none()
+    {
+        return Err(Error::Invalid);
+    }
     let account = account.to_owned();
     let room = room.map(str::to_owned);
+    let secret_id = secret_id.map(str::to_owned);
     let worker_runtime = room.is_some() && tokio::runtime::Handle::try_current().is_ok();
     let guard = OPERATIONS.clone().lock_owned().await;
     let work = move || {
@@ -114,7 +165,7 @@ async fn run_scoped(
             .block_on(async {
                 tokio::time::timeout(
                     Duration::from_secs(10),
-                    execute_scoped(&account, room.as_deref(), operation),
+                    execute_scoped(&account, room.as_deref(), secret_id.as_deref(), operation),
                 )
                 .await
                 .map_err(|_| Error::Unavailable)?
@@ -168,6 +219,7 @@ async fn matching_items<'a>(
 async fn execute_scoped(
     account: &str,
     room: Option<&str>,
+    secret_id: Option<&str>,
     operation: Operation,
 ) -> Result<Option<Password>, Error> {
     let service = SecretService::connect(EncryptionType::Dh).await?;
@@ -175,6 +227,10 @@ async fn execute_scoped(
     if let Some(room) = room {
         attrs.insert("purpose", ROOM_PURPOSE);
         attrs.insert("room", room);
+    }
+    if let Some(secret_id) = secret_id {
+        attrs.insert("purpose", INVITATION_PURPOSE);
+        attrs.insert("invitation", secret_id);
     }
     let mut items = matching_items(&service, &attrs).await?;
     match operation {
@@ -200,7 +256,13 @@ async fn execute_scoped(
                 collection
                     .create_item(
                         &room
-                            .map(|room| format!("Monogram room · {account} · {room}"))
+                            .map(|room| {
+                                if secret_id.is_some() {
+                                    format!("Monogram invitation · {account} · {room}")
+                                } else {
+                                    format!("Monogram room · {account} · {room}")
+                                }
+                            })
                             .unwrap_or_else(|| format!("Monogram XMPP login · {account}")),
                         attrs,
                         password.as_bytes(),
@@ -212,29 +274,40 @@ async fn execute_scoped(
         }
         Operation::Remove => {
             if room.is_none() {
-                let mut query = attributes(account);
-                query.insert("purpose", ROOM_PURPOSE);
-                let found = service.search_items(query).await?;
-                for item in found.unlocked.into_iter().chain(found.locked) {
-                    let values = item.get_attributes().await?;
-                    let Some(room) = values.get("room") else {
-                        continue;
-                    };
-                    if crate::protocol::bare(room).ok().as_deref() != Some(room.as_str()) {
-                        continue;
-                    }
-                    let mut exact = attributes(account);
-                    exact.insert("purpose", ROOM_PURPOSE);
-                    exact.insert("room", room);
-                    let schema = values
-                        .get("xdg:schema")
-                        .is_some_and(|value| value == "org.freedesktop.Secret.Generic");
-                    if values.len() == exact.len() + usize::from(schema)
-                        && exact.iter().all(|(key, value)| {
-                            values.get(*key).map(String::as_str) == Some(*value)
-                        })
-                    {
-                        items.push(item);
+                for purpose in [ROOM_PURPOSE, INVITATION_PURPOSE] {
+                    let mut query = attributes(account);
+                    query.insert("purpose", purpose);
+                    let found = service.search_items(query).await?;
+                    for item in found.unlocked.into_iter().chain(found.locked) {
+                        let values = item.get_attributes().await?;
+                        let Some(room) = values.get("room") else {
+                            continue;
+                        };
+                        if crate::protocol::bare(room).ok().as_deref() != Some(room.as_str()) {
+                            continue;
+                        }
+                        let mut exact = attributes(account);
+                        exact.insert("purpose", purpose);
+                        exact.insert("room", room);
+                        if purpose == INVITATION_PURPOSE {
+                            let Some(id) = values.get("invitation") else {
+                                continue;
+                            };
+                            if uuid::Uuid::parse_str(id).is_err() {
+                                continue;
+                            }
+                            exact.insert("invitation", id);
+                        }
+                        let schema = values
+                            .get("xdg:schema")
+                            .is_some_and(|value| value == "org.freedesktop.Secret.Generic");
+                        if values.len() == exact.len() + usize::from(schema)
+                            && exact.iter().all(|(key, value)| {
+                                values.get(*key).map(String::as_str) == Some(*value)
+                            })
+                        {
+                            items.push(item);
+                        }
                     }
                 }
             }
@@ -252,6 +325,80 @@ async fn execute_scoped(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires the disposable Secret Service fixture"]
+    fn isolated_invitation_passwords_are_separate_and_removed_with_account() {
+        assert_eq!(
+            std::env::var("MONOGRAM_KEYRING_FIXTURE").as_deref(),
+            Ok("1")
+        );
+        let ctx = gtk::glib::MainContext::new();
+        ctx.block_on(async {
+            let owner = "invitation-owner@example.invalid";
+            let other = "invitation-other@example.invalid";
+            let room = "room@conference.example.invalid";
+            let first = uuid::Uuid::new_v4().to_string();
+            let second = uuid::Uuid::new_v4().to_string();
+            store_room(owner, room, Zeroizing::new("joined-room-password".into()))
+                .await
+                .unwrap();
+            store_invitation(
+                owner,
+                room,
+                &first,
+                Zeroizing::new("pending-invitation".into()),
+            )
+            .await
+            .unwrap();
+            store_invitation(
+                owner,
+                room,
+                &second,
+                Zeroizing::new("new-invitation".into()),
+            )
+            .await
+            .unwrap();
+            store_invitation(other, room, &first, Zeroizing::new("other-account".into()))
+                .await
+                .unwrap();
+            assert_eq!(
+                load_room(owner, room).await.unwrap().as_str(),
+                "joined-room-password"
+            );
+            assert_eq!(
+                load_invitation(owner, room, &first).await.unwrap().as_str(),
+                "pending-invitation"
+            );
+            remove_invitation(owner, room, &first).await.unwrap();
+            assert_eq!(
+                load_invitation(owner, room, &first).await,
+                Err(Error::Missing)
+            );
+            assert_eq!(
+                load_invitation(owner, room, &second)
+                    .await
+                    .unwrap()
+                    .as_str(),
+                "new-invitation"
+            );
+            remove(owner).await.unwrap();
+            assert_eq!(load_room(owner, room).await, Err(Error::Missing));
+            assert_eq!(
+                load_invitation(owner, room, &second).await,
+                Err(Error::Missing)
+            );
+            assert_eq!(
+                load_invitation(other, room, &first).await.unwrap().as_str(),
+                "other-account"
+            );
+            assert_eq!(
+                load_invitation(owner, room, "not-an-id").await,
+                Err(Error::Invalid)
+            );
+            remove(other).await.unwrap();
+        });
+    }
 
     #[test]
     #[ignore = "requires the disposable Secret Service fixture"]

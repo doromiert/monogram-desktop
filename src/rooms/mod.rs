@@ -1,6 +1,7 @@
 //! Live room bookmarks and XEP-0045 membership. A bookmark alone never authorizes sending.
 pub mod archive;
 mod bookmarks;
+pub mod invitations;
 pub mod manage;
 pub mod members;
 mod muc;

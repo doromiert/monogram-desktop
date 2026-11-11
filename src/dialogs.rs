@@ -1083,65 +1083,7 @@ impl Ui {
         });
     }
     pub fn requests(self: &Rc<Self>) {
-        let owner = self.state.borrow().account.clone();
-        let body = bx(true, 18);
-        margins(&body, 24);
-        body.append(&wrap(
-            "Choose who may contact you and see your presence.",
-            "",
-        ));
-        for (name, description) in self.state.borrow().requests.clone() {
-            let g = adw::PreferencesGroup::new();
-            let row = adw::ActionRow::builder()
-                .title(&name)
-                .subtitle(&description)
-                .use_markup(false)
-                .build();
-            let actions = bx(false, 6);
-            actions.set_valign(gtk::Align::Center);
-            for (title, allow) in [("Decline", false), ("Accept", true)] {
-                let b = gtk::Button::with_label(title);
-                if allow {
-                    b.add_css_class("suggested-action")
-                }
-                let weak = Rc::downgrade(self);
-                let name = name.clone();
-                let description = description.clone();
-                let owner = owner.clone();
-                let group = g.clone();
-                b.connect_clicked(move |_| {
-                    if let Some(ui) = weak.upgrade() {
-                        if ui.state.borrow().account != owner {
-                            return;
-                        }
-                        if !owner.is_empty() {
-                            if !ui.online.get() {
-                                ui.notice("Reconnect to respond to this request");
-                                return;
-                            }
-                            ui.command(protocol::Command::Authorize {
-                                peer: name.clone(),
-                                allow,
-                            });
-                        }
-                        ui.state
-                            .borrow_mut()
-                            .requests
-                            .retain(|item| item != &(name.clone(), description.clone()));
-                        group.set_visible(false);
-                        ui.request_badge
-                            .set_text(&ui.state.borrow().requests.len().to_string());
-                        ui.request_badge
-                            .set_visible(!ui.state.borrow().requests.is_empty());
-                    }
-                });
-                actions.append(&b)
-            }
-            row.add_suffix(&actions);
-            g.add(&row);
-            body.append(&g)
-        }
-        self.dialog("Requests and Invitations", &scroll(&body), 520, 480);
+        self.requests_and_invitations();
     }
     pub fn contacts(self: &Rc<Self>) {
         let page = adw::PreferencesPage::new();

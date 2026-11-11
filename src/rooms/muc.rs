@@ -211,7 +211,7 @@ impl Rooms {
             history.min(50).to_string(),
         ));
         if let Some(password) = password.or_else(|| bookmark.and_then(Bookmark::password)) {
-            if password.len() > 1023 {
+            if password.encode_utf16().count() > 4096 {
                 return Err(Error::Invalid);
             }
             join.append_child(Element::builder("password", MUC).append(password).build());

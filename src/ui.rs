@@ -84,6 +84,7 @@ pub struct Ui {
     pub encryption_revision: Cell<u64>,
     pub room_syncing: RefCell<Option<(u64, String, u64)>>,
     pub room_sync_retry: RefCell<HashMap<String, (Instant, u8)>>,
+    pub request_secrets: RefCell<crate::request_logic::SecretJobs>,
     pub security_widgets: RefCell<Option<crate::dialogs::SecurityControls>>,
     pub review_request: RefCell<Option<(String, crate::encryption_policy::Mode)>>,
     pub status: RefCell<String>,
@@ -329,6 +330,7 @@ impl Ui {
             encryption_revision: Cell::new(0),
             room_syncing: RefCell::new(None),
             room_sync_retry: RefCell::new(HashMap::new()),
+            request_secrets: RefCell::new(Default::default()),
             security_widgets: RefCell::new(None),
             review_request: RefCell::new(None),
             status: RefCell::new("Not connected".into()),
@@ -405,6 +407,7 @@ impl Ui {
             };
             let before = ui.typing.borrow().len();
             ui.sync_room_bookmarks();
+            ui.retry_request_cleanup();
             ui.typing
                 .borrow_mut()
                 .retain(|_, t| t.elapsed() < Duration::from_secs(10));
@@ -777,10 +780,10 @@ impl Ui {
         list.add_css_class("chat-list");
         list.set_valign(gtk::Align::Start);
         list.set_vexpand(false);
+        let pending = self.request_count();
+        self.request_badge.set_label(&pending.to_string());
+        self.request_badge.set_visible(pending > 0);
         let state = self.state.borrow();
-        self.request_badge
-            .set_label(&state.requests.len().to_string());
-        self.request_badge.set_visible(!state.requests.is_empty());
         for chat in state.filtered(self.search.text().as_str()) {
             let latest = chat.latest_preview();
             let row = gtk::ListBoxRow::new();
@@ -1955,14 +1958,20 @@ impl Ui {
                 }
             }
             BackendEvent::Roster(contacts) => {
+                let mut resolved = Vec::new();
                 let mut s = self.state.borrow_mut();
                 for (jid, name, subscription) in contacts {
+                    if matches!(subscription.as_str(), "from" | "both") {
+                        resolved.push(jid.clone());
+                    }
                     let c = s.chat_for(&jid);
                     if !name.is_empty() {
                         c.name = name
                     }
                     c.contact = subscription != "none";
                 }
+                drop(s);
+                self.clear_contact_requests(&resolved);
             }
             BackendEvent::RoomBookmarks(bookmarks) => {
                 if self
@@ -2159,10 +2168,13 @@ impl Ui {
                 }
             }
             BackendEvent::Request(peer) => {
-                let item = (peer, "Presence subscription request".into());
-                if !self.state.borrow().requests.contains(&item) {
-                    self.state.borrow_mut().requests.push(item)
-                }
+                self.receive_contact_request(peer);
+            }
+            BackendEvent::RequestCancelled(peer) => {
+                self.clear_contact_request(&peer);
+            }
+            BackendEvent::RoomInvitation(invitation) => {
+                self.receive_room_invitation(invitation);
             }
         }
         self.persist();
