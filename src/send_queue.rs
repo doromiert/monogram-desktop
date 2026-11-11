@@ -33,6 +33,9 @@ impl crate::storage::Store {
 
 impl Ui {
     pub fn send_library_file(self: &Rc<Self>, path: &std::path::Path, sticker: bool) -> bool {
+        if !sticker {
+            return self.stage_attachment_files(vec![gtk::gio::File::for_path(path)]);
+        }
         self.queue_local_files(vec![gtk::gio::File::for_path(path)], "", sticker, false)
     }
 

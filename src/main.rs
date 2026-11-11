@@ -6,6 +6,7 @@ mod avatar_ui;
 mod clipboard_upload;
 mod contact_access;
 mod contact_access_ui;
+mod composer_attachments_ui;
 mod credentials;
 mod crypto;
 mod dialogs;

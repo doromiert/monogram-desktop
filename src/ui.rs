@@ -1164,7 +1164,18 @@ impl Ui {
         self.reply_bar.set_child(Some(&context));
         shell.append(&self.reply_bar);
         self.chips.set_visible(false);
-        shell.append(&self.chips);
+        let attachments = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Automatic)
+            .vscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(true)
+            .child(&self.chips)
+            .build();
+        attachments.add_css_class("attachment-preview-strip");
+        self.chips
+            .bind_property("visible", &attachments, "visible")
+            .sync_create()
+            .build();
+        shell.append(&attachments);
         let line = bx(false, 8);
         let composer = bx(false, 2);
         composer.set_hexpand(true);

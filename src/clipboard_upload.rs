@@ -52,7 +52,9 @@ pub fn attach(ui: &Rc<Ui>) {
             busy.set(false);
             return;
         }
-        ui.notice("Preparing pasted image…");
+        let progress = adw::Toast::new("Preparing pasted image…");
+        progress.set_timeout(0);
+        ui.toast.add_toast(progress.clone());
         let weak = Rc::downgrade(&ui);
         let busy = busy.clone();
         glib::MainContext::default().spawn_local(async move {
@@ -76,6 +78,7 @@ pub fn attach(ui: &Rc<Ui>) {
                     .map_err(|_| "The pasted image could not be prepared")?
             }
             .await;
+            progress.dismiss();
             busy.set(false);
             let current = weak.upgrade().filter(|ui| {
                 ui.generation.get() == generation
@@ -85,9 +88,9 @@ pub fn attach(ui: &Rc<Ui>) {
             });
             match (current, result) {
                 (Some(ui), Ok(path)) => {
-                    if !ui.send_library_file(&path, false) {
+                    if !ui.stage_attachment_files(vec![gio::File::for_path(&path)]) {
                         let _ = gio::spawn_blocking(move || std::fs::remove_file(path)).await;
-                        ui.notice("The pasted image could not be queued");
+                        ui.notice("The pasted image could not be attached");
                     }
                 }
                 (None, Ok(path)) => {
@@ -143,13 +146,13 @@ fn snapshot(owner: &str, texture: &gdk::Texture) -> Result<std::path::PathBuf, &
     }
     let _guard = crate::downloads::CACHE_IO.lock().unwrap();
     let root = crate::downloads::account_root(owner)?;
-    let directory = root.join("clipboard");
+    let directory = root.join("clipboard").join(uuid::Uuid::new_v4().to_string());
     fs::create_dir_all(&directory).map_err(|_| "Image storage is unavailable")?;
     for path in [&root, &directory] {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))
             .map_err(|_| "Image storage is unavailable")?;
     }
-    let path = directory.join(format!("{}.png", uuid::Uuid::new_v4()));
+    let path = directory.join("image.png");
     let partial = path.with_extension("part");
     let result = (|| {
         let mut output = fs::OpenOptions::new()
