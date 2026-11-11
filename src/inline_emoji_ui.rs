@@ -205,7 +205,13 @@ mod composer_tests {
         status.append(&gtk::Label::new(Some("12:34 ✓")));
         let short = InlineMessageText::new(&short_body, &short_emoji, Some(&status));
         let text = InlineMessageText::new(&body, &emoji, None);
-        let bytes = glib::Bytes::from_owned(vec![0xff; 20 * 20 * 4]);
+        let bytes = glib::Bytes::from_owned(
+            [0x9c, 0x4d, 0xcc, 0xff]
+                .into_iter()
+                .cycle()
+                .take(20 * 20 * 4)
+                .collect::<Vec<_>>(),
+        );
         let texture = gdk::MemoryTexture::new(
             20,
             20,
@@ -233,34 +239,20 @@ mod composer_tests {
         let finished = loop_.clone();
         glib::timeout_add_local_once(Duration::from_millis(200), move || finished.quit());
         loop_.run();
-        for slots in text.slots.borrow().values() {
-            for slot in slots {
-                if let Some(picture) = slot.picture.upgrade() {
-                    let position = text.label.layout().index_to_pos(slot.byte_start);
-                    eprintln!(
-                        "inline position index={} layout=({}, {}) offsets={:?} bounds={:?} margins=({}, {})",
-                        slot.byte_start,
-                        position.x() / gtk::pango::SCALE,
-                        position.y() / gtk::pango::SCALE,
-                        text.label.layout_offsets(),
-                        text.label.compute_bounds(&text.root),
-                        picture.margin_start(),
-                        picture.margin_top(),
-                    );
-                }
-            }
-        }
-        assert!(short.root.height() < 50, "short inline text split into rows");
-        assert!(text.root.height() < 100, "inline paragraph grew separate rows");
+        assert!(
+            short.root.height() < 50,
+            "short inline text split into rows"
+        );
+        assert!(
+            text.root.height() < 100,
+            "inline paragraph grew separate rows"
+        );
         let snapshot = gtk::Snapshot::new();
         let paintable = gtk::WidgetPaintable::new(Some(&window));
         paintable.snapshot(&snapshot, 360., 180.);
         if let (Some(node), Some(renderer)) = (snapshot.to_node(), window.renderer()) {
             renderer
-                .render_texture(
-                    &node,
-                    Some(&gtk::graphene::Rect::new(0., 0., 360., 180.)),
-                )
+                .render_texture(&node, Some(&gtk::graphene::Rect::new(0., 0., 360., 180.)))
                 .save_to_png(".state/inline-flow-after.png")
                 .unwrap();
         }
@@ -320,11 +312,11 @@ mod inline_overlay_imp {
                 reposition();
             }
             for child in children.iter().skip(1) {
-                let (_, natural_width, _, _) = child
+                let (_, natural_width, _, _) =
+                    child.widget.measure(gtk::Orientation::Horizontal, -1);
+                let (_, natural_height, _, _) = child
                     .widget
-                    .measure(gtk::Orientation::Horizontal, -1);
-                let (_, natural_height, _, _) =
-                    child.widget.measure(gtk::Orientation::Vertical, natural_width);
+                    .measure(gtk::Orientation::Vertical, natural_width);
                 let transform = gtk::gsk::Transform::new().translate(&gtk::graphene::Point::new(
                     child.x.get() as f32,
                     child.y.get() as f32,
@@ -412,11 +404,7 @@ struct InlineSlot {
 }
 
 impl InlineMessageText {
-    pub(crate) fn new(
-        body: &str,
-        emoji: &InlineEmoji,
-        status: Option<&gtk::Box>,
-    ) -> Rc<Self> {
+    pub(crate) fn new(body: &str, emoji: &InlineEmoji, status: Option<&gtk::Box>) -> Rc<Self> {
         let label = crate::widgets::wrap(body, "message-text");
         label.set_selectable(true);
         label.update_property(&[gtk::accessible::Property::Label(body)]);
@@ -452,10 +440,14 @@ impl InlineMessageText {
     }
 
     pub(crate) fn set_texture(&self, cid: &str, texture: gdk::Texture) {
-        self.textures
+        let first = self
+            .textures
             .borrow_mut()
-            .insert(cid.to_owned(), texture.clone());
-        self.refresh_attributes();
+            .insert(cid.to_owned(), texture.clone())
+            .is_none();
+        if first {
+            self.add_attributes(cid);
+        }
         if let Some(slots) = self.slots.borrow().get(cid) {
             for slot in slots {
                 if let Some(picture) = slot.picture.upgrade() {
@@ -501,14 +493,13 @@ impl InlineMessageText {
                     byte_start: start as i32,
                 });
         }
-        self.refresh_attributes();
         self.reposition();
     }
 
-    fn refresh_attributes(&self) {
+    fn add_attributes(&self, cid: &str) {
         let attributes = self.label.attributes().unwrap_or_default();
         for range in &self.emoji.ranges {
-            if !self.textures.borrow().contains_key(&range.asset.cid) {
+            if range.asset.cid != cid {
                 continue;
             }
             let start = self
@@ -550,9 +541,7 @@ impl InlineMessageText {
                     continue;
                 };
                 let position = layout.index_to_pos(slot.byte_start);
-                let x = label_bounds.x() as i32
-                    + layout_x
-                    + position.x() / gtk::pango::SCALE;
+                let x = label_bounds.x() as i32 + layout_x + position.x() / gtk::pango::SCALE;
                 let y = label_bounds.y() as i32
                     + layout_y
                     + position.y() / gtk::pango::SCALE
