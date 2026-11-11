@@ -56,6 +56,7 @@ pub struct Ui {
     pub scroll: gtk::ScrolledWindow,
     pub message_scroll: RefCell<Option<crate::messages::ScrollTarget>>,
     pub composer: gtk::TextView,
+    pub(crate) composer_inline: Rc<crate::inline_emoji_ui::ComposerInlineEmoji>,
     composer_placeholder: gtk::Label,
     pub send_button: gtk::Button,
     pub input_scroll: gtk::ScrolledWindow,
@@ -72,6 +73,7 @@ pub struct Ui {
     pub(crate) rendered_rows: RefCell<crate::messages::RenderedRows>,
     chat_refresh_pending: Cell<bool>,
     pub media_stack: gtk::Stack,
+    pub(crate) media_search: gtk::SearchEntry,
     pub media_pane: adw::ToolbarView,
     pub media_mode: RefCell<String>,
     pub media_toggles: RefCell<HashMap<String, adw::Toggle>>,
@@ -89,6 +91,7 @@ pub struct Ui {
     pub security_widgets: RefCell<Option<crate::dialogs::SecurityControls>>,
     pub link_preview_jobs: RefCell<crate::link_preview_logic::Jobs>,
     pub send_queue: RefCell<crate::send_queue::Queue>,
+    pub read_ui: RefCell<crate::read_state::ReadState>,
     pub contact_access_widgets: RefCell<Option<crate::contact_access_ui::ContactAccessControls>>,
     pub review_request: RefCell<Option<(String, crate::encryption_policy::Mode)>>,
     pub status: RefCell<String>,
@@ -108,9 +111,30 @@ pub struct Ui {
     pub active_media: RefCell<Option<Rc<crate::media::MediaViewer>>>,
     pub active_story: RefCell<Option<Rc<crate::media::StoryViewer>>>,
     pub sidebar_card: RefCell<Option<Rc<crate::wallet::WalletCard>>>,
+    pub(crate) pack_library: RefCell<Option<crate::packs::Library>>,
+    pub(crate) pack_pages: RefCell<Vec<Rc<crate::media_library_ui::PackLibraryPage>>>,
+    pub(crate) gif_library: RefCell<Option<crate::gifs::Library>>,
+    pub(crate) gif_page: RefCell<Option<Rc<crate::media_library_ui::GifLibraryPage>>>,
 }
 impl Ui {
     pub fn new(app: &adw::Application, smoke: bool) -> Rc<Self> {
+        Self::new_with_window(app, smoke, Self::new_window(app))
+    }
+    pub fn new_window(app: &adw::Application) -> adw::ApplicationWindow {
+        adw::ApplicationWindow::builder()
+            .application(app)
+            .title("Monogram")
+            .default_width(1380)
+            .default_height(900)
+            .width_request(430)
+            .height_request(480)
+            .build()
+    }
+    pub fn new_with_window(
+        _app: &adw::Application,
+        smoke: bool,
+        window: adw::ApplicationWindow,
+    ) -> Rc<Self> {
         let store = Store::open(smoke && !std::env::args().any(|s| s == "--crypto-smoke-test"))
             .expect("private local history database");
         let demo = State::demo();
@@ -124,16 +148,7 @@ impl Ui {
             (_, true) => State::live("", vec![]),
             _ => demo.clone(),
         };
-        let window = adw::ApplicationWindow::builder()
-            .application(app)
-            .title("Monogram")
-            .default_width(1380)
-            .default_height(900)
-            .width_request(430)
-            .height_request(480)
-            .build();
         let toast = adw::ToastOverlay::new();
-        window.set_content(Some(&toast));
         let utility = adw::OverlaySplitView::builder()
             .sidebar_position(gtk::PackType::End)
             .min_sidebar_width(360.)
@@ -204,6 +219,14 @@ impl Ui {
         bp.add_setter(&utility, "collapsed", Some(&true.to_value()));
         window.add_breakpoint(bp);
         let (tx, rx) = mpsc::channel();
+        let composer = gtk::TextView::builder()
+            .wrap_mode(gtk::WrapMode::WordChar)
+            .accepts_tab(false)
+            .hexpand(true)
+            .top_margin(4)
+            .bottom_margin(4)
+            .build();
+        let composer_inline = crate::inline_emoji_ui::ComposerInlineEmoji::new(&composer.buffer());
         let ui = Rc::new(Self {
             avatars: RefCell::new(Default::default()),
             images: RefCell::new(Default::default()),
@@ -288,13 +311,8 @@ impl Ui {
                 .vexpand(true)
                 .hscrollbar_policy(gtk::PolicyType::Never)
                 .build(),
-            composer: gtk::TextView::builder()
-                .wrap_mode(gtk::WrapMode::WordChar)
-                .accepts_tab(false)
-                .hexpand(true)
-                .top_margin(4)
-                .bottom_margin(4)
-                .build(),
+            composer,
+            composer_inline,
             composer_placeholder: gtk::Label::builder()
                 .label("Message…")
                 .xalign(0.)
@@ -330,6 +348,9 @@ impl Ui {
                 .transition_type(gtk::StackTransitionType::Crossfade)
                 .transition_duration(150)
                 .build(),
+            media_search: gtk::SearchEntry::builder()
+                .placeholder_text("Search")
+                .build(),
             media_pane: adw::ToolbarView::new(),
             media_mode: RefCell::new("media".into()),
             media_toggles: RefCell::new(HashMap::new()),
@@ -348,6 +369,7 @@ impl Ui {
             contact_access_widgets: RefCell::new(None),
             link_preview_jobs: RefCell::new(Default::default()),
             send_queue: RefCell::new(Default::default()),
+            read_ui: RefCell::new(Default::default()),
             review_request: RefCell::new(None),
             status: RefCell::new("Not connected".into()),
             event_tx: tx,
@@ -366,6 +388,10 @@ impl Ui {
             active_media: RefCell::new(None),
             active_story: RefCell::new(None),
             sidebar_card: RefCell::new(None),
+            pack_library: RefCell::new(None),
+            pack_pages: RefCell::new(Vec::new()),
+            gif_library: RefCell::new(None),
+            gif_page: RefCell::new(None),
         });
         ui.make_sidebar();
         ui.weak_button(&ui.welcome_sign_in, |ui| {
@@ -526,6 +552,8 @@ impl Ui {
             }
             glib::Propagation::Proceed
         });
+        // Keep the already-painted startup page visible until the complete interface is ready.
+        ui.window.set_content(Some(&ui.toast));
         ui
     }
     pub fn weak_button(self: &Rc<Self>, b: &gtk::Button, f: impl Fn(&Rc<Self>) + 'static) {
@@ -1598,8 +1626,11 @@ impl Ui {
         }
         if !self.state.borrow().account.is_empty() {
             let files = self.attachments.borrow().clone();
-            if files.is_empty() { self.queue_text(&value); }
-            else { self.queue_local_files(files, &value, false, true); }
+            if files.is_empty() {
+                self.queue_text(&value);
+            } else {
+                self.queue_local_files(files, &value, false, true);
+            }
             return;
         }
         let files = self.attachments.borrow().clone();
@@ -1769,7 +1800,11 @@ impl Ui {
             action.set_enabled(!live || self.online.get());
         }
         for (name, t) in self.media_toggles.borrow().iter() {
-            t.set_enabled(name == "emoji" || !live)
+            t.set_enabled(
+                matches!(name.as_str(), "emoji" | "stickers")
+                    || name == "gifs" && self.gif_page.borrow().is_some()
+                    || !live,
+            )
         }
         if live {
             self.media_stack.set_visible_child_name("emoji")
@@ -1831,7 +1866,17 @@ impl Ui {
         self.security_widgets.borrow_mut().take();
         self.contact_access_widgets.borrow_mut().take();
         self.link_preview_jobs.borrow_mut().cancel();
+        self.read_ui.replace(Default::default());
         self.review_request.borrow_mut().take();
+        if let Some(library) = self.pack_library.borrow_mut().take() {
+            library.cancel();
+        }
+        self.pack_pages.borrow_mut().clear();
+        if let Some(library) = self.gif_library.borrow_mut().take() {
+            library.cancel();
+        }
+        self.gif_page.borrow_mut().take();
+        self.clear_composer_inline_emoji();
         self.status.replace("Disconnected".into());
         let dialogs = std::mem::take(&mut *self.dialogs.borrow_mut());
         for d in dialogs {
@@ -1846,6 +1891,8 @@ impl Ui {
             v.close()
         }
         self.state.replace(state);
+        self.rebuild_pack_library();
+        self.rebuild_gif_library();
         self.timeline_scope_changed();
         self.history_pages.borrow_mut().clear();
         self.history_pending.borrow_mut().clear();
@@ -2171,15 +2218,28 @@ impl Ui {
             }
             BackendEvent::CryptoError { peer, text } => self.notice(&format!("{peer}: {text}")),
             BackendEvent::InlineEmoji { peer, id, emoji } => {
-                if self.store.restore_inline_emoji(owner, &peer, &id, &emoji).unwrap_or(false) {
+                if self
+                    .store
+                    .restore_inline_emoji(owner, &peer, &id, &emoji)
+                    .unwrap_or(false)
+                {
                     let mut state = self.state.borrow_mut();
-                    if let Some(message) = state.chats.iter_mut().find(|chat| chat.jid == peer)
+                    if let Some(message) = state
+                        .chats
+                        .iter_mut()
+                        .find(|chat| chat.jid == peer)
                         .and_then(|chat| chat.messages.iter_mut().find(|message| message.id == id))
-                        .filter(|message| message.inline_emoji.is_none() && message.text == emoji.body)
-                    { message.inline_emoji = Some(emoji); }
+                        .filter(|message| {
+                            message.inline_emoji.is_none() && message.text == emoji.body
+                        })
+                    {
+                        message.inline_emoji = Some(emoji);
+                    }
                     let active = state.current().jid == peer;
                     drop(state);
-                    if active { self.render_messages(false); }
+                    if active {
+                        self.render_messages(false);
+                    }
                 }
             }
             BackendEvent::PreviewSpoilers { peer, id, context } => {
@@ -2210,6 +2270,7 @@ impl Ui {
             BackendEvent::CryptoAliases {
                 legacy_sticker,
                 legacy_reply,
+                markable_id,
                 peer,
                 own,
                 id,
@@ -2219,6 +2280,10 @@ impl Ui {
                     .store
                     .merge_aliases(owner, &peer, own, &id, &aliases)
                     .and_then(|_| {
+                        if !markable_id.is_empty() {
+                            self.store
+                                .restore_markable(owner, &peer, &id, &markable_id)?;
+                        }
                         if legacy_sticker {
                             self.store.restore_legacy_sticker(owner, &peer, &id)?;
                         }
@@ -2318,6 +2383,8 @@ impl Ui {
                 self.release_upload_captions();
                 self.prepare_loaded_link_previews();
             }
+            BackendEvent::Read { peer, id } => self.receive_read_marker(owner, &peer, &id, false),
+            BackendEvent::OwnRead { peer, id } => self.receive_read_marker(owner, &peer, &id, true),
             BackendEvent::Receipt { peer, id } => self.delivery(&peer, &id, "delivered"),
             BackendEvent::Failed { peer, id } => {
                 self.delivery(&peer, &id, "failed");
@@ -2447,24 +2514,39 @@ impl Ui {
                 .cloned()
                 .or_else(|| self.store.message(owner, &peer, &known));
             if let Some(old) = old {
+                let restored_markable = !message.markable_id.is_empty()
+                    && self
+                        .store
+                        .restore_markable(owner, &peer, &known, &message.markable_id)
+                        .unwrap_or(false);
                 let restored_context = message
                     .preview_spoilers
                     .as_ref()
-                    .filter(|context| old.preview_spoilers.is_none() && context.matches(&old.text)
-                        && old.mode() == message.mode()
-                        && (!old.encrypted || old.fingerprint == message.fingerprint))
+                    .filter(|context| {
+                        old.preview_spoilers.is_none()
+                            && context.matches(&old.text)
+                            && old.mode() == message.mode()
+                            && (!old.encrypted || old.fingerprint == message.fingerprint)
+                    })
                     .cloned();
                 if let Some(context) = &restored_context {
                     let _ = self
                         .store
                         .restore_preview_spoilers(owner, &peer, &known, context);
                 }
-                let restored_emoji = message.inline_emoji.as_ref().filter(|emoji| {
-                    old.inline_emoji.is_none() && emoji.body == old.text
-                        && old.mode() == message.mode()
-                        && (!old.encrypted || old.fingerprint == message.fingerprint)
-                }).cloned();
-                if let Some(emoji) = &restored_emoji { let _ = self.store.restore_inline_emoji(owner, &peer, &known, emoji); }
+                let restored_emoji = message
+                    .inline_emoji
+                    .as_ref()
+                    .filter(|emoji| {
+                        old.inline_emoji.is_none()
+                            && emoji.body == old.text
+                            && old.mode() == message.mode()
+                            && (!old.encrypted || old.fingerprint == message.fingerprint)
+                    })
+                    .cloned();
+                if let Some(emoji) = &restored_emoji {
+                    let _ = self.store.restore_inline_emoji(owner, &peer, &known, emoji);
+                }
                 message_own = old.own;
                 if old.unavailable && !message.unavailable {
                     message.id = known.clone();
@@ -2486,7 +2568,12 @@ impl Ui {
                         c.messages.sort_by(|a, b| a.order_key().cmp(&b.order_key()));
                     }
                 } else if let Some(old) = c.messages.iter_mut().find(|m| m.id == known) {
-                    if let Some(emoji) = restored_emoji { old.inline_emoji = Some(emoji); }
+                    if restored_markable {
+                        old.markable_id = message.markable_id.clone();
+                    }
+                    if let Some(emoji) = restored_emoji {
+                        old.inline_emoji = Some(emoji);
+                    }
                     if let Some(context) = restored_context {
                         old.preview_spoilers = Some(context);
                     }

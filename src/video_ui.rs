@@ -30,7 +30,7 @@ pub(crate) struct Playback {
     inline_users: Cell<usize>,
 }
 impl Playback {
-    fn new(input: VerifiedFile) -> Option<Rc<Self>> {
+    pub(crate) fn new(input: VerifiedFile) -> Option<Rc<Self>> {
         let file = gio::File::for_path(format!("/proc/self/fd/{}", input.0.as_raw_fd()));
         let uri = CString::new(file.uri().as_str()).ok()?;
         let mut controls = std::ptr::null_mut();

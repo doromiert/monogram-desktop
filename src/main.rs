@@ -18,10 +18,12 @@ mod file_share;
 mod folder_actions;
 mod folders;
 mod forwarding;
+mod gifs;
 mod history_window;
 mod history_window_ui;
 mod image_loader;
 mod image_ui;
+mod inline_emoji_ui;
 mod invitation_ui;
 mod iq;
 mod legacy_polls;
@@ -29,8 +31,10 @@ mod link_preview_logic;
 mod link_preview_ui;
 mod link_previews;
 mod live_actions;
+mod lottie;
 mod media;
 mod media_caption;
+mod media_library_ui;
 mod media_store;
 mod message_actions;
 mod messages;
@@ -39,6 +43,7 @@ mod packs;
 mod polls;
 mod polls_ui;
 mod protocol;
+mod read_markers;
 mod read_state;
 mod request_logic;
 mod room_ui;
@@ -103,15 +108,6 @@ fn main() -> gtk::glib::ExitCode {
             window.present();
             return;
         }
-        let ui = ui::Ui::new(
-            app,
-            std::env::args().any(|s| {
-                matches!(
-                    s.as_str(),
-                    "--smoke-test" | "--live-smoke-test" | "--crypto-smoke-test"
-                )
-            }),
-        );
         let css = gtk::CssProvider::new();
         css.load_from_path(widgets::asset("style.css"));
         gtk::style_context_add_provider_for_display(
@@ -119,86 +115,112 @@ fn main() -> gtk::glib::ExitCode {
             &css,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
-        if std::env::args().any(|s| s == "--show-media") {
-            ui.toggle_media();
-        }
+        let smoke = std::env::args().any(|s| {
+            matches!(
+                s.as_str(),
+                "--smoke-test" | "--live-smoke-test" | "--crypto-smoke-test"
+            )
+        });
+        let window = ui::Ui::new_window(app);
         if std::env::var_os("MONOGRAM_CAPTURE_VIDEO").is_some() {
-            ui.window.set_default_size(1120, 760);
+            window.set_default_size(1120, 760);
             if std::env::var_os("MONOGRAM_CAPTURE_PATH").is_some() {
-                ui.window.set_resizable(false);
+                window.set_resizable(false);
             }
         }
-        present_window(&ui.window, monitor.as_deref(), started);
-        if !ui.smoke {
-            ui.reconnect_saved();
-        }
-        if std::env::args().any(|s| s == "--crypto-smoke-test") {
-            smoke::run_crypto(ui.clone());
-        } else if std::env::args().any(|s| s == "--live-smoke-test") {
-            smoke::run_live(ui.clone());
-        } else if ui.smoke {
-            smoke::run(ui.clone());
-        }
-        if let Ok(peer) = std::env::var("MONOGRAM_CAPTURE_PEER") {
-            let weak = std::rc::Rc::downgrade(&ui);
-            gtk::glib::idle_add_local_once(move || {
-                if let Some(ui) = weak.upgrade() {
-                    let id = ui
-                        .state
-                        .borrow()
-                        .chats
-                        .iter()
-                        .find(|chat| chat.jid == peer)
-                        .map(|chat| chat.id.clone());
-                    if let Some(id) = id {
-                        ui.select_chat(&id);
-                        if let Ok(video) = std::env::var("MONOGRAM_CAPTURE_VIDEO") {
-                            ui.load_timeline(Some(video));
+        window.set_content(Some(&startup_page()));
+        let app = app.clone();
+        let ready_window = window.clone();
+        after_first_paint(&window, move || {
+            let loading_paint = std::time::Instant::now();
+            eprintln!(
+                "Monogram loading feedback: {} ms",
+                started.elapsed().as_millis()
+            );
+            let ui = ui::Ui::new_with_window(&app, smoke, ready_window);
+            after_next_paint(&ui.window, move || {
+                eprintln!(
+                    "Monogram interface ready: {} ms (frame gap {} ms)",
+                    started.elapsed().as_millis(),
+                    loading_paint.elapsed().as_millis()
+                );
+            });
+            if std::env::args().any(|s| s == "--show-media") {
+                ui.toggle_media();
+            }
+            if !ui.smoke {
+                ui.reconnect_saved();
+            }
+            if std::env::args().any(|s| s == "--crypto-smoke-test") {
+                smoke::run_crypto(ui.clone());
+            } else if std::env::args().any(|s| s == "--live-smoke-test") {
+                smoke::run_live(ui.clone());
+            } else if ui.smoke {
+                smoke::run(ui.clone());
+            }
+            if let Ok(peer) = std::env::var("MONOGRAM_CAPTURE_PEER") {
+                let weak = std::rc::Rc::downgrade(&ui);
+                gtk::glib::idle_add_local_once(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        let id = ui
+                            .state
+                            .borrow()
+                            .chats
+                            .iter()
+                            .find(|chat| chat.jid == peer)
+                            .map(|chat| chat.id.clone());
+                        if let Some(id) = id {
+                            ui.select_chat(&id);
+                            if let Ok(video) = std::env::var("MONOGRAM_CAPTURE_VIDEO") {
+                                ui.load_timeline(Some(video));
+                            }
                         }
                     }
-                }
-            });
-        }
-        if let Ok(id) = std::env::var("MONOGRAM_CAPTURE_VIDEO") {
-            let weak = std::rc::Rc::downgrade(&ui);
-            gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(2), move || {
-                let Some(ui) = weak.upgrade() else { return };
-                ui.window.unfullscreen();
-                ui.window.unmaximize();
-                ui.window.set_default_size(1120, 760);
-                fn tile(widget: &gtk::Widget, id: &str) -> Option<gtk::Widget> {
-                    if widget.widget_name() == id && widget.has_css_class("message-media-tile") {
-                        return Some(widget.clone());
-                    }
-                    let mut next = widget.first_child();
-                    while let Some(child) = next {
-                        next = child.next_sibling();
-                        if let Some(found) = tile(&child, id) {
-                            return Some(found);
+                });
+            }
+            if let Ok(id) = std::env::var("MONOGRAM_CAPTURE_VIDEO") {
+                let weak = std::rc::Rc::downgrade(&ui);
+                gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(2), move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    ui.window.unfullscreen();
+                    ui.window.unmaximize();
+                    ui.window.set_default_size(1120, 760);
+                    fn tile(widget: &gtk::Widget, id: &str) -> Option<gtk::Widget> {
+                        if widget.widget_name() == id && widget.has_css_class("message-media-tile")
+                        {
+                            return Some(widget.clone());
                         }
+                        let mut next = widget.first_child();
+                        while let Some(child) = next {
+                            next = child.next_sibling();
+                            if let Some(found) = tile(&child, id) {
+                                return Some(found);
+                            }
+                        }
+                        None
                     }
-                    None
-                }
-                if let Some(tile) = tile(ui.timeline.upcast_ref(), &id) {
-                    ui.media_viewer(Some(tile));
-                }
-            });
-        }
-        if let Some(path) = std::env::var_os("MONOGRAM_CAPTURE_PATH") {
-            let paintable = gtk::WidgetPaintable::new(Some(&ui.window));
-            let window = ui.window.downgrade();
-            let capture = gtk::gio::SimpleAction::new("capture", None);
-            capture.connect_activate(move |_, _| {
-                if let Some(window) = window.upgrade().filter(|window| window.is_mapped()) {
-                    capture_window(&window, &paintable, std::path::PathBuf::from(&path));
-                }
-            });
-            ui.window.add_action(&capture);
-            gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(6), move || {
-                capture.activate(None);
-            });
-        }
-        ROOT.with(|root| root.replace(Some(ui)));
+                    if let Some(tile) = tile(ui.timeline.upcast_ref(), &id) {
+                        ui.media_viewer(Some(tile));
+                    }
+                });
+            }
+            if let Some(path) = std::env::var_os("MONOGRAM_CAPTURE_PATH") {
+                let paintable = gtk::WidgetPaintable::new(Some(&ui.window));
+                let window = ui.window.downgrade();
+                let capture = gtk::gio::SimpleAction::new("capture", None);
+                capture.connect_activate(move |_, _| {
+                    if let Some(window) = window.upgrade().filter(|window| window.is_mapped()) {
+                        capture_window(&window, &paintable, std::path::PathBuf::from(&path));
+                    }
+                });
+                ui.window.add_action(&capture);
+                gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(6), move || {
+                    capture.activate(None);
+                });
+            }
+            ROOT.with(|root| root.replace(Some(ui)));
+        });
+        present_window(&window, monitor.as_deref(), started);
     });
     let result = app.run_with_args(&args);
     let display = gtk::gdk::Display::default();
@@ -215,6 +237,47 @@ fn main() -> gtk::glib::ExitCode {
     cleanup.run();
     drop(display);
     result
+}
+
+fn startup_page() -> adw::ToolbarView {
+    let view = adw::ToolbarView::new();
+    view.add_top_bar(&adw::HeaderBar::new());
+    let spinner = gtk::Spinner::builder().spinning(true).build();
+    let page = adw::StatusPage::builder()
+        .icon_name("mail-unread-symbolic")
+        .title("Opening Monogram")
+        .description("Loading your conversations…")
+        .child(&spinner)
+        .build();
+    view.set_content(Some(&page));
+    view
+}
+
+fn after_first_paint(window: &adw::ApplicationWindow, callback: impl FnOnce() + 'static) {
+    let callback = std::rc::Rc::new(std::cell::RefCell::new(Some(callback)));
+    window.connect_map(move |window| {
+        after_next_paint(window, {
+            let callback = callback.clone();
+            move || {
+                let Some(callback) = callback.borrow_mut().take() else {
+                    return;
+                };
+                gtk::glib::idle_add_local_once(callback);
+            }
+        });
+    });
+}
+
+fn after_next_paint(window: &adw::ApplicationWindow, callback: impl FnOnce() + 'static) {
+    let Some(clock) = window.frame_clock() else {
+        return;
+    };
+    let callback = std::rc::Rc::new(std::cell::RefCell::new(Some(callback)));
+    clock.connect_after_paint(move |_| {
+        if let Some(callback) = callback.borrow_mut().take() {
+            callback();
+        }
+    });
 }
 
 fn capture_window(

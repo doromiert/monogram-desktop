@@ -166,8 +166,8 @@ impl PermissionControls {
     }
 }
 
-fn same_owner(ui: &Ui, owner: &str, generation: u64) -> bool {
-    ui.generation.get() == generation && ui.state.borrow().account == owner
+fn same_owner(ui: &Ui, owner: &str, _generation: u64) -> bool {
+    ui.state.borrow().account == owner
 }
 
 fn begin_permission_update(

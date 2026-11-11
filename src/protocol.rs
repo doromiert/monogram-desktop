@@ -289,8 +289,14 @@ fn normalize_content(
         m.poll_source = crate::polls::Source::Text;
     }
     m.hydrate_compatibility();
+    m.markable_id = if !own && m.action.is_none() {
+        crate::read_markers::markable_id(xml).unwrap_or_default()
+    } else {
+        String::new()
+    };
     m.inline_emoji = (!unavailable && m.attachment.is_none() && !control)
-        .then(|| crate::packs::normalized_inline(xml, &m.text)).flatten();
+        .then(|| crate::packs::normalized_inline(xml, &m.text))
+        .flatten();
     m.preview_spoilers = if unavailable {
         None
     } else {
@@ -403,6 +409,11 @@ pub fn text_stanza(peer: &str, text: &str, id: &str, reply: Option<(&str, &str, 
     root
 }
 pub fn outgoing(peer: &str, message: &Message, quote: &str) -> Element {
+    let mut root = outgoing_content(peer, message, quote);
+    crate::read_markers::decorate(&mut root, message);
+    root
+}
+fn outgoing_content(peer: &str, message: &Message, quote: &str) -> Element {
     let accompanied = message
         .forwarded
         .as_ref()
@@ -509,7 +520,19 @@ pub fn outgoing(peer: &str, message: &Message, quote: &str) -> Element {
 }
 #[derive(Debug, Clone)]
 pub enum BackendEvent {
-    InlineEmoji { peer: String, id: String, emoji: crate::packs::InlineEmoji },
+    Read {
+        peer: String,
+        id: String,
+    },
+    OwnRead {
+        peer: String,
+        id: String,
+    },
+    InlineEmoji {
+        peer: String,
+        id: String,
+        emoji: crate::packs::InlineEmoji,
+    },
     Uncertain {
         peer: String,
         id: String,
@@ -530,6 +553,7 @@ pub enum BackendEvent {
         context: crate::spoilers::Context,
     },
     CryptoAliases {
+        markable_id: String,
         legacy_sticker: bool,
         legacy_reply: Option<crate::crypto::legacy::service::LegacyReply>,
         peer: String,
@@ -811,6 +835,19 @@ pub enum Command {
         allow: bool,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
+    Displayed {
+        peer: String,
+        id: String,
+    },
+    DisplayedReady {
+        candidate: crate::read_markers::Candidate,
+        epoch: u64,
+    },
+    DisplayedPolicy {
+        enabled: bool,
+        revision: u64,
+    },
+    FlushDisplayed,
     Receipt {
         peer: String,
         id: String,
@@ -975,6 +1012,9 @@ impl Session {
                 let legacy=legacy::service::Handle::start(owner.clone(),generation,network.clone(),events.clone());
                 let contacts=crate::contact_access::Manager::new(owner.clone(),generation,events.clone()).await;
                 let mut contact_queries=HashMap::<String,(u64,std::time::Instant,u64)>::new();
+                let mut displayed_policy=crate::read_markers::load_policy(&owner).await;
+                let marker_flush=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let mut marker_tick=std::time::Instant::now();
                 let mut preview_jobs=HashMap::<String,PreviewHistoryJob>::new();
                 let mut preview_active=HashMap::<String,String>::new();
                 let (preview_epoch,_) = tokio::sync::watch::channel(0u64);
@@ -1286,6 +1326,20 @@ impl Session {
                             let (manager,network,epoch)=(contacts.clone(),network.clone(),contacts.epoch());
                             tokio::spawn(async move{let action=if allow{crate::contact_access::Action::Accept}else{crate::contact_access::Action::Deny};let _=reply.send(manager.act(&network,epoch,&peer,action).await.map(|_|()));});
                         },
+                        Some(Command::DisplayedPolicy{enabled,revision})=>{
+                            if revision>displayed_policy.revision || revision==displayed_policy.revision&&!enabled {displayed_policy=crate::read_markers::Policy{enabled,revision};}
+                            if online&&displayed_policy.enabled {let _=network.send(Command::FlushDisplayed);}
+                        },
+                        Some(Command::Displayed{peer,id})=>{
+                            if online&&displayed_policy.enabled&&!rooms.known(&peer)&&peer!=owner {crate::read_markers::prepare(owner.clone(),peer,id,room_epoch,network.clone());}
+                        },
+                        Some(Command::DisplayedReady{candidate,epoch})=>{
+                            let authorized=contacts.state(&candidate.peer).is_ok_and(|state|state.loaded&&state.shares_own_presence);
+                            if online&&epoch==room_epoch&&displayed_policy.enabled&&candidate.revision==displayed_policy.revision&&!rooms.known(&candidate.peer)&&candidate.peer!=owner&&authorized {
+                                if let Some(xml)=crate::read_markers::stanza(&candidate.peer,&candidate.wire){if send(&mut client,xml).await{crate::read_markers::acknowledge(owner.clone(),candidate);}}
+                            }
+                        },
+                        Some(Command::FlushDisplayed)=>{if online&&displayed_policy.enabled{crate::read_markers::flush(owner.clone(),room_epoch,network.clone(),marker_flush.clone());}},
                         Some(Command::Receipt{peer,id})=>{if online{send(&mut client,Element::builder("message",NS).attr("to".try_into().expect("static XML attribute"),peer).attr("type".try_into().expect("static XML attribute"),"chat").append(Element::builder("received","urn:xmpp:receipts").attr("id".try_into().expect("static XML attribute"),id).build()).build()).await;}},
                     }},
                     event=client.next()=>{match event{
@@ -1343,9 +1397,21 @@ impl Session {
                                     emit(BackendEvent::AvatarChanged{peer:from.into(),hint:None});
                                 }
                                 if root.attr("type")==Some("error"){emit(BackendEvent::Failed{peer:bare_of(from),id:root.attr("id").unwrap_or("").into()});continue}
-                                if let Some(r)=root.get_child("received","urn:xmpp:receipts"){emit(BackendEvent::Receipt{peer:bare_of(from),id:r.attr("id").unwrap_or("").into()})}
-                                let carbon=root.get_child("received","urn:xmpp:carbons:2").or_else(||root.get_child("sent","urn:xmpp:carbons:2"));
-                                if let Some(wrapper)=carbon{if from!=owner{continue}if let Some(inner)=wrapper.get_child("forwarded","urn:xmpp:forward:0").and_then(|f|f.get_child("message",NS)){deliver(&crypto,&legacy,&emit,inner,&owner,None,true,None);}continue}
+                                if let Some(notice)=crate::read_markers::incoming_receipt(&root,&owner).filter(|n|!rooms.known(&n.peer)){emit(BackendEvent::Receipt{peer:notice.peer,id:notice.id});}
+                                if let Some(notice)=crate::read_markers::incoming(&root,&owner).filter(|n|!rooms.known(&n.peer)){emit(BackendEvent::Read{peer:notice.peer,id:notice.id});}
+                                let mut carbon_wrappers=root.children().filter(|c|c.is("received","urn:xmpp:carbons:2")||c.is("sent","urn:xmpp:carbons:2"));
+                                if let Some(wrapper)=carbon_wrappers.next(){
+                                    if carbon_wrappers.next().is_some()||from!=owner||root.attr("to").is_some_and(|to|bare_of(to)!=owner){continue}
+                                    if let Some(inner)=wrapper.get_child("forwarded","urn:xmpp:forward:0").and_then(|f|f.get_child("message",NS)){
+                                        if wrapper.is("sent","urn:xmpp:carbons:2"){
+                                            if let Some(notice)=crate::read_markers::own_displayed(inner,&owner).filter(|n|!rooms.known(&n.peer)){emit(BackendEvent::OwnRead{peer:notice.peer,id:notice.id});}
+                                        }else{
+                                            if let Some(notice)=crate::read_markers::incoming_receipt(inner,&owner).filter(|n|!rooms.known(&n.peer)){emit(BackendEvent::Receipt{peer:notice.peer,id:notice.id});}
+                                            if let Some(notice)=crate::read_markers::incoming(inner,&owner).filter(|n|!rooms.known(&n.peer)){emit(BackendEvent::Read{peer:notice.peer,id:notice.id});}
+                                        }
+                                        deliver(&crypto,&legacy,&emit,inner,&owner,None,true,None);
+                                    }continue
+                                }
                                 if let Some((_peer,message,historical))=normalize(&root,&owner,None){let receipt_to=(!historical&&!message.own&&!message.wire_id.is_empty()&&root.get_child("request","urn:xmpp:receipts").is_some()).then(||from.to_string());deliver(&crypto,&legacy,&emit,&root,&owner,None,historical,receipt_to);}
                                 if root.get_child("delay","urn:xmpp:delay").is_none(){for name in ["composing","paused","active","inactive","gone"]{if root.get_child(name,"http://jabber.org/protocol/chatstates").is_some(){emit(BackendEvent::Typing{peer:bare_of(from),composing:name=="composing"})}}}
                             }else if root.is("presence",NS){
@@ -1399,11 +1465,11 @@ impl Session {
                                     }
                                     continue;
                                 }
-                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in ["urn:xmpp:receipts",REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT,crate::polls::NS,crate::forwarding::NS,crate::file_share::NS,crate::rooms::invitations::DIRECT]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if legacy_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),legacy::NS).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
+                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in ["urn:xmpp:receipts",crate::read_markers::NS,REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT,crate::polls::NS,crate::forwarding::NS,crate::file_share::NS,crate::rooms::invitations::DIRECT]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if legacy_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),legacy::NS).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
                             }
                         }
                     }},
-                    _=timer.tick()=>{iq.expire();contact_queries.retain(|_,(epoch,started,serial)|{let keep=contacts.valid(*epoch)&&started.elapsed()<Duration::from_secs(25);if !keep{contacts.clear_full(*epoch,Some(*serial));}keep});for stanza in room_jobs.expire(&mut rooms){let peer=bare_of(stanza.attr("to").unwrap_or(""));send(&mut client,stanza).await;emit(BackendEvent::RoomPresence(rooms.status(&peer)));}for presence in rooms.expire(){emit(BackendEvent::RoomPresence(presence));}if !online&&handshake.elapsed()>Duration::from_secs(45){emit(BackendEvent::Status{online:false,error:true,text:"Connection timed out. Check the account settings.".into()});break}mam.retain(|id,page| {
+                    _=timer.tick()=>{if online&&displayed_policy.enabled&&marker_tick.elapsed()>=Duration::from_secs(5){marker_tick=std::time::Instant::now();let _=network.send(Command::FlushDisplayed);}iq.expire();contact_queries.retain(|_,(epoch,started,serial)|{let keep=contacts.valid(*epoch)&&started.elapsed()<Duration::from_secs(25);if !keep{contacts.clear_full(*epoch,Some(*serial));}keep});for stanza in room_jobs.expire(&mut rooms){let peer=bare_of(stanza.attr("to").unwrap_or(""));send(&mut client,stanza).await;emit(BackendEvent::RoomPresence(rooms.status(&peer)));}for presence in rooms.expire(){emit(BackendEvent::RoomPresence(presence));}if !online&&handshake.elapsed()>Duration::from_secs(45){emit(BackendEvent::Status{online:false,error:true,text:"Connection timed out. Check the account settings.".into()});break}mam.retain(|id,page| {
                         let context_expired=preview_jobs.get(id).is_some_and(|job|job.reply.is_closed()||job.epoch!=room_epoch||job.deadline<=std::time::Instant::now());
                         let expired=page.started.elapsed()>Duration::from_secs(20)||context_expired;
                         if expired {if let Some(job)=preview_jobs.remove(id){finish_preview_history(&mut preview_active,job,false);}else{emit(archive::failed(page.peer.clone()));}}

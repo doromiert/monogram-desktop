@@ -181,6 +181,7 @@ fn decorate_outgoing(xml: &mut Element, clear: &Element, message: &Message) {
     if message.attachment.as_ref().is_some_and(|file| file.sticker) {
         xml.append_child(Element::builder("sticker", "urn:xmpp:stickers:0").build());
     }
+    crate::read_markers::decorate(xml, message);
 }
 fn split_fallback(outer: &Element, body: &str) -> Option<(String, String)> {
     // Legacy OMEMO authenticates the body, not the fallback range. Only move the
@@ -857,6 +858,7 @@ impl Worker {
                             None
                         };
                         self.emit(BackendEvent::CryptoAliases {
+                            markable_id: message.markable_id.clone(),
                             legacy_reply,
                             legacy_sticker: crate::file_share::Attachment::sticker_marker(
                                 &frame.xml,
@@ -986,6 +988,9 @@ impl Worker {
             }
             let (_, mut message, _) = protocol::normalize_protected(&content, &self.owner, None)
                 .ok_or(Error::Invalid("legacy body"))?;
+            if room.is_none() {
+                message.markable_id = metadata.markable_id.clone();
+            }
             if room.is_some() {
                 message.id = metadata.id.clone();
                 message.sender = metadata.sender.clone();

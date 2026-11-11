@@ -31,3 +31,5 @@ decoded textures to Rust.
 It reuses `ClapperGtk.Video` and `SimpleControls`, the same upstream widgets used
 by Galeria's `video_ui.py`, while adapting their paintable for Monogram's shared
 inline/focus rendering. No Clapper implementation is vendored here.
+
+`lottie_renderer.c` calls the upstream [Samsung rlottie C API](https://github.com/Samsung/rlottie), linked from Nix rlottie 0.2-unstable-2026-10-01. rlottie is MIT with its retained upstream third-party notices; no library source is copied. The GPL-3.0-or-later helper parses TGS only inside bubblewrap and renders one requested RGBA frame at a time.

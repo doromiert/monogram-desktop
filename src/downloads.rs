@@ -243,6 +243,14 @@ pub fn verify(path: &Path, file: &Attachment, cancel: &AtomicBool) -> Result<(),
     verified_input(path, file, cancel).map(|_| ())
 }
 pub struct VerifiedFile(pub(crate) File);
+impl VerifiedFile {
+    pub fn reopen(&self) -> Result<Self, &'static str> {
+        use std::os::fd::AsRawFd;
+        File::open(format!("/proc/self/fd/{}", self.0.as_raw_fd()))
+            .map(Self)
+            .map_err(|_| "Verified artwork is unavailable")
+    }
+}
 pub fn verified_input(
     path: &Path,
     file: &Attachment,

@@ -300,10 +300,15 @@ impl Store {
         matches!(latest.1.as_str(), "failed" | "uncertain").then_some(latest.0.text)
     }
     pub fn mark_read(&self, a: &str, peer: &str) -> rusqlite::Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         for table in ["messages", "message_bases", "action_events"] {
-            self.db.execute(&format!("UPDATE {table} SET body=json_set(body,'$.unread',json('false')) WHERE account=? AND peer=? AND json_extract(body,'$.unread')=1"),params![a,peer])?;
+            tx.execute(&format!("UPDATE {table} SET body=json_set(body,'$.unread',json('false')) WHERE account=? AND peer=? AND json_extract(body,'$.unread')=1"),params![a,peer])?;
         }
-        Ok(())
+        tx.execute("UPDATE chats SET body=json_set(body,'$.unread',0) WHERE account=? AND peer=? AND COALESCE(json_extract(body,'$.unread'),0)!=0",params![a,peer])?;
+        tx.commit()
     }
     pub fn unread_count(&self, a: &str, peer: &str) -> u32 {
         self.db.query_row("SELECT count(*) FROM messages WHERE account=? AND peer=? AND json_extract(body,'$.unread')=1 AND COALESCE(json_extract(body,'$.retracted'),0)=0",params![a,peer],|r|r.get(0)).unwrap_or(0)

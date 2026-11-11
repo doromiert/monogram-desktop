@@ -1,4 +1,4 @@
-use crate::{dialogs::bind_amount, model::*, ui::Ui, wallet::WalletCard, widgets::*};
+use crate::{model::*, ui::Ui, widgets::*};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, graphene, subclass::prelude::*};
 use std::{
@@ -58,151 +58,35 @@ impl Ui {
         self.media_pane.add_top_bar(&header);
         let body = bx(true, 0);
         body.set_margin_top(12);
-        let search = gtk::SearchEntry::builder()
-            .placeholder_text("Search")
-            .margin_start(12)
-            .margin_end(12)
-            .margin_bottom(12)
-            .build();
+        let search = self.media_search.clone();
+        search.set_margin_start(12);
+        search.set_margin_end(12);
+        search.set_margin_bottom(12);
         body.append(&search);
         self.media_stack
             .add_named(&self.emoji_sidebar(&search), Some("emoji"));
         self.media_stack.set_vexpand(true);
-        let entries = Rc::new(RefCell::new(vec![]));
-        let gifs_grid = gtk::Grid::builder()
-            .column_homogeneous(true)
-            .column_spacing(4)
-            .row_spacing(4)
-            .build();
-        for (kind, items) in [
-            (
-                "stickers",
-                vec!["🦊", "🐻", "🐸", "🐈", "☕", "🎉", "🌸", "🚀"],
-            ),
-            (
-                "gifs",
-                vec![
-                    "Happy dance",
-                    "Good morning",
-                    "High five",
-                    "You got this",
-                    "Weekend mood",
-                    "Well done",
-                ],
-            ),
-        ] {
-            let area = bx(true, 8);
-            margins(&area, 12);
-            area.set_margin_top(0);
-            area.append(&text("Favorites", "caption dim-label"));
-            let cols = 4;
-            let flow = gtk::FlowBox::builder()
-                .selection_mode(gtk::SelectionMode::None)
-                .column_spacing(4)
-                .row_spacing(4)
-                .min_children_per_line(cols)
-                .max_children_per_line(cols)
-                .build();
-            flow.add_css_class("media-grid");
-            gifs_grid.add_css_class("media-grid");
-            for (index, item) in items.into_iter().enumerate() {
-                let b = gtk::Button::builder().tooltip_text(item).build();
-                if kind == "gifs" {
-                    b.set_child(Some(&AnimatedImage::new(index)));
-                    b.add_css_class("gif-button");
-                    gifs_grid.attach(&b, index as i32 % 2, index as i32 / 2, 1, 1);
-                    entries.borrow_mut().push((
-                        b.clone().upcast::<gtk::Widget>(),
-                        item.to_string(),
-                        true,
-                    ));
-                } else {
-                    b.set_label(item);
-                    b.add_css_class("flat");
-                    b.add_css_class("sticker-item");
-                    flow.insert(&b, -1);
-                    let child = b.parent().unwrap();
-                    child.set_focusable(false);
-                    entries.borrow_mut().push((child, item.to_string(), false));
-                }
-                let weak = Rc::downgrade(self);
-                b.connect_clicked(move |_| {
-                    if let Some(ui) = weak.upgrade() {
-                        if let Some(id) =
-                            ui.send_content(item, if kind == "gifs" { "gif" } else { "sticker" })
-                        {
-                            if let Some(m) = ui
-                                .state
-                                .borrow_mut()
-                                .current_mut()
-                                .messages
-                                .iter_mut()
-                                .find(|m| m.id == id)
-                            {
-                                m.gif_index = index
-                            }
-                            ui.render_messages(true);
-                        }
-                    }
-                });
-            }
-            if kind == "gifs" {
-                area.append(&gifs_grid)
-            } else {
-                area.append(&flow)
-            }
-            let scroll = scroll(&area);
-            scroll.set_vexpand(true);
-            self.media_stack.add_named(&scroll, Some(kind));
-        }
-        let money = bx(true, 12);
-        margins(&money, 12);
-        let card = WalletCard::new("Everyday", "1.2048", true, || {});
-        money.append(&card.root);
-        self.sidebar_card.replace(Some(card));
-        let mode = adw::ToggleGroup::builder().homogeneous(true).build();
-        for (n, l) in [("send", "Send"), ("request", "Request")] {
-            mode.add(adw::Toggle::builder().name(n).label(l).build())
-        }
-        money.append(&mode);
-        let amount = gtk::Entry::builder()
-            .placeholder_text("Amount")
-            .input_purpose(gtk::InputPurpose::Number)
-            .build();
-        money.append(&amount);
-        let currency = gtk::DropDown::from_strings(&["XMR", "USD", "EUR", "PLN"]);
-        money.append(&currency);
-        let note = gtk::Entry::builder().placeholder_text("Add a note").build();
-        money.append(&note);
-        let review = gtk::Button::with_label("Review");
-        review.add_css_class("suggested-action");
-        bind_amount(&amount, &review);
-        let weak = Rc::downgrade(self);
-        review.connect_clicked(move |_| {
-            if let Some(ui) = weak.upgrade() {
-                let value = format!(
-                    "{} {}",
-                    amount.text(),
-                    ["XMR", "USD", "EUR", "PLN"][currency.selected() as usize]
-                );
-                if mode.active_name().as_deref() == Some("request") {
-                    ui.send_content(&value, "payment");
-                    ui.show_chat()
-                } else {
-                    let d = adw::AlertDialog::builder()
-                        .heading("Payment Review")
-                        .body(format!(
-                            "{value}\n{}\n\nOffline preview. No funds will be sent.",
-                            note.text()
-                        ))
-                        .build();
-                    d.add_response("close", "Close");
-                    d.present(Some(&ui.window));
-                }
-            }
-        });
-        money.append(&review);
-        self.media_stack.add_named(&scroll(&money), Some("monero"));
+        self.media_stack.add_named(
+            &adw::StatusPage::builder().title("Loading packs…").build(),
+            Some("stickers"),
+        );
+        self.media_stack.add_named(
+            &adw::StatusPage::builder()
+                .title("GIF search unavailable")
+                .description("Saved GIFs and GIPHY search will appear here when configured.")
+                .build(),
+            Some("gifs"),
+        );
+        self.media_stack.add_named(
+            &adw::StatusPage::builder()
+                .icon_name("wallet-symbolic")
+                .title("Wallet unavailable")
+                .description("No native Monero wallet is configured for this desktop client.")
+                .build(),
+            Some("monero"),
+        );
+        self.rebuild_pack_library();
+        self.rebuild_gif_library();
         let t = toggle.downgrade();
         let search_weak = search.downgrade();
         self.media_stack
@@ -212,23 +96,10 @@ impl Ui {
                         t.set_active_name(Some(&name))
                     }
                     if let Some(search) = search_weak.upgrade() {
-                        search.set_visible(name != "monero")
+                        search.set_visible(matches!(name.as_str(), "emoji" | "gifs"))
                     }
                 }
             });
-        search.connect_search_changed(move |s| {
-            let q = s.text().to_lowercase();
-            let mut index = 0;
-            for (widget, title, gif) in entries.borrow().iter() {
-                let visible = q.is_empty() || title.to_lowercase().contains(&q);
-                widget.set_visible(visible);
-                if *gif && visible {
-                    gifs_grid.remove(widget);
-                    gifs_grid.attach(widget, index % 2, index / 2, 1, 1);
-                    index += 1
-                }
-            }
-        });
         body.append(&self.media_stack);
         self.media_pane.set_content(Some(&body));
         self.track_sidebar(&self.media_pane);

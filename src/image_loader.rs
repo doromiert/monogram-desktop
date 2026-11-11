@@ -23,11 +23,18 @@ pub fn input_stream(file: crate::downloads::VerifiedFile) -> gio::InputStream {
     unsafe { from_glib_full(monogram_verified_stream_new(file.0.into_raw_fd())) }
 }
 pub struct Decoder {
-    image: glib::Object,
+    backend: Backend,
     cancel: gio::Cancellable,
     pub mime: String,
     pub width: u32,
     pub height: u32,
+}
+enum Backend {
+    Raster(glib::Object),
+    Tgs {
+        input: crate::downloads::VerifiedFile,
+        decoder: Option<(u32, crate::lottie::Decoder)>,
+    },
 }
 pub struct Frame {
     pub texture: gdk::Texture,
@@ -47,6 +54,36 @@ impl Decoder {
         cancel: &gio::Cancellable,
     ) -> Result<Self, &'static str> {
         Self::open_stream(&input_stream(input), cancel)
+    }
+    /// Only authenticated sticker attachments may interpret gzip as TGS.
+    /// Retain the inode and start the bounded renderer lazily at the requested frame size.
+    pub fn open_sticker(
+        mut input: crate::downloads::VerifiedFile,
+        cancel: &gio::Cancellable,
+    ) -> Result<Self, &'static str> {
+        use std::io::{Read, Seek};
+        if cancel.is_cancelled() {
+            return Err("Image preview cancelled");
+        }
+        let mut magic = [0; 2];
+        let gzip = input.0.read_exact(&mut magic).is_ok() && magic == [0x1f, 0x8b];
+        input
+            .0
+            .rewind()
+            .map_err(|_| "Sticker artwork unavailable")?;
+        if !gzip {
+            return Self::open(input, cancel);
+        }
+        Ok(Self {
+            backend: Backend::Tgs {
+                input,
+                decoder: None,
+            },
+            cancel: cancel.clone(),
+            mime: "application/x-tgsticker".into(),
+            width: 512,
+            height: 512,
+        })
     }
     pub fn open_bytes(
         bytes: &glib::Bytes,
@@ -89,7 +126,7 @@ impl Decoder {
         let width = unsafe { gly_image_get_width(raw) };
         let height = unsafe { gly_image_get_height(raw) };
         Ok(Self {
-            image,
+            backend: Backend::Raster(image),
             cancel: cancel.clone(),
             mime,
             width,
@@ -103,11 +140,29 @@ impl Decoder {
         if !(1..=8192).contains(&edge) {
             return Err("Invalid preview dimensions");
         }
+        let image = match &mut self.backend {
+            Backend::Raster(image) => image,
+            Backend::Tgs { input, decoder } => {
+                let edge = edge.min(512);
+                if decoder.as_ref().is_none_or(|(size, _)| *size != edge) {
+                    // Dropping a previous size promptly reaps its sandbox child.
+                    decoder.take();
+                    *decoder = Some((
+                        edge,
+                        crate::lottie::Decoder::open(input.reopen()?, edge, &self.cancel)?,
+                    ));
+                }
+                let frame = decoder.as_mut().expect("TGS decoder opened").1.frame()?;
+                return Ok(Frame {
+                    texture: frame.texture,
+                    delay: Some(frame.delay),
+                });
+            }
+        };
         let mut error = std::ptr::null_mut();
         let mut delay = 0;
-        let raw = unsafe {
-            monogram_image_frame(self.image.to_glib_none().0, edge, &mut delay, &mut error)
-        };
+        let raw =
+            unsafe { monogram_image_frame(image.to_glib_none().0, edge, &mut delay, &mut error) };
         clear_error(error);
         if raw.is_null() {
             return Err(if self.cancel.is_cancelled() {
@@ -170,6 +225,7 @@ fn cached_preview(
     source: &SourceStamp,
     edge: u32,
     cancel: &gio::Cancellable,
+    sticker: bool,
 ) -> Option<crate::image_ui::Image> {
     use std::io::Read;
     let mut bytes = Vec::new();
@@ -187,7 +243,8 @@ fn cached_preview(
     if &metadata.source != source
         || metadata.width == 0
         || metadata.height == 0
-        || !metadata.mime.starts_with("image/")
+        || !(metadata.mime.starts_with("image/")
+            || sticker && metadata.mime == "application/x-tgsticker")
         || openssl::sha::sha256(png).as_slice() != metadata.checksum
     {
         return None;
@@ -309,7 +366,13 @@ pub fn preview(
         .flatten();
     if let Some(cached) = cached.as_ref()
         && let Ok(metadata) = path.metadata()
-        && let Some(image) = cached_preview(cached, &SourceStamp::new(&metadata), edge, cancel)
+        && let Some(image) = cached_preview(
+            cached,
+            &SourceStamp::new(&metadata),
+            edge,
+            cancel,
+            file.sticker,
+        )
     {
         if !stopped.load(Ordering::Acquire) {
             return Ok(image);
@@ -324,7 +387,11 @@ pub fn preview(
         .metadata()
         .map(|metadata| SourceStamp::new(&metadata))
         .ok();
-    let mut decoder = Decoder::open(input, cancel)?;
+    let mut decoder = if file.sticker {
+        Decoder::open_sticker(input, cancel)?
+    } else {
+        Decoder::open(input, cancel)?
+    };
     let frame = decoder.frame(edge)?;
     if stopped.load(Ordering::Acquire) {
         return Err("Image preview cancelled");
@@ -349,65 +416,298 @@ pub fn play<W: IsA<gtk::Widget> + Clone + 'static>(
     visible: impl Fn(&W) -> bool + 'static,
     draw: impl Fn(&W, gdk::Texture) + 'static,
 ) {
-    use std::{
-        sync::{
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-            mpsc,
-        },
-        time::Instant,
-    };
-    static WORKERS: AtomicUsize = AtomicUsize::new(0);
+    let sticker = file.sticker;
+    play_input(picture, edge, visible, draw, sticker, move || {
+        crate::downloads::verified_input(&path, &file, &std::sync::atomic::AtomicBool::new(false))
+    });
+}
+
+/// Retain the verified inode while creating an independent stream on each map.
+pub fn play_opened<W: IsA<gtk::Widget> + Clone + 'static>(
+    picture: &W,
+    input: crate::downloads::VerifiedFile,
+    edge: u32,
+    visible: impl Fn(&W) -> bool + 'static,
+    draw: impl Fn(&W, gdk::Texture) + 'static,
+) {
+    play_input(picture, edge, visible, draw, false, move || input.reopen());
+}
+
+const MAX_ANIMATION_CONTEXTS: usize = 64;
+const MAX_ANIMATION_PIXELS: usize = 32 * 1024 * 1024;
+static ANIMATION_CONTEXTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static ANIMATION_PIXELS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+struct AnimationReservation {
+    pixels: usize,
+}
+
+impl AnimationReservation {
+    fn new(edge: u32) -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        let pixels = usize::try_from(edge).ok()?.checked_pow(2)?;
+        ANIMATION_CONTEXTS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |contexts| {
+                (contexts < MAX_ANIMATION_CONTEXTS).then_some(contexts + 1)
+            })
+            .ok()?;
+        if ANIMATION_PIXELS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(pixels)
+                    .filter(|total| *total <= MAX_ANIMATION_PIXELS)
+            })
+            .is_err()
+        {
+            ANIMATION_CONTEXTS.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(Self { pixels })
+    }
+}
+
+impl Drop for AnimationReservation {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        ANIMATION_PIXELS.fetch_sub(self.pixels, Ordering::AcqRel);
+        ANIMATION_CONTEXTS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+struct AnimationDecoder {
+    decoder: Decoder,
+    _reservation: AnimationReservation,
+}
+
+type AnimationOpen =
+    std::sync::Arc<dyn Fn() -> Result<crate::downloads::VerifiedFile, &'static str> + Send + Sync>;
+
+enum AnimationCommand {
+    Frame {
+        id: u64,
+        edge: u32,
+        sticker: bool,
+        open: AnimationOpen,
+        cancel: gio::Cancellable,
+        reply: std::sync::mpsc::SyncSender<Result<Frame, &'static str>>,
+    },
+    Drop(u64),
+}
+
+struct AnimationScheduler {
+    workers: Vec<std::sync::mpsc::SyncSender<AnimationCommand>>,
+}
+
+impl AnimationScheduler {
+    fn shared() -> &'static Self {
+        static SCHEDULER: std::sync::OnceLock<AnimationScheduler> = std::sync::OnceLock::new();
+        SCHEDULER.get_or_init(|| {
+            let mut workers = Vec::with_capacity(4);
+            for index in 0..4 {
+                let (sender, receiver) = std::sync::mpsc::sync_channel(64);
+                std::thread::Builder::new()
+                    .name(format!("monogram-animation-{index}"))
+                    .spawn(move || animation_worker(receiver))
+                    .expect("animation worker starts");
+                workers.push(sender);
+            }
+            Self { workers }
+        })
+    }
+
+    fn worker(&self, id: u64) -> &std::sync::mpsc::SyncSender<AnimationCommand> {
+        &self.workers[id as usize % self.workers.len()]
+    }
+
+    fn frame(
+        &self,
+        id: u64,
+        edge: u32,
+        sticker: bool,
+        open: AnimationOpen,
+        cancel: gio::Cancellable,
+    ) -> Option<std::sync::mpsc::Receiver<Result<Frame, &'static str>>> {
+        let (reply, receive) = std::sync::mpsc::sync_channel(1);
+        self.worker(id)
+            .try_send(AnimationCommand::Frame {
+                id,
+                edge,
+                sticker,
+                open,
+                cancel,
+                reply,
+            })
+            .ok()
+            .map(|_| receive)
+    }
+
+    fn drop_context(&self, id: u64) -> bool {
+        self.worker(id).try_send(AnimationCommand::Drop(id)).is_ok()
+    }
+}
+
+fn animation_worker(receiver: std::sync::mpsc::Receiver<AnimationCommand>) {
+    let mut decoders = std::collections::HashMap::<u64, AnimationDecoder>::new();
+    while let Ok(command) = receiver.recv() {
+        match command {
+            AnimationCommand::Drop(id) => {
+                decoders.remove(&id);
+            }
+            AnimationCommand::Frame {
+                id,
+                edge,
+                sticker,
+                open,
+                cancel,
+                reply,
+            } => {
+                let result = (|| {
+                    if !decoders.contains_key(&id) {
+                        let reservation = AnimationReservation::new(edge)
+                            .ok_or("Animation preview budget reached")?;
+                        let decoder = if sticker {
+                            Decoder::open_sticker(open()?, &cancel)?
+                        } else {
+                            Decoder::open(open()?, &cancel)?
+                        };
+                        decoders.insert(
+                            id,
+                            AnimationDecoder {
+                                decoder,
+                                _reservation: reservation,
+                            },
+                        );
+                    }
+                    decoders
+                        .get_mut(&id)
+                        .expect("animation decoder was inserted")
+                        .decoder
+                        .frame(edge)
+                })();
+                if result.is_err() {
+                    decoders.remove(&id);
+                }
+                if reply.try_send(result).is_err() {
+                    decoders.remove(&id);
+                }
+            }
+        }
+    }
+}
+
+struct AnimationState {
+    id: u64,
+    pending: std::cell::RefCell<Option<std::sync::mpsc::Receiver<Result<Frame, &'static str>>>>,
+    cancel: std::cell::RefCell<gio::Cancellable>,
+    registered: std::cell::Cell<bool>,
+    next: std::cell::Cell<std::time::Instant>,
+}
+
+fn request_animation_frame(
+    state: &AnimationState,
+    edge: u32,
+    sticker: bool,
+    open: std::sync::Arc<
+        dyn Fn() -> Result<crate::downloads::VerifiedFile, &'static str> + Send + Sync,
+    >,
+) {
+    if let Some(receive) = AnimationScheduler::shared().frame(
+        state.id,
+        edge,
+        sticker,
+        open,
+        state.cancel.borrow().clone(),
+    ) {
+        state.pending.replace(Some(receive));
+        state.registered.set(true);
+    }
+}
+
+fn drop_animation_context(state: &AnimationState) -> bool {
+    if state.registered.get() {
+        state.cancel.borrow().cancel();
+        state.cancel.replace(gio::Cancellable::new());
+        state.pending.borrow_mut().take();
+        if AnimationScheduler::shared().drop_context(state.id) {
+            state.registered.set(false);
+            return true;
+        }
+        return false;
+    }
+    true
+}
+
+fn retry_animation_drop(id: u64) {
+    glib::timeout_add_local(Duration::from_millis(25), move || {
+        if AnimationScheduler::shared().drop_context(id) {
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
+}
+
+fn play_input<W: IsA<gtk::Widget> + Clone + 'static>(
+    picture: &W,
+    edge: u32,
+    visible: impl Fn(&W) -> bool + 'static,
+    draw: impl Fn(&W, gdk::Texture) + 'static,
+    sticker: bool,
+    open: impl Fn() -> Result<crate::downloads::VerifiedFile, &'static str> + Send + Sync + 'static,
+) {
+    let open = std::sync::Arc::new(open);
     let picture = picture.downgrade();
-    let mut frames = None;
-    let mut next = Instant::now();
+    let visible = std::rc::Rc::new(visible);
+    let draw = std::rc::Rc::new(draw);
+    static IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let state = AnimationState {
+        id: IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        pending: std::cell::RefCell::new(None),
+        cancel: std::cell::RefCell::new(gio::Cancellable::new()),
+        registered: std::cell::Cell::new(false),
+        next: std::cell::Cell::new(std::time::Instant::now()),
+    };
     glib::timeout_add_local(Duration::from_millis(25), move || {
         let Some(picture) = picture.upgrade() else {
+            if !drop_animation_context(&state) {
+                retry_animation_drop(state.id);
+            }
             return glib::ControlFlow::Break;
         };
         if !picture.is_mapped() || !visible(&picture) {
-            frames = None;
+            let _ = drop_animation_context(&state);
             return glib::ControlFlow::Continue;
         }
-        if let Some(rx) = frames.as_ref() {
-            if Instant::now() < next {
-                return glib::ControlFlow::Continue;
-            }
-            match mpsc::Receiver::<Frame>::try_recv(rx) {
-                Ok(frame) => {
+        if let Some(receive) = state.pending.borrow_mut().take() {
+            match receive.try_recv() {
+                Ok(Ok(frame)) => {
                     draw(&picture, frame.texture);
                     let Some(delay) = frame.delay else {
+                        let _ = drop_animation_context(&state);
                         return glib::ControlFlow::Break;
                     };
-                    next = Instant::now()
-                        + delay.clamp(Duration::from_millis(25), Duration::from_secs(60));
+                    state.next.set(
+                        std::time::Instant::now()
+                            + delay.clamp(Duration::from_millis(25), Duration::from_secs(60)),
+                    );
                 }
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => return glib::ControlFlow::Break,
+                Ok(Err("Animation preview budget reached")) => {
+                    state.registered.set(false);
+                    state
+                        .next
+                        .set(std::time::Instant::now() + Duration::from_millis(100));
+                }
+                Ok(Err(_)) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    let _ = drop_animation_context(&state);
+                    return glib::ControlFlow::Break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    state.pending.replace(Some(receive));
+                    return glib::ControlFlow::Continue;
+                }
             }
-        } else if WORKERS
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < 4).then_some(n + 1)
-            })
-            .is_ok()
-        {
-            let (tx, rx) = mpsc::sync_channel(1);
-            let (path, file) = (path.clone(), file.clone());
-            std::thread::spawn(move || {
-                let input = crate::downloads::verified_input(&path, &file, &AtomicBool::new(false));
-                if let Ok(input) = input
-                    && let Ok(mut decoder) = Decoder::open(input, &gio::Cancellable::new())
-                {
-                    while let Ok(frame) = decoder.frame(edge) {
-                        let animated = frame.delay.is_some();
-                        if tx.send(frame).is_err() || !animated {
-                            break;
-                        }
-                    }
-                }
-                WORKERS.fetch_sub(1, Ordering::AcqRel);
-            });
-            next = Instant::now();
-            frames = Some(rx);
+        }
+        if state.pending.borrow().is_none() && std::time::Instant::now() >= state.next.get() {
+            request_animation_frame(&state, edge, sticker, open.clone());
         }
         glib::ControlFlow::Continue
     });
@@ -483,7 +783,14 @@ fn fit(texture: gdk::Texture, edge: u32) -> Result<gdk::Texture, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, sync::atomic::AtomicBool};
+    use std::{
+        fs,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        time::Instant,
+    };
     #[test]
     #[ignore = "requires real bubblewrap namespaces and glycin loaders outside the Nix build sandbox"]
     fn sandboxed_inline_avatar_decodes_from_memory() {
@@ -574,6 +881,81 @@ mod tests {
             Some("Image preview unavailable")
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a native display, bubblewrap and glycin loaders"]
+    fn six_visible_gifs_all_advance_without_blocking_gtk() {
+        assert_eq!(std::env::var("MONOGRAM_IMAGE_FIXTURE").as_deref(), Ok("1"));
+        gtk::init().unwrap();
+        let path = crate::widgets::asset("preview-0.gif");
+        let bytes = fs::read(&path).unwrap();
+        let mut file =
+            crate::file_share::Attachment::bare("https://fixture.invalid/tiny.gif").unwrap();
+        file.size = Some(bytes.len() as u64);
+        file.hashes
+            .insert("sha-256".into(), openssl::sha::sha256(&bytes).to_vec());
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        let window = gtk::Window::builder()
+            .child(&row)
+            .default_width(660)
+            .default_height(120)
+            .build();
+        let counts = (0..6)
+            .map(|_| Arc::new(AtomicUsize::new(0)))
+            .collect::<Vec<_>>();
+        for count in &counts {
+            let picture = gtk::Picture::new();
+            picture.set_size_request(100, 100);
+            row.append(&picture);
+            let count = count.clone();
+            play(
+                &picture,
+                path.clone(),
+                file.clone(),
+                100,
+                |_| true,
+                move |picture, texture| {
+                    picture.set_paintable(Some(&texture));
+                    count.fetch_add(1, Ordering::Relaxed);
+                },
+            );
+        }
+        window.present();
+        let loop_ = glib::MainLoop::new(None, false);
+        let finished = loop_.clone();
+        let started = Instant::now();
+        let heartbeat = Arc::new(AtomicUsize::new(0));
+        let heartbeat_tick = heartbeat.clone();
+        glib::timeout_add_local(Duration::from_millis(20), move || {
+            heartbeat_tick.fetch_add(1, Ordering::Relaxed);
+            glib::ControlFlow::Continue
+        });
+        let result = std::rc::Rc::new(std::cell::Cell::new(false));
+        let result_tick = result.clone();
+        let counts_tick = counts.clone();
+        glib::timeout_add_local(Duration::from_millis(20), move || {
+            if counts_tick
+                .iter()
+                .all(|count| count.load(Ordering::Relaxed) >= 3)
+            {
+                result_tick.set(true);
+                finished.quit();
+                return glib::ControlFlow::Break;
+            }
+            if started.elapsed() >= Duration::from_secs(8) {
+                finished.quit();
+                return glib::ControlFlow::Break;
+            }
+            glib::ControlFlow::Continue
+        });
+        loop_.run();
+        window.close();
+        assert!(result.get(), "not every visible GIF advanced three frames");
+        assert!(
+            heartbeat.load(Ordering::Relaxed) >= 3,
+            "GTK main loop stalled"
+        );
     }
 }
 

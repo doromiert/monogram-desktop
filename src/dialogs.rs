@@ -1402,6 +1402,68 @@ impl Ui {
             });
             privacy.add(&row)
         }
+        if !owner.is_empty() {
+            let read = adw::SwitchRow::builder()
+                .title("Send read receipts")
+                .subtitle("Tell contacts when you have actually viewed their messages")
+                .active(self.read_receipts_enabled())
+                .build();
+            let spinner = gtk::Spinner::new();
+            spinner.set_visible(false);
+            spinner.set_tooltip_text(Some("Saving read receipt preference"));
+            read.add_suffix(&spinner);
+            let changing = Rc::new(Cell::new(false));
+            let pending = Rc::new(Cell::new(false));
+            let weak = Rc::downgrade(self);
+            let account = owner.clone();
+            read.connect_active_notify(move |row| {
+                if changing.get() || pending.replace(true) {
+                    return;
+                }
+                let Some(ui) = weak
+                    .upgrade()
+                    .filter(|ui| ui.state.borrow().account == account)
+                else {
+                    pending.set(false);
+                    return;
+                };
+                if row.is_active() == ui.read_receipts_enabled() {
+                    pending.set(false);
+                    return;
+                }
+                row.set_sensitive(false);
+                spinner.set_visible(true);
+                spinner.set_spinning(true);
+                let update = ui.set_read_receipts(row.is_active());
+                let weak_ui = Rc::downgrade(&ui);
+                let weak_row = row.downgrade();
+                let weak_spinner = spinner.downgrade();
+                let account = account.clone();
+                let changing = changing.clone();
+                let pending = pending.clone();
+                glib::spawn_future_local(async move {
+                    let result = update.await;
+                    let ui = weak_ui
+                        .upgrade()
+                        .filter(|ui| ui.state.borrow().account == account);
+                    if let (Some(ui), Some(row)) = (ui.as_ref(), weak_row.upgrade()) {
+                        changing.set(true);
+                        row.set_active(ui.read_receipts_enabled());
+                        row.set_sensitive(true);
+                        changing.set(false);
+                    }
+                    if let Some(spinner) = weak_spinner.upgrade() {
+                        spinner.set_spinning(false);
+                        spinner.set_visible(false);
+                    }
+                    pending.set(false);
+                    if let (Some(ui), Err(error)) = (ui, result) {
+                        ui.notice(&error);
+                    }
+                });
+            });
+            privacy.add(&read);
+        }
         general.add(&privacy);
         if !owner.is_empty() {
             general.add(&self.link_preview_preferences());

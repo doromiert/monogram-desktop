@@ -119,6 +119,24 @@
 .gif-button { padding: 0; border: none; border-radius: 10px; box-shadow: none; background: transparent; }
 .media-grid flowboxchild, .media-grid flowboxchild:hover { padding: 0; background: transparent; }
 .media-grid flowboxchild:focus, .media-grid flowboxchild:focus-visible { outline: none; box-shadow: none; }
+.pack-library-page, .pack-library-page scrolledwindow, .pack-library-grid,
+.pack-library-grid flowboxchild, .pack-library-grid flowboxchild:hover { background: transparent; }
+.pack-library-toolbar { min-height: 34px; }
+.pack-library-grid { padding: 2px; }
+.pack-item { min-width: 58px; min-height: 58px; padding: 2px; border: none; background: transparent; box-shadow: none; }
+.pack-item-picture { min-width: 54px; min-height: 54px; background: transparent; }
+.pack-selector-item { min-height: 30px; padding: 3px 8px; }
+.pack-library-progress { padding: 0 4px; }
+.gif-library-page, .gif-library-page scrolledwindow, .gif-library-grid,
+.gif-library-grid flowboxchild, .gif-library-grid flowboxchild:hover { background: transparent; }
+.gif-library-grid { padding: 2px 10px 10px; }
+.gif-library-tile { background: transparent; }
+.gif-library-item { min-height: 108px; padding: 0; border: none; border-radius: 10px; }
+.gif-library-item picture { min-height: 108px; }
+.inline-emoji-text {
+  background: transparent; padding: 0; box-shadow: none;
+}
+.inline-custom-emoji { min-width: 20px; min-height: 20px; }
 
 .message-list row.selected-message { background: alpha(@accent_bg_color,.14); color: @window_fg_color; }
 .shared-media-grid { padding: 12px; }

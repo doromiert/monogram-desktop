@@ -30,6 +30,31 @@ const READY_UPLOAD_CAPTIONS: &str = "SELECT dependency.peer,caption.body
       AND COALESCE(json_type(parent.body,'$.upload'),'null')='null'
       AND json_type(parent.body,'$.attachment')='object'";
 impl Store {
+    pub async fn write_snapshot<T: Send + 'static>(
+        &self,
+        write: impl FnOnce(&Store) -> rusqlite::Result<T> + Send + 'static,
+    ) -> rusqlite::Result<T> {
+        let Some(path) = self
+            .db
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+        else {
+            return write(self);
+        };
+        gtk::gio::spawn_blocking(move || {
+            let db = Connection::open_with_flags(
+                path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            db.busy_timeout(std::time::Duration::from_millis(250))?;
+            db.pragma_update(None, "foreign_keys", "ON")?;
+            write(&Store { db })
+        })
+        .await
+        .map_err(|_| rusqlite::Error::InvalidQuery)?
+    }
     pub fn init_link_previews(&self) -> rusqlite::Result<()> {
         self.db.execute_batch("CREATE TABLE IF NOT EXISTS link_previews(account TEXT NOT NULL REFERENCES accounts(jid) ON DELETE CASCADE,url TEXT NOT NULL,expires INTEGER NOT NULL,body TEXT,PRIMARY KEY(account,url));CREATE INDEX IF NOT EXISTS link_previews_expiry ON link_previews(account,expires);")
     }
@@ -53,11 +78,13 @@ impl Store {
             db
         };
         db.execute_batch("PRAGMA foreign_keys=ON;CREATE TABLE IF NOT EXISTS accounts(jid TEXT PRIMARY KEY,config TEXT NOT NULL);CREATE TABLE IF NOT EXISTS chats(account TEXT NOT NULL REFERENCES accounts(jid) ON DELETE CASCADE,peer TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(account,peer));CREATE TABLE IF NOT EXISTS messages(account TEXT NOT NULL,peer TEXT NOT NULL,id TEXT NOT NULL,timestamp TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(account,peer,id),FOREIGN KEY(account,peer) REFERENCES chats(account,peer) ON DELETE CASCADE);CREATE INDEX IF NOT EXISTS message_order ON messages(account,peer,timestamp,id);CREATE TABLE IF NOT EXISTS aliases(account TEXT NOT NULL,peer TEXT NOT NULL,own INTEGER NOT NULL,alias TEXT NOT NULL,message TEXT NOT NULL,PRIMARY KEY(account,peer,own,alias));CREATE TABLE IF NOT EXISTS preferences(key TEXT PRIMARY KEY,value TEXT NOT NULL);")?;
+        db.busy_timeout(std::time::Duration::from_millis(250))?;
         let store = Self { db };
         store.init_actions()?;
         store.init_media()?;
         store.init_rooms()?;
         store.init_requests()?;
+        store.init_read_markers()?;
         store.init_link_previews()?;
         store.db.execute_batch("CREATE INDEX IF NOT EXISTS queued_outbox ON messages(account,timestamp,id) WHERE json_extract(body,'$.outbox_pending')=1;")?;
         store.db.execute_batch("CREATE TABLE IF NOT EXISTS upload_captions(account TEXT NOT NULL,peer TEXT NOT NULL,id TEXT NOT NULL,parent TEXT NOT NULL,PRIMARY KEY(account,peer,id),FOREIGN KEY(account,peer,id) REFERENCES messages(account,peer,id) ON DELETE CASCADE);")?;
@@ -159,17 +186,40 @@ impl Store {
         peer: &str,
         message: &Message,
     ) -> rusqlite::Result<()> {
-        let transaction = self.db.unchecked_transaction()?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         self.upsert_message(account, peer, message)?;
         transaction.commit()
     }
-    pub(crate) fn save_outbox_pair(&self, account: &str, peer: &str, media: &Message, caption: &Message) -> rusqlite::Result<()> {
-        let transaction = self.db.unchecked_transaction()?;
+    pub(crate) fn save_outbox_pair(
+        &self,
+        account: &str,
+        peer: &str,
+        media: &Message,
+        caption: &Message,
+    ) -> rusqlite::Result<()> {
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         self.upsert_message(account, peer, media)?;
         self.upsert_message(account, peer, caption)?;
         transaction.commit()
     }
     fn upsert_message(&self, account: &str, peer: &str, m: &Message) -> rusqlite::Result<()> {
+        let confirmed;
+        let m = if m.own && m.delivery != "read" && self.confirmed_read(account, peer, &m.id) {
+            confirmed = {
+                let mut message = m.clone();
+                message.delivery = "read".into();
+                message
+            };
+            &confirmed
+        } else {
+            m
+        };
         if m.action.is_some() {
             return Ok(());
         }
@@ -236,7 +286,10 @@ impl Store {
         id: &str,
         context: &crate::spoilers::Context,
     ) -> rusqlite::Result<bool> {
-        let transaction = self.db.unchecked_transaction()?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let mut changed = false;
         for table in ["messages", "message_bases"] {
             let body: Option<String> = transaction
@@ -270,16 +323,52 @@ impl Store {
         transaction.commit()?;
         Ok(changed)
     }
-    pub fn restore_inline_emoji(&self, owner: &str, peer: &str, id: &str, emoji: &crate::packs::InlineEmoji) -> rusqlite::Result<bool> {
-        let Ok(validated) = crate::packs::InlineEmoji::new(emoji.body.clone(), emoji.ranges.clone()) else { return Ok(false) };
-        let transaction = self.db.unchecked_transaction()?;
+    pub fn restore_inline_emoji(
+        &self,
+        owner: &str,
+        peer: &str,
+        id: &str,
+        emoji: &crate::packs::InlineEmoji,
+    ) -> rusqlite::Result<bool> {
+        let Ok(validated) =
+            crate::packs::InlineEmoji::new(emoji.body.clone(), emoji.ranges.clone())
+        else {
+            return Ok(false);
+        };
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let mut changed = false;
         for table in ["messages", "message_bases"] {
-            let body: Option<String> = transaction.query_row(&format!("SELECT body FROM {table} WHERE account=? AND peer=? AND id=?"), params![owner,peer,id], |row| row.get(0)).optional()?;
-            let Some(mut message) = body.and_then(|body| Message::decode(&body).ok()) else { continue };
-            if message.inline_emoji.is_some() || message.unavailable || message.retracted || message.mode() == crate::encryption_policy::Mode::Legacy || message.text != validated.body { continue; }
+            let body: Option<String> = transaction
+                .query_row(
+                    &format!("SELECT body FROM {table} WHERE account=? AND peer=? AND id=?"),
+                    params![owner, peer, id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(mut message) = body.and_then(|body| Message::decode(&body).ok()) else {
+                continue;
+            };
+            if message.inline_emoji.is_some()
+                || message.unavailable
+                || message.retracted
+                || message.mode() == crate::encryption_policy::Mode::Legacy
+                || message.text != validated.body
+            {
+                continue;
+            }
             message.inline_emoji = Some(validated.clone());
-            transaction.execute(&format!("UPDATE {table} SET body=? WHERE account=? AND peer=? AND id=?"), params![serde_json::to_string(&message).map_err(|_| rusqlite::Error::InvalidQuery)?,owner,peer,id])?;
+            transaction.execute(
+                &format!("UPDATE {table} SET body=? WHERE account=? AND peer=? AND id=?"),
+                params![
+                    serde_json::to_string(&message).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    owner,
+                    peer,
+                    id
+                ],
+            )?;
             changed = true;
         }
         transaction.commit()?;
@@ -358,12 +447,7 @@ impl Store {
         wire: &str,
         status: &str,
     ) -> rusqlite::Result<Option<Message>> {
-        let Some(id) = self.known(
-            account,
-            peer,
-            true,
-            &[format!("wire:{wire}"), format!("origin:{wire}")],
-        ) else {
+        let Some(id) = self.own_wire_id(account, peer, wire)? else {
             return Ok(None);
         };
         let Some(mut message) = self
@@ -372,7 +456,7 @@ impl Store {
         else {
             return Ok(None);
         };
-        if message.delivery != "delivered" || status == "delivered" {
+        if message.delivery != "read" && (message.delivery != "delivered" || status == "read") {
             message.delivery = status.into();
             let tx = self.db.unchecked_transaction()?;
             self.upsert_message(account, peer, &message)?;

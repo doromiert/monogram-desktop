@@ -398,9 +398,17 @@ fn prepare(path: PathBuf, draft: &Draft, limit: u64, job: &Job) -> Result<Prepar
         return Err("Upload snapshot changed");
     }
     let (content, _) = gio::content_type_guess(Some(Path::new(&name)), Some(prefix.as_slice()));
-    let mime = gio::content_type_get_mime_type(&content)
+    let mut mime = gio::content_type_get_mime_type(&content)
         .map(|v| v.to_string())
         .unwrap_or_else(|| "application/octet-stream".into());
+    if draft.sticker && prefix.starts_with(&[0x1f, 0x8b]) {
+        // A filename is only a hint. Validate the retained snapshot in the same
+        // bounded no-network renderer used by incoming TGS stickers.
+        let verified = crate::downloads::VerifiedFile(input);
+        let _validated = crate::lottie::Decoder::open(verified, 1, &job.source)?;
+        job.check()?;
+        mime = "application/x-tgsticker".into();
+    }
     Ok(Prepared {
         path,
         name,

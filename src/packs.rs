@@ -2526,3 +2526,86 @@ impl<'de> Deserialize<'de> for InlineEmoji {
         Self::new(stored.body, ranges).map_err(D::Error::custom)
     }
 }
+
+fn rooted_file(root: &Path, name: &str) -> Result<File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    if name.is_empty() || name.contains('/') || name.contains('\0') || matches!(name, "." | "..") {
+        return Err(Error("Invalid artwork filename."));
+    }
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(0x10000 | 0x20000 | 0x80000)
+        .open(root)?;
+    let name = std::ffi::CString::new(name).map_err(|_| Error("Invalid artwork filename."))?;
+    unsafe extern "C" {
+        fn openat(dirfd: i32, path: *const std::ffi::c_char, flags: i32, ...) -> i32;
+    }
+    let fd = unsafe { openat(directory.as_raw_fd(), name.as_ptr(), 0x20000 | 0x80000) };
+    if fd < 0 {
+        return Err(Error("Artwork file is unavailable."));
+    }
+    let file = unsafe { File::from_raw_fd(fd) };
+    if !file.metadata()?.is_file() {
+        return Err(Error("Artwork is not a regular file."));
+    }
+    Ok(file)
+}
+impl Library {
+    pub async fn verified_asset(
+        &self,
+        id: i64,
+        job: Job,
+    ) -> Result<(Asset, crate::downloads::VerifiedFile)> {
+        let this = self.clone();
+        worker(move || {
+            use std::io::{Seek, SeekFrom};
+            this.check(&job)?;
+            let _guard = this.owner.gate.lock().unwrap();
+            let snapshot = this.read()?;
+            let item = find_item(&snapshot, id)?.clone();
+            validate_item(&item)?;
+            job.update("Preparing artwork", 0, 1, 0);
+            let mut input = rooted_file(&this.owner.path, &item.file)?;
+            let bytes = read_limit(&mut input, FILE_LIMIT, &job)?;
+            validate_media(&bytes, &item.mime, item.width, item.height, Some(&job))?;
+            this.check(&job)?;
+            input.seek(SeekFrom::Start(0))?;
+            let asset = Asset {
+                path: this.owner.path.join(&item.file),
+                item,
+                size: bytes.len() as u64,
+                sha256: hash(&bytes),
+            };
+            Ok((asset, crate::downloads::VerifiedFile(input)))
+        })
+        .await
+    }
+    pub async fn verified_inline(
+        &self,
+        asset: InlineAsset,
+        job: Job,
+    ) -> Result<(InlineFile, crate::downloads::VerifiedFile)> {
+        let file = self.cache_inline(asset.clone(), job.clone()).await?;
+        let this = self.clone();
+        worker(move || {
+            use std::io::{Seek, SeekFrom};
+            this.check(&job)?;
+            let name = file
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or(Error("Invalid inline artwork path."))?;
+            let mut input = rooted_file(&this.owner.path.join("inline"), name)?;
+            let bytes = read_limit(&mut input, INLINE_LIMIT, &job)?;
+            if bytes != *asset.bytes
+                || format!("sha-256+{}@bob.xmpp.org", hash(&bytes)) != asset.cid
+            {
+                return Err(Error("Inline artwork changed before loading."));
+            }
+            input.seek(SeekFrom::Start(0))?;
+            this.check(&job)?;
+            Ok((file, crate::downloads::VerifiedFile(input)))
+        })
+        .await
+    }
+}

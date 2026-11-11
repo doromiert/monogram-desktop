@@ -16,6 +16,7 @@ fn yes() -> bool {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Message {
+    pub markable_id: String,
     #[serde(default)]
     pub inline_emoji: Option<crate::packs::InlineEmoji>,
     #[serde(default)]
@@ -67,6 +68,7 @@ impl Default for Message {
         Self {
             preview_spoilers: Some(crate::spoilers::Context::clear()),
             inline_emoji: None,
+            markable_id: String::new(),
             upload: None,
             upload_caption_for: String::new(),
             attachment: None,

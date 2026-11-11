@@ -1,9 +1,10 @@
-{ pkgs, lib, stdenv, pkg-config, libomemo-c, openssl, gtk4, libadwaita, libepoxy, libglycin-gtk4, glycin-loaders, sqlite, wrapGAppsHook4, xorg-server, dbus, makeFontsConf, adwaita-fonts, gsettings-desktop-schemas, mesa, librsvg, prosody, cacert, python3, jdk21, gnome-keyring, gst_all_1, clapper-unwrapped, monogramSrc ? lib.cleanSource ./., craneLib ? import (builtins.fetchTarball {
+{ pkgs, lib, stdenv, pkg-config, libomemo-c, openssl, gtk4, libadwaita, libepoxy, libglycin-gtk4, glycin-loaders, sqlite, wrapGAppsHook4, xorg-server, dbus, makeFontsConf, adwaita-fonts, gsettings-desktop-schemas, mesa, librsvg, prosody, cacert, python3, jdk21, gnome-keyring, gst_all_1, clapper-unwrapped, rlottie, zlib, bubblewrap, monogramSrc ? lib.cleanSource ./., craneLib ? import (builtins.fetchTarball {
   url = "https://github.com/ipetkov/crane/archive/79fd63528501446749c09f08cad486a58c7d173e.tar.gz";
   sha256 = "sha256-TREenflwEjxOSq292FYwbc3kEm7TDRtXCZRNWEdjBmg=";
 }) { inherit pkgs; } }:
 let
   src = monogramSrc;
+  stickerRlottie = rlottie.overrideAttrs (old: { mesonFlags = (old.mesonFlags or []) ++ [ "-Dthread=false" ]; });
   fontConfig = makeFontsConf { fontDirectories = [ adwaita-fonts ]; };
   commonArgs = {
     pname = "monogram-desktop";
@@ -31,6 +32,9 @@ let
     cargoBuildExtraArgs = "--bin monogram-desktop";
   });
 in craneLib.buildPackage (commonArgs // {
+  buildInputs = commonArgs.buildInputs ++ [ stickerRlottie zlib ];
+  nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ bubblewrap ];
+  MONOGRAM_BWRAP = "${bubblewrap}/bin/bwrap";
   inherit cargoArtifacts cargoVendorDir;
   cargoBuildExtraArgs = "--bin monogram-desktop";
   passthru = { inherit cargoArtifacts; };
@@ -76,7 +80,13 @@ in craneLib.buildPackage (commonArgs // {
     cp data/icons/com.negzero.MonogramDesktop.svg $out/share/icons/hicolor/scalable/apps/
     cp -r LICENSE LICENSES $out/share/doc/monogram-desktop/
     cp native/NOTICE.md $out/share/doc/monogram-desktop/native-NOTICE.md
+    mkdir -p $out/libexec
+    lottie_helper=$(find target -path '*/release/build/monogram-desktop-*/out/monogram-sticker-renderer' -type f | head -n 1)
+    test -n "$lottie_helper"
+    cp "$lottie_helper" $out/libexec/monogram-sticker-renderer
     gappsWrapperArgs+=(
+      --set MONOGRAM_LOTTIE_HELPER $out/libexec/monogram-sticker-renderer
+      --set MONOGRAM_BWRAP ${bubblewrap}/bin/bwrap
       --set MONOGRAM_ASSET_DIR $out/share/monogram-desktop
       --set MONOGRAM_EPOXY_LIBRARY ${libepoxy}/lib/libepoxy.so.0
       --set GTK_USE_PORTAL 1

@@ -36,9 +36,25 @@ impl Ui {
         self.queue_local_files(vec![gtk::gio::File::for_path(path)], "", sticker, false)
     }
 
-    pub fn queue_local_files(self: &Rc<Self>, files: Vec<gtk::gio::File>, caption: &str, sticker: bool, clear_composer: bool) -> bool {
-        if files.is_empty() || files.len() > 64 || caption.len() > 64 * 1024 || self.state.borrow().account.is_empty() { return false; }
-        let reply = self.replying.borrow().as_ref().and_then(|id| self.active_message(id));
+    pub fn queue_local_files(
+        self: &Rc<Self>,
+        files: Vec<gtk::gio::File>,
+        caption: &str,
+        sticker: bool,
+        clear_composer: bool,
+    ) -> bool {
+        if files.is_empty()
+            || files.len() > 64
+            || caption.len() > 64 * 1024
+            || self.state.borrow().account.is_empty()
+        {
+            return false;
+        }
+        let reply = self
+            .replying
+            .borrow()
+            .as_ref()
+            .and_then(|id| self.active_message(id));
         let mut state = self.state.borrow_mut();
         let owner = state.account.clone();
         let peer = state.current().jid.clone();
@@ -47,24 +63,57 @@ impl Ui {
         for (index, file) in files.into_iter().enumerate() {
             let id = new_id();
             let mut message = Message {
-                id: id.clone(), wire_id: id.clone(), aliases: vec![format!("wire:{id}"),format!("origin:{id}")],
-                sender: owner.clone(), author: "You".into(), own: true, kind: "file".into(),
-                text: if index == 0 { caption.trim().into() } else { String::new() },
-                outbox_pending: true, delivery: "queued".into(), unsupported_attachment: true,
-                upload: Some(UploadDraft { uri: file.uri().into(), name: file.basename().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| "attachment".into()), error: None, sticker }),
+                id: id.clone(),
+                wire_id: id.clone(),
+                aliases: vec![format!("wire:{id}"), format!("origin:{id}")],
+                sender: owner.clone(),
+                author: "You".into(),
+                own: true,
+                kind: "file".into(),
+                text: if index == 0 {
+                    caption.trim().into()
+                } else {
+                    String::new()
+                },
+                outbox_pending: true,
+                delivery: "queued".into(),
+                unsupported_attachment: true,
+                upload: Some(UploadDraft {
+                    uri: file.uri().into(),
+                    name: file
+                        .basename()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "attachment".into()),
+                    error: None,
+                    sticker,
+                }),
                 ..Default::default()
             };
             if let Some(reply) = &reply {
-                message.reply = format!("{} · {}", reply.author, reply.preview().chars().take(80).collect::<String>());
+                message.reply = format!(
+                    "{} · {}",
+                    reply.author,
+                    reply.preview().chars().take(80).collect::<String>()
+                );
                 message.reply_id = reply.wire_id.clone();
-                message.reply_to = if group && !reply.sender.is_empty() { reply.sender.clone() } else if reply.own { owner.clone() } else { peer.clone() };
+                message.reply_to = if group && !reply.sender.is_empty() {
+                    reply.sender.clone()
+                } else if reply.own {
+                    owner.clone()
+                } else {
+                    peer.clone()
+                };
             }
             state.current_mut().messages.push(message);
             ids.push(id);
         }
         drop(state);
         if !self.persist() {
-            self.state.borrow_mut().current_mut().messages.retain(|message| !ids.contains(&message.id));
+            self.state
+                .borrow_mut()
+                .current_mut()
+                .messages
+                .retain(|message| !ids.contains(&message.id));
             return false;
         }
         if clear_composer {
@@ -81,7 +130,11 @@ impl Ui {
         self.render_messages(true);
         self.refresh_chats(None);
         let weak = Rc::downgrade(self);
-        glib::idle_add_local_once(move || { if let Some(ui) = weak.upgrade() { ui.flush_send_queue(); } });
+        glib::idle_add_local_once(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.flush_send_queue();
+            }
+        });
         true
     }
     pub fn queue_text(self: &Rc<Self>, value: &str) {
@@ -89,6 +142,17 @@ impl Ui {
             self.notice("Message is too long");
             return;
         }
+        let inline = self
+            .composer_inline_emoji()
+            .filter(|emoji| emoji.body == value)
+            .and_then(|emoji| {
+                let start = value[..value.len() - value.trim_start().len()]
+                    .chars()
+                    .count();
+                emoji
+                    .slice(start, start + value.trim().chars().count())
+                    .ok()
+            });
         let reply = self
             .replying
             .borrow()
@@ -108,6 +172,7 @@ impl Ui {
             .find(|message| message.id == id)
             .unwrap();
         message.outbox_pending = true;
+        message.inline_emoji = inline;
         message.delivery = "queued".into();
         // Encryption is unknown until the sending policy has actually completed.
         message.encrypted = false;
@@ -139,6 +204,7 @@ impl Ui {
         self.loading.set(true);
         self.composer.buffer().set_text("");
         self.loading.set(false);
+        self.clear_composer_inline_emoji();
         self.cancel_reply();
         self.save_draft();
         self.history_window.content_changed();
@@ -307,22 +373,46 @@ impl Ui {
                     if mode == Mode::Legacy && !current.text.trim().is_empty() {
                         let caption_id = new_id();
                         let mut caption = Message {
-                            id: caption_id.clone(), wire_id: caption_id.clone(),
-                            aliases: vec![format!("wire:{caption_id}"),format!("origin:{caption_id}")],
-                            sender: owner.clone(), author: "You".into(), own: true,
-                            text: std::mem::take(&mut current.text), upload_caption_for: current.id.clone(),
-                            delivery: "waiting-upload".into(), ..Default::default()
+                            id: caption_id.clone(),
+                            wire_id: caption_id.clone(),
+                            aliases: vec![
+                                format!("wire:{caption_id}"),
+                                format!("origin:{caption_id}"),
+                            ],
+                            sender: owner.clone(),
+                            author: "You".into(),
+                            own: true,
+                            text: std::mem::take(&mut current.text),
+                            upload_caption_for: current.id.clone(),
+                            delivery: "waiting-upload".into(),
+                            ..Default::default()
                         };
                         caption.set_encryption(mode, fingerprint.clone());
-                        if ui.store.save_outbox_pair(&owner, &peer, &current, &caption).is_err() {
+                        if ui
+                            .store
+                            .save_outbox_pair(&owner, &peer, &current, &caption)
+                            .is_err()
+                        {
                             ui.notice("Media caption could not be saved");
                             continue;
                         }
-                        if let Some(chat) = ui.state.borrow_mut().chats.iter_mut().find(|chat| chat.jid == peer) {
-                            if let Some(row) = chat.messages.iter_mut().find(|row| row.id == current.id) { *row = current.clone(); }
+                        if let Some(chat) = ui
+                            .state
+                            .borrow_mut()
+                            .chats
+                            .iter_mut()
+                            .find(|chat| chat.jid == peer)
+                        {
+                            if let Some(row) =
+                                chat.messages.iter_mut().find(|row| row.id == current.id)
+                            {
+                                *row = current.clone();
+                            }
                             chat.messages.push(caption);
                         }
-                    } else if !ui.store_queued_row(&owner, &peer, current.clone()) { continue; }
+                    } else if !ui.store_queued_row(&owner, &peer, current.clone()) {
+                        continue;
+                    }
                     ui.start_upload(&peer, &current.id);
                     continue;
                 }
@@ -444,7 +534,11 @@ mod tests {
         assert_eq!(ui.composer_text(), "Preserve this draft");
         let queued = ui.store.queued_messages(owner).unwrap();
         assert_eq!(queued.len(), 2);
-        assert!(queued.iter().any(|(_, message)| message.upload.as_ref().is_some_and(|draft| draft.sticker)));
+        assert!(
+            queued
+                .iter()
+                .any(|(_, message)| message.upload.as_ref().is_some_and(|draft| draft.sticker))
+        );
         ui.window.destroy();
     }
 }

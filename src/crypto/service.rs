@@ -631,6 +631,7 @@ impl Worker {
                     let stored = history.message(&self.owner, peer, &id);
                     if stored.as_ref().is_none_or(|m| !m.unavailable) {
                         self.emit(BackendEvent::CryptoAliases {
+                            markable_id: message.markable_id.clone(),
                             legacy_sticker: false,
                             legacy_reply: None,
                             peer: peer.clone(),
@@ -644,12 +645,21 @@ impl Worker {
                             .store
                             .transaction(|tx| local.engine.journal.find(tx, &digest))?
                         {
-                            if let Some(stored) = stored.as_ref().filter(|stored| stored.inline_emoji.is_none())
+                            if let Some(stored) = stored
+                                .as_ref()
+                                .filter(|stored| stored.inline_emoji.is_none())
                                 && let Some(content) = pending.content.as_ref()
-                                && let Some((_, decoded, _)) = protocol::normalize_protected(content, &self.owner, None)
-                                && let Some(emoji) = decoded.inline_emoji.filter(|emoji| emoji.body == stored.text)
+                                && let Some((_, decoded, _)) =
+                                    protocol::normalize_protected(content, &self.owner, None)
+                                && let Some(emoji) = decoded
+                                    .inline_emoji
+                                    .filter(|emoji| emoji.body == stored.text)
                             {
-                                self.emit(BackendEvent::InlineEmoji { peer: peer.clone(), id: id.clone(), emoji });
+                                self.emit(BackendEvent::InlineEmoji {
+                                    peer: peer.clone(),
+                                    id: id.clone(),
+                                    emoji,
+                                });
                             }
                             if let Some(stored) =
                                 stored.filter(|stored| stored.preview_spoilers.is_none())
@@ -752,6 +762,7 @@ impl Worker {
             let (_, mut message, _) = protocol::normalize_protected(&content, &self.owner, None)
                 .ok_or(Error::Invalid("unsupported encrypted message"))?;
             message.encrypted = true;
+            message.markable_id = metadata.markable_id.clone();
             message.unavailable = false;
             message.fingerprint = lifecycle::hex(&received.fingerprint);
             message.aliases.append(&mut metadata.aliases);

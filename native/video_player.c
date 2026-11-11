@@ -127,7 +127,19 @@ static void audio_changed (ClapperPlayer *player, GParamSpec *pspec, MonogramVid
 }
 static void snapshot (GdkPaintable *paintable, GdkSnapshot *snapshot, double width, double height) {
   MonogramVideo *self = (MonogramVideo *) paintable;
-  if (self->paintable) gdk_paintable_snapshot (self->paintable, snapshot, width, height);
+  if (!self->paintable) return;
+  double ratio = self->height > 0 ? self->width / (double) self->height : 0;
+  double video_width = width, video_height = height;
+  if (ratio > 0 && width / height > ratio)
+    video_width = height * ratio;
+  else if (ratio > 0)
+    video_height = width / ratio;
+  graphene_point_t offset = GRAPHENE_POINT_INIT (
+      (width - video_width) / 2, (height - video_height) / 2);
+  gtk_snapshot_save (snapshot);
+  gtk_snapshot_translate (snapshot, &offset);
+  gdk_paintable_snapshot (self->paintable, snapshot, video_width, video_height);
+  gtk_snapshot_restore (snapshot);
 }
 static GdkPaintable *current_image (GdkPaintable *paintable) {
   MonogramVideo *self = (MonogramVideo *) paintable;

@@ -7,6 +7,8 @@ mod avatar;
 mod contact_access;
 #[path = "../src/credentials.rs"]
 mod credentials;
+#[path = "../src/downloads.rs"]
+mod downloads;
 #[path = "../src/crypto/mod.rs"]
 mod crypto;
 #[path = "../src/encryption_policy.rs"]
@@ -33,6 +35,8 @@ mod packs;
 mod polls;
 #[path = "../src/protocol.rs"]
 mod protocol;
+#[path = "../src/read_markers.rs"]
+mod read_markers;
 #[path = "../src/rooms/mod.rs"]
 mod rooms;
 #[path = "../src/spoilers.rs"]

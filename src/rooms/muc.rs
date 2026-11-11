@@ -723,7 +723,8 @@ impl Rooms {
         };
         message.hydrate_compatibility();
         message.inline_emoji = (!unavailable && message.attachment.is_none())
-            .then(|| crate::packs::normalized_inline(xml, &message.text)).flatten();
+            .then(|| crate::packs::normalized_inline(xml, &message.text))
+            .flatten();
         message.preview_spoilers = if unavailable {
             None
         } else {

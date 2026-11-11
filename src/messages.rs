@@ -606,13 +606,27 @@ impl Ui {
                     } else {
                         "message-text"
                     };
+                    let preview = self.link_preview_for_message(&m);
+                    let inline = m.inline_emoji.as_ref().map(|emoji| {
+                        self.inline_message_text(
+                            &m.text,
+                            emoji,
+                            preview.is_none().then_some(&meta),
+                        )
+                    });
                     let l = wrap(&m.text, css);
                     l.set_selectable(true);
-                    if let Some(preview) = self.link_preview_for_message(&m) {
+                    if let Some(preview) = preview {
                         // Keep the status row after the native card so time,
                         // encryption and delivery state follow the full bubble.
-                        bubble.append(&l);
+                        if let Some(inline) = inline.as_ref() {
+                            bubble.append(inline);
+                        } else {
+                            bubble.append(&l);
+                        }
                         bubble.append(&crate::link_preview_ui::link_preview_card(&preview));
+                    } else if let Some(inline) = inline {
+                        bubble.append(&inline);
                     } else {
                         bubble.append(&MessageText::new(&l, &meta));
                     }

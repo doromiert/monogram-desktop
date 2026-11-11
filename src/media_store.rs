@@ -93,7 +93,8 @@ impl Store {
             return Ok(false);
         };
         if message.upload.is_some()
-            || !(mime.starts_with("image/") || mime.starts_with("video/"))
+            || !(mime.starts_with("image/") || mime.starts_with("video/")
+                || file.sticker && mime == "application/x-tgsticker")
             || width == 0
             || height == 0
         {
