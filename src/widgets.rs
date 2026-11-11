@@ -259,7 +259,7 @@ mod image_imp {
                 } else {
                     height
                 };
-                (0, height, -1, -1)
+                (height, height, -1, -1)
             }
         }
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
@@ -405,7 +405,10 @@ mod media_geometry_tests {
                 image.measure(gtk::Orientation::Vertical, narrow.0).1,
                 narrow.1
             );
-            assert_eq!(image.measure(gtk::Orientation::Vertical, narrow.0).0, 0);
+            assert_eq!(
+                image.measure(gtk::Orientation::Vertical, narrow.0).0,
+                narrow.1
+            );
         }
         let sticker = AspectImage::thumbnail(512, true);
         assert!(sticker.imp().borderless.get());
