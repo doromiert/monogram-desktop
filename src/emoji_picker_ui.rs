@@ -17,7 +17,8 @@ struct EmojiSurface {
     ui: Weak<Ui>,
     root: gtk::Box,
     favorites_label: gtk::Label,
-    favorites: gtk::FlowBox,
+    favorites: gtk::ScrolledWindow,
+    favorites_model: gio::ListStore,
     model: gio::ListStore,
     query: RefCell<String>,
     activate: Rc<EmojiAction>,
@@ -32,24 +33,8 @@ impl EmojiSurface {
     ) -> Rc<Self> {
         let surface = Rc::new_cyclic(|surface: &Weak<EmojiSurface>| {
             let model = gio::ListStore::new::<glib::BoxedAnyObject>();
-            let factory = gtk::SignalListItemFactory::new();
-            let weak = surface.clone();
-            factory.connect_bind(move |_, item| {
-                let Some(surface) = weak.upgrade() else {
-                    return;
-                };
-                let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-                let Some(data) = item.item().and_downcast::<glib::BoxedAnyObject>() else {
-                    return;
-                };
-                let entry = data.borrow::<EmojiEntry>().clone();
-                item.set_child(Some(&surface.emoji_button(&entry.text, &entry.name)));
-            });
-            factory.connect_unbind(|_, item| {
-                item.downcast_ref::<gtk::ListItem>()
-                    .unwrap()
-                    .set_child(gtk::Widget::NONE);
-            });
+            let favorites_model = gio::ListStore::new::<glib::BoxedAnyObject>();
+            let factory = emoji_factory(surface);
             let grid = gtk::GridView::new(
                 Some(gtk::NoSelection::new(Some(model.clone()))),
                 Some(factory),
@@ -60,14 +45,23 @@ impl EmojiSurface {
             grid.add_css_class("emoji-picker-grid");
 
             let favorites_label = text("Favorites", "caption dim-label");
-            let favorites = gtk::FlowBox::builder()
-                .selection_mode(gtk::SelectionMode::None)
-                .min_children_per_line(columns)
-                .max_children_per_line(columns)
-                .column_spacing(2)
-                .row_spacing(2)
+            let favorites_grid = gtk::GridView::new(
+                Some(gtk::NoSelection::new(Some(favorites_model.clone()))),
+                Some(emoji_factory(surface)),
+            );
+            favorites_grid.set_min_columns(columns);
+            favorites_grid.set_max_columns(columns);
+            favorites_grid.set_single_click_activate(false);
+            favorites_grid.add_css_class("emoji-picker-grid");
+            favorites_grid.add_css_class("emoji-favorites-grid");
+            let favorites = gtk::ScrolledWindow::builder()
+                .hscrollbar_policy(gtk::PolicyType::Never)
+                .vscrollbar_policy(gtk::PolicyType::Automatic)
+                .min_content_height(36)
+                .max_content_height(108)
+                .propagate_natural_height(true)
+                .child(&favorites_grid)
                 .build();
-            favorites.add_css_class("emoji-favorites-grid");
             let root = bx(true, 6);
             root.add_css_class("emoji-picker-surface");
             root.append(&favorites_label);
@@ -90,6 +84,7 @@ impl EmojiSurface {
                 root,
                 favorites_label,
                 favorites,
+                favorites_model,
                 model,
                 query: RefCell::new(String::new()),
                 activate: Rc::new(activate),
@@ -141,9 +136,7 @@ impl EmojiSurface {
         for entry in &entries {
             self.model.append(&glib::BoxedAnyObject::new(entry.clone()));
         }
-        while let Some(child) = self.favorites.first_child() {
-            self.favorites.remove(&child);
-        }
+        self.favorites_model.remove_all();
         let visible: std::collections::HashSet<_> =
             entries.iter().map(|entry| entry.text.as_str()).collect();
         let mut favorite_count = 0;
@@ -151,12 +144,15 @@ impl EmojiSurface {
             if !query.trim().is_empty() && !visible.contains(emoji.as_str()) {
                 continue;
             }
-            let name = crate::emoji_completion::catalog()
+            let Some(entry) = crate::emoji_completion::catalog()
                 .iter()
                 .find(|entry| entry.text == *emoji)
-                .map(|entry| entry.name.as_str())
-                .unwrap_or("Favorite emoji");
-            self.favorites.insert(&self.emoji_button(emoji, name), -1);
+                .cloned()
+            else {
+                continue;
+            };
+            self.favorites_model
+                .append(&glib::BoxedAnyObject::new(entry));
             favorite_count += 1;
         }
         self.favorites_label.set_visible(favorite_count > 0);
@@ -291,6 +287,28 @@ impl EmojiSurface {
     }
 }
 
+fn emoji_factory(surface: &Weak<EmojiSurface>) -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    let weak = surface.clone();
+    factory.connect_bind(move |_, item| {
+        let Some(surface) = weak.upgrade() else {
+            return;
+        };
+        let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+        let Some(data) = item.item().and_downcast::<glib::BoxedAnyObject>() else {
+            return;
+        };
+        let entry = data.borrow::<EmojiEntry>().clone();
+        item.set_child(Some(&surface.emoji_button(&entry.text, &entry.name)));
+    });
+    factory.connect_unbind(|_, item| {
+        item.downcast_ref::<gtk::ListItem>()
+            .unwrap()
+            .set_child(gtk::Widget::NONE);
+    });
+    factory
+}
+
 fn refresh_emoji_surfaces(ui: &Rc<Ui>) {
     let surfaces = EMOJI_SURFACES.with(|registry| {
         let mut registry = registry.borrow_mut();
@@ -314,6 +332,7 @@ fn refresh_emoji_surfaces(ui: &Rc<Ui>) {
 pub(crate) struct ReactionPicker {
     pub root: gtk::Stack,
     actions: RefCell<glib::WeakRef<gtk::Widget>>,
+    _surface: Rc<EmojiSurface>,
 }
 
 impl ReactionPicker {
@@ -435,6 +454,7 @@ impl Ui {
         let picker = Rc::new(ReactionPicker {
             root: stack,
             actions: RefCell::new(glib::WeakRef::new()),
+            _surface: surface,
         });
         let weak = Rc::downgrade(&picker);
         expand.connect_clicked(move |_| {

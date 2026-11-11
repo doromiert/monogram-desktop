@@ -94,8 +94,7 @@
 .emoji-sidebar { margin: 0 10px 10px; }
 .emoji-picker-surface > label { margin: 4px 6px 2px; }
 .emoji-picker-grid { padding: 2px; }
-.emoji-picker-grid child, .emoji-picker-grid child:hover,
-.emoji-favorites-grid flowboxchild, .emoji-favorites-grid flowboxchild:hover {
+.emoji-picker-grid child, .emoji-picker-grid child:hover {
   padding: 0; background: transparent; box-shadow: none; outline: none;
 }
 .emoji-picker-item { font-size: 22px; padding: 4px; min-width: 28px; min-height: 28px; border-radius: 8px; }
