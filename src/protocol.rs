@@ -1,7 +1,6 @@
 //! Standards-only XMPP boundary. No GTK, database access, or implicit plaintext fallback.
 use crate::crypto::{legacy, service as modern};
 use crate::encryption_policy::Mode;
-#[cfg(test)]
 use crate::model::{Account, Message};
 use crate::rooms::archive;
 use crate::transport::{Client, Event};
