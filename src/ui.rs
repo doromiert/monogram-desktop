@@ -1222,6 +1222,7 @@ impl Ui {
             }
         });
         let emoji_completion = crate::emoji_completion::attach(&self.composer);
+        crate::clipboard_upload::attach(self);
         let key = gtk::EventControllerKey::new();
         key.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = Rc::downgrade(self);

@@ -3,6 +3,7 @@ mod action_store;
 mod attachment_ui;
 mod avatar;
 mod avatar_ui;
+mod clipboard_upload;
 mod contact_access;
 mod contact_access_ui;
 mod credentials;
