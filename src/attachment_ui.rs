@@ -198,7 +198,9 @@ impl Ui {
             .content_height(58)
             .build();
         let fraction = Rc::new(Cell::new(None::<f64>));
+        let displayed_fraction = Rc::new(Cell::<f64>::new(0.));
         let draw_fraction = fraction.clone();
+        let draw_displayed_fraction = displayed_fraction.clone();
         let started = Instant::now();
         disk.set_draw_func(move |_, ctx, width, height| {
             let x = f64::from(width) / 2.;
@@ -211,7 +213,7 @@ impl Ui {
             let start = -std::f64::consts::FRAC_PI_2;
             let (angle, amount) = draw_fraction.get().map_or_else(
                 || (start + started.elapsed().as_secs_f64() * 3., 0.23),
-                |fraction| (start, fraction.clamp(0., 1.)),
+                |_| (start, draw_displayed_fraction.get().clamp(0., 1.)),
             );
             ctx.set_source_rgba(1., 1., 1., 0.95);
             ctx.set_line_cap(gtk::cairo::LineCap::Round);
@@ -307,6 +309,9 @@ impl Ui {
         let action = button.downgrade();
         let ring = disk.downgrade();
         let feedback = status.downgrade();
+        let animating = Rc::new(Cell::new(false));
+        let tick_running = Rc::new(Cell::new(false));
+        let last_frame = Rc::new(Cell::new(None::<i64>));
         glib::timeout_add_local(Duration::from_millis(80), move || {
             let (Some(ui), Some(controls), Some(button), Some(ring), Some(label)) = (
                 weak.upgrade(),
@@ -315,13 +320,16 @@ impl Ui {
                 ring.upgrade(),
                 feedback.upgrade(),
             ) else {
+                animating.set(false);
                 return glib::ControlFlow::Break;
             };
             if !ui.attachment_is_current(&owner, &peer, &id, &file) {
+                animating.set(false);
                 return glib::ControlFlow::Break;
             }
             // Video preparation/playback may fail after a preview has been revealed.
             if !controls.is_visible() || !ui.in_chat_viewport(&controls) {
+                animating.set(false);
                 return glib::ControlFlow::Continue;
             }
             let mut state = if cancelled.get() {
@@ -335,7 +343,13 @@ impl Ui {
                     .start_automatic(&owner, file.clone());
                 state = ui.downloads.borrow().status(&owner, &file);
             }
-            let (icon, title, reason, progress) = if controls.has_css_class("media-preview-error") {
+            let preview_error = controls.has_css_class("media-preview-error");
+            let active = !preview_error
+                && (matches!(
+                    state.as_ref(),
+                    Some(Status::Running { .. } | Status::Ready(_))
+                ) || state.is_none() && allow_auto);
+            let (icon, title, reason, progress) = if preview_error {
                 (
                     "view-refresh-symbolic",
                     "Retry preparation",
@@ -372,12 +386,49 @@ impl Ui {
             };
             button.set_icon_name(icon);
             button.set_tooltip_text(Some(title));
-            fraction.set(progress);
+            let previous = fraction.replace(progress);
+            if progress.is_some() && previous.is_none() {
+                displayed_fraction.set(progress.unwrap_or_default());
+            }
+            let was_animating = animating.replace(active);
+            if !active {
+                displayed_fraction.set(progress.unwrap_or_default());
+                if was_animating || previous != progress {
+                    ring.queue_draw();
+                }
+            } else if ring.is_mapped() && !tick_running.replace(true) {
+                let fraction = fraction.clone();
+                let displayed_fraction = displayed_fraction.clone();
+                let animating = animating.clone();
+                let tick_running = tick_running.clone();
+                let last_frame = last_frame.clone();
+                let panel = controls.downgrade();
+                ring.add_tick_callback(move |ring, clock| {
+                    let Some(controls) = panel.upgrade() else {
+                        tick_running.set(false);
+                        return glib::ControlFlow::Break;
+                    };
+                    if !animating.get() || !controls.is_visible() || !ring.is_mapped() {
+                        last_frame.set(None);
+                        tick_running.set(false);
+                        return glib::ControlFlow::Break;
+                    }
+                    let now = clock.frame_time();
+                    let previous = last_frame.replace(Some(now)).unwrap_or(now);
+                    let elapsed = ((now - previous).max(0) as f64 / 1_000_000.).min(0.1);
+                    if let Some(target) = fraction.get() {
+                        let current = displayed_fraction.get();
+                        let blend = 1. - (-12. * elapsed).exp();
+                        displayed_fraction.set(current + (target - current) * blend);
+                    }
+                    ring.queue_draw();
+                    glib::ControlFlow::Continue
+                });
+            }
             label.set_visible(reason.is_some());
             if let Some(reason) = reason {
                 label.set_text(reason);
             }
-            ring.queue_draw();
             glib::ControlFlow::Continue
         });
         let content = bx(true, 0);

@@ -44,7 +44,7 @@ impl Ui {
             .build();
         let own = adw::PreferencesGroup::builder()
             .title("Other Devices on Your Account")
-            .description("Your other devices require an independent fingerprint decision")
+            .description("Blind trust for this conversation approves your own devices too; otherwise review each hybrid fingerprint independently. Explicit blocks remain blocked.")
             .build();
         let mut keys: BTreeMap<String, BTreeMap<u32, String>> = BTreeMap::new();
         let mut own_count = 0;
