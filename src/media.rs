@@ -3,6 +3,7 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib, graphene, subclass::prelude::*};
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     rc::{Rc, Weak},
     time::{Duration, Instant},
 };
@@ -675,24 +676,49 @@ mod fly_imp {
                 if let (Some(origin), Some(overlay)) =
                     (*self.origin.borrow(), self.overlay.upgrade())
                 {
-                    if let (Some(target), Some(pb)) =
+                    if let (Some(frame), Some(pb)) =
                         (obj.compute_bounds(&overlay), picture.compute_bounds(&*obj))
                     {
-                        let w = picture.width().max(1) as f64;
-                        let h = picture.height().max(1) as f64;
-                        let iw = w.min(h * 2.);
-                        let ih = iw / 2.;
-                        let ix = (w - iw) / 2.;
-                        let iy = (h - ih) / 2.;
-                        let sx = origin.width() as f64 / iw;
-                        let sy = origin.height() as f64 / ih;
+                        let widget_w = pb.width().max(1.) as f64;
+                        let widget_h = pb.height().max(1.) as f64;
+                        let ratio = picture
+                            .downcast_ref::<gtk::Picture>()
+                            .and_then(|picture| picture.paintable())
+                            .map(|paintable| paintable.intrinsic_aspect_ratio())
+                            .filter(|ratio| *ratio > 0.)
+                            .unwrap_or(widget_w / widget_h);
+                        let target_w = widget_w.min(widget_h * ratio).max(1.);
+                        let target_h = widget_h.min(widget_w / ratio).max(1.);
+                        let target_x = pb.x() as f64 + (widget_w - target_w) / 2.;
+                        let target_y = pb.y() as f64 + (widget_h - target_h) / 2.;
+                        let start_x = origin.x() as f64 + origin.width() as f64 / 2.;
+                        let start_y = origin.y() as f64 + origin.height() as f64 / 2.;
+                        let end_x = frame.x() as f64 + target_x + target_w / 2.;
+                        let end_y = frame.y() as f64 + target_y + target_h / 2.;
+                        let dx = end_x - start_x;
+                        let dy = end_y - start_y;
+                        let control_x = (start_x + end_x) / 2. + dy * 0.22;
+                        let control_y = (start_y + end_y) / 2. - (dx.abs() * 0.28).max(48.);
+                        let one_minus = 1. - p;
+                        let current_x = one_minus * one_minus * start_x
+                            + 2. * one_minus * p * control_x
+                            + p * p * end_x;
+                        let current_y = one_minus * one_minus * start_y
+                            + 2. * one_minus * p * control_y
+                            + p * p * end_y;
+                        let current_w =
+                            origin.width() as f64 + (target_w - origin.width() as f64) * p;
+                        let current_h =
+                            origin.height() as f64 + (target_h - origin.height() as f64) * p;
                         s.translate(&graphene::Point::new(
-                            ((origin.x() as f64 - target.x() as f64 - (pb.x() as f64 + ix) * sx)
-                                * (1. - p)) as f32,
-                            ((origin.y() as f64 - target.y() as f64 - (pb.y() as f64 + iy) * sy)
-                                * (1. - p)) as f32,
+                            (current_x - frame.x() as f64) as f32,
+                            (current_y - frame.y() as f64) as f32,
                         ));
-                        s.scale((p + (1. - p) * sx) as f32, (p + (1. - p) * sy) as f32);
+                        s.scale((current_w / target_w) as f32, (current_h / target_h) as f32);
+                        s.translate(&graphene::Point::new(
+                            -(target_x + target_w / 2.) as f32,
+                            -(target_y + target_h / 2.) as f32,
+                        ));
                     }
                 }
             }
@@ -727,6 +753,7 @@ impl MediaItem {
 }
 pub struct MediaViewer {
     pub root: gtk::Overlay,
+    backdrop: gtk::Box,
     ui: Weak<Ui>,
     stack: gtk::Stack,
     frames: RefCell<Vec<FlyFrame>>,
@@ -744,6 +771,10 @@ pub struct MediaViewer {
     fullscreen: gtk::Button,
     previous: gtk::Button,
     next: gtk::Button,
+    video_controls: gtk::Revealer,
+    media_controls: gtk::MediaControls,
+    active_video: RefCell<Option<Rc<crate::video_ui::Playback>>>,
+    playbacks: RefCell<HashMap<String, Rc<crate::video_ui::Playback>>>,
     progress: Cell<f64>,
     closing: Cell<bool>,
     was_fullscreen: bool,
@@ -765,12 +796,17 @@ impl MediaViewer {
             .focusable(true)
             .build();
         root.add_css_class("media-viewer");
+        let backdrop = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        backdrop.set_hexpand(true);
+        backdrop.set_vexpand(true);
+        backdrop.add_css_class("media-viewer-backdrop");
+        root.set_child(Some(&backdrop));
         let stack = gtk::Stack::builder()
             .transition_duration(230)
             .hexpand(true)
             .vexpand(true)
             .build();
-        root.set_child(Some(&stack));
+        root.add_overlay(&stack);
         let mut pictures = vec![];
         let mut frames = vec![];
         let origin = source.as_ref().and_then(|w| w.compute_bounds(&ui.overlay));
@@ -784,10 +820,10 @@ impl MediaViewer {
             pic.set_can_shrink(true);
             pic.set_hexpand(true);
             pic.set_vexpand(true);
-            pic.set_margin_top(70);
-            pic.set_margin_bottom(60);
-            pic.set_margin_start(70);
-            pic.set_margin_end(70);
+            pic.set_margin_top(72);
+            pic.set_margin_bottom(20);
+            pic.set_margin_start(20);
+            pic.set_margin_end(20);
             let frame: FlyFrame = glib::Object::new();
             frame.set_hexpand(true);
             frame.set_vexpand(true);
@@ -826,17 +862,25 @@ impl MediaViewer {
         root.add_overlay(&top_revealer);
         let previous = icon_button("go-previous-symbolic", "Previous media");
         previous.add_css_class("circular");
+        previous.add_css_class("media-viewer-arrow");
         previous.set_halign(gtk::Align::Start);
-        previous.set_margin_start(16);
         let previous_revealer =
             reveal(previous.upcast_ref(), gtk::Align::Start, gtk::Align::Center);
         root.add_overlay(&previous_revealer);
         let next = icon_button("go-next-symbolic", "Next media");
         next.add_css_class("circular");
+        next.add_css_class("media-viewer-arrow");
         next.set_halign(gtk::Align::End);
-        next.set_margin_end(16);
         let next_revealer = reveal(next.upcast_ref(), gtk::Align::End, gtk::Align::Center);
         root.add_overlay(&next_revealer);
+        let media_controls = gtk::MediaControls::new(None::<&gtk::MediaStream>);
+        margins(&media_controls, 12);
+        let bottom = bx(true, 0);
+        bottom.add_css_class("media-controls-bottom");
+        bottom.append(&media_controls);
+        let video_controls = reveal(bottom.upcast_ref(), gtk::Align::Fill, gtk::Align::End);
+        video_controls.set_reveal_child(false);
+        root.add_overlay(&video_controls);
         let preview_status = label("Loading preview…", "");
         preview_status.set_halign(gtk::Align::Center);
         preview_status.set_valign(gtk::Align::Center);
@@ -844,6 +888,7 @@ impl MediaViewer {
         root.add_overlay(&preview_status);
         let viewer = Rc::new(Self {
             root,
+            backdrop,
             ui: Rc::downgrade(ui),
             stack,
             frames: RefCell::new(frames),
@@ -861,6 +906,10 @@ impl MediaViewer {
             fullscreen,
             previous,
             next,
+            video_controls,
+            media_controls,
+            active_video: RefCell::new(None),
+            playbacks: RefCell::new(HashMap::new()),
             progress: Cell::new(0.),
             closing: Cell::new(false),
             was_fullscreen: ui.window.is_fullscreen(),
@@ -921,6 +970,11 @@ impl MediaViewer {
                     gdk::Key::Escape => v.close(),
                     gdk::Key::Left => v.move_by(-1),
                     gdk::Key::Right => v.move_by(1),
+                    gdk::Key::space if v.active_video.borrow().is_some() => {
+                        let video = v.active_video.borrow();
+                        let media = &video.as_ref().unwrap().media;
+                        media.set_playing(!media.is_playing());
+                    }
                     _ => return glib::Propagation::Proceed,
                 }
                 return glib::Propagation::Stop;
@@ -940,7 +994,10 @@ impl MediaViewer {
             };
             let mut target = viewer.root.pick(x, y, gtk::PickFlags::DEFAULT);
             while let Some(widget) = target {
-                if widget.is::<gtk::Button>() || widget.is::<adw::HeaderBar>() {
+                if widget.is::<gtk::Button>()
+                    || widget.is::<gtk::MediaControls>()
+                    || widget.is::<adw::HeaderBar>()
+                {
                     return;
                 }
                 target = widget.parent();
@@ -1011,22 +1068,36 @@ impl MediaViewer {
         viewer
     }
     fn animate(&self, p: f64) {
+        let p = p * p * (3. - 2. * p);
         self.progress.set(p);
-        self.root.set_opacity(p);
+        self.backdrop.set_opacity(p);
+        for control in &self.controls {
+            control.set_opacity(p);
+        }
+        self.preview_status.set_opacity(p);
+        self.video_controls.set_opacity(p);
         for f in self.frames.borrow().iter() {
             f.imp().progress.set(p);
             f.queue_draw()
         }
     }
     pub fn open(self: &Rc<Self>) {
-        self.root.set_opacity(0.);
+        if let Some(source) = self.source.as_ref().and_then(|source| source.upgrade()) {
+            source.set_opacity(0.);
+        }
+        self.backdrop.set_opacity(0.);
+        for control in &self.controls {
+            control.set_opacity(0.);
+        }
+        self.preview_status.set_opacity(0.);
+        self.video_controls.set_opacity(0.);
         self.root.grab_focus();
         let weak = Rc::downgrade(self);
         let a = adw::TimedAnimation::new(
             &self.root,
             0.,
             1.,
-            280,
+            360,
             adw::CallbackAnimationTarget::new(move |p| {
                 if let Some(v) = weak.upgrade() {
                     v.animate(p)
@@ -1046,6 +1117,7 @@ impl MediaViewer {
         if index == previous && delta != 0 {
             return;
         }
+        self.set_active_video(None);
         self.index.set(index);
         self.update_position(delta);
         if !self.owner.is_empty() {
@@ -1130,6 +1202,10 @@ impl MediaViewer {
                     .hexpand(true)
                     .vexpand(true)
                     .build();
+                pic.set_margin_top(72);
+                pic.set_margin_bottom(20);
+                pic.set_margin_start(20);
+                pic.set_margin_end(20);
                 let frame: FlyFrame = glib::Object::new();
                 frame.set_hexpand(true);
                 frame.set_vexpand(true);
@@ -1230,6 +1306,61 @@ impl MediaViewer {
                 viewer.close();
                 return glib::ControlFlow::Break;
             };
+            if file.video_candidate() {
+                if !current {
+                    if let Some(player) = ui.images.borrow_mut().video(&file.key()) {
+                        if player.media.is_prepared() {
+                            picture.set_paintable(Some(&player.media.current_image()));
+                        }
+                    }
+                    return glib::ControlFlow::Continue;
+                }
+                let Some(path) = ui.cached_image_source(&file) else {
+                    if current {
+                        viewer.preview_status.set_text("Loading video…");
+                        viewer.preview_status.set_visible(true);
+                    }
+                    return glib::ControlFlow::Continue;
+                };
+                let player = viewer
+                    .playbacks
+                    .borrow()
+                    .get(&id)
+                    .cloned()
+                    .or_else(|| ui.video(&file, &path));
+                let Some(player) = player else {
+                    if current {
+                        viewer.preview_status.set_text("Preparing video…");
+                        viewer.preview_status.set_visible(true);
+                    }
+                    return glib::ControlFlow::Continue;
+                };
+                if player.media.error().is_some() {
+                    if current {
+                        viewer.preview_status.set_text("Video playback unavailable");
+                        viewer.preview_status.set_visible(true);
+                    }
+                    return glib::ControlFlow::Continue;
+                }
+                if !player.media.is_prepared() || !player.media.has_video() {
+                    if current {
+                        viewer.preview_status.set_text("Preparing video…");
+                        viewer.preview_status.set_visible(true);
+                    }
+                    return glib::ControlFlow::Continue;
+                }
+                picture.set_paintable(Some(&player.media));
+                {
+                    let mut playbacks = viewer.playbacks.borrow_mut();
+                    playbacks.clear();
+                    playbacks.insert(id.clone(), player.clone());
+                }
+                if current {
+                    viewer.preview_status.set_visible(false);
+                    viewer.set_active_video(Some(player));
+                }
+                return glib::ControlFlow::Continue;
+            }
             if loaded_edge.get() == edge {
                 if index == viewer.index.get() {
                     viewer.preview_status.set_visible(false);
@@ -1310,6 +1441,8 @@ impl MediaViewer {
         for control in &self.controls {
             control.set_reveal_child(true);
         }
+        self.video_controls
+            .set_reveal_child(self.active_video.borrow().is_some());
         if let Some(timer) = self.controls_timer.borrow_mut().take() {
             timer.remove();
         }
@@ -1325,6 +1458,7 @@ impl MediaViewer {
                     for control in &viewer.controls {
                         control.set_reveal_child(false);
                     }
+                    viewer.video_controls.set_reveal_child(false);
                 }
             });
             self.controls_timer.replace(Some(timer));
@@ -1335,10 +1469,10 @@ impl MediaViewer {
         let Some(ui) = self.ui.upgrade() else { return };
         let full = ui.window.is_fullscreen();
         for pic in self.pictures.borrow().iter() {
-            pic.set_margin_top(if full { 0 } else { 70 });
-            pic.set_margin_bottom(if full { 0 } else { 60 });
-            pic.set_margin_start(if full { 0 } else { 70 });
-            pic.set_margin_end(if full { 0 } else { 70 })
+            pic.set_margin_top(if full { 0 } else { 72 });
+            pic.set_margin_bottom(if full { 0 } else { 20 });
+            pic.set_margin_start(if full { 0 } else { 20 });
+            pic.set_margin_end(if full { 0 } else { 20 })
         }
         self.fullscreen.set_icon_name(if full {
             "view-restore-symbolic"
@@ -1346,8 +1480,50 @@ impl MediaViewer {
             "view-fullscreen-symbolic"
         });
     }
+    fn set_active_video(&self, player: Option<Rc<crate::video_ui::Playback>>) {
+        let unchanged = self
+            .active_video
+            .borrow()
+            .as_ref()
+            .zip(player.as_ref())
+            .is_some_and(|(current, next)| Rc::ptr_eq(current, next));
+        if unchanged {
+            return;
+        }
+        if let Some(current) = self.active_video.borrow_mut().take() {
+            let poster = current.media.current_image();
+            for picture in self.pictures.borrow().iter() {
+                if picture.paintable().is_some_and(|image| {
+                    image.downcast_ref::<gtk::MediaFile>() == Some(&current.media)
+                }) {
+                    picture.set_paintable(Some(&poster));
+                }
+            }
+            current.media.pause();
+            current.media.set_muted(true);
+            current.media.set_loop(true);
+            current.expanded.set(false);
+        }
+        if let Some(player) = player {
+            player.expanded.set(true);
+            player.media.set_loop(false);
+            player.media.set_muted(false);
+            self.media_controls.set_media_stream(Some(&player.media));
+            self.video_controls.set_reveal_child(true);
+            player.media.play();
+            self.active_video.replace(Some(player));
+        } else {
+            self.media_controls
+                .set_media_stream(None::<&gtk::MediaStream>);
+            self.video_controls.set_reveal_child(false);
+        }
+    }
     pub fn close_immediate(self: &Rc<Self>) {
         self.closing.set(true);
+        self.set_active_video(None);
+        if let Some(source) = self.source.as_ref().and_then(|source| source.upgrade()) {
+            source.set_opacity(1.);
+        }
         if let Some(timer) = self.controls_timer.borrow_mut().take() {
             timer.remove();
         }
@@ -1378,6 +1554,7 @@ impl MediaViewer {
         if self.closing.replace(true) {
             return;
         }
+        self.set_active_video(None);
         let Some(ui) = self.ui.upgrade() else { return };
         if let Some(a) = self.animation.borrow().as_ref() {
             a.pause()
@@ -1404,7 +1581,7 @@ impl MediaViewer {
             &self.root,
             self.progress.get(),
             0.,
-            240,
+            360,
             adw::CallbackAnimationTarget::new(move |p| {
                 if let Some(v) = weak.upgrade() {
                     v.animate(p)
@@ -1413,6 +1590,9 @@ impl MediaViewer {
         );
         let v = self.clone();
         a.connect_done(move |_| {
+            if let Some(source) = v.source.as_ref().and_then(|source| source.upgrade()) {
+                source.set_opacity(1.);
+            }
             if let Some(ui) = v.ui.upgrade() {
                 ui.overlay.remove_overlay(&v.root);
                 if ui

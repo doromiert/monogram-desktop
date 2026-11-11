@@ -14,6 +14,7 @@ pub(crate) struct RenderedRows {
     dates: HashMap<String, gtk::ListBoxRow>,
     big_emoji: bool,
     group: bool,
+    render_request: Option<ScrollTarget>,
 }
 struct RenderedRow {
     message: Message,
@@ -154,9 +155,27 @@ impl Ui {
         } else {
             self.capture_scroll_position()
         };
-        self.render_messages_at(position);
+        let mut rows = self.rendered_rows.borrow_mut();
+        let scheduled = rows.render_request.is_some();
+        if !scheduled || bottom {
+            rows.render_request = Some(position);
+        }
+        drop(rows);
+        if !scheduled {
+            let weak = Rc::downgrade(self);
+            self.scroll.add_tick_callback(move |_, _| {
+                if let Some(ui) = weak.upgrade() {
+                    let target = ui.rendered_rows.borrow_mut().render_request.take();
+                    if let Some(target) = target {
+                        ui.render_messages_at(target);
+                    }
+                }
+                glib::ControlFlow::Break
+            });
+        }
     }
     pub fn render_messages_at(self: &Rc<Self>, position: ScrollTarget) {
+        self.rendered_rows.borrow_mut().render_request.take();
         self.bubbles.borrow_mut().clear();
         let state = self.state.borrow();
         let messages = state.current().messages.clone();
@@ -627,13 +646,11 @@ impl Ui {
             order.push(row);
         }
         rendered.dates.retain(|day, _| days.contains(day));
+        let retained: HashSet<gtk::Widget> = order.iter().map(|row| row.clone().upcast()).collect();
         let mut child = self.timeline.first_child();
         while let Some(widget) = child {
             child = widget.next_sibling();
-            if !order
-                .iter()
-                .any(|row| row.upcast_ref::<gtk::Widget>() == &widget)
-            {
+            if !retained.contains(&widget) {
                 self.timeline.remove(&widget);
             }
         }
@@ -683,11 +700,12 @@ impl Ui {
             return;
         }
         let weak = Rc::downgrade(self);
-        self.scroll.add_tick_callback(move |_, clock| {
+        let install = move |clock: &gdk::FrameClock| {
             let weak = weak.clone();
             let handler = Rc::new(Cell::new(None));
             let signal = handler.clone();
-            handler.set(Some(clock.connect_after_paint(move |clock| {
+            handler.set(Some(clock.connect_local("layout", true, move |values| {
+                let clock = values[0].get::<gdk::FrameClock>().unwrap();
                 clock.disconnect(signal.take().unwrap());
                 if let Some(ui) = weak.upgrade() {
                     if let Some(target) = ui.message_scroll.take() {
@@ -698,21 +716,35 @@ impl Ui {
                             ScrollTarget::Message(id) => ui
                                 .highlight_position(id)
                                 .unwrap_or_else(|| adjustment.value()),
-                            ScrollTarget::Position { value, anchor } => anchor
-                                .and_then(|(id, delta)| {
-                                    let bubbles = ui.bubbles.borrow();
-                                    let bounds = bubbles.get(&id)?.compute_bounds(&ui.timeline)?;
-                                    Some(f64::from(bounds.y()) - delta)
-                                })
-                                .unwrap_or(value),
+                            ScrollTarget::Position { value, anchor } => {
+                                let maximum = (adjustment.upper() - adjustment.page_size()).max(0.);
+                                let continued_scroll = adjustment.value() - value.min(maximum);
+                                anchor
+                                    .and_then(|(id, delta)| {
+                                        let bubbles = ui.bubbles.borrow();
+                                        let bounds =
+                                            bubbles.get(&id)?.compute_bounds(&ui.timeline)?;
+                                        Some(f64::from(bounds.y()) - delta + continued_scroll)
+                                    })
+                                    .unwrap_or(adjustment.value())
+                            }
                         });
                         ui.history_window.moving.set(false);
                     }
                     ui.schedule_history_maintenance();
                 }
+                None
             })));
-            glib::ControlFlow::Break
-        });
+            clock.request_phase(gdk::FrameClockPhase::LAYOUT);
+        };
+        if let Some(clock) = self.scroll.frame_clock() {
+            install(&clock);
+        } else {
+            self.scroll.add_tick_callback(move |_, clock| {
+                install(clock);
+                glib::ControlFlow::Break
+            });
+        }
     }
     fn highlight_position(self: &Rc<Self>, id: String) -> Option<f64> {
         let bubble = self.bubbles.borrow().get(&id)?.clone();

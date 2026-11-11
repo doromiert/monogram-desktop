@@ -589,6 +589,8 @@ pub async fn run(
         name: prepared.name,
         mime: prepared.mime,
         size: Some(prepared.size),
+        width: None,
+        height: None,
         hashes: BTreeMap::from([("sha-256".into(), prepared.hash)]),
         manual: false,
         sticker: false,

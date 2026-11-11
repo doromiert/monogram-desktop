@@ -1,7 +1,7 @@
 //! Local decoded-media observations never rewrite the immutable received SFS payload.
 use crate::{file_share::Attachment, model::Message, storage::Store};
 use rusqlite::{OptionalExtension, params};
-const FILTER: &str = "m.account=?1 AND m.peer=?2 AND COALESCE(json_extract(m.body,'$.retracted'),0)=0 AND json_type(m.body,'$.attachment')='object' AND (json_extract(m.body,'$.attachment.mime') LIKE 'image/%' OR EXISTS(SELECT 1 FROM image_metadata i WHERE i.account=m.account AND i.peer=m.peer AND i.id=m.id))";
+const FILTER: &str = "m.account=?1 AND m.peer=?2 AND COALESCE(json_extract(m.body,'$.retracted'),0)=0 AND json_type(m.body,'$.attachment')='object' AND (json_extract(m.body,'$.attachment.mime') LIKE 'image/%' OR json_extract(m.body,'$.attachment.mime') LIKE 'video/%' OR lower(json_extract(m.body,'$.attachment.name')) LIKE '%.mp4' OR lower(json_extract(m.body,'$.attachment.name')) LIKE '%.webm' OR lower(json_extract(m.body,'$.attachment.name')) LIKE '%.mov' OR lower(json_extract(m.body,'$.attachment.name')) LIKE '%.mkv' OR EXISTS(SELECT 1 FROM image_metadata i WHERE i.account=m.account AND i.peer=m.peer AND i.id=m.id))";
 #[derive(Default)]
 pub struct MediaWindow {
     pub messages: Vec<Message>,
@@ -41,7 +41,30 @@ impl Store {
         .unwrap_or(Err(rusqlite::Error::InvalidQuery))
     }
     pub fn init_media(&self) -> rusqlite::Result<()> {
-        self.db.execute_batch("CREATE TABLE IF NOT EXISTS image_metadata(account TEXT NOT NULL,peer TEXT NOT NULL,id TEXT NOT NULL,file TEXT NOT NULL,mime TEXT NOT NULL,width INTEGER NOT NULL,height INTEGER NOT NULL,animated INTEGER NOT NULL,PRIMARY KEY(account,peer,id),FOREIGN KEY(account,peer,id) REFERENCES messages(account,peer,id) ON DELETE CASCADE);CREATE TRIGGER IF NOT EXISTS image_metadata_invalidated AFTER UPDATE OF body ON messages WHEN EXISTS(SELECT 1 FROM image_metadata i WHERE i.account=OLD.account AND i.peer=OLD.peer AND i.id=OLD.id) AND (COALESCE(json_extract(NEW.body,'$.retracted'),0)=1 OR json_extract(NEW.body,'$.attachment') IS NOT json_extract(OLD.body,'$.attachment')) BEGIN DELETE FROM image_metadata WHERE account=OLD.account AND peer=OLD.peer AND id=OLD.id; END;")
+        let tx = self.db.unchecked_transaction()?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS image_metadata(account TEXT NOT NULL,peer TEXT NOT NULL,id TEXT NOT NULL,file TEXT NOT NULL,mime TEXT NOT NULL,width INTEGER NOT NULL,height INTEGER NOT NULL,animated INTEGER NOT NULL,PRIMARY KEY(account,peer,id),FOREIGN KEY(account,peer,id) REFERENCES messages(account,peer,id) ON DELETE CASCADE);
+            DROP TRIGGER IF EXISTS image_metadata_invalidated;
+            CREATE TRIGGER image_metadata_invalidated AFTER UPDATE OF body ON messages
+            WHEN EXISTS(SELECT 1 FROM image_metadata i WHERE i.account=OLD.account AND i.peer=OLD.peer AND i.id=OLD.id)
+                AND (COALESCE(json_extract(NEW.body,'$.retracted'),0)=1
+                    OR json_extract(NEW.body,'$.attachment.wire_url') IS NOT json_extract(OLD.body,'$.attachment.wire_url')
+                    OR json_extract(NEW.body,'$.attachment.size') IS NOT json_extract(OLD.body,'$.attachment.size')
+                    OR json_extract(NEW.body,'$.attachment.hashes') IS NOT json_extract(OLD.body,'$.attachment.hashes'))
+            BEGIN DELETE FROM image_metadata WHERE account=OLD.account AND peer=OLD.peer AND id=OLD.id; END;")?;
+        tx.commit()
+    }
+    pub fn media_dimensions(
+        &self,
+        owner: &str,
+        peer: &str,
+        id: &str,
+        file: &Attachment,
+    ) -> Option<(u32, u32)> {
+        self.db.query_row(
+            "SELECT width,height FROM image_metadata WHERE account=? AND peer=? AND id=? AND file=?",
+            params![owner, peer, id, file.key()], |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u32>(1)?)),
+        ).ok().or_else(|| file.width.zip(file.height))
+            .filter(|(width, height)| *width > 0 && *height > 0 && u64::from(*width) * u64::from(*height) <= 64_000_000)
     }
     pub fn remember_image(
         &self,
@@ -62,7 +85,11 @@ impl Store {
         }) else {
             return Ok(false);
         };
-        if message.upload.is_some() || !mime.starts_with("image/") || width == 0 || height == 0 {
+        if message.upload.is_some()
+            || !(mime.starts_with("image/") || mime.starts_with("video/"))
+            || width == 0
+            || height == 0
+        {
             return Ok(false);
         }
         self.db.execute("INSERT INTO image_metadata VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(account,peer,id) DO UPDATE SET file=excluded.file,mime=excluded.mime,width=excluded.width,height=excluded.height,animated=excluded.animated WHERE image_metadata.file!=excluded.file OR image_metadata.mime!=excluded.mime OR image_metadata.width!=excluded.width OR image_metadata.height!=excluded.height OR image_metadata.animated!=excluded.animated",params![owner,peer,id,file.key(),mime,width,height,animated])?;

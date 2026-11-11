@@ -69,6 +69,7 @@ pub struct Ui {
     pub anchor: RefCell<Option<String>>,
     pub bubbles: RefCell<HashMap<String, gtk::Widget>>,
     pub(crate) rendered_rows: RefCell<crate::messages::RenderedRows>,
+    chat_refresh_pending: Cell<bool>,
     pub media_stack: gtk::Stack,
     pub media_pane: adw::ToolbarView,
     pub media_mode: RefCell<String>,
@@ -305,6 +306,7 @@ impl Ui {
             anchor: RefCell::new(None),
             bubbles: RefCell::new(HashMap::new()),
             rendered_rows: RefCell::new(Default::default()),
+            chat_refresh_pending: Cell::new(false),
             media_stack: gtk::Stack::builder()
                 .hhomogeneous(false)
                 .vhomogeneous(false)
@@ -459,6 +461,18 @@ impl Ui {
     }
     pub fn notice(&self, message: &str) {
         self.toast.add_toast(adw::Toast::new(message));
+    }
+    fn queue_chat_refresh(self: &Rc<Self>) {
+        if self.chat_refresh_pending.replace(true) {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.chat_refresh_pending.set(false);
+                ui.refresh_chats(None);
+            }
+        });
     }
     pub fn persist(&self) -> bool {
         if let Err(_) = self.store.save(&self.state.borrow()) {
@@ -1066,9 +1080,14 @@ impl Ui {
                 s.compose_changed()
             }
         });
+        let emoji_completion = crate::emoji_completion::attach(&self.composer);
         let key = gtk::EventControllerKey::new();
+        key.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = Rc::downgrade(self);
         key.connect_key_pressed(move |_, key, _, state| {
+            if emoji_completion.key(key, state) {
+                return glib::Propagation::Stop;
+            }
             let Some(s) = weak.upgrade() else {
                 return glib::Propagation::Proceed;
             };
@@ -2032,6 +2051,8 @@ impl Ui {
                         token,
                     )));
                 }
+                self.queue_chat_refresh();
+                return;
             }
             BackendEvent::LegacyEncryptedMessage {
                 peer,
@@ -2045,6 +2066,8 @@ impl Ui {
                         crate::crypto::legacy::service::Request::Accepted(token),
                     ));
                 }
+                self.queue_chat_refresh();
+                return;
             }
             BackendEvent::Message {
                 peer,
@@ -2053,6 +2076,8 @@ impl Ui {
                 receipt_to,
             } => {
                 self.receive_message(owner, peer, message, historical, receipt_to);
+                self.queue_chat_refresh();
+                return;
             }
             BackendEvent::Presence { peer, online } => {
                 let mut s = self.state.borrow_mut();
@@ -2063,6 +2088,7 @@ impl Ui {
                 if self.pages.visible_child_name().as_deref() == Some("chat") {
                     self.show_chat()
                 }
+                return;
             }
             BackendEvent::Typing { peer, composing } => {
                 if composing {
@@ -2073,6 +2099,7 @@ impl Ui {
                 if self.pages.visible_child_name().as_deref() == Some("chat") {
                     self.show_chat()
                 }
+                return;
             }
             BackendEvent::Uncertain { peer, id } => {
                 self.delivery(&peer, &id, "uncertain");
@@ -2268,8 +2295,15 @@ impl Ui {
         let follow =
             active && follow && (!historical || !self.history_pages.borrow().contains_key(&peer));
         c.remember_latest();
+        let changed = inserted
+            .as_ref()
+            .or(known.as_ref())
+            .and_then(|id| c.messages.iter().find(|message| &message.id == id));
+        let mut saved = self.store.save_chat_message(owner, c, changed).is_ok();
         drop(s);
-        let mut saved = self.persist();
+        if !saved {
+            self.notice("Local history could not be saved. Check free space and permissions.");
+        }
         if saved && active {
             self.history_window.content_changed();
         }

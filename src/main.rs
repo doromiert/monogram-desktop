@@ -8,6 +8,7 @@ mod crypto;
 mod dialogs;
 mod download_smoke;
 mod downloads;
+mod emoji_completion;
 mod encryption_policy;
 mod file_share;
 mod folders;

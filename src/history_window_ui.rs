@@ -51,11 +51,12 @@ impl Ui {
             return;
         }
         let weak = Rc::downgrade(self);
-        glib::idle_add_local_once(move || {
+        self.scroll.add_tick_callback(move |_, _| {
             if let Some(ui) = weak.upgrade() {
                 ui.history_window.scheduled.set(false);
                 ui.maintain_history_window();
             }
+            glib::ControlFlow::Break
         });
     }
 
@@ -122,10 +123,11 @@ impl Ui {
             self.render_messages(false);
             return;
         }
-        if top < height * SCREENS && !self.history_window.at_end(Side::Older) {
+        // Prefetch inside the retained buffer, so trimming cannot immediately fetch it again.
+        let prefetch = height * SCREENS / 2.;
+        if top < prefetch && !self.history_window.at_end(Side::Older) {
             self.page_timeline(Side::Older);
-        } else if end - top - height < height * SCREENS && !self.history_window.at_end(Side::Newer)
-        {
+        } else if end - top - height < prefetch && !self.history_window.at_end(Side::Newer) {
             self.page_timeline(Side::Newer);
         }
     }
@@ -134,7 +136,7 @@ impl Ui {
         if self.history_window.at_end(side) {
             return;
         }
-        let (owner, peer, boundary) = {
+        let (owner, peer, boundary, limit) = {
             let state = self.state.borrow();
             let chat = state.current();
             let edge = match side {
@@ -142,10 +144,16 @@ impl Ui {
                 Side::Newer => chat.messages.last(),
             };
             let Some(edge) = edge else { return };
+            let average_height =
+                self.timeline.height().max(1) as f64 / chat.messages.len().max(1) as f64;
+            let limit = (self.scroll.height().max(1) as f64 * 1.5 / average_height)
+                .ceil()
+                .clamp(4., PAGE as f64) as u32;
             (
                 state.account.clone(),
                 chat.jid.clone(),
                 (edge.timestamp.clone(), edge.id.clone()),
+                limit,
             )
         };
         let Some(revision) = self.history_window.begin() else {
@@ -161,7 +169,7 @@ impl Ui {
             let result = ui
                 .store
                 .read_snapshot(move |store| {
-                    store.history_side(&account, &chat, (&boundary.0, &boundary.1), side, PAGE)
+                    store.history_side(&account, &chat, (&boundary.0, &boundary.1), side, limit)
                 })
                 .await;
             if !ui.finish_history_query(&owner, &peer, generation, revision) {
@@ -173,7 +181,7 @@ impl Ui {
             }
             match result {
                 Ok(mut page) => {
-                    ui.history_window.end(side, page.len() < PAGE as usize);
+                    ui.history_window.end(side, page.len() < limit as usize);
                     let mut state = ui.state.borrow_mut();
                     let chat = state.current_mut();
                     let present: HashSet<_> = chat.messages.iter().map(|m| m.id.as_str()).collect();
@@ -183,9 +191,12 @@ impl Ui {
                         ui.schedule_history_maintenance();
                         return;
                     }
-                    chat.messages.extend(page);
-                    chat.messages
-                        .sort_by(|a, b| a.order_key().cmp(&b.order_key()));
+                    match side {
+                        Side::Older => {
+                            chat.messages.splice(0..0, page);
+                        }
+                        Side::Newer => chat.messages.extend(page),
+                    }
                     chat.remember_latest();
                     drop(state);
                     ui.render_messages(false);

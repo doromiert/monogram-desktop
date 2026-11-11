@@ -128,6 +128,219 @@ impl Decoder {
         })
     }
 }
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct SourceStamp {
+    device: u64,
+    inode: u64,
+    length: u64,
+    modified: i64,
+    modified_ns: i64,
+}
+impl SourceStamp {
+    fn new(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            length: metadata.len(),
+            modified: metadata.mtime(),
+            modified_ns: metadata.mtime_nsec(),
+        }
+    }
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PreviewMetadata {
+    source: SourceStamp,
+    mime: String,
+    width: u32,
+    height: u32,
+    animated: bool,
+    checksum: Vec<u8>,
+}
+fn preview_path(source: &std::path::Path, key: &str, edge: u32) -> Option<std::path::PathBuf> {
+    Some(
+        source
+            .parent()?
+            .join("thumbnails")
+            .join(format!("{key}-{edge}.preview")),
+    )
+}
+fn cached_preview(
+    path: &std::path::Path,
+    source: &SourceStamp,
+    edge: u32,
+    cancel: &gio::Cancellable,
+) -> Option<crate::image_ui::Image> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(12 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > 12 * 1024 * 1024 {
+        return None;
+    }
+    let split = bytes.iter().take(2048).position(|byte| *byte == b'\n')?;
+    let metadata: PreviewMetadata = serde_json::from_slice(&bytes[..split]).ok()?;
+    let png = &bytes[split + 1..];
+    if &metadata.source != source
+        || metadata.width == 0
+        || metadata.height == 0
+        || !metadata.mime.starts_with("image/")
+        || openssl::sha::sha256(png).as_slice() != metadata.checksum
+    {
+        return None;
+    }
+    let mut decoder = Decoder::open_bytes(&glib::Bytes::from_owned(png.to_vec()), cancel).ok()?;
+    let texture = decoder.frame(edge).ok()?.texture;
+    Some(crate::image_ui::Image {
+        texture,
+        mime: metadata.mime,
+        width: metadata.width,
+        height: metadata.height,
+        animated: metadata.animated,
+    })
+}
+fn save_preview(
+    path: &std::path::Path,
+    source: SourceStamp,
+    image: &crate::image_ui::Image,
+    cancel: &gio::Cancellable,
+) {
+    use std::{
+        fs,
+        io::Write,
+        os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    };
+    if cancel.is_cancelled() {
+        return;
+    }
+    let png = image.texture.save_to_png_bytes();
+    let metadata = PreviewMetadata {
+        source,
+        mime: image.mime.clone(),
+        width: image.width,
+        height: image.height,
+        animated: image.animated,
+        checksum: openssl::sha::sha256(png.as_ref()).to_vec(),
+    };
+    let Ok(header) = serde_json::to_vec(&metadata) else {
+        return;
+    };
+    let Some(dir) = path.parent() else { return };
+    let _guard = crate::downloads::CACHE_IO.lock().unwrap();
+    if cancel.is_cancelled()
+        || fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .is_err()
+    {
+        return;
+    }
+    let partial = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> std::io::Result<()> {
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&partial)?;
+        output.write_all(&header)?;
+        output.write_all(b"\n")?;
+        output.write_all(png.as_ref())?;
+        if !cancel.is_cancelled() {
+            fs::rename(&partial, path)?;
+        }
+        Ok(())
+    })();
+    let _ = fs::remove_file(partial);
+    if result.is_err() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<_> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension()?.to_str()? != "preview" {
+                return None;
+            }
+            let metadata = entry.metadata().ok()?;
+            metadata.is_file().then(|| {
+                (
+                    metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+                    metadata.len(),
+                    path,
+                )
+            })
+        })
+        .collect();
+    let mut bytes: u64 = files.iter().map(|(_, size, _)| size).sum();
+    let mut count = files.len();
+    if bytes <= 128 * 1024 * 1024 && count <= 256 {
+        return;
+    }
+    files.sort_unstable_by_key(|(modified, _, _)| *modified);
+    for (_, size, path) in files {
+        if bytes <= 128 * 1024 * 1024 && count <= 256 {
+            break;
+        }
+        if fs::remove_file(path).is_ok() {
+            bytes = bytes.saturating_sub(size);
+            count -= 1;
+        }
+    }
+}
+/// Worker-only. Originals remain authenticated; private derived thumbnails avoid full redecodes.
+pub fn preview(
+    file: &crate::file_share::Attachment,
+    path: &std::path::Path,
+    edge: u32,
+    cancel: &gio::Cancellable,
+    stopped: &std::sync::atomic::AtomicBool,
+    allow_decode: bool,
+) -> Result<crate::image_ui::Image, &'static str> {
+    use std::sync::atomic::Ordering;
+    let cached = (edge <= 1536)
+        .then(|| preview_path(path, &file.key(), edge))
+        .flatten();
+    if let Some(cached) = cached.as_ref()
+        && let Ok(metadata) = path.metadata()
+        && let Some(image) = cached_preview(cached, &SourceStamp::new(&metadata), edge, cancel)
+    {
+        if !stopped.load(Ordering::Acquire) {
+            return Ok(image);
+        }
+    }
+    if !allow_decode {
+        return Err("Preview not cached");
+    }
+    let input = crate::downloads::verified_input(path, file, stopped)?;
+    let stamp = input
+        .0
+        .metadata()
+        .map(|metadata| SourceStamp::new(&metadata))
+        .ok();
+    let mut decoder = Decoder::open(input, cancel)?;
+    let frame = decoder.frame(edge)?;
+    if stopped.load(Ordering::Acquire) {
+        return Err("Image preview cancelled");
+    }
+    let image = crate::image_ui::Image {
+        texture: frame.texture,
+        mime: decoder.mime,
+        width: decoder.width,
+        height: decoder.height,
+        animated: frame.delay.is_some(),
+    };
+    if let (Some(path), Some(stamp)) = (cached, stamp) {
+        save_preview(&path, stamp, &image, cancel);
+    }
+    Ok(image)
+}
 pub fn play<W: IsA<gtk::Widget> + Clone + 'static>(
     picture: &W,
     path: std::path::PathBuf,

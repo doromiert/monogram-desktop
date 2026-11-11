@@ -87,7 +87,8 @@
 .message-menu-panel { background: @popover_bg_color; border-radius: 12px; padding: 4px; box-shadow: 0 2px 8px alpha(black,.2); }
 .reaction-choice { font-size: 19px; padding: 4px; min-width: 24px; }
 .message-bubble .message-author { margin-bottom: 0; }
-.media-viewer { background: rgba(0,0,0,.82); color: white; }
+.media-viewer { background: transparent; color: white; }
+.media-viewer-backdrop { background: rgba(5,5,7,.88); }
 .media-viewer headerbar { background: transparent; color: white; border: none; box-shadow: none; }
 .media-viewer button { color: white; }
 .gif-preview { border-radius: 10px; }
@@ -109,11 +110,17 @@
 .message-bubble.media-bubble { padding: 2px; border-radius: 12px; }
 .media-bubble .attachment-controls { padding: 8px; }
 .media-bubble .message-author { margin: 3px 7px; }
-.media-viewer .media-controls-top { background: linear-gradient(to bottom, rgba(0,0,0,.72), transparent); padding-bottom: 24px; }
+.media-viewer .media-controls-top { background: linear-gradient(to bottom, rgba(0,0,0,.5), transparent); padding-bottom: 24px; }
 .media-viewer .media-controls-top headerbar { color: white; }
-.media-viewer button.circular { background: rgba(0,0,0,.35); color: white; }
+.media-viewer .media-controls-bottom { background: linear-gradient(to top, rgba(0,0,0,.5), transparent); padding-top: 24px; }
+.media-viewer button.circular { color: white; }
+.media-viewer button.media-viewer-arrow { background: rgba(28,28,28,.85); margin: 14px; min-width: 32px; min-height: 32px; }
 
 .message-bubble.media-bubble { border-bottom-left-radius: 5px; }
 .message-bubble.media-bubble.own { border-bottom-left-radius: 12px; border-bottom-right-radius: 5px; }
 .message-bubble.media-bubble.cluster-previous { border-top-left-radius: 5px; }
 .message-bubble.media-bubble.cluster-previous.own { border-top-left-radius: 12px; border-top-right-radius: 5px; }
+
+.media-download { background: alpha(@window_fg_color,.06); border-radius: 10px; }
+.media-download-controls { background: transparent; color: white; }
+.media-download-action { min-width: 40px; min-height: 40px; padding: 0; color: white; background: rgba(0,0,0,.48); border: none; box-shadow: none; }

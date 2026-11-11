@@ -104,6 +104,22 @@ impl Store {
         )?;
         tx.commit()
     }
+    pub fn save_chat_message(
+        &self,
+        account: &str,
+        chat: &Chat,
+        message: Option<&Message>,
+    ) -> rusqlite::Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        let mut metadata = serde_json::to_value(chat).unwrap();
+        metadata.as_object_mut().unwrap().remove("messages");
+        tx.execute("INSERT INTO chats VALUES (?,?,?) ON CONFLICT(account,peer) DO UPDATE SET body=excluded.body",
+            params![account, chat.jid, metadata.to_string()])?;
+        if let Some(message) = message {
+            self.upsert_message(account, &chat.jid, message)?;
+        }
+        tx.commit()
+    }
     fn upsert_message(&self, account: &str, peer: &str, m: &Message) -> rusqlite::Result<()> {
         if m.action.is_some() {
             return Ok(());

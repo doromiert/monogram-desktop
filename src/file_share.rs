@@ -118,6 +118,10 @@ pub struct Attachment {
     pub name: String,
     pub mime: String,
     pub size: Option<u64>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
     pub hashes: BTreeMap<String, Vec<u8>>,
     pub manual: bool,
     pub sticker: bool,
@@ -177,6 +181,15 @@ impl Attachment {
                     .append(size.to_string())
                     .build(),
             );
+        }
+        for (name, dimension) in [("width", self.width), ("height", self.height)] {
+            if let Some(dimension) = dimension {
+                metadata.append_child(
+                    Element::builder(name, META)
+                        .append(dimension.to_string())
+                        .build(),
+                );
+            }
         }
         for (algorithm, hash) in &self.hashes {
             metadata.append_child(
@@ -298,6 +311,8 @@ impl Attachment {
             name: link.name(),
             mime: "application/octet-stream".into(),
             size: None,
+            width: None,
+            height: None,
             hashes: BTreeMap::new(),
             manual: false,
             sticker: false,
@@ -339,6 +354,21 @@ impl Attachment {
             if value.size? > i64::MAX as u64 {
                 return None;
             }
+        }
+        let dimension = |name| {
+            field(file, name)
+                .and_then(|value| value.trim().parse::<u32>().ok())
+                .filter(|value| (1..=65535).contains(value))
+        };
+        value.width = dimension("width");
+        value.height = dimension("height");
+        if value
+            .width
+            .zip(value.height)
+            .is_some_and(|(w, h)| u64::from(w) * u64::from(h) > 64_000_000)
+        {
+            value.width = None;
+            value.height = None;
         }
         for hash in file.children().filter(|c| c.is("hash", HASH)) {
             let algorithm = hash.attr("algo").unwrap_or("");

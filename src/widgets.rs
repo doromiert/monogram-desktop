@@ -297,6 +297,14 @@ impl AspectImage {
     pub fn paintable(&self) -> Option<gdk::Paintable> {
         self.imp().paintable.borrow().clone()
     }
+    pub fn set_ratio(&self, ratio: f64) {
+        if ratio.is_finite()
+            && ratio > 0.
+            && (self.imp().ratio.replace(ratio) - ratio).abs() > 0.001
+        {
+            self.queue_resize();
+        }
+    }
     pub fn set_paintable(&self, paintable: Option<gdk::Paintable>) {
         if !self.imp().cover.get()
             && let Some(image) = paintable.as_ref()
@@ -331,6 +339,17 @@ impl AspectImage {
         obj.set_halign(gtk::Align::Center);
         obj
     }
+}
+
+pub fn reveal_media(controls: &gtk::Box, paintable: &impl IsA<gdk::Paintable>) {
+    controls.remove_css_class("media-preview-error");
+    controls.set_tooltip_text(None);
+    if let Some(overlay) = controls.parent().and_downcast::<gtk::Overlay>()
+        && let Some(placeholder) = overlay.child().and_downcast::<AspectImage>()
+    {
+        placeholder.set_ratio(paintable.intrinsic_aspect_ratio());
+    }
+    controls.set_visible(false);
 }
 
 mod gif_imp {

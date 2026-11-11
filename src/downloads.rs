@@ -45,6 +45,7 @@ enum Policy {
     Automatic,
 }
 struct Task {
+    policy: Policy,
     state: Arc<Mutex<Status>>,
     cancel: Arc<AtomicBool>,
     signal: Option<tokio::sync::oneshot::Sender<()>>,
@@ -75,7 +76,14 @@ impl Downloads {
     pub fn status(&self, account: &str, file: &Attachment) -> Option<Status> {
         self.tasks
             .get(&(account.into(), file.key()))
-            .map(|t| t.state.lock().unwrap().clone())
+            .and_then(|task| {
+                let status = task.state.lock().unwrap().clone();
+                if task.policy == Policy::Cache && matches!(status, Status::Failed(_)) {
+                    None
+                } else {
+                    Some(status)
+                }
+            })
     }
     pub fn cancel(&mut self, account: &str, file: &Attachment) {
         if let Some(task) = self.tasks.get_mut(&(account.into(), file.key())) {
@@ -110,6 +118,9 @@ impl Downloads {
             return Err("Invalid attachment");
         }
         let key = (account.to_string(), file.key());
+        if policy == Policy::Cache && self.tasks.contains_key(&key) {
+            return Ok(());
+        }
         if self
             .tasks
             .get(&key)
@@ -136,6 +147,7 @@ impl Downloads {
         self.tasks.insert(
             key,
             Task {
+                policy,
                 state: state.clone(),
                 cancel: cancel.clone(),
                 signal: Some(tx),
