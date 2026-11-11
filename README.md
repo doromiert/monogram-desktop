@@ -1,14 +1,10 @@
 # Monogram Desktop
 
 A native **Rust / GTK 4 / libadwaita** reimplementation of Monogram for Linux.
-The app now includes **initial live XMPP direct-text messaging** and a separate
-offline demo with fictional conversations. Live mode supports verified TLS login,
-roster/presence, text, replies, carbons, archive history, receipts and local drafts.
-**OMEMO 2 direct messages are available through explicit setup and fingerprint review.**
-Live direct chats also support structured polls, corrections/reactions/retractions,
-attributed text forwarding, and generic file uploads/downloads with encrypted
-metadata and native progress controls. Rich media playback, calls, groups and
-wallets remain offline demo surfaces. See the [parity ledger](docs/FEATURE_PARITY.md).
+Live mode supports TLS sign-in, saved credentials, direct and bookmarked MUC
+conversations, Legacy OMEMO and OMEMO 2, history, replies, message actions and
+cached media playback. An optional offline demo uses fictional conversations.
+Full mobile parity remains unfinished; see the [parity ledger](docs/FEATURE_PARITY.md).
 
 ## Run with Nix
 
@@ -32,6 +28,11 @@ nix flake check
 nix build
 ```
 
+Nix builds compiled dependencies separately with Crane. App-only source changes
+reuse those artifacts; dependency manifests, Cargo.lock and vendored XMPP changes
+invalidate them. The initial cache fill still compiles dependencies. `nix build`
+builds the application; `nix flake check` opts into the verification suite.
+
 The flake pins Rust, GTK and libadwaita; Cargo.lock pins Rust dependencies.
 Application logic and rendering run in a native Rust executable. A Python
 standard-library script in tests/ launches disposable Prosody verification fixtures.
@@ -41,8 +42,7 @@ checks were run on x86_64-linux.
 ## Try it
 
 - On first launch, choose **Sign In** to connect an XMPP account. You can also add an account from **Main Menu → Accounts → Add Account**.
-  Use New Conversation to enter another person's bare address. Passwords stay in
-  memory; reconnect after restart requires entering them again. Accounts keep
+  Use New Conversation to enter another person's bare address. Saved passwords use Secret Service for automatic reconnect. Accounts keep
   separate local history/drafts. Open Offline Demo returns to the fictional data.
   See [LIVE_XMPP.md](docs/LIVE_XMPP.md) for behavior, storage and current limits.
 - Select chats; Ctrl+F replaces the header with search and shows message/chat results.

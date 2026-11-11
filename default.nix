@@ -1,14 +1,40 @@
-{ lib, stdenv, rustPlatform, pkg-config, libomemo-c, openssl, gtk4, libadwaita, libepoxy, libglycin-gtk4, glycin-loaders, sqlite, wrapGAppsHook4, xorg-server, dbus, makeFontsConf, adwaita-fonts, gsettings-desktop-schemas, mesa, librsvg, prosody, cacert, python3, jdk21, gnome-keyring, gst_all_1, clapper-unwrapped }:
-let fontConfig = makeFontsConf { fontDirectories = [ adwaita-fonts ]; };
-in rustPlatform.buildRustPackage {
-  pname = "monogram-desktop";
-  version = "0.2.0";
-  src = lib.cleanSource ./.;
-  cargoHash = "sha256-UryRp1nOeUCKo7YNNHk2A76DLnicMzeJt2n53nSGip0=";
-  nativeBuildInputs = [ pkg-config wrapGAppsHook4 ];
-  buildInputs = [ clapper-unwrapped clapper-unwrapped.lib gtk4 libadwaita libepoxy libglycin-gtk4 glycin-loaders sqlite libomemo-c openssl librsvg gsettings-desktop-schemas gst_all_1.gstreamer gst_all_1.gst-plugins-base gst_all_1.gst-plugins-good gst_all_1.gst-plugins-bad gst_all_1.gst-plugins-ugly gst_all_1.gst-libav ];
+{ pkgs, lib, stdenv, pkg-config, libomemo-c, openssl, gtk4, libadwaita, libepoxy, libglycin-gtk4, glycin-loaders, sqlite, wrapGAppsHook4, xorg-server, dbus, makeFontsConf, adwaita-fonts, gsettings-desktop-schemas, mesa, librsvg, prosody, cacert, python3, jdk21, gnome-keyring, gst_all_1, clapper-unwrapped, monogramSrc ? lib.cleanSource ./., craneLib ? import (builtins.fetchTarball {
+  url = "https://github.com/ipetkov/crane/archive/79fd63528501446749c09f08cad486a58c7d173e.tar.gz";
+  sha256 = "sha256-TREenflwEjxOSq292FYwbc3kEm7TDRtXCZRNWEdjBmg=";
+}) { inherit pkgs; } }:
+let
+  src = monogramSrc;
+  fontConfig = makeFontsConf { fontDirectories = [ adwaita-fonts ]; };
+  commonArgs = {
+    pname = "monogram-desktop";
+    version = "0.2.0";
+    inherit src;
+    strictDeps = true;
+    CARGO_BUILD_TARGET = stdenv.hostPlatform.rust.rustcTarget;
+    nativeBuildInputs = [ pkg-config wrapGAppsHook4 ];
+    buildInputs = [ clapper-unwrapped clapper-unwrapped.lib gtk4 libadwaita libepoxy libglycin-gtk4 glycin-loaders sqlite libomemo-c openssl librsvg gsettings-desktop-schemas gst_all_1.gstreamer gst_all_1.gst-plugins-base gst_all_1.gst-plugins-good gst_all_1.gst-plugins-bad gst_all_1.gst-plugins-ugly gst_all_1.gst-libav ];
+    doCheck = false;
+  };
+  # Only manifests/lockfiles and the real path dependency affect this source.
+  dummySrc = craneLib.mkDummySrc {
+    inherit src;
+    extraDummyScript = ''
+      rm -rf "$out/vendor/tokio-xmpp"
+      cp -R ${builtins.path { path = src + "/vendor/tokio-xmpp"; name = "monogram-tokio-xmpp"; }} "$out/vendor/tokio-xmpp"
+      chmod -R u+w "$out/vendor/tokio-xmpp"
+    '';
+  };
+  cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
+  cargoArtifacts = craneLib.buildDepsOnly ((builtins.removeAttrs commonArgs [ "src" ]) // {
+    inherit dummySrc cargoVendorDir;
+    cargoCheckExtraArgs = "--bin monogram-desktop";
+    cargoBuildExtraArgs = "--bin monogram-desktop";
+  });
+in craneLib.buildPackage (commonArgs // {
+  inherit cargoArtifacts cargoVendorDir;
+  cargoBuildExtraArgs = "--bin monogram-desktop";
+  passthru = { inherit cargoArtifacts; };
   nativeCheckInputs = [ xorg-server dbus prosody openssl python3 jdk21 gnome-keyring ];
-  doCheck = true;
   postCheck = ''
     export HOME=$TMPDIR/home XDG_CACHE_HOME=$TMPDIR/cache XDG_CONFIG_HOME=$TMPDIR/config XDG_STATE_HOME=$TMPDIR/state
     mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
@@ -63,4 +89,4 @@ in rustPlatform.buildRustPackage {
     license = [ lib.licenses.gpl3Plus lib.licenses.gpl3Only ];
     platforms = lib.platforms.linux;
   };
-}
+})

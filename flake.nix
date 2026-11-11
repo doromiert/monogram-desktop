@@ -23,7 +23,7 @@
           packages = with pkgs; [ cargo rustc rustfmt clippy pkg-config sqlite libepoxy python3 jdk21 gnome-keyring gtk4 libadwaita gobject-introspection xorg-server xdotool imagemagick prosody openssl ];
         }; });
       checks = eachSystem (system: {
-        prototype = self.packages.${system}.default;
+        prototype = self.packages.${system}.default.overrideAttrs (_: { doCheck = true; });
       });
     };
 }
