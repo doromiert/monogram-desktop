@@ -699,7 +699,7 @@ impl Rooms {
                 aliases.push(format!("origin:{id}"));
             }
         }
-        let message = Message {
+        let mut message = Message {
             kind: if attachment.is_some() { "file" } else { "text" }.into(),
             attachment,
             unsupported_attachment: xml
@@ -720,6 +720,14 @@ impl Rooms {
             time: date.with_timezone(&Local).format("%H:%M").to_string(),
             delivery: "delivered".into(),
             ..Default::default()
+        };
+        message.hydrate_compatibility();
+        message.inline_emoji = (!unavailable && message.attachment.is_none())
+            .then(|| crate::packs::normalized_inline(xml, &message.text)).flatten();
+        message.preview_spoilers = if unavailable {
+            None
+        } else {
+            crate::spoilers::normalized(xml, &message.text)
         };
         Some((jid, message, historical))
     }

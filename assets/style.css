@@ -46,7 +46,7 @@
 .wallet-balance { font-size: 44px; font-weight: 700; }
 .wallet-muted { color: alpha(white,.8); }
 .wallet-card button { color: white; background: alpha(white,.14); box-shadow: none; border: none; }
-.payment-card { background: linear-gradient(120deg,#ff8a16,#f45100); color: white; border-radius: 12px; padding: 20px 26px; min-width: 210px; }
+.payment-card { background: linear-gradient(120deg,#ff8a16,#f45100); color: white; border-radius: 12px; padding: 20px 26px; }
 .payment-card .title-1 { color: white; }
 .large-emoji { font-size: 56px; padding: 8px; }
 .preview-label { font-size: 10px; letter-spacing: 1px; opacity: .5; }
@@ -59,8 +59,14 @@
 .message-reply { color: @window_fg_color; background: alpha(@window_fg_color,.10); padding: 7px 9px; border-left: 3px solid @accent_color; }
 .message-reply label { color: @window_fg_color; }
 .reply-target { outline: 2px solid @accent_color; }
-.reaction { color: @window_fg_color; background: alpha(@window_fg_color,.12); margin: 8px 1px 2px; }
+.reaction { color: @window_fg_color; background: alpha(@window_fg_color,.12); margin: 8px; }
 .reaction:checked { background: @accent_bg_color; color: @accent_fg_color; }
+.reaction-emoji { font-size: 16px; }
+.reaction-count { font-size: 11px; }
+.message-status-spinner { min-width: 12px; min-height: 12px; }
+.message-status-tick { color: white; font-size: 12px; font-weight: 700; letter-spacing: -3px; }
+.message-status-tick.sent { opacity: .5; }
+.message-status-tick.read { opacity: 1; }
 .composer-shell { padding: 8px; }
 .composer { padding: 4px; border-radius: 12px; }
 .composer textview { padding: 0; }
@@ -87,12 +93,17 @@
 .message-list row:selected { background: alpha(@accent_bg_color,.14); color: @window_fg_color; }
 .message-menu > contents { padding: 0; background: transparent; border: none; box-shadow: none; }
 .message-menu-panel { background: @popover_bg_color; border-radius: 12px; padding: 4px; box-shadow: 0 2px 8px alpha(black,.2); }
+.context-menu-row { min-height: 34px; padding: 5px 10px; border-radius: 8px; }
+.context-menu-row label { margin: 0; }
 .reaction-choice { font-size: 19px; padding: 4px; min-width: 24px; }
 .reaction-expand { margin: 2px; min-width: 28px; min-height: 28px; }
 .expanded-reactions { padding: 8px; }
-.emoji-picker-surface { padding: 2px; }
-.emoji-sidebar { margin: 0 10px 10px; }
+.emoji-picker-surface { padding: 2px; background: transparent; }
+.emoji-sidebar { margin: 0 10px; background: transparent; }
 .emoji-picker-surface > label { margin: 4px 6px 2px; }
+.emoji-category-scroll, .emoji-category-bar, .emoji-picker-surface scrolledwindow, .emoji-picker-grid { background: transparent; }
+.emoji-category-bar { padding: 0 2px; }
+.emoji-category { font-size: 18px; min-width: 30px; min-height: 30px; padding: 2px; border-radius: 9px; }
 .emoji-picker-grid { padding: 2px; }
 .emoji-picker-grid child, .emoji-picker-grid child:hover {
   padding: 0; background: transparent; box-shadow: none; outline: none;
@@ -100,7 +111,8 @@
 .emoji-picker-item { font-size: 22px; padding: 4px; min-width: 28px; min-height: 28px; border-radius: 8px; }
 .message-bubble .message-author { margin-bottom: 0; }
 .media-viewer { background: transparent; color: white; }
-.media-viewer-backdrop { background: rgba(5,5,7,.88); }
+.media-viewer-backdrop { background: rgba(5,5,7,.66); }
+.media-viewer stack, .media-viewer picture { background: transparent; }
 .media-viewer headerbar { background: transparent; color: white; border: none; box-shadow: none; }
 .media-viewer button { color: white; }
 .gif-preview { border-radius: 10px; }

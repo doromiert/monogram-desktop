@@ -40,6 +40,8 @@ fn same_content(a: &Message, b: &Message) -> bool {
         && a.poll_closed_at == b.poll_closed_at
         && a.reactions == b.reactions
         && a.my_reactions == b.my_reactions
+        && a.preview_spoilers == b.preview_spoilers
+        && a.inline_emoji == b.inline_emoji
         && a.unavailable == b.unavailable
         && a.pinned == b.pinned
         && a.options == b.options
@@ -95,7 +97,13 @@ fn message_status(meta: &gtk::Box, m: &Message) {
         && (!m.own
             || !matches!(
                 m.delivery.as_str(),
-                "sending" | "waiting-upload" | "failed" | "uncertain"
+                "uploading"
+                    | "sending"
+                    | "waiting-upload"
+                    | "preparing-encryption"
+                    | "queued"
+                    | "failed"
+                    | "uncertain"
             ))
     {
         let image = gtk::Image::from_icon_name("channel-secure-symbolic");
@@ -108,23 +116,43 @@ fn message_status(meta: &gtk::Box, m: &Message) {
     }
     meta.append(&label(&m.time, ""));
     if m.own {
-        let icon = match m.delivery.as_str() {
-            "sending" | "waiting-upload" => "content-loading-symbolic",
-            "failed" | "uncertain" => "dialog-warning-symbolic",
-            _ => "object-select-symbolic",
-        };
-        let image = gtk::Image::from_icon_name(icon);
-        image.set_pixel_size(12);
-        image.set_tooltip_text(Some(match m.delivery.as_str() {
-            "sent" => "Sent",
-            "delivered" => "Delivered",
-            "uncertain" => "Delivery uncertain",
-            "failed" => "Send failed",
-            "sending" => "Sending",
-            "waiting-upload" => "Waiting for media to send",
-            _ => "Stored",
-        }));
-        meta.append(&image);
+        match m.delivery.as_str() {
+            "uploading" | "sending" | "waiting-upload" | "preparing-encryption" | "queued" => {
+                let spinner = gtk::Spinner::new();
+                spinner.add_css_class("message-status-spinner");
+                spinner.set_spinning(true);
+                spinner.set_tooltip_text(Some(match m.delivery.as_str() {
+                    "uploading" | "waiting-upload" => "Uploading",
+                    "preparing-encryption" => "Preparing encryption",
+                    "queued" => "Queued",
+                    _ => "Sending",
+                }));
+                meta.append(&spinner);
+            }
+            "failed" | "uncertain" => {
+                let image = gtk::Image::from_icon_name("dialog-warning-symbolic");
+                image.set_pixel_size(12);
+                image.set_tooltip_text(Some(if m.delivery == "failed" {
+                    "Send failed"
+                } else {
+                    "Delivery uncertain"
+                }));
+                meta.append(&image);
+            }
+            status => {
+                let read = status == "read";
+                let tick = label(if read { "✓✓" } else { "✓" }, "message-status-tick");
+                tick.add_css_class(if read { "read" } else { "sent" });
+                tick.set_tooltip_text(Some(if read {
+                    "Read"
+                } else if status == "delivered" {
+                    "Delivered"
+                } else {
+                    "Sent"
+                }));
+                meta.append(&tick);
+            }
+        }
     }
     if let Some(parent) = meta.parent() {
         if let Some(text) = parent.parent().and_downcast::<MessageText>() {
@@ -151,6 +179,25 @@ pub enum ScrollTarget {
     },
 }
 impl Ui {
+    pub(crate) fn refresh_link_preview_rows(self: &Rc<Self>, url: &str) {
+        let ids: Vec<_> = self
+            .state
+            .borrow()
+            .current()
+            .messages
+            .iter()
+            .filter(|message| crate::link_previews::candidate(message).as_deref() == Some(url))
+            .map(|message| message.id.clone())
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        for id in ids {
+            self.rendered_rows.borrow_mut().rows.remove(&id);
+        }
+        self.render_messages(false);
+    }
+
     pub fn render_messages(self: &Rc<Self>, bottom: bool) {
         if bottom && !self.history_window.newest() && !self.state.borrow().account.is_empty() {
             self.load_timeline(None);
@@ -265,11 +312,8 @@ impl Ui {
             let outer = bx(false, 8);
             outer.set_valign(gtk::Align::Start);
             outer.set_vexpand(false);
-            outer.set_halign(if m.own {
-                gtk::Align::End
-            } else {
-                gtk::Align::Start
-            });
+            outer.set_halign(gtk::Align::Fill);
+            outer.set_hexpand(true);
             let mut avatar = None;
             if group && !m.own {
                 let a = self.chat_avatar(
@@ -321,6 +365,7 @@ impl Ui {
             let author = text(&m.author, "message-author");
             author.set_hexpand(true);
             author.set_valign(gtk::Align::Center);
+            author.set_ellipsize(gtk::pango::EllipsizeMode::End);
             if m.pinned {
                 heading.append(&gtk::Image::from_icon_name("view-pin-symbolic"))
             }
@@ -530,7 +575,6 @@ impl Ui {
                 }
                 "gif" => {
                     let gif = AnimatedImage::new(m.gif_index);
-                    gif.set_width_request(220);
                     gif.constrain_width(220);
                     bubble.append(&gif)
                 }
@@ -564,7 +608,14 @@ impl Ui {
                     };
                     let l = wrap(&m.text, css);
                     l.set_selectable(true);
-                    bubble.append(&MessageText::new(&l, &meta))
+                    if let Some(preview) = self.link_preview_for_message(&m) {
+                        // Keep the status row after the native card so time,
+                        // encryption and delivery state follow the full bubble.
+                        bubble.append(&l);
+                        bubble.append(&crate::link_preview_ui::link_preview_card(&preview));
+                    } else {
+                        bubble.append(&MessageText::new(&l, &meta));
+                    }
                 }
                 _ => {}
             }
@@ -584,7 +635,14 @@ impl Ui {
                     if m.poll.as_ref().is_some_and(|p| p.is_option(&emoji)) {
                         continue;
                     }
-                    let b = gtk::ToggleButton::with_label(reaction);
+                    let b = gtk::ToggleButton::new();
+                    let chip = bx(false, 3);
+                    chip.append(&label(&emoji, "reaction-emoji"));
+                    if let Some((_, count)) = reaction.rsplit_once(' ') {
+                        chip.append(&label(count, "reaction-count"));
+                    }
+                    b.set_child(Some(&chip));
+                    b.update_property(&[gtk::accessible::Property::Label(reaction)]);
                     b.set_active(m.my_reactions.contains(&emoji));
                     b.add_css_class("reaction");
                     let id = m.id.clone();
@@ -598,7 +656,7 @@ impl Ui {
                 }
                 bubble.append(&row)
             }
-            outer.append(&bubble);
+            outer.append(&MessageBubbleLimit::new(&bubble, m.own));
             self.bubbles
                 .borrow_mut()
                 .insert(m.id.clone(), bubble.clone().upcast());

@@ -67,11 +67,16 @@ pub enum Request {
         quote: String,
     },
     Incoming(Frame),
+    Preview {
+        frame: Frame,
+        reply: oneshot::Sender<bool>,
+    },
     Accepted(Token),
 }
 pub struct Handle {
     tx: channel::UnboundedSender<Request>,
     frames: channel::Sender<Frame>,
+    previews: channel::Sender<Request>,
     owner: String,
     generation: u64,
     events: mpsc::Sender<Envelope>,
@@ -86,6 +91,7 @@ impl Handle {
     ) -> Self {
         let (tx, mut rx) = channel::unbounded_channel();
         let (frames, mut incoming) = channel::channel(32);
+        let (previews, mut preview_frames) = channel::channel(150);
         let (cancel, stopped) = oneshot::channel();
         let origin = owner.clone();
         let notifications = events.clone();
@@ -93,19 +99,34 @@ impl Handle {
             let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().expect("crypto runtime");
             runtime.block_on(async move{tokio::select!{_=stopped=>{},_=async move {
                 let mut worker=Worker{root:lifecycle::root(),owner,generation,network,events,local:None,online:false,ready:false,reviews:BTreeMap::new()};
-                loop {tokio::select! {biased;request=rx.recv()=>{let Some(request)=request else{break};worker.process(request).await;},frame=incoming.recv()=>{let Some(frame)=frame else{break};worker.process(Request::Incoming(frame)).await;}}}
+                loop {tokio::select! {biased;request=rx.recv()=>{let Some(request)=request else{break};worker.process(request).await;},frame=incoming.recv()=>{let Some(frame)=frame else{break};worker.process(Request::Incoming(frame)).await;},request=preview_frames.recv()=>{let Some(request)=request else{break};worker.process(request).await;}}}
             }=>{}}});
         }).expect("crypto thread");
         Self {
             tx,
             frames,
+            previews,
             owner: origin,
             generation,
             events: notifications,
             cancel: Some(cancel),
         }
     }
+    pub fn preview(&self, frame: Frame) -> Option<oneshot::Receiver<bool>> {
+        if bundle::xml(&frame.xml, 1024 * 1024).is_err() {
+            return None;
+        }
+        let (reply, received) = oneshot::channel();
+        self.previews
+            .try_send(Request::Preview { frame, reply })
+            .ok()?;
+        Some(received)
+    }
     pub fn send(&self, request: Request) {
+        if matches!(request, Request::Preview { .. }) {
+            let _ = self.previews.try_send(request);
+            return;
+        }
         if let Request::Incoming(frame) = request {
             if bundle::xml(&frame.xml, 1024 * 1024).is_err() {
                 return;
@@ -575,7 +596,10 @@ impl Worker {
         }
     }
     async fn incoming(&mut self, frame: Frame) -> Result<()> {
-        if !self.ready {
+        self.incoming_mode(frame, false).await
+    }
+    async fn incoming_mode(&mut self, frame: Frame, preview: bool) -> Result<()> {
+        if !self.ready && !preview {
             self.placeholder(
                 &frame,
                 "Encrypted message — enable OMEMO 2 and review the sender's devices",
@@ -604,16 +628,14 @@ impl Worker {
         if let Some((peer, message, _)) = &outer {
             if let Some(history) = self.history()? {
                 if let Some(id) = history.known(&self.owner, peer, message.own, &[alias.clone()]) {
-                    if history
-                        .message(&self.owner, peer, &id)
-                        .is_none_or(|m| !m.unavailable)
-                    {
+                    let stored = history.message(&self.owner, peer, &id);
+                    if stored.as_ref().is_none_or(|m| !m.unavailable) {
                         self.emit(BackendEvent::CryptoAliases {
                             legacy_sticker: false,
                             legacy_reply: None,
                             peer: peer.clone(),
                             own: message.own,
-                            id,
+                            id: id.clone(),
                             aliases: message.aliases.clone(),
                         });
                         let local = self.local.as_mut().unwrap();
@@ -622,6 +644,28 @@ impl Worker {
                             .store
                             .transaction(|tx| local.engine.journal.find(tx, &digest))?
                         {
+                            if let Some(stored) = stored.as_ref().filter(|stored| stored.inline_emoji.is_none())
+                                && let Some(content) = pending.content.as_ref()
+                                && let Some((_, decoded, _)) = protocol::normalize_protected(content, &self.owner, None)
+                                && let Some(emoji) = decoded.inline_emoji.filter(|emoji| emoji.body == stored.text)
+                            {
+                                self.emit(BackendEvent::InlineEmoji { peer: peer.clone(), id: id.clone(), emoji });
+                            }
+                            if let Some(stored) =
+                                stored.filter(|stored| stored.preview_spoilers.is_none())
+                                && let Some(content) = pending.content.as_ref()
+                                && let Some((_, decoded, _)) =
+                                    protocol::normalize_protected(content, &self.owner, None)
+                                && let Some(context) = decoded
+                                    .preview_spoilers
+                                    .filter(|context| context.matches(&stored.text))
+                            {
+                                self.emit(BackendEvent::PreviewSpoilers {
+                                    peer: peer.clone(),
+                                    id,
+                                    context,
+                                });
+                            }
                             if let Some(token) = pending.token {
                                 self.accept(token).await?;
                             }
@@ -630,6 +674,9 @@ impl Worker {
                     }
                 }
             }
+        }
+        if preview {
+            return Ok(());
         }
         let header = bundle::single(bundle::single(&frame.xml, "encrypted", NS)?, "header", NS)?;
         let sender = bundle::positive(header.attr("sid"))?;
@@ -897,6 +944,17 @@ impl Worker {
                 if let Err(error) = self.incoming(frame.clone()).await {
                     self.placeholder(&frame, &error.to_string());
                 }
+            }
+            Request::Preview { frame, reply } => {
+                let result = self.incoming_mode(frame, true).await;
+                let ok = matches!(
+                    result,
+                    Ok(())
+                        | Err(Error::Unavailable(
+                            "This OMEMO 2 message has no key for this device"
+                        ))
+                );
+                let _ = reply.send(ok);
             }
             Request::Accepted(token) => {
                 if let Err(error) = self.accept(token).await {

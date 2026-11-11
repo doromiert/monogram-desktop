@@ -15,6 +15,7 @@ mod emoji_picker_ui;
 mod emoji_preferences;
 mod encryption_policy;
 mod file_share;
+mod folder_actions;
 mod folders;
 mod forwarding;
 mod history_window;
@@ -24,6 +25,9 @@ mod image_ui;
 mod invitation_ui;
 mod iq;
 mod legacy_polls;
+mod link_preview_logic;
+mod link_preview_ui;
+mod link_previews;
 mod live_actions;
 mod media;
 mod media_caption;
@@ -31,14 +35,18 @@ mod media_store;
 mod message_actions;
 mod messages;
 mod model;
+mod packs;
 mod polls;
 mod polls_ui;
 mod protocol;
+mod read_state;
 mod request_logic;
 mod room_ui;
 mod rooms;
 mod send_policy_ui;
+mod send_queue;
 mod smoke;
+mod spoilers;
 mod storage;
 mod transport;
 mod ui;
@@ -217,7 +225,10 @@ fn capture_window(
     let (width, height) = (window.width() as f32, window.height() as f32);
     eprintln!(
         "Monogram capture: {}x{}, fullscreen={}, maximized={}",
-        width, height, window.is_fullscreen(), window.is_maximized()
+        width,
+        height,
+        window.is_fullscreen(),
+        window.is_maximized()
     );
     let snapshot = gtk::Snapshot::new();
     paintable.snapshot(&snapshot, width as f64, height as f64);

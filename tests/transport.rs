@@ -27,12 +27,16 @@ mod media_store;
 mod message_actions;
 #[path = "../src/model.rs"]
 mod model;
+#[path = "../src/packs.rs"]
+mod packs;
 #[path = "../src/polls.rs"]
 mod polls;
 #[path = "../src/protocol.rs"]
 mod protocol;
 #[path = "../src/rooms/mod.rs"]
 mod rooms;
+#[path = "../src/spoilers.rs"]
+mod spoilers;
 #[path = "../src/storage.rs"]
 mod storage;
 #[path = "../src/transport.rs"]

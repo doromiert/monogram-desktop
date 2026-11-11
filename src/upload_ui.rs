@@ -489,6 +489,7 @@ impl Ui {
                     uri: file.uri().into(),
                     name: filename,
                     error: None,
+                    sticker: false,
                 }),
                 ..Default::default()
             };
@@ -662,6 +663,7 @@ mod tests {
                 uri: "file:///fictional/input".into(),
                 name: "input.txt".into(),
                 error: None,
+                sticker: false,
             }),
             unsupported_attachment: true,
             ..Default::default()

@@ -27,7 +27,10 @@ fn bare_of(value: &str) -> String {
 }
 fn subscription_peer(presence: &Element, owner: &str) -> Option<String> {
     if !presence.is("presence", NS)
-        || !matches!(presence.attr("type"), Some("subscribe" | "unsubscribe" | "subscribed" | "unsubscribed"))
+        || !matches!(
+            presence.attr("type"),
+            Some("subscribe" | "unsubscribe" | "subscribed" | "unsubscribed")
+        )
         || presence.attr("to").is_some_and(|to| {
             to.parse::<tokio_xmpp::jid::Jid>()
                 .ok()
@@ -36,7 +39,19 @@ fn subscription_peer(presence: &Element, owner: &str) -> Option<String> {
     {
         return None;
     }
-    if presence.children().any(|child| matches!(child.ns().as_str(), "urn:xmpp:delay" | "jabber:x:delay" | "urn:xmpp:carbons:2" | "urn:xmpp:forward:0" | "urn:xmpp:mam:1" | "urn:xmpp:mam:2")) { return None; }
+    if presence.children().any(|child| {
+        matches!(
+            child.ns().as_str(),
+            "urn:xmpp:delay"
+                | "jabber:x:delay"
+                | "urn:xmpp:carbons:2"
+                | "urn:xmpp:forward:0"
+                | "urn:xmpp:mam:1"
+                | "urn:xmpp:mam:2"
+        )
+    }) {
+        return None;
+    }
     let from = presence.attr("from")?;
     (from != owner && bare(from).ok().as_deref() == Some(from)).then(|| from.to_owned())
 }
@@ -44,18 +59,24 @@ pub fn el(name: &str, ns: &str) -> Element {
     Element::builder(name, ns).build()
 }
 pub fn reply_content(xml: &Element, body: &str) -> (String, String, String, String) {
+    reply_projection(xml, body).0
+}
+pub fn reply_projection(
+    xml: &Element,
+    body: &str,
+) -> ((String, String, String, String), Vec<(usize, usize)>) {
     let replies: Vec<_> = xml.children().filter(|c| c.is("reply", REPLY)).collect();
     if replies.len() != 1 {
-        return empty_reply(body);
+        return (empty_reply(body), Vec::new());
     }
     let r = replies[0];
     let id = r.attr("id").unwrap_or("");
     if !crate::message_actions::valid_id(id) {
-        return empty_reply(body);
+        return (empty_reply(body), Vec::new());
     }
     let author = bare_of(r.attr("to").unwrap_or(""));
     if !author.is_empty() && bare(&author).is_err() {
-        return empty_reply(body);
+        return (empty_reply(body), Vec::new());
     }
     let chars: Vec<char> = body.chars().collect();
     let mut ranges = vec![];
@@ -88,9 +109,10 @@ pub fn reply_content(xml: &Element, body: &str) -> (String, String, String, Stri
         Some(())
     })();
     if parsed.is_none() {
-        return (id.into(), author, String::new(), body.into());
+        return ((id.into(), author, String::new(), body.into()), Vec::new());
     }
     ranges.sort();
+    let removed = ranges.clone();
     let mut pos = 0;
     let mut quote = String::new();
     let mut clean = String::new();
@@ -104,7 +126,7 @@ pub fn reply_content(xml: &Element, body: &str) -> (String, String, String, Stri
         pos = pos.max(b)
     }
     clean.extend(&chars[pos..]);
-    (id.into(), author, quote.trim().into(), clean)
+    ((id.into(), author, quote.trim().into(), clean), removed)
 }
 fn empty_reply(body: &str) -> (String, String, String, String) {
     (String::new(), String::new(), String::new(), body.into())
@@ -267,6 +289,13 @@ fn normalize_content(
         m.poll_source = crate::polls::Source::Text;
     }
     m.hydrate_compatibility();
+    m.inline_emoji = (!unavailable && m.attachment.is_none() && !control)
+        .then(|| crate::packs::normalized_inline(xml, &m.text)).flatten();
+    m.preview_spoilers = if unavailable {
+        None
+    } else {
+        crate::spoilers::normalized(xml, &m.text)
+    };
     m.wire_id = xml
         .attr("id")
         .filter(|id| crate::message_actions::valid_id(id))
@@ -475,10 +504,12 @@ pub fn outgoing(peer: &str, message: &Message, quote: &str) -> Element {
     if let Some(action) = &message.action {
         crate::message_actions::decorate(&mut root, action);
     }
+    crate::packs::decorate_inline(&mut root, message);
     root
 }
 #[derive(Debug, Clone)]
 pub enum BackendEvent {
+    InlineEmoji { peer: String, id: String, emoji: crate::packs::InlineEmoji },
     Uncertain {
         peer: String,
         id: String,
@@ -492,6 +523,11 @@ pub enum BackendEvent {
     CryptoError {
         peer: String,
         text: String,
+    },
+    PreviewSpoilers {
+        peer: String,
+        id: String,
+        context: crate::spoilers::Context,
     },
     CryptoAliases {
         legacy_sticker: bool,
@@ -734,6 +770,17 @@ pub enum Command {
         peer: String,
         before: String,
     },
+    PreviewHistory {
+        peer: String,
+        start: String,
+        end: String,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
+    PreviewHistoryNext {
+        job: PreviewHistoryJob,
+        before: String,
+        complete: bool,
+    },
     Typing {
         peer: String,
         composing: bool,
@@ -768,6 +815,55 @@ pub enum Command {
         peer: String,
         id: String,
     },
+}
+#[derive(Debug)]
+pub(crate) struct PreviewHistoryJob {
+    peer: String,
+    start: String,
+    end: String,
+    epoch: u64,
+    token: String,
+    cancel: tokio::sync::watch::Receiver<u64>,
+    deadline: std::time::Instant,
+    reply: tokio::sync::oneshot::Sender<bool>,
+    pending: Vec<tokio::sync::oneshot::Receiver<bool>>,
+    cursors: std::collections::HashSet<String>,
+    results: std::collections::HashSet<String>,
+    page_count: usize,
+    failed: bool,
+}
+async fn preview_history_page(
+    network: &channel::UnboundedSender<Command>,
+    mut job: PreviewHistoryJob,
+    before: String,
+    complete: bool,
+) {
+    let pending = std::mem::take(&mut job.pending);
+    let remaining = job
+        .deadline
+        .saturating_duration_since(std::time::Instant::now());
+    tokio::select! {
+        _ = job.reply.closed() => job.failed = true,
+        _ = job.cancel.changed() => job.failed = true,
+        result = tokio::time::timeout(remaining, async move {
+            for reply in pending { if !reply.await.unwrap_or(false) { return false; } } true
+        }) => job.failed |= !matches!(result, Ok(true)),
+    }
+    let _ = network.send(Command::PreviewHistoryNext {
+        job,
+        before,
+        complete,
+    });
+}
+fn finish_preview_history(
+    active: &mut HashMap<String, String>,
+    job: PreviewHistoryJob,
+    success: bool,
+) {
+    if active.get(&job.peer) == Some(&job.token) {
+        active.remove(&job.peer);
+    }
+    let _ = job.reply.send(success);
 }
 pub type Envelope = (u64, String, BackendEvent);
 async fn room_operation<T>(
@@ -879,6 +975,9 @@ impl Session {
                 let legacy=legacy::service::Handle::start(owner.clone(),generation,network.clone(),events.clone());
                 let contacts=crate::contact_access::Manager::new(owner.clone(),generation,events.clone()).await;
                 let mut contact_queries=HashMap::<String,(u64,std::time::Instant,u64)>::new();
+                let mut preview_jobs=HashMap::<String,PreviewHistoryJob>::new();
+                let mut preview_active=HashMap::<String,String>::new();
+                let (preview_epoch,_) = tokio::sync::watch::channel(0u64);
                 let mut iq=crate::iq::Pending::default();
                 let mut rooms=crate::rooms::Rooms::new(owner.clone());
                 rooms.update_choices(choices);
@@ -1123,6 +1222,27 @@ impl Session {
                             let root=outgoing(&peer,&message,&quote);
                             let ok=send(&mut client,root).await;emit(if ok{BackendEvent::Sent{peer,id:message.wire_id}}else{BackendEvent::Failed{peer,id:message.wire_id}});
                         },
+                        Some(Command::PreviewHistory{peer,start,end,reply})=>{
+                            if reply.is_closed(){continue}
+                            let room=rooms.known(&peer);
+                            let interval=start.len()<=100&&end.len()<=100&&chrono::DateTime::parse_from_rfc3339(&start).ok().zip(chrono::DateTime::parse_from_rfc3339(&end).ok()).is_some_and(|(start,end)|start<=end);
+                            if !online||!interval||bare(&peer).ok().as_deref()!=Some(peer.as_str())||(room&&!rooms.is_joined(&peer))||preview_active.len()>=4||preview_active.contains_key(&peer){let _=reply.send(false);continue}
+                            let (id,root,page)=archive::Page::range(peer.clone(),room,String::new(),Some((&start,&end)),50);
+                            if send(&mut client,root).await {
+                                preview_active.insert(peer.clone(),id.clone());
+                                preview_jobs.insert(id.clone(),PreviewHistoryJob {peer,start,end,epoch:room_epoch,token:id.clone(),cancel:preview_epoch.subscribe(),deadline:std::time::Instant::now()+Duration::from_secs(60),reply,pending:Vec::new(),cursors:Default::default(),results:Default::default(),page_count:0,failed:false});
+                                mam.insert(id,page);
+                            }else{let _=reply.send(false);}
+                        },
+                        Some(Command::PreviewHistoryNext{mut job,before,complete})=>{
+                            let room=rooms.known(&job.peer);
+                            if job.reply.is_closed()||preview_active.get(&job.peer)!=Some(&job.token)||!online||job.epoch!=room_epoch||job.deadline<=std::time::Instant::now()||job.failed||(room&&!rooms.is_joined(&job.peer)){finish_preview_history(&mut preview_active,job,false);continue}
+                            if complete{finish_preview_history(&mut preview_active,job,true);continue}
+                            if job.page_count==0||!job.cursors.insert(before.clone()){finish_preview_history(&mut preview_active,job,false);continue}
+                            job.page_count=0;
+                            let (id,root,page)=archive::Page::range(job.peer.clone(),room,before,Some((&job.start,&job.end)),50);
+                            if send(&mut client,root).await {preview_jobs.insert(id.clone(),job);mam.insert(id,page);}else{finish_preview_history(&mut preview_active,job,false);}
+                        },
                         Some(Command::History{peer,before})=>{
                             let room=rooms.known(&peer);
                             if !online || (room && !rooms.is_joined(&peer)) {
@@ -1169,8 +1289,8 @@ impl Session {
                         Some(Command::Receipt{peer,id})=>{if online{send(&mut client,Element::builder("message",NS).attr("to".try_into().expect("static XML attribute"),peer).attr("type".try_into().expect("static XML attribute"),"chat").append(Element::builder("received","urn:xmpp:receipts").attr("id".try_into().expect("static XML attribute"),id).build()).build()).await;}},
                     }},
                     event=client.next()=>{match event{
-                        Some(Event::Online)=>{online=true;let contact_epoch=contacts.online();let (manager,contact_network)=(contacts.clone(),network.clone());tokio::spawn(async move{if let Err(error)=manager.refresh(&contact_network,contact_epoch).await{if manager.valid(contact_epoch){manager.error(error)}}});room_epoch=room_epoch.wrapping_add(1);let _=network.send(Command::LoadRoomBookmarks);crypto.send(modern::Request::Online(true));legacy.send(legacy::service::Request::Online(true));emit(BackendEvent::Status{online:true,error:false,text:"Connected · TLS".into()});send(&mut client,el("presence",NS)).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"set").attr("id".try_into().expect("static XML attribute"),"carbons").append(el("enable","urn:xmpp:carbons:2")).build()).await;},
-                        Some(Event::Disconnected(error))=>{#[cfg(test)] eprintln!("fixture disconnect: {error:?}");online=false;contacts.disconnect();contact_queries.clear();room_jobs.disconnect();rooms.disconnect();loading_rooms=false;subscribing_rooms=false;crypto_ready=false;legacy_ready=false;crypto.send(modern::Request::Online(false));legacy.send(legacy::service::Request::Online(false));iq.disconnect();mam.clear();handshake=std::time::Instant::now();let fatal = fatal_error(&error);emit(BackendEvent::Status{online:false,error:fatal,text:if fatal{"Sign-in failed. Check credentials, TLS certificate and server configuration."}else{"Disconnected. Reconnecting…"}.into()});if fatal{break}},
+                        Some(Event::Online)=>{online=true;let contact_epoch=contacts.online();let (manager,contact_network)=(contacts.clone(),network.clone());tokio::spawn(async move{if let Err(error)=manager.refresh(&contact_network,contact_epoch).await{if manager.valid(contact_epoch){manager.error(error)}}});room_epoch=room_epoch.wrapping_add(1);preview_epoch.send_replace(room_epoch);let _=network.send(Command::LoadRoomBookmarks);crypto.send(modern::Request::Online(true));legacy.send(legacy::service::Request::Online(true));emit(BackendEvent::Status{online:true,error:false,text:"Connected · TLS".into()});send(&mut client,el("presence",NS)).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"set").attr("id".try_into().expect("static XML attribute"),"carbons").append(el("enable","urn:xmpp:carbons:2")).build()).await;},
+                        Some(Event::Disconnected(error))=>{#[cfg(test)] eprintln!("fixture disconnect: {error:?}");online=false;preview_epoch.send_modify(|epoch|*epoch=epoch.wrapping_add(1));contacts.disconnect();contact_queries.clear();room_jobs.disconnect();rooms.disconnect();loading_rooms=false;subscribing_rooms=false;crypto_ready=false;legacy_ready=false;crypto.send(modern::Request::Online(false));legacy.send(legacy::service::Request::Online(false));iq.disconnect();for (_,job) in preview_jobs.drain(){finish_preview_history(&mut preview_active,job,false);}preview_active.clear();mam.clear();handshake=std::time::Instant::now();let fatal = fatal_error(&error);emit(BackendEvent::Status{online:false,error:fatal,text:if fatal{"Sign-in failed. Check credentials, TLS certificate and server configuration."}else{"Disconnected. Reconnecting…"}.into()});if fatal{break}},
                         None=>break,
                         Some(Event::Stanza(stanza))=>{
                             let root:Element=stanza.into();if iq.receive(&root,&owner){if let Some((epoch,_,serial))=contact_queries.remove(root.attr("id").unwrap_or("")){if root.attr("type")==Some("result")&&root.children().count()==1{if let Some(query)=root.get_child("query",crate::contact_access::ROSTER){if let Err(error)=crate::contact_access::parse_roster(query,true).and_then(|update|contacts.finish_full(epoch,serial,update)){contacts.clear_full(epoch,Some(serial));if contacts.valid(epoch){contacts.error(error)}}}else{contacts.clear_full(epoch,Some(serial));}}else{contacts.clear_full(epoch,Some(serial));}}continue}let from=root.attr("from").unwrap_or("");
@@ -1183,7 +1303,25 @@ impl Session {
                                     if results.next().is_some() { continue; }
                                     let query=wrapper.attr("queryid").unwrap_or("");
                                     let Some(page)=mam.get(query).filter(|page| page.accepts(&root,&owner)) else {continue};
-                                    let Some(result)=page.result(wrapper) else {continue};
+                                    let Some(result)=page.result(wrapper) else {if let Some(job)=preview_jobs.get_mut(query){job.failed=true;}continue};
+                                    if let Some(job)=preview_jobs.get_mut(query){
+                                        if job.reply.is_closed(){continue}
+                                        let stamp=chrono::DateTime::parse_from_rfc3339(result.stamp).ok();
+                                        let in_range=stamp.zip(chrono::DateTime::parse_from_rfc3339(&job.start).ok()).zip(chrono::DateTime::parse_from_rfc3339(&job.end).ok()).is_some_and(|((stamp,start),end)|stamp>=start&&stamp<=end);
+                                        if job.epoch!=room_epoch||job.deadline<=std::time::Instant::now()||job.page_count>=50||!archive::valid_uid(result.uid)||!in_range||(page.room&&!rooms.is_joined(&page.peer)){job.failed=true;continue}
+                                        if !job.results.insert(result.uid.to_string()){continue}
+                                        job.page_count+=1;
+                                        if page.room {
+                                            if result.xml.attr("type")!=Some("groupchat")||bare_of(result.xml.attr("from").unwrap_or(""))!=page.peer {job.failed=true;continue}
+                                        }else{
+                                            let Some((peer,_,_))=normalize(result.xml,&owner,Some((result.uid,result.stamp)))else{continue};
+                                            if peer!=page.peer{job.failed=true;continue}
+                                        }
+                                        match preview_metadata(&rooms,&crypto,&legacy,&emit,result.xml,&owner,(result.uid,result.stamp)){
+                                            Ok(Some(reply))=>job.pending.push(reply),Ok(None)=>{},Err(())=>job.failed=true,
+                                        }
+                                        continue;
+                                    }
                                     if page.room {
                                         deliver_room(&rooms,&legacy,&emit,result.xml,&owner,Some((result.uid,result.stamp)));
                                     } else if normalize(result.xml,&owner,Some((result.uid,result.stamp))).is_some_and(|(peer,_,_)| peer==page.peer) {
@@ -1216,9 +1354,9 @@ impl Session {
                                 refresh_room_members(&mut rooms,&bare_of(from),room_epoch,&network);
                                 if let Some(presence)=room_presence{
                                     if !presence.joined {
-                                        mam.retain(|_,page| {
+                                        mam.retain(|id,page| {
                                             let left=page.room && page.peer==presence.jid;
-                                            if left { emit(archive::failed(page.peer.clone())); }
+                                            if left {if let Some(job)=preview_jobs.remove(id){finish_preview_history(&mut preview_active,job,false);}else{emit(archive::failed(page.peer.clone()));}}
                                             !left
                                         });
                                     }
@@ -1252,7 +1390,12 @@ impl Session {
                                 if let Some(page)=mam.get(id) {
                                     if page.accepts(&root,&owner) && matches!(root.attr("type"),Some("result"|"error")) {
                                         let page=mam.remove(id).expect("matched archive query");
-                                        emit(page.finish(&root));
+                                        if let Some(job)=preview_jobs.remove(id){
+                                            if let BackendEvent::History{before,complete,error,..}=page.finish(&root){
+                                                let explicit_complete=root.get_child("fin",archive::NS).is_some_and(|fin|matches!(fin.attr("complete"),Some("true"|"1")));
+                                                if error||(before.is_empty()&&!explicit_complete){finish_preview_history(&mut preview_active,job,false);}else{let next_network=network.clone();tokio::spawn(async move{preview_history_page(&next_network,job,before,complete).await;});}
+                                            }
+                                        }else{emit(page.finish(&root));}
                                     }
                                     continue;
                                 }
@@ -1260,13 +1403,14 @@ impl Session {
                             }
                         }
                     }},
-                    _=timer.tick()=>{iq.expire();contact_queries.retain(|_,(epoch,started,serial)|{let keep=contacts.valid(*epoch)&&started.elapsed()<Duration::from_secs(25);if !keep{contacts.clear_full(*epoch,Some(*serial));}keep});for stanza in room_jobs.expire(&mut rooms){let peer=bare_of(stanza.attr("to").unwrap_or(""));send(&mut client,stanza).await;emit(BackendEvent::RoomPresence(rooms.status(&peer)));}for presence in rooms.expire(){emit(BackendEvent::RoomPresence(presence));}if !online&&handshake.elapsed()>Duration::from_secs(45){emit(BackendEvent::Status{online:false,error:true,text:"Connection timed out. Check the account settings.".into()});break}mam.retain(|_,page| {
-                        let expired=page.started.elapsed()>Duration::from_secs(20);
-                        if expired { emit(archive::failed(page.peer.clone())); }
+                    _=timer.tick()=>{iq.expire();contact_queries.retain(|_,(epoch,started,serial)|{let keep=contacts.valid(*epoch)&&started.elapsed()<Duration::from_secs(25);if !keep{contacts.clear_full(*epoch,Some(*serial));}keep});for stanza in room_jobs.expire(&mut rooms){let peer=bare_of(stanza.attr("to").unwrap_or(""));send(&mut client,stanza).await;emit(BackendEvent::RoomPresence(rooms.status(&peer)));}for presence in rooms.expire(){emit(BackendEvent::RoomPresence(presence));}if !online&&handshake.elapsed()>Duration::from_secs(45){emit(BackendEvent::Status{online:false,error:true,text:"Connection timed out. Check the account settings.".into()});break}mam.retain(|id,page| {
+                        let context_expired=preview_jobs.get(id).is_some_and(|job|job.reply.is_closed()||job.epoch!=room_epoch||job.deadline<=std::time::Instant::now());
+                        let expired=page.started.elapsed()>Duration::from_secs(20)||context_expired;
+                        if expired {if let Some(job)=preview_jobs.remove(id){finish_preview_history(&mut preview_active,job,false);}else{emit(archive::failed(page.peer.clone()));}}
                         !expired
                     });}
                 }}
-                contacts.disconnect();contact_queries.clear();room_jobs.disconnect();iq.disconnect();
+                preview_epoch.send_modify(|epoch|*epoch=epoch.wrapping_add(1));for (_,job) in preview_jobs.drain(){finish_preview_history(&mut preview_active,job,false);}preview_active.clear();contacts.disconnect();contact_queries.clear();room_jobs.disconnect();iq.disconnect();
                 let _=tokio::time::timeout(Duration::from_secs(2),client.send_end()).await;
             } => {} } });
         }).expect("network thread");
@@ -1300,6 +1444,73 @@ fn fatal_error(error: &tokio_xmpp::Error) -> bool {
         ),
         _ => false,
     }
+}
+fn preview_metadata(
+    rooms: &crate::rooms::Rooms,
+    crypto: &modern::Handle,
+    legacy: &legacy::service::Handle,
+    emit: &impl Fn(BackendEvent),
+    xml: &Element,
+    owner: &str,
+    archive: (&str, &str),
+) -> Result<Option<tokio::sync::oneshot::Receiver<bool>>, ()> {
+    if xml.attr("type") == Some("groupchat") {
+        let room = bare_of(xml.attr("from").unwrap_or(""));
+        let Some(mut metadata) = rooms.archived_message(
+            &room,
+            archive::ResultStanza {
+                xml,
+                uid: archive.0,
+                stamp: archive.1,
+            },
+        ) else {
+            return Ok(None);
+        };
+        if xml.get_child("encrypted", legacy::NS).is_some() {
+            let sender = rooms.sender(xml, true).map_err(|_| ())?;
+            metadata.own = sender.author == owner;
+            metadata.legacy_room_sender = Some(sender.clone());
+            let frame = modern::Frame {
+                xml: xml.clone(),
+                archive: Some((archive.0.into(), archive.1.into())),
+                historical: true,
+                receipt_to: None,
+            };
+            return legacy
+                .preview(
+                    frame,
+                    Some(crate::crypto::journal::RoomContext { sender, metadata }),
+                )
+                .map(Some)
+                .ok_or(());
+        }
+        emit(BackendEvent::Message {
+            peer: room,
+            message: metadata,
+            historical: true,
+            receipt_to: None,
+        });
+        return Ok(None);
+    }
+    let modern = xml.get_child("encrypted", "urn:xmpp:omemo:2").is_some();
+    let classic = xml.get_child("encrypted", legacy::NS).is_some();
+    if modern != classic {
+        let frame = modern::Frame {
+            xml: xml.clone(),
+            archive: Some((archive.0.into(), archive.1.into())),
+            historical: true,
+            receipt_to: None,
+        };
+        return if modern {
+            crypto.preview(frame)
+        } else {
+            legacy.preview(frame, None)
+        }
+        .map(Some)
+        .ok_or(());
+    }
+    deliver(crypto, legacy, emit, xml, owner, Some(archive), true, None);
+    Ok(None)
 }
 fn deliver_room(
     rooms: &crate::rooms::Rooms,
@@ -1415,6 +1626,74 @@ async fn send(client: &mut Client, root: Element) -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn preview_history_waits_for_metadata_workers_without_using_the_chat_cursor() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (network, mut commands) = channel::unbounded_channel();
+            let (reply, completion) = tokio::sync::oneshot::channel();
+            let (ack, received) = tokio::sync::oneshot::channel();
+            let (epoch, cancel) = tokio::sync::watch::channel(1u64);
+            let job = PreviewHistoryJob {
+                peer: "peer@example.org".into(),
+                start: "2026-11-11T00:00:00Z".into(),
+                end: "2026-11-11T23:59:59Z".into(),
+                epoch: 1,
+                token: "metadata-only".into(),
+                cancel,
+                deadline: std::time::Instant::now() + Duration::from_secs(2),
+                reply,
+                pending: vec![received],
+                cursors: Default::default(),
+                results: Default::default(),
+                page_count: 1,
+                failed: false,
+            };
+            let work = tokio::spawn(async move {
+                preview_history_page(&network, job, "archive-first".into(), true).await;
+            });
+            tokio::task::yield_now().await;
+            assert!(commands.try_recv().is_err());
+            ack.send(true).unwrap();
+            work.await.unwrap();
+            let Command::PreviewHistoryNext {
+                job,
+                before,
+                complete,
+            } = commands.recv().await.unwrap()
+            else {
+                panic!("metadata refresh changed ordinary history cursor")
+            };
+            assert_eq!(before, "archive-first");
+            assert!(complete && !job.failed);
+            let mut active = HashMap::from([("peer@example.org".into(), "newer-job".into())]);
+            finish_preview_history(&mut active, job, false);
+            assert!(!completion.await.unwrap());
+            assert_eq!(
+                active.get("peer@example.org").map(String::as_str),
+                Some("newer-job")
+            );
+            let (_, request, _) = archive::Page::range(
+                "peer@example.org".into(),
+                false,
+                String::new(),
+                Some(("2026-11-11T00:00:00Z", "2026-11-11T23:59:59Z")),
+                50,
+            );
+            let form = request
+                .get_child("query", archive::NS)
+                .unwrap()
+                .get_child("x", "jabber:x:data")
+                .unwrap();
+            for name in ["with", "start", "end"] {
+                assert!(form.children().any(|field| field.attr("var") == Some(name)));
+            }
+            drop(epoch);
+        });
+    }
+    #[test]
     fn subscriptions_require_a_real_bare_contact_for_this_account() {
         for kind in ["subscribe", "unsubscribe", "subscribed", "unsubscribed"] {
             let xml: Element = format!("<presence xmlns='jabber:client' type='{kind}' from='friend@example.org' to='me@example.org/desktop'/>").parse().unwrap();
@@ -1427,7 +1706,13 @@ mod tests {
                 invalid.set_attr("".into(), "from".try_into().unwrap(), from);
                 assert!(subscription_peer(&invalid, "me@example.org").is_none());
             }
-            for namespace in ["urn:xmpp:delay", "jabber:x:delay", "urn:xmpp:carbons:2", "urn:xmpp:forward:0", "urn:xmpp:mam:2"] {
+            for namespace in [
+                "urn:xmpp:delay",
+                "jabber:x:delay",
+                "urn:xmpp:carbons:2",
+                "urn:xmpp:forward:0",
+                "urn:xmpp:mam:2",
+            ] {
                 let mut delayed = xml.clone();
                 delayed.append_child(Element::builder("wrapper", namespace).build());
                 assert!(subscription_peer(&delayed, "me@example.org").is_none());

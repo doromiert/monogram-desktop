@@ -24,6 +24,15 @@ pub struct ResultStanza<'a> {
 
 impl Page {
     pub fn query(peer: String, room: bool, before: String) -> (String, Element, Self) {
+        Self::range(peer, room, before, None, 50)
+    }
+    pub fn range(
+        peer: String,
+        room: bool,
+        before: String,
+        interval: Option<(&str, &str)>,
+        max: usize,
+    ) -> (String, Element, Self) {
         let id = new_id();
         let mut form = attr(el("x", FORM), "type", "submit");
         let mut form_type = attr(
@@ -38,8 +47,15 @@ impl Page {
             field.append_child(value("value", FORM, &peer));
             form.append_child(field);
         }
+        if let Some((start, end)) = interval {
+            for (name, stamp) in [("start", start), ("end", end)] {
+                let mut field = attr(el("field", FORM), "var", name);
+                field.append_child(value("value", FORM, stamp));
+                form.append_child(field);
+            }
+        }
         let mut set = el("set", RSM);
-        set.append_child(value("max", RSM, "50"));
+        set.append_child(value("max", RSM, &max.clamp(1, 50).to_string()));
         set.append_child(value("before", RSM, &before));
         let mut query = attr(el("query", NS), "queryid", &id);
         query.append_child(form);

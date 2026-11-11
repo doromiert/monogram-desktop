@@ -61,6 +61,7 @@ impl Ui {
     }
 
     fn maintain_history_window(self: &Rc<Self>) {
+        self.mark_visible_chat_read();
         if self.state.borrow().account.is_empty()
             || !self.timeline.is_mapped()
             || self.message_scroll.borrow().is_some()

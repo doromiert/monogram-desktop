@@ -30,6 +30,9 @@ const READY_UPLOAD_CAPTIONS: &str = "SELECT dependency.peer,caption.body
       AND COALESCE(json_type(parent.body,'$.upload'),'null')='null'
       AND json_type(parent.body,'$.attachment')='object'";
 impl Store {
+    pub fn init_link_previews(&self) -> rusqlite::Result<()> {
+        self.db.execute_batch("CREATE TABLE IF NOT EXISTS link_previews(account TEXT NOT NULL REFERENCES accounts(jid) ON DELETE CASCADE,url TEXT NOT NULL,expires INTEGER NOT NULL,body TEXT,PRIMARY KEY(account,url));CREATE INDEX IF NOT EXISTS link_previews_expiry ON link_previews(account,expires);")
+    }
     pub fn open(memory: bool) -> rusqlite::Result<Self> {
         let db = if memory {
             Connection::open_in_memory()?
@@ -55,6 +58,8 @@ impl Store {
         store.init_media()?;
         store.init_rooms()?;
         store.init_requests()?;
+        store.init_link_previews()?;
+        store.db.execute_batch("CREATE INDEX IF NOT EXISTS queued_outbox ON messages(account,timestamp,id) WHERE json_extract(body,'$.outbox_pending')=1;")?;
         store.db.execute_batch("CREATE TABLE IF NOT EXISTS upload_captions(account TEXT NOT NULL,peer TEXT NOT NULL,id TEXT NOT NULL,parent TEXT NOT NULL,PRIMARY KEY(account,peer,id),FOREIGN KEY(account,peer,id) REFERENCES messages(account,peer,id) ON DELETE CASCADE);")?;
         Ok(store)
     }
@@ -148,6 +153,22 @@ impl Store {
         }
         tx.commit()
     }
+    pub(crate) fn save_outbox_row(
+        &self,
+        account: &str,
+        peer: &str,
+        message: &Message,
+    ) -> rusqlite::Result<()> {
+        let transaction = self.db.unchecked_transaction()?;
+        self.upsert_message(account, peer, message)?;
+        transaction.commit()
+    }
+    pub(crate) fn save_outbox_pair(&self, account: &str, peer: &str, media: &Message, caption: &Message) -> rusqlite::Result<()> {
+        let transaction = self.db.unchecked_transaction()?;
+        self.upsert_message(account, peer, media)?;
+        self.upsert_message(account, peer, caption)?;
+        transaction.commit()
+    }
     fn upsert_message(&self, account: &str, peer: &str, m: &Message) -> rusqlite::Result<()> {
         if m.action.is_some() {
             return Ok(());
@@ -207,6 +228,62 @@ impl Store {
         self.upsert_message(owner, peer, &message)?;
         tx.commit()?;
         Ok(Some(message))
+    }
+    pub fn restore_preview_spoilers(
+        &self,
+        owner: &str,
+        peer: &str,
+        id: &str,
+        context: &crate::spoilers::Context,
+    ) -> rusqlite::Result<bool> {
+        let transaction = self.db.unchecked_transaction()?;
+        let mut changed = false;
+        for table in ["messages", "message_bases"] {
+            let body: Option<String> = transaction
+                .query_row(
+                    &format!("SELECT body FROM {table} WHERE account=? AND peer=? AND id=?"),
+                    params![owner, peer, id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(mut message) = body.and_then(|body| Message::decode(&body).ok()) else {
+                continue;
+            };
+            if message.unavailable
+                || message.preview_spoilers.is_some()
+                || !context.matches(&message.text)
+            {
+                continue;
+            }
+            message.preview_spoilers = Some(context.clone());
+            transaction.execute(
+                &format!("UPDATE {table} SET body=? WHERE account=? AND peer=? AND id=?"),
+                params![
+                    serde_json::to_string(&message).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    owner,
+                    peer,
+                    id
+                ],
+            )?;
+            changed = true;
+        }
+        transaction.commit()?;
+        Ok(changed)
+    }
+    pub fn restore_inline_emoji(&self, owner: &str, peer: &str, id: &str, emoji: &crate::packs::InlineEmoji) -> rusqlite::Result<bool> {
+        let Ok(validated) = crate::packs::InlineEmoji::new(emoji.body.clone(), emoji.ranges.clone()) else { return Ok(false) };
+        let transaction = self.db.unchecked_transaction()?;
+        let mut changed = false;
+        for table in ["messages", "message_bases"] {
+            let body: Option<String> = transaction.query_row(&format!("SELECT body FROM {table} WHERE account=? AND peer=? AND id=?"), params![owner,peer,id], |row| row.get(0)).optional()?;
+            let Some(mut message) = body.and_then(|body| Message::decode(&body).ok()) else { continue };
+            if message.inline_emoji.is_some() || message.unavailable || message.retracted || message.mode() == crate::encryption_policy::Mode::Legacy || message.text != validated.body { continue; }
+            message.inline_emoji = Some(validated.clone());
+            transaction.execute(&format!("UPDATE {table} SET body=? WHERE account=? AND peer=? AND id=?"), params![serde_json::to_string(&message).map_err(|_| rusqlite::Error::InvalidQuery)?,owner,peer,id])?;
+            changed = true;
+        }
+        transaction.commit()?;
+        Ok(changed)
     }
     pub fn restore_legacy_sticker(
         &self,
@@ -568,6 +645,12 @@ impl Store {
             "DELETE FROM preferences WHERE key=?",
             [format!("folders:{a}")],
         )?;
+        for key in [
+            format!("link-previews-enabled:{a}"),
+            format!("link-previews-encrypted:{a}"),
+        ] {
+            tx.execute("DELETE FROM preferences WHERE key=?", [key])?;
+        }
         let trust_prefix = format!("blind-trust:{a}\n");
         tx.execute(
             "DELETE FROM preferences WHERE substr(key,1,length(?1))=?1",

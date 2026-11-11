@@ -576,3 +576,83 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 }
+
+/// Worker-only, sanitized local preview pixels. No remote URL reaches a decoder.
+pub(crate) struct EncodedPreview {
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+fn encode_preview_texture(texture: gdk::Texture) -> EncodedPreview {
+    EncodedPreview {
+        width: texture.width() as u32,
+        height: texture.height() as u32,
+        bytes: texture.save_to_png_bytes().as_ref().to_vec(),
+    }
+}
+pub(crate) fn encode_link_preview(
+    bytes: Vec<u8>,
+    cancel: &gio::Cancellable,
+) -> Result<EncodedPreview, &'static str> {
+    if bytes.len() > 2 * 1024 * 1024 || cancel.is_cancelled() {
+        return Err("Preview image unavailable");
+    }
+    let mut decoder = Decoder::open_bytes(&glib::Bytes::from_owned(bytes), cancel)?;
+    if !matches!(
+        decoder.mime.as_str(),
+        "image/jpeg"
+            | "image/png"
+            | "image/webp"
+            | "image/gif"
+            | "image/avif"
+            | "image/heif"
+            | "image/heic"
+            | "image/bmp"
+            | "image/x-ms-bmp"
+            | "image/vnd.wap.wbmp"
+    ) || u64::from(decoder.width) * u64::from(decoder.height) > 40_000_000
+    {
+        return Err("Preview image unavailable");
+    }
+    Ok(encode_preview_texture(decoder.frame(640)?.texture))
+}
+pub(crate) fn encode_video_preview(
+    path: &std::path::Path,
+    cancel: &gio::Cancellable,
+    timeout_ms: u32,
+) -> Result<EncodedPreview, &'static str> {
+    unsafe extern "C" {
+        fn monogram_preview_video(
+            path: *const std::ffi::c_char,
+            cancel: *mut gio::ffi::GCancellable,
+            timeout_ms: u32,
+        ) -> *mut gdk::ffi::GdkTexture;
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| "Preview image unavailable")?;
+    let raw = unsafe { monogram_preview_video(path.as_ptr(), cancel.to_glib_none().0, timeout_ms) };
+    if cancel.is_cancelled() {
+        if !raw.is_null() {
+            unsafe { glib::gobject_ffi::g_object_unref(raw.cast()) };
+        }
+        return Err("Preview cancelled");
+    }
+    let texture = if raw.is_null() {
+        let mut pixels = vec![0u8; 640 * 360 * 4];
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[0x2a, 0x24, 0x20, 0xff]);
+        }
+        gdk::MemoryTexture::new(
+            640,
+            360,
+            gdk::MemoryFormat::B8g8r8a8Premultiplied,
+            &glib::Bytes::from_owned(pixels),
+            640 * 4,
+        )
+        .upcast()
+    } else {
+        unsafe { from_glib_full(raw) }
+    };
+    Ok(encode_preview_texture(texture))
+}

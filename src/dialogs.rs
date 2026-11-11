@@ -448,12 +448,15 @@ impl Ui {
         right.connect_pressed(move |_, _, x, y| {
             if let (Some(ui), Some(parent)) = (weak.upgrade(), parent.upgrade()) {
                 let p = gtk::Popover::builder().has_arrow(false).build();
+                p.add_css_class("message-menu");
                 p.set_parent(&parent);
                 p.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
                 let content = bx(true, 2);
+                content.add_css_class("message-menu-panel");
                 for (title, key) in &items {
                     let b = gtk::Button::with_label(title);
                     b.add_css_class("flat");
+                    b.add_css_class("context-menu-row");
                     let weak = Rc::downgrade(&ui);
                     let pop = p.downgrade();
                     let key = key.clone();
@@ -487,6 +490,33 @@ impl Ui {
             "story-new" => self.new_story(),
             "folder-edit" => self.edit_folder(id),
             "folder-new" => self.edit_folder(""),
+            "folder-delete" => {
+                let owner = self.state.borrow().account.clone();
+                let generation = self.generation.get();
+                let name = id.to_owned();
+                let dialog = adw::AlertDialog::builder()
+                    .heading("Delete Folder?")
+                    .body(format!(
+                        "Delete “{name}”? Chats in this folder will remain in Monogram."
+                    ))
+                    .build();
+                dialog.add_responses(&[("cancel", "Cancel"), ("delete", "Delete")]);
+                dialog.set_default_response(Some("cancel"));
+                dialog.set_close_response("cancel");
+                dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+                let weak = Rc::downgrade(self);
+                dialog.connect_response(Some("delete"), move |_, _| {
+                    let Some(ui) = weak.upgrade().filter(|ui| {
+                        ui.generation.get() == generation && ui.state.borrow().account == owner
+                    }) else {
+                        return;
+                    };
+                    if !ui.delete_custom_folder(&name) {
+                        ui.notice("The folder could not be deleted");
+                    }
+                });
+                dialog.present(Some(&self.window));
+            }
             "folder-left" | "folder-right" => {
                 let index = self
                     .state
@@ -934,8 +964,27 @@ impl Ui {
                     ui.notice("Local account removal failed");
                     return;
                 }
-                if let Err(reason) = crate::downloads::forget(&owner) {
-                    ui.notice(reason);
+                let cleanup_owner = owner.clone();
+                let cleanup = gtk::gio::spawn_blocking(move || {
+                    (
+                        crate::downloads::forget(&cleanup_owner),
+                        crate::link_previews::forget(&cleanup_owner),
+                    )
+                });
+                let weak = Rc::downgrade(&ui);
+                drop(ui);
+                let cleanup = cleanup.await;
+                let Some(ui) = weak.upgrade() else { return };
+                match cleanup {
+                    Ok((attachments, previews)) => {
+                        if let Err(reason) = attachments {
+                            ui.notice(reason);
+                        }
+                        if let Err(reason) = previews {
+                            ui.notice(reason);
+                        }
+                    }
+                    Err(_) => ui.notice("Local cache removal failed"),
                 }
                 if !ui.smoke && ui.store.accounts().is_empty() {
                     ui.show_welcome();
@@ -1354,6 +1403,9 @@ impl Ui {
             privacy.add(&row)
         }
         general.add(&privacy);
+        if !owner.is_empty() {
+            general.add(&self.link_preview_preferences());
+        }
         dialog.add(&general);
         let account = adw::PreferencesPage::builder()
             .title("Account")
@@ -1716,6 +1768,9 @@ impl Ui {
         self.dialog("Message Details", &page, 520, 440);
     }
     pub fn retry(self: &Rc<Self>, id: &str) {
+        if self.retry_queued_message(id) {
+            return;
+        }
         if self
             .state
             .borrow()

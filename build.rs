@@ -60,6 +60,36 @@ fn main() {
         println!("cargo:rustc-link-lib={library}");
     }
     println!("cargo:rerun-if-changed=native/image_loader.c");
+    let app = pkg_config::Config::new()
+        .cargo_metadata(false)
+        .probe("gstreamer-app-1.0")
+        .expect("GStreamer appsink");
+    let raw_video = pkg_config::Config::new()
+        .cargo_metadata(false)
+        .probe("gstreamer-video-1.0")
+        .expect("GStreamer video frames");
+    let mut preview = cc::Build::new();
+    preview.opt_level(2).file("native/image_preview.c");
+    for paths in [
+        &image.include_paths,
+        &unix.include_paths,
+        &app.include_paths,
+        &raw_video.include_paths,
+    ] {
+        for path in paths {
+            preview.include(path);
+        }
+    }
+    preview.compile("monogram_link_preview");
+    for dependency in [&image, &unix, &app, &raw_video] {
+        for path in &dependency.link_paths {
+            println!("cargo:rustc-link-search=native={}", path.display());
+        }
+        for library in &dependency.libs {
+            println!("cargo:rustc-link-lib={library}");
+        }
+    }
+    println!("cargo:rerun-if-changed=native/image_preview.c");
     let clapper = pkg_config::Config::new()
         .atleast_version("0.10.0")
         .probe("clapper-gtk-0.0")

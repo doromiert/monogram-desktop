@@ -87,6 +87,8 @@ pub struct Ui {
     pub room_sync_retry: RefCell<HashMap<String, (Instant, u8)>>,
     pub request_secrets: RefCell<crate::request_logic::SecretJobs>,
     pub security_widgets: RefCell<Option<crate::dialogs::SecurityControls>>,
+    pub link_preview_jobs: RefCell<crate::link_preview_logic::Jobs>,
+    pub send_queue: RefCell<crate::send_queue::Queue>,
     pub contact_access_widgets: RefCell<Option<crate::contact_access_ui::ContactAccessControls>>,
     pub review_request: RefCell<Option<(String, crate::encryption_policy::Mode)>>,
     pub status: RefCell<String>,
@@ -344,6 +346,8 @@ impl Ui {
             request_secrets: RefCell::new(Default::default()),
             security_widgets: RefCell::new(None),
             contact_access_widgets: RefCell::new(None),
+            link_preview_jobs: RefCell::new(Default::default()),
+            send_queue: RefCell::new(Default::default()),
             review_request: RefCell::new(None),
             status: RefCell::new("Not connected".into()),
             event_tx: tx,
@@ -382,6 +386,18 @@ impl Ui {
         ui.refresh_stories();
         ui.load_current();
         ui.update_mode();
+        let weak = Rc::downgrade(&ui);
+        ui.window.connect_is_active_notify(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.mark_visible_chat_read();
+            }
+        });
+        let weak = Rc::downgrade(&ui);
+        ui.pages.connect_visible_child_name_notify(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.mark_visible_chat_read();
+            }
+        });
         ui.big_emoji
             .set(ui.store.pref("big_emoji", "true") == "true");
         adw::StyleManager::default().set_color_scheme(
@@ -453,6 +469,47 @@ impl Ui {
             glib::Propagation::Stop
         });
         ui.window.add_controller(keys);
+        let typing_keys = gtk::EventControllerKey::new();
+        typing_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak_keys = Rc::downgrade(&ui);
+        typing_keys.connect_key_pressed(move |controller, key, _, modifiers| {
+            let Some(ui) = weak_keys.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
+            let blocked_modifiers = gdk::ModifierType::CONTROL_MASK
+                | gdk::ModifierType::ALT_MASK
+                | gdk::ModifierType::SUPER_MASK
+                | gdk::ModifierType::META_MASK;
+            let printable = key
+                .to_unicode()
+                .is_some_and(|character| !character.is_control());
+            let focus_is_editable =
+                gtk::prelude::GtkWindowExt::focus(&ui.window).is_some_and(|focus| {
+                    let mut current = Some(focus);
+                    while let Some(widget) = current {
+                        if widget.is::<gtk::Editable>() || widget.is::<gtk::TextView>() {
+                            return true;
+                        }
+                        current = widget.parent();
+                    }
+                    false
+                });
+            if !printable
+                || modifiers.intersects(blocked_modifiers)
+                || focus_is_editable
+                || ui.pages.visible_child_name().as_deref() != Some("chat")
+                || ui.active_media.borrow().is_some()
+            {
+                return glib::Propagation::Proceed;
+            }
+            ui.composer.grab_focus();
+            if controller.forward(&ui.composer) {
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        ui.window.add_controller(typing_keys);
         ui.window.connect_close_request(move |_| {
             if let Some(u) = weak.upgrade() {
                 u.save_draft();
@@ -748,12 +805,15 @@ impl Ui {
                     ui.persist();
                 }
             });
-            let actions = vec![
+            let mut actions = vec![
                 ("Edit folder…".into(), format!("folder-edit:{name}")),
                 ("Move Left".into(), format!("folder-left:{name}")),
                 ("Move Right".into(), format!("folder-right:{name}")),
                 ("New folder…".into(), "folder-new".into()),
             ];
+            if state.folders.contains_key(&name) {
+                actions.push(("Delete folder…".into(), format!("folder-delete:{name}")));
+            }
             self.context_actions(&b, actions);
             self.folder_bar.append(&b);
         }
@@ -991,7 +1051,13 @@ impl Ui {
         chat.add_css_class("conversation");
         self.timeline.add_css_class("messages");
         self.timeline.add_css_class("message-list");
-        self.scroll.set_child(Some(&self.timeline));
+        let timeline_clamp = adw::Clamp::builder()
+            .child(&self.timeline)
+            .maximum_size(900)
+            .tightening_threshold(700)
+            .build();
+        timeline_clamp.add_css_class("timeline-clamp");
+        self.scroll.set_child(Some(&timeline_clamp));
         let history_view = gtk::Overlay::builder()
             .child(&self.scroll)
             .vexpand(true)
@@ -1530,6 +1596,12 @@ impl Ui {
         if value.trim().is_empty() && self.attachments.borrow().is_empty() {
             return;
         }
+        if !self.state.borrow().account.is_empty() {
+            let files = self.attachments.borrow().clone();
+            if files.is_empty() { self.queue_text(&value); }
+            else { self.queue_local_files(files, &value, false, true); }
+            return;
+        }
         let files = self.attachments.borrow().clone();
         let reply = self.replying.borrow().clone();
         self.choose_sending(move |ui, mode| {
@@ -1758,6 +1830,7 @@ impl Ui {
         self.encryption_checks.borrow_mut().clear();
         self.security_widgets.borrow_mut().take();
         self.contact_access_widgets.borrow_mut().take();
+        self.link_preview_jobs.borrow_mut().cancel();
         self.review_request.borrow_mut().take();
         self.status.replace("Disconnected".into());
         let dialogs = std::mem::take(&mut *self.dialogs.borrow_mut());
@@ -1985,6 +2058,8 @@ impl Ui {
                 self.update_mode();
                 self.refresh_contact_access();
                 if online {
+                    self.flush_send_queue();
+                    self.prepare_loaded_link_previews();
                     self.room_sync_retry.borrow_mut().clear();
                     self.sync_room_bookmarks();
                     self.remember_sign_in(owner);
@@ -2066,6 +2141,7 @@ impl Ui {
                 self.crypto.replace(status);
                 self.update_crypto_controls();
                 self.update_mode();
+                self.flush_send_queue();
             }
             BackendEvent::AvatarChanged { peer, hint } => {
                 self.avatars.borrow_mut().invalidate(&peer, hint);
@@ -2075,6 +2151,7 @@ impl Ui {
                 self.legacy_crypto.replace(status);
                 self.update_crypto_controls();
                 self.release_upload_captions();
+                self.flush_send_queue();
             }
             BackendEvent::LegacyReview { peer, rows, errors } => {
                 self.handle_device_review(
@@ -2093,6 +2170,43 @@ impl Ui {
                 );
             }
             BackendEvent::CryptoError { peer, text } => self.notice(&format!("{peer}: {text}")),
+            BackendEvent::InlineEmoji { peer, id, emoji } => {
+                if self.store.restore_inline_emoji(owner, &peer, &id, &emoji).unwrap_or(false) {
+                    let mut state = self.state.borrow_mut();
+                    if let Some(message) = state.chats.iter_mut().find(|chat| chat.jid == peer)
+                        .and_then(|chat| chat.messages.iter_mut().find(|message| message.id == id))
+                        .filter(|message| message.inline_emoji.is_none() && message.text == emoji.body)
+                    { message.inline_emoji = Some(emoji); }
+                    let active = state.current().jid == peer;
+                    drop(state);
+                    if active { self.render_messages(false); }
+                }
+            }
+            BackendEvent::PreviewSpoilers { peer, id, context } => {
+                if self
+                    .store
+                    .restore_preview_spoilers(owner, &peer, &id, &context)
+                    .unwrap_or(false)
+                {
+                    let mut state = self.state.borrow_mut();
+                    if let Some(message) = state
+                        .chats
+                        .iter_mut()
+                        .find(|chat| chat.jid == peer)
+                        .and_then(|chat| chat.messages.iter_mut().find(|message| message.id == id))
+                        .filter(|message| {
+                            message.preview_spoilers.is_none() && context.matches(&message.text)
+                        })
+                    {
+                        message.preview_spoilers = Some(context);
+                    }
+                    let active = state.current().jid == peer;
+                    drop(state);
+                    if active {
+                        self.render_messages(false);
+                    }
+                }
+            }
             BackendEvent::CryptoAliases {
                 legacy_sticker,
                 legacy_reply,
@@ -2202,6 +2316,7 @@ impl Ui {
             BackendEvent::Sent { peer, id } => {
                 self.delivery(&peer, &id, "sent");
                 self.release_upload_captions();
+                self.prepare_loaded_link_previews();
             }
             BackendEvent::Receipt { peer, id } => self.delivery(&peer, &id, "delivered"),
             BackendEvent::Failed { peer, id } => {
@@ -2253,9 +2368,7 @@ impl Ui {
             } else {
                 self.state.borrow_mut().chat_for(&peer).name.clone()
             };
-            let visible = self.state.borrow().current().jid == peer
-                && self.window.is_active()
-                && self.pages.visible_child_name().as_deref() == Some("chat");
+            let visible = self.state.borrow().current().jid == peer && self.reading_current_chat();
             message.unread = matches!(
                 message.action,
                 Some(crate::message_actions::Action::Correct { .. })
@@ -2285,9 +2398,7 @@ impl Ui {
             }
             return saved;
         }
-        let visible = self.state.borrow().current().jid == peer
-            && self.window.is_active()
-            && self.pages.visible_child_name().as_deref() == Some("chat");
+        let visible = self.state.borrow().current().jid == peer && self.reading_current_chat();
         let incoming_id = message.id.clone();
         let incoming_aliases = message.aliases.clone();
         let known = self
@@ -2336,6 +2447,24 @@ impl Ui {
                 .cloned()
                 .or_else(|| self.store.message(owner, &peer, &known));
             if let Some(old) = old {
+                let restored_context = message
+                    .preview_spoilers
+                    .as_ref()
+                    .filter(|context| old.preview_spoilers.is_none() && context.matches(&old.text)
+                        && old.mode() == message.mode()
+                        && (!old.encrypted || old.fingerprint == message.fingerprint))
+                    .cloned();
+                if let Some(context) = &restored_context {
+                    let _ = self
+                        .store
+                        .restore_preview_spoilers(owner, &peer, &known, context);
+                }
+                let restored_emoji = message.inline_emoji.as_ref().filter(|emoji| {
+                    old.inline_emoji.is_none() && emoji.body == old.text
+                        && old.mode() == message.mode()
+                        && (!old.encrypted || old.fingerprint == message.fingerprint)
+                }).cloned();
+                if let Some(emoji) = &restored_emoji { let _ = self.store.restore_inline_emoji(owner, &peer, &known, emoji); }
                 message_own = old.own;
                 if old.unavailable && !message.unavailable {
                     message.id = known.clone();
@@ -2357,6 +2486,10 @@ impl Ui {
                         c.messages.sort_by(|a, b| a.order_key().cmp(&b.order_key()));
                     }
                 } else if let Some(old) = c.messages.iter_mut().find(|m| m.id == known) {
+                    if let Some(emoji) = restored_emoji { old.inline_emoji = Some(emoji); }
+                    if let Some(context) = restored_context {
+                        old.preview_spoilers = Some(context);
+                    }
                     if old.own && message.own && message.legacy_room_sender.is_some() {
                         old.sender = message.sender.clone();
                         old.legacy_room_sender = message.legacy_room_sender.clone();
@@ -2390,6 +2523,7 @@ impl Ui {
                     message.reply = "Original message is not loaded".into()
                 }
             }
+            message.unread = false;
             if !visible && !message.own && !historical {
                 c.unread += 1;
                 message.unread = true;

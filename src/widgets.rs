@@ -105,6 +105,98 @@ pub fn horizontal_strip(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
     scroll.add_controller(controller);
     scroll
 }
+mod message_bubble_limit_imp {
+    use super::*;
+
+    #[derive(Default)]
+    pub struct MessageBubbleLimit {
+        pub child: RefCell<Option<gtk::Widget>>,
+        pub own: Cell<bool>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for MessageBubbleLimit {
+        const NAME: &'static str = "MonogramMessageBubbleLimit";
+        type Type = super::MessageBubbleLimit;
+        type ParentType = gtk::Widget;
+    }
+
+    impl ObjectImpl for MessageBubbleLimit {
+        fn dispose(&self) {
+            if let Some(child) = self.child.borrow_mut().take() {
+                child.unparent();
+            }
+        }
+    }
+
+    impl WidgetImpl for MessageBubbleLimit {
+        fn request_mode(&self) -> gtk::SizeRequestMode {
+            gtk::SizeRequestMode::HeightForWidth
+        }
+
+        fn measure(&self, orientation: gtk::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
+            let Some(child) = self.child.borrow().as_ref().cloned() else {
+                return (0, 0, -1, -1);
+            };
+            if orientation == gtk::Orientation::Horizontal {
+                let (minimum, natural, _, _) =
+                    child.measure(gtk::Orientation::Horizontal, for_size);
+                return (minimum, natural.max(minimum), -1, -1);
+            }
+            let (minimum, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
+            let child_width = if for_size < 0 {
+                natural.max(minimum).max(1)
+            } else {
+                natural
+                    .min(for_size.saturating_mul(2) / 5)
+                    .max(minimum)
+                    .max(1)
+            };
+            child.measure(gtk::Orientation::Vertical, child_width)
+        }
+
+        fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
+            let Some(child) = self.child.borrow().as_ref().cloned() else {
+                return;
+            };
+            let cap = width.max(0).saturating_mul(2) / 5;
+            let (_, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
+            let child_width = natural.min(cap).max(1);
+            let x = if self.own.get() {
+                width.saturating_sub(child_width)
+            } else {
+                0
+            };
+            let transform =
+                gtk::gsk::Transform::new().translate(&gtk::graphene::Point::new(x as f32, 0.));
+            child.allocate(child_width, height, baseline, Some(transform));
+        }
+
+        fn snapshot(&self, snapshot: &gtk::Snapshot) {
+            if let Some(child) = self.child.borrow().as_ref() {
+                self.obj().snapshot_child(child, snapshot);
+            }
+        }
+    }
+}
+
+glib::wrapper! {
+    pub struct MessageBubbleLimit(ObjectSubclass<message_bubble_limit_imp::MessageBubbleLimit>)
+        @extends gtk::Widget,
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
+}
+
+impl MessageBubbleLimit {
+    pub fn new(child: &impl IsA<gtk::Widget>, own: bool) -> Self {
+        let widget: Self = glib::Object::new();
+        widget.imp().own.set(own);
+        let child = child.clone().upcast::<gtk::Widget>();
+        child.set_parent(&widget);
+        widget.imp().child.replace(Some(child));
+        widget.set_hexpand(true);
+        widget
+    }
+}
 mod message_text_imp {
     use super::*;
     #[derive(Default)]

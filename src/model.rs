@@ -16,6 +16,10 @@ fn yes() -> bool {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Message {
+    #[serde(default)]
+    pub inline_emoji: Option<crate::packs::InlineEmoji>,
+    #[serde(default)]
+    pub preview_spoilers: Option<crate::spoilers::Context>,
     pub upload: Option<UploadDraft>,
     pub upload_caption_for: String,
     pub attachment: Option<crate::file_share::Attachment>,
@@ -51,6 +55,7 @@ pub struct Message {
     pub pinned: bool,
     pub timestamp: String,
     pub delivery: String,
+    pub outbox_pending: bool,
     pub wire_id: String,
     pub aliases: Vec<String>,
     pub options: Vec<(String, u32)>,
@@ -60,6 +65,8 @@ pub struct Message {
 impl Default for Message {
     fn default() -> Self {
         Self {
+            preview_spoilers: Some(crate::spoilers::Context::clear()),
+            inline_emoji: None,
             upload: None,
             upload_caption_for: String::new(),
             attachment: None,
@@ -95,6 +102,7 @@ impl Default for Message {
             pinned: false,
             timestamp: now(),
             delivery: "local".into(),
+            outbox_pending: false,
             wire_id: String::new(),
             aliases: vec![],
             options: vec![],
@@ -576,6 +584,8 @@ pub struct UploadDraft {
     pub uri: String,
     pub name: String,
     pub error: Option<String>,
+    #[serde(default)]
+    pub sticker: bool,
 }
 impl std::fmt::Debug for UploadDraft {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

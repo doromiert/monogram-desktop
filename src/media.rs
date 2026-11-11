@@ -56,16 +56,18 @@ impl Ui {
         });
         header.set_title_widget(Some(&toggle));
         self.media_pane.add_top_bar(&header);
-        let body = bx(true, 12);
+        let body = bx(true, 0);
         body.set_margin_top(12);
         let search = gtk::SearchEntry::builder()
             .placeholder_text("Search")
             .margin_start(12)
             .margin_end(12)
+            .margin_bottom(12)
             .build();
         body.append(&search);
         self.media_stack
             .add_named(&self.emoji_sidebar(&search), Some("emoji"));
+        self.media_stack.set_vexpand(true);
         let entries = Rc::new(RefCell::new(vec![]));
         let gifs_grid = gtk::Grid::builder()
             .column_homogeneous(true)
@@ -228,9 +230,6 @@ impl Ui {
             }
         });
         body.append(&self.media_stack);
-        let footer = label("Local preview collection", "caption dim-label");
-        footer.set_margin_bottom(12);
-        body.append(&footer);
         self.media_pane.set_content(Some(&body));
         self.track_sidebar(&self.media_pane);
         self.utility.set_sidebar(Some(&self.media_pane));
@@ -664,6 +663,8 @@ mod fly_imp {
         pub progress: Cell<f64>,
         pub zoom: Cell<f64>,
         pub pan: Cell<(f64, f64)>,
+        pub clip_radii: Cell<[f32; 4]>,
+        pub clip_enabled: Cell<bool>,
         pub origin: RefCell<Option<graphene::Rect>>,
         pub overlay: glib::WeakRef<gtk::Overlay>,
     }
@@ -685,6 +686,7 @@ mod fly_imp {
                 return;
             };
             let p = self.progress.get();
+            let mut clipped = false;
             s.save();
             if p < 1. {
                 if let (Some(origin), Some(overlay)) =
@@ -724,6 +726,25 @@ mod fly_imp {
                             origin.width() as f64 + (target_w - origin.width() as f64) * p;
                         let current_h =
                             origin.height() as f64 + (target_h - origin.height() as f64) * p;
+                        if self.clip_enabled.get() {
+                            let radii = self.clip_radii.get().map(|radius| {
+                                let radius = radius * (1. - p as f32);
+                                graphene::Size::new(radius, radius)
+                            });
+                            s.push_rounded_clip(&gtk::gsk::RoundedRect::new(
+                                graphene::Rect::new(
+                                    (current_x - frame.x() as f64 - current_w / 2.) as f32,
+                                    (current_y - frame.y() as f64 - current_h / 2.) as f32,
+                                    current_w as f32,
+                                    current_h as f32,
+                                ),
+                                radii[0],
+                                radii[1],
+                                radii[2],
+                                radii[3],
+                            ));
+                            clipped = true;
+                        }
                         s.translate(&graphene::Point::new(
                             (current_x - frame.x() as f64) as f32,
                             (current_y - frame.y() as f64) as f32,
@@ -746,6 +767,9 @@ mod fly_imp {
                 }
             }
             obj.snapshot_child(&picture, s);
+            if clipped {
+                s.pop();
+            }
             s.restore();
         }
     }
@@ -807,6 +831,27 @@ pub struct MediaViewer {
     controls_timer: RefCell<Option<glib::SourceId>>,
     zoom_reset: gtk::Button,
 }
+
+fn inline_media_radii(source: &gtk::Widget) -> Option<[f32; 4]> {
+    let mut current = Some(source.clone());
+    while let Some(widget) = current {
+        if widget.has_css_class("sticker-bubble") {
+            return None;
+        }
+        if widget.has_css_class("media-bubble") {
+            let own = widget.has_css_class("own");
+            let mut radii = [10.; 4];
+            radii[if own { 2 } else { 3 }] = 3.;
+            if widget.has_css_class("cluster-previous") {
+                radii[if own { 1 } else { 0 }] = 3.;
+            }
+            return Some(radii);
+        }
+        current = widget.parent();
+    }
+    Some([10.; 4])
+}
+
 impl MediaViewer {
     pub fn new(
         ui: &Rc<Ui>,
@@ -834,6 +879,7 @@ impl MediaViewer {
         let mut pictures = vec![];
         let mut frames = vec![];
         let origin = source.as_ref().and_then(|w| w.compute_bounds(&ui.overlay));
+        let source_clip = source.as_ref().and_then(inline_media_radii);
         for item in &items {
             let pic = if item.message.is_some() {
                 gtk::Picture::new()
@@ -854,6 +900,10 @@ impl MediaViewer {
             frame.imp().origin.replace(origin);
             frame.imp().overlay.set(Some(&root));
             frame.imp().zoom.set(1.);
+            frame.imp().clip_enabled.set(source_clip.is_some());
+            if let Some(radii) = source_clip {
+                frame.imp().clip_radii.set(radii);
+            }
             frame.append(&pic);
             stack.add_named(&frame, Some(&item.id));
             pictures.push(pic);
@@ -1198,7 +1248,14 @@ impl MediaViewer {
         self.index.set(index);
         self.update_position(delta);
         if !self.owner.is_empty() {
-            let Some(ui) = self.ui.upgrade() else { return };
+            let Some(ui) = self.ui.upgrade().filter(|ui| {
+                ui.generation.get() == self.generation
+                    && ui.state.borrow().account == self.owner
+                    && ui.state.borrow().current().jid == self.peer
+            }) else {
+                self.close();
+                return;
+            };
             let id = self.items.borrow()[index].id.clone();
             let Some(message) = ui
                 .store
@@ -1208,6 +1265,18 @@ impl MediaViewer {
                 self.close();
                 return;
             };
+            let loaded = ui
+                .state
+                .borrow()
+                .current()
+                .messages
+                .iter()
+                .any(|message| message.id == id);
+            if loaded {
+                ui.render_messages_at(crate::messages::ScrollTarget::Message(id.clone()));
+            } else {
+                ui.load_timeline(Some(id.clone()));
+            }
             let file = message.attachment.as_ref().unwrap();
             let state = ui.downloads.borrow().status(&self.owner, file);
             if !matches!(

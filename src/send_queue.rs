@@ -1,0 +1,450 @@
+//! An unsent row is durable before choosing encryption or submitting a packet.
+use crate::{
+    encryption_policy::{Mode, Preference, Selection},
+    model::*,
+    protocol::Command,
+    ui::Ui,
+};
+use adw::prelude::*;
+use gtk::glib;
+use std::{
+    collections::{BTreeMap, HashSet},
+    rc::Rc,
+};
+
+#[derive(Default)]
+pub struct Queue {
+    loading: bool,
+    peers: HashSet<(u64, String)>,
+}
+
+impl crate::storage::Store {
+    pub fn queued_messages(&self, owner: &str) -> rusqlite::Result<Vec<(String, Message)>> {
+        let mut query = self.db.prepare("SELECT peer,body FROM messages WHERE account=? AND json_extract(body,'$.outbox_pending')=1 AND json_extract(body,'$.delivery') IN('queued','preparing-encryption') ORDER BY timestamp,id LIMIT 64")?;
+        query
+            .query_map([owner], |row| {
+                let body: String = row.get(1)?;
+                let message = Message::decode(&body).map_err(|_| rusqlite::Error::InvalidQuery)?;
+                Ok((row.get(0)?, message))
+            })?
+            .collect()
+    }
+}
+
+impl Ui {
+    pub fn send_library_file(self: &Rc<Self>, path: &std::path::Path, sticker: bool) -> bool {
+        self.queue_local_files(vec![gtk::gio::File::for_path(path)], "", sticker, false)
+    }
+
+    pub fn queue_local_files(self: &Rc<Self>, files: Vec<gtk::gio::File>, caption: &str, sticker: bool, clear_composer: bool) -> bool {
+        if files.is_empty() || files.len() > 64 || caption.len() > 64 * 1024 || self.state.borrow().account.is_empty() { return false; }
+        let reply = self.replying.borrow().as_ref().and_then(|id| self.active_message(id));
+        let mut state = self.state.borrow_mut();
+        let owner = state.account.clone();
+        let peer = state.current().jid.clone();
+        let group = state.current().group;
+        let mut ids = Vec::new();
+        for (index, file) in files.into_iter().enumerate() {
+            let id = new_id();
+            let mut message = Message {
+                id: id.clone(), wire_id: id.clone(), aliases: vec![format!("wire:{id}"),format!("origin:{id}")],
+                sender: owner.clone(), author: "You".into(), own: true, kind: "file".into(),
+                text: if index == 0 { caption.trim().into() } else { String::new() },
+                outbox_pending: true, delivery: "queued".into(), unsupported_attachment: true,
+                upload: Some(UploadDraft { uri: file.uri().into(), name: file.basename().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| "attachment".into()), error: None, sticker }),
+                ..Default::default()
+            };
+            if let Some(reply) = &reply {
+                message.reply = format!("{} · {}", reply.author, reply.preview().chars().take(80).collect::<String>());
+                message.reply_id = reply.wire_id.clone();
+                message.reply_to = if group && !reply.sender.is_empty() { reply.sender.clone() } else if reply.own { owner.clone() } else { peer.clone() };
+            }
+            state.current_mut().messages.push(message);
+            ids.push(id);
+        }
+        drop(state);
+        if !self.persist() {
+            self.state.borrow_mut().current_mut().messages.retain(|message| !ids.contains(&message.id));
+            return false;
+        }
+        if clear_composer {
+            self.loading.set(true);
+            self.composer.buffer().set_text("");
+            self.loading.set(false);
+            self.attachments.borrow_mut().clear();
+            crate::widgets::clear(&self.chips);
+            self.chips.set_visible(false);
+        }
+        self.cancel_reply();
+        self.save_draft();
+        self.history_window.content_changed();
+        self.render_messages(true);
+        self.refresh_chats(None);
+        let weak = Rc::downgrade(self);
+        glib::idle_add_local_once(move || { if let Some(ui) = weak.upgrade() { ui.flush_send_queue(); } });
+        true
+    }
+    pub fn queue_text(self: &Rc<Self>, value: &str) {
+        if value.len() > 64 * 1024 {
+            self.notice("Message is too long");
+            return;
+        }
+        let reply = self
+            .replying
+            .borrow()
+            .as_ref()
+            .and_then(|id| self.active_message(id));
+        let mut state = self.state.borrow_mut();
+        let owner = state.account.clone();
+        let peer = state.current().jid.clone();
+        let group = state.current().group;
+        let Some(id) = state.send(value, "text") else {
+            return;
+        };
+        let message = state
+            .current_mut()
+            .messages
+            .iter_mut()
+            .find(|message| message.id == id)
+            .unwrap();
+        message.outbox_pending = true;
+        message.delivery = "queued".into();
+        // Encryption is unknown until the sending policy has actually completed.
+        message.encrypted = false;
+        message.encryption_mode = None;
+        if let Some(reply) = reply {
+            message.reply = format!(
+                "{} · {}",
+                reply.author,
+                reply.preview().chars().take(80).collect::<String>()
+            );
+            message.reply_id = reply.wire_id.clone();
+            message.reply_to = if group && !reply.sender.is_empty() {
+                reply.sender
+            } else if reply.own {
+                owner
+            } else {
+                peer.clone()
+            };
+        }
+        drop(state);
+        if !self.persist() {
+            self.state
+                .borrow_mut()
+                .current_mut()
+                .messages
+                .retain(|message| message.id != id);
+            return;
+        }
+        self.loading.set(true);
+        self.composer.buffer().set_text("");
+        self.loading.set(false);
+        self.cancel_reply();
+        self.save_draft();
+        self.history_window.content_changed();
+        self.render_messages(true);
+        self.refresh_chats(None);
+        let weak = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.flush_send_queue();
+            }
+        });
+    }
+
+    pub fn flush_send_queue(self: &Rc<Self>) {
+        if !self.online.get() || self.send_queue.borrow().loading {
+            return;
+        }
+        self.send_queue.borrow_mut().loading = true;
+        let owner = self.state.borrow().account.clone();
+        let generation = self.generation.get();
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            let Some(ui) = weak.upgrade() else { return };
+            let account = owner.clone();
+            let rows = ui
+                .store
+                .read_snapshot(move |store| store.queued_messages(&account))
+                .await;
+            ui.send_queue.borrow_mut().loading = false;
+            if ui.generation.get() != generation || ui.state.borrow().account != owner {
+                return;
+            }
+            let Ok(rows) = rows else {
+                ui.notice("Queued messages could not be loaded");
+                return;
+            };
+            let mut peers: BTreeMap<String, Vec<Message>> = BTreeMap::new();
+            for (peer, message) in rows {
+                peers.entry(peer).or_default().push(message);
+            }
+            for (peer, messages) in peers {
+                ui.prepare_queued_peer(peer, messages);
+            }
+        });
+    }
+
+    fn prepare_queued_peer(self: &Rc<Self>, peer: String, messages: Vec<Message>) {
+        let generation = self.generation.get();
+        let revision = self.encryption_revision.get();
+        let state = self.state.borrow();
+        let Some(chat) = state.chats.iter().find(|chat| chat.jid == peer) else {
+            return;
+        };
+        if chat.group && !chat.room_can_send {
+            return;
+        }
+        let selected = self.sending_mode(chat);
+        if let Some(mode) = selected {
+            if self.fingerprint_for_send(mode).is_none() {
+                return;
+            }
+        } else if !self.crypto.borrow().ready && !self.legacy_crypto.borrow().ready {
+            return;
+        }
+        let owner = state.account.clone();
+        drop(state);
+        let key = (generation, peer.clone());
+        if !self.send_queue.borrow_mut().peers.insert(key.clone()) {
+            return;
+        }
+        let result: Option<Result<Mode, String>> = selected.map(Ok);
+        let receive = if result.is_none() {
+            let (reply, receive) = tokio::sync::oneshot::channel();
+            if self.command(Command::ChooseEncryption {
+                peer: peer.clone(),
+                reply,
+            }) {
+                Some(receive)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            let result = match result {
+                Some(result) => result,
+                None => match receive {
+                    Some(receive) => receive
+                        .await
+                        .map_err(|_| "Encryption preparation was interrupted".to_owned())
+                        .and_then(|result| result.map_err(|error| error.to_string())),
+                    None => Err("The connection is unavailable".into()),
+                },
+            };
+            let Some(ui) = weak.upgrade() else { return };
+            ui.send_queue.borrow_mut().peers.remove(&key);
+            if ui.generation.get() != generation || ui.state.borrow().account != owner {
+                return;
+            }
+            if !ui.online.get() {
+                return;
+            }
+            let result = if ui.encryption_revision.get() != revision {
+                Err("Encryption settings changed. Retry this message.".into())
+            } else {
+                result
+            };
+            let mode = match result {
+                Ok(mode) => mode,
+                Err(error) => {
+                    for mut message in messages {
+                        message.delivery = "failed".into();
+                        ui.store_queued_row(&owner, &peer, message);
+                    }
+                    ui.notice(&error);
+                    return;
+                }
+            };
+            let Some(fingerprint) = ui.fingerprint_for_send(mode) else {
+                return;
+            };
+            if selected.is_none() {
+                if let Some(chat) = ui
+                    .state
+                    .borrow_mut()
+                    .chats
+                    .iter_mut()
+                    .find(|chat| chat.jid == peer)
+                {
+                    chat.sending_preference = Some(Preference::Automatic);
+                    chat.automatic_encryption = Some(Selection {
+                        mode,
+                        time_ms: chrono::Utc::now().timestamp_millis(),
+                    });
+                    chat.encryption = mode.encrypted();
+                }
+                if !ui.persist() {
+                    return;
+                }
+                if mode == Mode::Plain {
+                    ui.notice("Sending without end-to-end encryption in this conversation");
+                }
+            }
+            for message in messages {
+                // A user may remove a queued message while the key check is running.
+                let Some(mut current) =
+                    ui.store
+                        .message(&owner, &peer, &message.id)
+                        .filter(|message| {
+                            message.outbox_pending
+                                && !message.retracted
+                                && matches!(
+                                    message.delivery.as_str(),
+                                    "queued" | "preparing-encryption"
+                                )
+                        })
+                else {
+                    continue;
+                };
+                current.set_encryption(mode, fingerprint.clone());
+                current.outbox_pending = false;
+                current.delivery = "sending".into();
+                if current.upload.is_some() {
+                    if mode == Mode::Legacy && !current.text.trim().is_empty() {
+                        let caption_id = new_id();
+                        let mut caption = Message {
+                            id: caption_id.clone(), wire_id: caption_id.clone(),
+                            aliases: vec![format!("wire:{caption_id}"),format!("origin:{caption_id}")],
+                            sender: owner.clone(), author: "You".into(), own: true,
+                            text: std::mem::take(&mut current.text), upload_caption_for: current.id.clone(),
+                            delivery: "waiting-upload".into(), ..Default::default()
+                        };
+                        caption.set_encryption(mode, fingerprint.clone());
+                        if ui.store.save_outbox_pair(&owner, &peer, &current, &caption).is_err() {
+                            ui.notice("Media caption could not be saved");
+                            continue;
+                        }
+                        if let Some(chat) = ui.state.borrow_mut().chats.iter_mut().find(|chat| chat.jid == peer) {
+                            if let Some(row) = chat.messages.iter_mut().find(|row| row.id == current.id) { *row = current.clone(); }
+                            chat.messages.push(caption);
+                        }
+                    } else if !ui.store_queued_row(&owner, &peer, current.clone()) { continue; }
+                    ui.start_upload(&peer, &current.id);
+                    continue;
+                }
+                if !ui.store_queued_row(&owner, &peer, current.clone()) {
+                    continue;
+                }
+                let wire_id = current.wire_id.clone();
+                let quote = current
+                    .reply
+                    .split_once(" · ")
+                    .map_or(String::new(), |(_, body)| body.into());
+                if !ui.command(Command::Send {
+                    peer: peer.clone(),
+                    message: current,
+                    quote,
+                }) {
+                    ui.delivery(&peer, &wire_id, "failed");
+                }
+            }
+            ui.flush_send_queue();
+        });
+    }
+
+    pub fn store_queued_row(self: &Rc<Self>, owner: &str, peer: &str, message: Message) -> bool {
+        if self.store.save_outbox_row(owner, peer, &message).is_err() {
+            self.notice("Queued message could not be saved");
+            return false;
+        }
+        let mut state = self.state.borrow_mut();
+        if let Some(chat) = state.chats.iter_mut().find(|chat| chat.jid == peer) {
+            if let Some(row) = chat.messages.iter_mut().find(|row| row.id == message.id) {
+                *row = message;
+            }
+            chat.remember_latest();
+        }
+        let active = state.current().jid == peer;
+        drop(state);
+        if active {
+            self.render_messages(false);
+        }
+        self.refresh_chats(None);
+        true
+    }
+
+    pub fn retry_queued_message(self: &Rc<Self>, id: &str) -> bool {
+        let state = self.state.borrow();
+        let Some(mut message) = state
+            .message(id)
+            .filter(|message| message.outbox_pending)
+            .cloned()
+        else {
+            return false;
+        };
+        let owner = state.account.clone();
+        let peer = state.current().jid.clone();
+        drop(state);
+        message.delivery = "queued".into();
+        if self.store_queued_row(&owner, &peer, message) {
+            self.flush_send_queue();
+        }
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn optimistic_text_is_durable_before_any_connection() {
+        let app = adw::Application::builder()
+            .application_id("com.negzero.MonogramDesktop.OutboxFixture")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let ui = Ui::new(&app, true);
+        let owner = "owner@fixture.invalid";
+        ui.store
+            .save_account(&Account {
+                jid: owner.into(),
+                host: String::new(),
+                port: 5222,
+                direct_tls: false,
+            })
+            .unwrap();
+        let mut state = State::live(owner, vec![]);
+        state.active = state.chat_for("peer@fixture.invalid").id.clone();
+        ui.activate_state(state);
+        ui.composer
+            .buffer()
+            .set_text("Keep this while disconnected");
+        let start = std::time::Instant::now();
+        ui.send();
+        assert!(start.elapsed() < std::time::Duration::from_millis(400));
+        assert!(ui.composer_text().is_empty());
+        let queued = ui.store.queued_messages(owner).unwrap();
+        assert_eq!(queued.len(), 1);
+        let (peer, message) = &queued[0];
+        assert_eq!(message.text, "Keep this while disconnected");
+        assert!(message.outbox_pending);
+        assert_eq!(message.delivery, "queued");
+        assert!(message.encryption_mode.is_none());
+        assert!(
+            ui.session.borrow().is_none(),
+            "the check must never connect or submit a packet"
+        );
+        let mut failed = message.clone();
+        failed.delivery = "failed".into();
+        assert!(ui.store_queued_row(owner, peer, failed));
+        assert!(ui.retry_queued_message(&message.id));
+        assert_eq!(ui.store.queued_messages(owner).unwrap().len(), 1);
+        assert_eq!(
+            ui.state.borrow().current().messages.len(),
+            1,
+            "retry must retain one ID"
+        );
+        ui.composer.buffer().set_text("Preserve this draft");
+        assert!(ui.send_library_file(std::path::Path::new("/fictional/sticker.webp"), true));
+        assert_eq!(ui.composer_text(), "Preserve this draft");
+        let queued = ui.store.queued_messages(owner).unwrap();
+        assert_eq!(queued.len(), 2);
+        assert!(queued.iter().any(|(_, message)| message.upload.as_ref().is_some_and(|draft| draft.sticker)));
+        ui.window.destroy();
+    }
+}

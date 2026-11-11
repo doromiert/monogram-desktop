@@ -595,7 +595,7 @@ pub async fn run(
         height: None,
         hashes: BTreeMap::from([("sha-256".into(), prepared.hash)]),
         manual: false,
-        sticker: false,
+        sticker: draft.sticker,
     };
     if !attachment.valid_outgoing(encrypted) {
         return Err("Invalid uploaded attachment");
@@ -680,6 +680,7 @@ mod tests {
             uri: gio::File::for_path(&source).uri().into(),
             name: "file.txt".into(),
             error: None,
+            sticker: false,
         };
         let target = directory.0.join("account/uploads/snapshot.input");
         let prepared = prepare(target.clone(), &draft, 100, &Job::default()).unwrap();

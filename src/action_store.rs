@@ -301,7 +301,7 @@ impl Store {
     }
     pub fn mark_read(&self, a: &str, peer: &str) -> rusqlite::Result<()> {
         for table in ["messages", "message_bases", "action_events"] {
-            self.db.execute(&format!("UPDATE {table} SET body=json_set(body,'$.unread',json('false')) WHERE account=? AND peer=?"),params![a,peer])?;
+            self.db.execute(&format!("UPDATE {table} SET body=json_set(body,'$.unread',json('false')) WHERE account=? AND peer=? AND json_extract(body,'$.unread')=1"),params![a,peer])?;
         }
         Ok(())
     }

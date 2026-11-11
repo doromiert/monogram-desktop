@@ -107,6 +107,35 @@ fn recovered_retraction(
     message.set_encryption(Mode::Legacy, stored.fingerprint.clone());
     Ok(Some(message))
 }
+fn preview_spoilers(
+    outer: &Element,
+    raw: &str,
+    visible: &str,
+    owner: &str,
+    peer: &str,
+    room: bool,
+) -> Option<crate::spoilers::Context> {
+    let mut content = Element::builder("message", payload::CLIENT)
+        .append(
+            Element::builder("body", payload::CLIENT)
+                .append(raw)
+                .build(),
+        )
+        .build();
+    if let Some(reply) = LegacyReply::parse(outer, raw, owner, peer, room) {
+        content.append_child(outer.get_child("reply", REPLY)?.clone());
+        if !reply.quote.is_empty() {
+            content.append_child(
+                outer
+                    .children()
+                    .find(|child| reply_fallback(child))?
+                    .clone(),
+            );
+        }
+    }
+    crate::spoilers::append_legacy_hints(outer, &mut content);
+    crate::spoilers::normalized(&content, visible)
+}
 fn outgoing_content(peer: &str, message: &Message, quote: &str) -> Result<Element> {
     if message.mode() != Mode::Legacy {
         return Err(Error::Invalid("wrong outgoing Legacy OMEMO mode"));
@@ -219,6 +248,11 @@ pub enum Request {
         epoch: u64,
     },
     Incoming(Frame),
+    Preview {
+        frame: Frame,
+        room: Option<RoomContext>,
+        reply: oneshot::Sender<bool>,
+    },
     IncomingRoom {
         frame: Frame,
         sender: RoomSender,
@@ -229,6 +263,7 @@ pub enum Request {
 pub struct Handle {
     tx: channel::UnboundedSender<Request>,
     incoming: channel::Sender<Request>,
+    previews: channel::Sender<Request>,
     stop: Option<oneshot::Sender<()>>,
     owner: String,
     generation: u64,
@@ -243,10 +278,12 @@ impl Handle {
     ) -> Self {
         let (tx, mut requests) = channel::unbounded_channel();
         let (incoming, mut frames) = channel::channel(32);
+        let (previews, mut preview_frames) = channel::channel(150);
         let (stop, stopped) = oneshot::channel();
         let handle = Self {
             tx,
             incoming,
+            previews,
             stop: Some(stop),
             owner: owner.clone(),
             generation,
@@ -264,6 +301,7 @@ impl Handle {
                                 biased;
                                 next = requests.recv() => match next { Some(request) => worker.process(request).await, None => break },
                                 next = frames.recv() => match next { Some(request) => worker.process(request).await, None => break },
+                                next = preview_frames.recv() => match next { Some(request) => worker.process(request).await, None => break },
                             }
                         }
                     } => {},
@@ -272,7 +310,25 @@ impl Handle {
         }).expect("Legacy OMEMO worker");
         handle
     }
+    pub fn preview(
+        &self,
+        frame: Frame,
+        room: Option<RoomContext>,
+    ) -> Option<oneshot::Receiver<bool>> {
+        if bundle::xml(&frame.xml, MAX_WIRE).is_err() {
+            return None;
+        }
+        let (reply, received) = oneshot::channel();
+        self.previews
+            .try_send(Request::Preview { frame, room, reply })
+            .ok()?;
+        Some(received)
+    }
     pub fn send(&self, request: Request) {
+        if matches!(request, Request::Preview { .. }) {
+            let _ = self.previews.try_send(request);
+            return;
+        }
         let frame = match &request {
             Request::Incoming(frame) | Request::IncomingRoom { frame, .. } => Some(frame),
             _ => None,
@@ -661,11 +717,58 @@ impl Worker {
         }
     }
     async fn incoming(&mut self, frame: &Frame, room: Option<&RoomContext>) -> Result<()> {
-        if !self.ready {
+        self.incoming_mode(frame, room, false).await
+    }
+    async fn incoming_mode(
+        &mut self,
+        frame: &Frame,
+        room: Option<&RoomContext>,
+        preview: bool,
+    ) -> Result<()> {
+        if !self.ready && !preview {
             return Err(Error::Unavailable("Legacy OMEMO is not ready"));
         }
-        let digest = self.digest(frame, room)?;
         let outer = outer_metadata(&self.owner, frame, room);
+        if preview
+            && let Some((peer, metadata, _)) = &outer
+            && metadata.own
+            && let Some(local) = self.local.as_mut()
+            && frame
+                .xml
+                .get_child("encrypted", NS)
+                .and_then(|encrypted| encrypted.get_child("header", NS))
+                .and_then(|header| header.attr("sid"))
+                .and_then(|sid| sid.parse::<u32>().ok())
+                == Some(local.device())
+        {
+            let fingerprint = lifecycle::hex(&local.fingerprint()?);
+            if let Some(history) = self.history()?
+                && let Some(id) = history.known(&self.owner, peer, true, &metadata.aliases)
+                && let Some(stored) = history.message(&self.owner, peer, &id).filter(|stored| {
+                    stored.own
+                        && !stored.unavailable
+                        && !stored.retracted
+                        && stored.mode() == Mode::Legacy
+                        && (stored.sender.split('/').next() == Some(self.owner.as_str())
+                            || stored.legacy_room_sender.as_ref().is_some_and(|sender| {
+                                sender.author == self.owner && sender.room == *peer
+                            }))
+                        && stored.fingerprint == fingerprint
+                        && stored.wire_id == metadata.wire_id
+                        && matches!(stored.delivery.as_str(), "sent" | "delivered" | "read")
+                })
+                && stored.preview_spoilers.is_none()
+                && let Some(context) = crate::spoilers::cached_legacy(&frame.xml, &stored)
+            {
+                self.emit(BackendEvent::PreviewSpoilers {
+                    peer: peer.clone(),
+                    id,
+                    context,
+                });
+            }
+            return Ok(());
+        }
+        let digest = self.digest(frame, room)?;
         let alias = alias(digest);
         if let Some((peer, message, _)) = &outer {
             if let Some(history) = self.history()? {
@@ -701,6 +804,58 @@ impl Worker {
                         } else {
                             None
                         };
+                        let local = self.local.as_mut().unwrap();
+                        let saved = local
+                            .store
+                            .transaction(|tx| local.journal.find(tx, &digest))?;
+                        let context = if stored.preview_spoilers.is_none()
+                            && stored.mode() == Mode::Legacy
+                            && !stored.fingerprint.is_empty()
+                        {
+                            let mut visible = stored.clone();
+                            if let Some(reply) = &legacy_reply {
+                                visible.text = reply.text.clone();
+                                visible.reply_id = reply.id.clone();
+                                visible.hydrate_compatibility();
+                            }
+                            saved
+                                .as_ref()
+                                .and_then(|saved| {
+                                    saved
+                                        .content
+                                        .as_ref()
+                                        .and_then(|content| {
+                                            content.get_child("body", payload::CLIENT)
+                                        })
+                                        .map(Element::text)
+                                        .and_then(|raw| {
+                                            preview_spoilers(
+                                                saved.outer.as_ref().unwrap_or(&frame.xml),
+                                                &raw,
+                                                &visible.text,
+                                                &self.owner,
+                                                peer,
+                                                room.is_some(),
+                                            )
+                                        })
+                                })
+                                .or_else(|| {
+                                    if legacy_reply.is_some() {
+                                        preview_spoilers(
+                                            &frame.xml,
+                                            &stored.text,
+                                            &visible.text,
+                                            &self.owner,
+                                            peer,
+                                            room.is_some(),
+                                        )
+                                    } else {
+                                        crate::spoilers::cached_legacy(&frame.xml, &stored)
+                                    }
+                                })
+                        } else {
+                            None
+                        };
                         self.emit(BackendEvent::CryptoAliases {
                             legacy_reply,
                             legacy_sticker: crate::file_share::Attachment::sticker_marker(
@@ -708,16 +863,26 @@ impl Worker {
                             ),
                             peer: peer.clone(),
                             own: message.own,
-                            id,
+                            id: id.clone(),
                             aliases: message.aliases.clone(),
                         });
-                        if let Some(token) = self.local.as_mut().unwrap().pending_token(&digest)? {
+                        if let Some(context) = context {
+                            self.emit(BackendEvent::PreviewSpoilers {
+                                peer: peer.clone(),
+                                id,
+                                context,
+                            });
+                        }
+                        if let Some(token) = saved.and_then(|saved| saved.token) {
                             self.accept(token).await?;
                         }
                         return Ok(());
                     }
                 }
             }
+        }
+        if preview {
+            return Ok(());
         }
         let stamp = outer
             .as_ref()
@@ -794,6 +959,7 @@ impl Worker {
             {
                 crate::message_actions::decorate(&mut content, &action);
             }
+            crate::spoilers::append_legacy_hints(outer, &mut content);
             let reply = content.get_child("body", payload::CLIENT).and_then(|body| {
                 LegacyReply::parse(outer, &body.text(), &self.owner, &peer, room.is_some())
             });
@@ -1089,6 +1255,18 @@ impl Worker {
                 metadata.legacy_room_sender = Some(sender.clone());
                 self.receive_request(frame, Some(RoomContext { sender, metadata }))
                     .await;
+            }
+            Request::Preview { frame, room, reply } => {
+                let result = self.incoming_mode(&frame, room.as_ref(), true).await;
+                let ok = matches!(
+                    result,
+                    Ok(())
+                        | Err(Error::Unavailable(
+                            "Message was encrypted by this device"
+                                | "Encrypted message does not include this device"
+                        ))
+                );
+                let _ = reply.send(ok);
             }
             Request::Accepted(token) => {
                 if let Err(error) = self.accept(token).await {

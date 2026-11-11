@@ -14,6 +14,7 @@ const APP: &str = "com.negzero.MonogramDesktop";
 const PURPOSE: &str = "XMPP login password v1";
 const ROOM_PURPOSE: &str = "XMPP room password v1";
 const INVITATION_PURPOSE: &str = "XMPP room invitation password v1";
+const SERVICE_PURPOSE: &str = "Monogram optional provider credential v1";
 const CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 static OPERATIONS: LazyLock<Arc<Mutex<()>>> = LazyLock::new(|| Arc::new(Mutex::new(())));
 
@@ -53,6 +54,112 @@ enum Operation {
     Load,
     Store(Password),
     Remove,
+}
+
+pub async fn load_service(account: &str, service: &str) -> Result<Option<Password>, Error> {
+    provider(account, service, Operation::Load).await
+}
+pub async fn save_service(account: &str, service: &str, secret: Password) -> Result<(), Error> {
+    if secret.is_empty() || secret.len() > 4096 {
+        return Err(Error::Invalid);
+    }
+    provider(account, service, Operation::Store(secret))
+        .await
+        .map(|_| ())
+}
+pub async fn remove_service(account: &str, service: &str) -> Result<(), Error> {
+    provider(account, service, Operation::Remove)
+        .await
+        .map(|_| ())
+}
+fn service_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 48
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+}
+async fn provider(
+    account: &str,
+    provider: &str,
+    operation: Operation,
+) -> Result<Option<Password>, Error> {
+    if crate::protocol::bare(account).ok().as_deref() != Some(account) || !service_name(provider) {
+        return Err(Error::Invalid);
+    }
+    let account = account.to_owned();
+    let provider = provider.to_owned();
+    let guard = OPERATIONS.clone().lock_owned().await;
+    let work = move || {
+        let _guard = guard;
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| Error::Unavailable)?
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    let service = SecretService::connect(EncryptionType::Dh).await?;
+                    let mut attrs = attributes(&account);
+                    attrs.insert("purpose", SERVICE_PURPOSE);
+                    attrs.insert("service", &provider);
+                    let items = matching_items(&service, &attrs).await?;
+                    match operation {
+                        Operation::Load => {
+                            if let Some(item) = items.first() {
+                                item.ensure_unlocked().await?;
+                                let bytes = Zeroizing::new(item.get_secret().await?);
+                                let value =
+                                    std::str::from_utf8(&bytes).map_err(|_| Error::Invalid)?;
+                                if value.is_empty() || value.len() > 4096 {
+                                    return Err(Error::Invalid);
+                                }
+                                return Ok(Some(Zeroizing::new(value.to_owned())));
+                            }
+                        }
+                        Operation::Store(secret) => {
+                            if let Some(item) = items.first() {
+                                item.ensure_unlocked().await?;
+                                item.set_secret(secret.as_bytes(), CONTENT_TYPE).await?;
+                            } else {
+                                let collection = service.get_default_collection().await?;
+                                collection.ensure_unlocked().await?;
+                                collection
+                                    .create_item(
+                                        &format!("Monogram {provider} · {account}"),
+                                        attrs,
+                                        secret.as_bytes(),
+                                        false,
+                                        CONTENT_TYPE,
+                                    )
+                                    .await?;
+                            }
+                            for duplicate in items.iter().skip(1) {
+                                duplicate.ensure_unlocked().await?;
+                                duplicate.delete().await?;
+                            }
+                        }
+                        Operation::Remove => {
+                            for item in items {
+                                item.ensure_unlocked().await?;
+                                item.delete().await?;
+                            }
+                        }
+                    }
+                    Ok(None)
+                })
+                .await
+                .map_err(|_| Error::Unavailable)?
+            })
+    };
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::spawn_blocking(work)
+            .await
+            .map_err(|_| Error::Unavailable)?
+    } else {
+        gio::spawn_blocking(work)
+            .await
+            .map_err(|_| Error::Unavailable)?
+    }
 }
 
 pub async fn load(account: &str) -> Result<Password, Error> {
@@ -274,6 +381,30 @@ async fn execute_scoped(
         }
         Operation::Remove => {
             if room.is_none() {
+                let mut query = attributes(account);
+                query.insert("purpose", SERVICE_PURPOSE);
+                let found = service.search_items(query).await?;
+                for item in found.unlocked.into_iter().chain(found.locked) {
+                    let values = item.get_attributes().await?;
+                    let Some(provider) = values.get("service").filter(|value| service_name(value))
+                    else {
+                        continue;
+                    };
+                    let mut exact = attributes(account);
+                    exact.insert("purpose", SERVICE_PURPOSE);
+                    exact.insert("service", provider);
+                    let schema = values
+                        .get("xdg:schema")
+                        .is_some_and(|v| v == "org.freedesktop.Secret.Generic");
+                    if values.len() == exact.len() + usize::from(schema)
+                        && exact
+                            .iter()
+                            .all(|(k, v)| values.get(*k).map(String::as_str) == Some(*v))
+                    {
+                        item.ensure_unlocked().await?;
+                        item.delete().await?;
+                    }
+                }
                 for purpose in [ROOM_PURPOSE, INVITATION_PURPOSE] {
                     let mut query = attributes(account);
                     query.insert("purpose", purpose);
