@@ -106,6 +106,9 @@ fn main() -> gtk::glib::ExitCode {
         if std::env::args().any(|s| s == "--show-media") {
             ui.toggle_media();
         }
+        if std::env::var_os("MONOGRAM_CAPTURE_VIDEO").is_some() {
+            ui.window.set_default_size(1120, 760);
+        }
         present_window(&ui.window, monitor.as_deref(), started);
         if !ui.smoke {
             ui.reconnect_saved();
@@ -134,13 +137,45 @@ fn main() -> gtk::glib::ExitCode {
                 }
             });
         }
+        if let Ok(id) = std::env::var("MONOGRAM_CAPTURE_VIDEO") {
+            let weak = std::rc::Rc::downgrade(&ui);
+            gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(2), move || {
+                let Some(ui) = weak.upgrade() else { return };
+                ui.window.unfullscreen();
+                ui.window.unmaximize();
+                ui.window.set_default_size(1120, 760);
+                fn tile(widget: &gtk::Widget, id: &str) -> Option<gtk::Widget> {
+                    if widget.widget_name() == id && widget.has_css_class("message-media-tile") {
+                        return Some(widget.clone());
+                    }
+                    let mut next = widget.first_child();
+                    while let Some(child) = next {
+                        next = child.next_sibling();
+                        if let Some(found) = tile(&child, id) {
+                            return Some(found);
+                        }
+                    }
+                    None
+                }
+                if let Some(tile) = tile(ui.timeline.upcast_ref(), &id) {
+                    ui.media_viewer(Some(tile));
+                }
+            });
+        }
         if let Some(path) = std::env::var_os("MONOGRAM_CAPTURE_PATH") {
             let window = ui.window.downgrade();
-            gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(4), move || {
+            gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(6), move || {
                 let Some(window) = window.upgrade().filter(|window| window.is_mapped()) else {
                     return;
                 };
                 let (width, height) = (window.width() as f32, window.height() as f32);
+                eprintln!(
+                    "Monogram capture: {}x{}, fullscreen={}, maximized={}",
+                    width,
+                    height,
+                    window.is_fullscreen(),
+                    window.is_maximized()
+                );
                 let snapshot = gtk::Snapshot::new();
                 gtk::WidgetPaintable::new(Some(&window)).snapshot(
                     &snapshot,
