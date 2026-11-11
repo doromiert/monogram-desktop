@@ -28,6 +28,7 @@ mod model;
 mod polls;
 mod polls_ui;
 mod protocol;
+mod room_ui;
 mod rooms;
 mod send_policy_ui;
 mod smoke;

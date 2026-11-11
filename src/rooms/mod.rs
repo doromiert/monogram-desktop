@@ -1,13 +1,22 @@
 //! Live room bookmarks and XEP-0045 membership. A bookmark alone never authorizes sending.
 pub mod archive;
 mod bookmarks;
+pub mod manage;
 pub mod members;
 mod muc;
 
 pub use bookmarks::{
-    Bookmark, BookmarkInfo, bookmark_changed, load_bookmarks, subscribe_bookmarks,
+    Bookmark, BookmarkInfo, bookmark_changed, load_bookmarks, save_bookmark, subscribe_bookmarks,
 };
+pub use manage::Password;
 pub use muc::{Presence, Rooms};
+
+#[derive(Clone, Debug)]
+pub struct LocalBookmark {
+    pub info: BookmarkInfo,
+    pub revision: u64,
+    pub dirty: bool,
+}
 
 use crate::iq;
 use std::fmt;
@@ -26,10 +35,28 @@ pub enum Error {
     Locked,
     Encryption,
     RecipientsUnavailable,
+    BookmarkPrivacyUnavailable,
+    Cancelled,
+    OperationBusy,
+    PartialCreated { room: String },
+    JoinedSecretUnsaved { room: String },
+    RoomSecretUnavailable,
     UnsupportedMessage,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Self::PartialCreated { room } = self {
+            return write!(
+                f,
+                "The room {room} was created, but setup could not be completed. Its owner can configure it and rejoin."
+            );
+        }
+        if let Self::JoinedSecretUnsaved { room } = self {
+            return write!(
+                f,
+                "Joined {room}, but its password could not be saved in the system keyring. The room is still joined."
+            );
+        }
         f.write_str(match self {
             Self::Invalid => "Invalid room address, nickname or server response",
             Self::Request(iq::Error::Timeout) => {
@@ -46,6 +73,11 @@ impl fmt::Display for Error {
                 "Encrypted room sending is unavailable. Your encryption setting is unchanged."
             }
             Self::RecipientsUnavailable => "The room must disclose a complete members-only recipient list before encryption can be prepared",
+            Self::BookmarkPrivacyUnavailable => "Private bookmark synchronization is unavailable. This room choice stays on this device.",
+            Self::Cancelled => "The room operation was cancelled because the connection or room changed.",
+            Self::OperationBusy => "Another operation for this room is still running.",
+            Self::RoomSecretUnavailable => "The system keyring could not read the saved room password. Unlock it or enter a password explicitly.",
+            Self::PartialCreated {..} | Self::JoinedSecretUnsaved {..} => unreachable!(),
             Self::UnsupportedMessage => "This room message type is unavailable",
         })
     }

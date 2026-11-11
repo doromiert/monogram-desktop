@@ -329,6 +329,25 @@ impl Ui {
             g.add(&row)
         }
         body.append(&g);
+        if !demo && chat.group {
+            let saved = adw::ActionRow::builder()
+                .title("Saved Room")
+                .activatable(true)
+                .build();
+            saved.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+            let weak = Rc::downgrade(self);
+            saved.connect_activated(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.room_preferences();
+                }
+            });
+            body.append(&saved);
+            let leave = gtk::Button::with_label("Leave Group");
+            leave.add_css_class("destructive-action");
+            leave.set_sensitive(chat.room_joined);
+            self.weak_button(&leave, |ui| ui.leave_current_room());
+            body.append(&leave);
+        }
         if demo && chat.group {
             let members = adw::PreferencesGroup::builder().title("Members").build();
             for name in ["Alex · Owner", "Sam", "Mira", "Robin"] {

@@ -82,6 +82,8 @@ pub struct Ui {
     pub legacy_crypto: RefCell<crate::crypto::service::Status>,
     pub encryption_checks: RefCell<HashMap<String, String>>,
     pub encryption_revision: Cell<u64>,
+    pub room_syncing: RefCell<Option<(u64, String, u64)>>,
+    pub room_sync_retry: RefCell<HashMap<String, (Instant, u8)>>,
     pub security_widgets: RefCell<Option<crate::dialogs::SecurityControls>>,
     pub review_request: RefCell<Option<(String, crate::encryption_policy::Mode)>>,
     pub status: RefCell<String>,
@@ -325,6 +327,8 @@ impl Ui {
             legacy_crypto: RefCell::new(Default::default()),
             encryption_checks: RefCell::new(HashMap::new()),
             encryption_revision: Cell::new(0),
+            room_syncing: RefCell::new(None),
+            room_sync_retry: RefCell::new(HashMap::new()),
             security_widgets: RefCell::new(None),
             review_request: RefCell::new(None),
             status: RefCell::new("Not connected".into()),
@@ -400,6 +404,7 @@ impl Ui {
                 return glib::ControlFlow::Break;
             };
             let before = ui.typing.borrow().len();
+            ui.sync_room_bookmarks();
             ui.typing
                 .borrow_mut()
                 .retain(|_, t| t.elapsed() < Duration::from_secs(10));
@@ -1775,11 +1780,16 @@ impl Ui {
             self.welcome_account.replace(Some(config.clone()));
             self.show_welcome_status("Connecting…", true, false);
         }
-        let session = Session::start(
+        let Ok(rooms) = self.store.room_choices(&config.jid) else {
+            self.notice("Saved room settings could not be read");
+            return;
+        };
+        let session = Session::start_with_rooms(
             config,
             password,
             self.generation.get(),
             self.event_tx.clone(),
+            rooms,
         );
         self.session.replace(Some(session));
         self.update_mode();
@@ -1935,6 +1945,8 @@ impl Ui {
                 }
                 self.update_mode();
                 if online {
+                    self.room_sync_retry.borrow_mut().clear();
+                    self.sync_room_bookmarks();
                     self.remember_sign_in(owner);
                     self.load_history(true)
                 } else if error {
@@ -1953,9 +1965,18 @@ impl Ui {
                 }
             }
             BackendEvent::RoomBookmarks(bookmarks) => {
+                if self
+                    .store
+                    .reconcile_room_choices(owner, &bookmarks)
+                    .is_err()
+                {
+                    self.notice("Saved room settings could not be updated");
+                }
                 let mut state = self.state.borrow_mut();
                 for bookmark in bookmarks {
                     let room = state.chat_for(&bookmark.jid);
+                    room.room_autojoin = Some(bookmark.autojoin);
+                    room.room_nick = bookmark.nick.clone();
                     room.group = true;
                     room.contact = false;
                     room.name = if bookmark.name.is_empty() {

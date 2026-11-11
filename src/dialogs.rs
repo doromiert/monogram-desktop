@@ -936,6 +936,8 @@ impl Ui {
             .placeholder_text("Name or XMPP address")
             .build();
         body.append(&entry);
+        let room_actions = bx(true, 6);
+        body.append(&room_actions);
         let list = gtk::ListBox::new();
         list.add_css_class("boxed-list");
         list.set_selection_mode(gtk::SelectionMode::None);
@@ -986,6 +988,7 @@ impl Ui {
             header.pack_end(&open);
             let weak = Rc::downgrade(self);
             let owner = self.state.borrow().account.clone();
+            let dialog = d.clone();
             open.connect_clicked(move |_| {
                 if let Some(ui) = weak.upgrade() {
                     if ui.state.borrow().account != owner {
@@ -996,31 +999,36 @@ impl Ui {
                             let id = ui.state.borrow_mut().chat_for(&peer).id.clone();
                             ui.select_chat(&id);
                             ui.persist();
-                            d.close();
+                            dialog.close();
                         }
                         Err(e) => ui.notice(&e),
                     }
                 }
             });
-        } else {
-            body.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-            for (title, action) in [
-                ("New Group", "group"),
-                ("Join a Room or MIX Channel", "room"),
-            ] {
+        }
+        {
+            for (title, action) in [("New Group", "group"), ("Join a Room", "room")] {
                 let b = gtk::Button::with_label(title);
+                let dialog = d.clone();
                 self.weak_button(&b, move |s| {
+                    dialog.close();
                     if action == "group" {
                         s.new_group()
+                    } else if live {
+                        s.join_room_dialog()
                     } else {
                         s.preview_form("Join a Room", &["Room address", "Nickname"])
                     }
                 });
-                body.append(&b)
+                room_actions.append(&b)
             }
         }
     }
     pub fn new_group(self: &Rc<Self>) {
+        if !self.state.borrow().account.is_empty() {
+            self.create_group_dialog();
+            return;
+        }
         let page = adw::PreferencesPage::new();
         let g = adw::PreferencesGroup::builder()
             .title("Group Details")

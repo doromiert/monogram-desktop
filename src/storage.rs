@@ -1,6 +1,8 @@
 use crate::model::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+#[path = "rooms/store.rs"]
+mod room_store;
 pub struct Store {
     pub db: Connection,
 }
@@ -48,6 +50,7 @@ impl Store {
         let store = Self { db };
         store.init_actions()?;
         store.init_media()?;
+        store.init_rooms()?;
         store.db.execute_batch("CREATE TABLE IF NOT EXISTS upload_captions(account TEXT NOT NULL,peer TEXT NOT NULL,id TEXT NOT NULL,parent TEXT NOT NULL,PRIMARY KEY(account,peer,id),FOREIGN KEY(account,peer,id) REFERENCES messages(account,peer,id) ON DELETE CASCADE);")?;
         Ok(store)
     }

@@ -255,6 +255,8 @@ pub struct Chat {
     pub room_joined: bool,
     #[serde(skip)]
     pub room_can_send: bool,
+    pub room_autojoin: Option<bool>,
+    pub room_nick: Option<String>,
     pub messages: Vec<Message>,
     #[serde(skip)]
     pub latest: Option<MessagePreview>,

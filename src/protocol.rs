@@ -2,7 +2,6 @@
 use crate::crypto::{legacy, service as modern};
 use crate::encryption_policy::Mode;
 #[cfg(test)]
-use crate::model::new_id;
 use crate::model::{Account, Message};
 use crate::rooms::archive;
 use crate::transport::{Client, Event};
@@ -574,6 +573,85 @@ pub enum Command {
     Crypto(crate::crypto::service::Request),
     Legacy(crate::crypto::legacy::service::Request),
     LoadRoomBookmarks,
+    UpdateRoomChoices(Vec<crate::rooms::LocalBookmark>),
+    RoomServices {
+        reply: tokio::sync::oneshot::Sender<Result<Vec<String>, crate::rooms::Error>>,
+    },
+    CreateRoom {
+        service: String,
+        title: String,
+        nick: String,
+        reply:
+            tokio::sync::oneshot::Sender<Result<crate::rooms::BookmarkInfo, crate::rooms::Error>>,
+    },
+    JoinExistingRoom {
+        peer: String,
+        nick: String,
+        password: Option<crate::rooms::Password>,
+        reply:
+            tokio::sync::oneshot::Sender<Result<crate::rooms::BookmarkInfo, crate::rooms::Error>>,
+    },
+    LeaveRoom {
+        peer: String,
+        reply: tokio::sync::oneshot::Sender<Result<(), crate::rooms::Error>>,
+    },
+    InviteRoom {
+        peer: String,
+        members: Vec<String>,
+        reply: tokio::sync::oneshot::Sender<Result<Vec<String>, crate::rooms::Error>>,
+    },
+    ManagedJoin {
+        epoch: u64,
+        peer: String,
+        nick: String,
+        password: Option<crate::rooms::Password>,
+        history: u32,
+        ticket: crate::rooms::manage::Ticket,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::rooms::manage::JoinReceipt, crate::rooms::Error>,
+        >,
+    },
+    ManagedUnlock {
+        epoch: u64,
+        peer: String,
+        id: u64,
+        ticket: crate::rooms::manage::Ticket,
+        reply: tokio::sync::oneshot::Sender<Result<(), crate::rooms::Error>>,
+    },
+    ManagedLeave {
+        epoch: u64,
+        peer: String,
+        id: u64,
+        ticket: crate::rooms::manage::Ticket,
+        reply: tokio::sync::oneshot::Sender<Result<(), crate::rooms::Error>>,
+    },
+    ManagedRoomStanza {
+        epoch: u64,
+        peer: String,
+        id: u64,
+        ticket: crate::rooms::manage::Ticket,
+        xml: Element,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
+    ManagedIq {
+        epoch: u64,
+        peer: String,
+        id: u64,
+        ticket: crate::rooms::manage::Ticket,
+        kind: crate::iq::Kind,
+        payload: crate::rooms::manage::Form,
+        reply: tokio::sync::oneshot::Sender<crate::iq::Reply>,
+    },
+    RoomOperationFinished {
+        peer: String,
+        ticket: crate::rooms::manage::Ticket,
+    },
+    ManagedCancel {
+        epoch: u64,
+        peer: String,
+        ticket: crate::rooms::manage::Ticket,
+        leave: bool,
+    },
     RoomBookmarksLoaded {
         epoch: u64,
         result: Result<Vec<crate::rooms::Bookmark>, crate::rooms::Error>,
@@ -649,6 +727,33 @@ pub enum Command {
     },
 }
 pub type Envelope = (u64, String, BackendEvent);
+async fn room_operation<T>(
+    network: &channel::UnboundedSender<Command>,
+    peer: &str,
+    epoch: u64,
+    ticket: &crate::rooms::manage::Ticket,
+    mut reply: tokio::sync::oneshot::Sender<Result<T, crate::rooms::Error>>,
+    leave: bool,
+    work: impl std::future::Future<Output = Result<T, crate::rooms::Error>>,
+) {
+    let result = tokio::select! {value=work=>Some(value),_=reply.closed()=>None};
+    let abandoned = match result {
+        Some(value) => reply.send(value).is_err(),
+        None => true,
+    };
+    if abandoned {
+        let _ = network.send(Command::ManagedCancel {
+            epoch,
+            peer: peer.into(),
+            ticket: ticket.clone(),
+            leave,
+        });
+    }
+    let _ = network.send(Command::RoomOperationFinished {
+        peer: peer.into(),
+        ticket: ticket.clone(),
+    });
+}
 fn prepare_room(
     rooms: &crate::rooms::Rooms,
     peer: String,
@@ -709,6 +814,15 @@ impl Session {
         generation: u64,
         events: mpsc::Sender<Envelope>,
     ) -> Self {
+        Self::start_with_rooms(config, password, generation, events, vec![])
+    }
+    pub fn start_with_rooms(
+        config: Account,
+        password: String,
+        generation: u64,
+        events: mpsc::Sender<Envelope>,
+        choices: Vec<crate::rooms::LocalBookmark>,
+    ) -> Self {
         let (tx, mut rx) = channel::unbounded_channel();
         let (cancel, stopped) = tokio::sync::oneshot::channel();
         let network = tx.clone();
@@ -722,6 +836,8 @@ impl Session {
                 let legacy=legacy::service::Handle::start(owner.clone(),generation,network.clone(),events.clone());
                 let mut iq=crate::iq::Pending::default();
                 let mut rooms=crate::rooms::Rooms::new(owner.clone());
+                rooms.update_choices(choices);
+                let mut room_jobs=crate::rooms::manage::Pending::default();
                 let mut room_epoch=0u64;
                 let mut loading_rooms=false;
                 let mut subscribing_rooms=false;
@@ -734,6 +850,89 @@ impl Session {
                         Some(Command::LegacyReady(ready))=>legacy_ready=ready,
                         Some(Command::Crypto(request))=>crypto.send(request),
                         Some(Command::Legacy(request))=>legacy.send(request),
+                        Some(Command::UpdateRoomChoices(choices))=>{
+                            rooms.update_choices(choices);
+                            if online {for peer in rooms.autojoin(){let _=network.send(Command::JoinRoom{peer,nick:None});}}
+                        },
+                        Some(Command::RoomServices{reply})=>{
+                            if !online {let _=reply.send(Err(crate::rooms::Error::Request(crate::iq::Error::Closed)));continue}
+                            let (network,owner)=(network.clone(),owner.clone());
+                            tokio::spawn(async move {let _=reply.send(crate::rooms::manage::services(&crate::iq::Client::new(network),&owner).await);});
+                        },
+                        Some(Command::CreateRoom{service,title,nick,reply})=>{
+                            let room=match crate::rooms::manage::creation_address(&service){Ok(room)=>room,Err(error)=>{let _=reply.send(Err(error));continue}};
+                            if !online {let _=reply.send(Err(crate::rooms::Error::Cancelled));continue}
+                            let ticket=match room_jobs.begin(&room){Ok(ticket)=>ticket,Err(error)=>{let _=reply.send(Err(error));continue}};
+                            let (network,owner,epoch)=(network.clone(),owner.clone(),room_epoch);
+                            tokio::spawn(async move {
+                                room_operation(&network,&room,epoch,&ticket,reply,true,crate::rooms::manage::create(&network,&owner,epoch,&room,&service,&title,&nick,&ticket)).await;
+                            });
+                        },
+                        Some(Command::JoinExistingRoom{peer,nick,password,reply})=>{
+                            if !online {let _=reply.send(Err(crate::rooms::Error::Cancelled));continue}
+                            if password.is_some()&&rooms.is_joined(&peer){let _=reply.send(Err(crate::rooms::Error::AlreadyJoined));continue}
+                            let ticket=match room_jobs.begin(&peer){Ok(ticket)=>ticket,Err(error)=>{let _=reply.send(Err(error));continue}};
+                            let imported=rooms.imported_password(&peer);
+                            let (network,owner,epoch)=(network.clone(),owner.clone(),room_epoch);
+                            tokio::spawn(async move {
+                                room_operation(&network,&peer,epoch,&ticket,reply,true,crate::rooms::manage::join(&network,&owner,epoch,&peer,&nick,password,imported,&ticket)).await;
+                            });
+                        },
+                        Some(Command::InviteRoom{peer,members,reply})=>{
+                            if !online||!rooms.is_joined(&peer){let _=reply.send(Err(crate::rooms::Error::NotJoined));continue}
+                            let Some(id)=rooms.join_id(&peer) else{let _=reply.send(Err(crate::rooms::Error::Cancelled));continue};
+                            let ticket=match room_jobs.begin(&peer){Ok(ticket)=>ticket,Err(error)=>{let _=reply.send(Err(error));continue}};
+                            let (network,epoch)=(network.clone(),room_epoch);
+                            tokio::spawn(async move {
+                                room_operation(&network,&peer,epoch,&ticket,reply,false,crate::rooms::manage::invite(&network,&peer,members,epoch,id,&ticket)).await;
+                            });
+                        },
+                        Some(Command::LeaveRoom{peer,reply})=>{
+                            room_jobs.cancel(&peer);
+                            let result=match rooms.leave(&peer){
+                                Ok(stanza)=>if online&&send(&mut client,stanza).await {Ok(())}else{Err(crate::rooms::Error::Request(crate::iq::Error::Closed))},
+                                Err(crate::rooms::Error::NotJoined)=>Ok(()),Err(error)=>Err(error),
+                            };
+                            emit(BackendEvent::RoomPresence(rooms.status(&peer)));let _=reply.send(result);
+                        },
+                        Some(Command::RoomOperationFinished{peer,ticket})=>room_jobs.finished(&peer,&ticket),
+                        Some(Command::ManagedCancel{epoch,peer,ticket,leave})=>{
+                            if epoch==room_epoch&&room_jobs.valid(&peer,&ticket){
+                                let owned=room_jobs.owned_join(&peer,&ticket);room_jobs.cancel(&peer);
+                                if leave&&owned.is_some()&&owned==rooms.join_id(&peer) {if let Ok(stanza)=rooms.leave(&peer){if online{send(&mut client,stanza).await;}emit(BackendEvent::RoomPresence(rooms.status(&peer)));}}
+                            }
+                        },
+                        Some(Command::ManagedJoin{epoch,peer,nick,password,history,ticket,reply})=>{
+                            if !online||epoch!=room_epoch||!room_jobs.valid(&peer,&ticket){let _=reply.send(Err(crate::rooms::Error::Cancelled));continue}
+                            if room_jobs.contains(&peer){let _=reply.send(Err(crate::rooms::Error::OperationBusy));continue}
+                            if let Some(receipt)=rooms.join_receipt(&peer){let _=reply.send(Ok(receipt));continue}
+                            match rooms.join_with(&peer,Some(&nick),password.as_ref().map(|value|value.0.as_str()),history){
+                                Ok(stanza)=>{
+                                    let id=rooms.join_id(&peer).expect("new join ID");room_jobs.insert(peer.clone(),id,reply);
+                                    emit(BackendEvent::RoomPresence(rooms.status(&peer)));
+                                    if !send(&mut client,stanza).await{room_jobs.cancel(&peer);let _=rooms.leave(&peer);}
+                                },Err(error)=>{let _=reply.send(Err(error));},
+                            }
+                        },
+                        Some(Command::ManagedUnlock{epoch,peer,id,ticket,reply})=>{
+                            let result=if online&&epoch==room_epoch&&room_jobs.valid(&peer,&ticket)&&room_jobs.owned_join(&peer,&ticket)==Some(id){rooms.configured(&peer,id)}else{Err(crate::rooms::Error::Cancelled)};
+                            if result.is_ok(){emit(BackendEvent::RoomPresence(rooms.status(&peer)));refresh_room_members(&mut rooms,&peer,room_epoch,&network);}
+                            let _=reply.send(result);
+                        },
+                        Some(Command::ManagedLeave{epoch,peer,id,ticket,reply})=>{
+                            let result=if online&&epoch==room_epoch&&room_jobs.valid(&peer,&ticket)&&room_jobs.owned_join(&peer,&ticket)==Some(id)&&rooms.join_id(&peer)==Some(id){
+                                room_jobs.cancel(&peer);match rooms.leave(&peer){Ok(stanza)=>{let sent=send(&mut client,stanza).await;emit(BackendEvent::RoomPresence(rooms.status(&peer)));if sent{Ok(())}else{Err(crate::rooms::Error::Request(crate::iq::Error::Closed))}},Err(error)=>Err(error)}
+                            }else{Err(crate::rooms::Error::Cancelled)};
+                            let _=reply.send(result);
+                        },
+                        Some(Command::ManagedRoomStanza{epoch,peer,id,ticket,xml,reply})=>{
+                            let allowed=online&&epoch==room_epoch&&room_jobs.valid(&peer,&ticket)&&rooms.join_id(&peer)==Some(id)&&rooms.is_joined(&peer)&&xml.attr("to")==Some(peer.as_str());
+                            let _=reply.send(allowed&&send(&mut client,xml).await);
+                        },
+                        Some(Command::ManagedIq{epoch,peer,id,ticket,kind,payload,reply})=>{
+                            if !online||epoch!=room_epoch||!room_jobs.valid(&peer,&ticket)||rooms.join_id(&peer)!=Some(id)||!rooms.is_joined(&peer)||(payload.0.is("query","http://jabber.org/protocol/muc#owner")&&room_jobs.owned_join(&peer,&ticket)!=Some(id)){let _=reply.send(Err(crate::iq::Error::Closed));continue}
+                            if let Some(query)=iq.start(peer,kind,payload.0,reply){let id=query.attr("id").expect("IQ ID").to_string();if !send(&mut client,query).await{iq.fail(&id);}}
+                        },
                         Some(Command::LoadRoomBookmarks) if online && !loading_rooms => {
                             loading_rooms=true;
                             let tx=network.clone(); let owner=owner.clone(); let epoch=room_epoch;
@@ -753,7 +952,10 @@ impl Session {
                                     emit(BackendEvent::RoomBookmarks(rooms.import(bookmarks)));
                                     for peer in rooms.autojoin(){ let _=network.send(Command::JoinRoom{peer,nick:None}); }
                                 }
-                                Err(error)=>emit(BackendEvent::RoomError(error.to_string())),
+                                Err(error)=>{
+                                    emit(BackendEvent::RoomError(error.to_string()));emit(BackendEvent::RoomBookmarks(rooms.cached_choices()));
+                                    for peer in rooms.autojoin(){let _=network.send(Command::JoinRoom{peer,nick:None});}
+                                },
                             }
                         },
                         Some(Command::RoomBookmarksLoaded{..})=>{},
@@ -805,32 +1007,17 @@ impl Session {
                             let _=reply.send(allowed && send(&mut client,xml).await);
                         },
                         Some(Command::JoinRoom{peer,nick})=>{
-                            if !online { emit(BackendEvent::RoomError("Connect before joining a room".into())); continue; }
-                            match rooms.join(&peer,nick.as_deref()){
-                                Ok(presence)=>{
-                                    emit(BackendEvent::RoomPresence(rooms.status(&peer)));
-                                    let disco="http://jabber.org/protocol/disco#info";
-                                    let (reply,answer)=tokio::sync::oneshot::channel();
-                                    if let Some(query)=iq.start(peer.clone(),crate::iq::Kind::Get,el("query",disco),reply) {
-                                        let id=query.attr("id").expect("IQ ID").to_string();
-                                        if send(&mut client,query).await {
-                                            let (peer,tx,epoch)=(peer.clone(),network.clone(),room_epoch);
-                                            tokio::spawn(async move {
-                                                if let Ok(Ok(Some(info)))=answer.await
-                                                    && info.is("query",disco)
-                                                    && info.children().any(|item| item.is("feature",disco) && item.attr("var")==Some(SID))
-                                                {
-                                                    let _=tx.send(Command::RoomStableIds{epoch,peer});
-                                                }
-                                            });
-                                        } else {
-                                            iq.fail(&id);
-                                        }
-                                    }
-                                    if !send(&mut client,presence).await { emit(BackendEvent::RoomError("Could not send the room join request".into())); }
-                                }
-                                Err(error)=>emit(BackendEvent::RoomError(error.to_string())),
-                            }
+                            if !online {emit(BackendEvent::RoomError("Connect before joining a room".into()));continue}
+                            if rooms.is_joined(&peer)||rooms.joining(&peer){continue}
+                            let ticket=match room_jobs.begin(&peer){Ok(ticket)=>ticket,Err(_)=>continue};
+                            let imported=rooms.imported_password(&peer);
+                            let nick=nick.unwrap_or_else(||rooms.preferred_nick(&peer));
+                            let (network,owner,epoch,events)=(network.clone(),owner.clone(),room_epoch,events.clone());
+                            tokio::spawn(async move {
+                                let result=crate::rooms::manage::join(&network,&owner,epoch,&peer,&nick,None,imported,&ticket).await;
+                                let _=network.send(Command::RoomOperationFinished{peer,ticket});
+                                if let Err(error)=result{let _=events.send((generation,owner,BackendEvent::RoomError(error.to_string())));}
+                            });
                         },
                         Some(Command::Avatar { peer, source, reply })=>{
                             let client = crate::iq::Client::new(network.clone());
@@ -910,7 +1097,7 @@ impl Session {
                     }},
                     event=client.next()=>{match event{
                         Some(Event::Online)=>{online=true;room_epoch=room_epoch.wrapping_add(1);let _=network.send(Command::LoadRoomBookmarks);crypto.send(modern::Request::Online(true));legacy.send(legacy::service::Request::Online(true));emit(BackendEvent::Status{online:true,error:false,text:"Connected · TLS".into()});send(&mut client,el("presence",NS)).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"get").attr("id".try_into().expect("static XML attribute"),"roster").append(el("query","jabber:iq:roster")).build()).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"set").attr("id".try_into().expect("static XML attribute"),"carbons").append(el("enable","urn:xmpp:carbons:2")).build()).await;},
-                        Some(Event::Disconnected(error))=>{#[cfg(test)] eprintln!("fixture disconnect: {error:?}");online=false;rooms.disconnect();loading_rooms=false;subscribing_rooms=false;crypto_ready=false;legacy_ready=false;crypto.send(modern::Request::Online(false));legacy.send(legacy::service::Request::Online(false));iq.disconnect();mam.clear();resources.clear();handshake=std::time::Instant::now();let fatal = fatal_error(&error);emit(BackendEvent::Status{online:false,error:fatal,text:if fatal{"Sign-in failed. Check credentials, TLS certificate and server configuration."}else{"Disconnected. Reconnecting…"}.into()});if fatal{break}},
+                        Some(Event::Disconnected(error))=>{#[cfg(test)] eprintln!("fixture disconnect: {error:?}");online=false;room_jobs.disconnect();rooms.disconnect();loading_rooms=false;subscribing_rooms=false;crypto_ready=false;legacy_ready=false;crypto.send(modern::Request::Online(false));legacy.send(legacy::service::Request::Online(false));iq.disconnect();mam.clear();resources.clear();handshake=std::time::Instant::now();let fatal = fatal_error(&error);emit(BackendEvent::Status{online:false,error:fatal,text:if fatal{"Sign-in failed. Check credentials, TLS certificate and server configuration."}else{"Disconnected. Reconnecting…"}.into()});if fatal{break}},
                         None=>break,
                         Some(Event::Stanza(stanza))=>{
                             let root:Element=stanza.into();if iq.receive(&root,&owner){continue}let from=root.attr("from").unwrap_or("");
@@ -946,6 +1133,7 @@ impl Session {
                                 if root.get_child("delay","urn:xmpp:delay").is_none(){for name in ["composing","paused","active","inactive","gone"]{if root.get_child(name,"http://jabber.org/protocol/chatstates").is_some(){emit(BackendEvent::Typing{peer:bare_of(from),composing:name=="composing"})}}}
                             }else if root.is("presence",NS){
                                 let room_presence=rooms.presence(&root);
+                                room_jobs.changed(&rooms,&bare_of(from));
                                 refresh_room_members(&mut rooms,&bare_of(from),room_epoch,&network);
                                 if let Some(presence)=room_presence{
                                     if !presence.joined {
@@ -973,13 +1161,13 @@ impl Session {
                             }
                         }
                     }},
-                    _=timer.tick()=>{iq.expire();for presence in rooms.expire(){emit(BackendEvent::RoomPresence(presence));}if !online&&handshake.elapsed()>Duration::from_secs(45){emit(BackendEvent::Status{online:false,error:true,text:"Connection timed out. Check the account settings.".into()});break}mam.retain(|_,page| {
+                    _=timer.tick()=>{iq.expire();for stanza in room_jobs.expire(&mut rooms){let peer=bare_of(stanza.attr("to").unwrap_or(""));send(&mut client,stanza).await;emit(BackendEvent::RoomPresence(rooms.status(&peer)));}for presence in rooms.expire(){emit(BackendEvent::RoomPresence(presence));}if !online&&handshake.elapsed()>Duration::from_secs(45){emit(BackendEvent::Status{online:false,error:true,text:"Connection timed out. Check the account settings.".into()});break}mam.retain(|_,page| {
                         let expired=page.started.elapsed()>Duration::from_secs(20);
                         if expired { emit(archive::failed(page.peer.clone())); }
                         !expired
                     });}
                 }}
-                iq.disconnect();
+                room_jobs.disconnect();iq.disconnect();
                 let _=tokio::time::timeout(Duration::from_secs(2),client.send_end()).await;
             } => {} } });
         }).expect("network thread");

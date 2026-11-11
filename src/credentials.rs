@@ -12,6 +12,7 @@ use zeroize::Zeroizing;
 
 const APP: &str = "com.negzero.MonogramDesktop";
 const PURPOSE: &str = "XMPP login password v1";
+const ROOM_PURPOSE: &str = "XMPP room password v1";
 const CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 static OPERATIONS: LazyLock<Arc<Mutex<()>>> = LazyLock::new(|| Arc::new(Mutex::new(())));
 
@@ -69,13 +70,41 @@ pub async fn remove(account: &str) -> Result<(), Error> {
     run(account, Operation::Remove).await.map(|_| ())
 }
 
+pub async fn load_room(account: &str, room: &str) -> Result<Password, Error> {
+    run_scoped(account, Some(room), Operation::Load)
+        .await?
+        .ok_or(Error::Missing)
+}
+
+pub async fn store_room(account: &str, room: &str, password: Password) -> Result<(), Error> {
+    if password.len() > 1023 {
+        return Err(Error::Invalid);
+    }
+    run_scoped(account, Some(room), Operation::Store(password))
+        .await
+        .map(|_| ())
+}
+
 async fn run(account: &str, operation: Operation) -> Result<Option<Password>, Error> {
+    run_scoped(account, None, operation).await
+}
+
+async fn run_scoped(
+    account: &str,
+    room: Option<&str>,
+    operation: Operation,
+) -> Result<Option<Password>, Error> {
     if crate::protocol::bare(account).ok().as_deref() != Some(account) {
         return Err(Error::Invalid);
     }
+    if room.is_some_and(|room| crate::protocol::bare(room).ok().as_deref() != Some(room)) {
+        return Err(Error::Invalid);
+    }
     let account = account.to_owned();
+    let room = room.map(str::to_owned);
+    let worker_runtime = room.is_some() && tokio::runtime::Handle::try_current().is_ok();
     let guard = OPERATIONS.clone().lock_owned().await;
-    gio::spawn_blocking(move || {
+    let work = move || {
         // Keep writes ordered even when the GTK request that launched one has gone away.
         let _guard = guard;
         tokio::runtime::Builder::new_current_thread()
@@ -83,13 +112,23 @@ async fn run(account: &str, operation: Operation) -> Result<Option<Password>, Er
             .build()
             .map_err(|_| Error::Unavailable)?
             .block_on(async {
-                tokio::time::timeout(Duration::from_secs(10), execute(&account, operation))
-                    .await
-                    .map_err(|_| Error::Unavailable)?
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    execute_scoped(&account, room.as_deref(), operation),
+                )
+                .await
+                .map_err(|_| Error::Unavailable)?
             })
-    })
-    .await
-    .map_err(|_| Error::Unavailable)?
+    };
+    if worker_runtime {
+        tokio::task::spawn_blocking(work)
+            .await
+            .map_err(|_| Error::Unavailable)?
+    } else {
+        gio::spawn_blocking(work)
+            .await
+            .map_err(|_| Error::Unavailable)?
+    }
 }
 
 fn attributes(account: &str) -> HashMap<&str, &str> {
@@ -126,9 +165,17 @@ async fn matching_items<'a>(
     Ok(matching.into_iter().map(|(_, item)| item).collect())
 }
 
-async fn execute(account: &str, operation: Operation) -> Result<Option<Password>, Error> {
+async fn execute_scoped(
+    account: &str,
+    room: Option<&str>,
+    operation: Operation,
+) -> Result<Option<Password>, Error> {
     let service = SecretService::connect(EncryptionType::Dh).await?;
-    let attrs = attributes(account);
+    let mut attrs = attributes(account);
+    if let Some(room) = room {
+        attrs.insert("purpose", ROOM_PURPOSE);
+        attrs.insert("room", room);
+    }
     let mut items = matching_items(&service, &attrs).await?;
     match operation {
         Operation::Load => {
@@ -138,7 +185,7 @@ async fn execute(account: &str, operation: Operation) -> Result<Option<Password>
             item.ensure_unlocked().await?;
             let bytes = Zeroizing::new(item.get_secret().await?);
             let password = std::str::from_utf8(&bytes).map_err(|_| Error::Invalid)?;
-            if password.is_empty() {
+            if password.is_empty() && room.is_none() {
                 return Err(Error::Invalid);
             }
             return Ok(Some(Zeroizing::new(password.to_owned())));
@@ -152,7 +199,9 @@ async fn execute(account: &str, operation: Operation) -> Result<Option<Password>
                 collection.ensure_unlocked().await?;
                 collection
                     .create_item(
-                        &format!("Monogram XMPP login · {account}"),
+                        &room
+                            .map(|room| format!("Monogram room · {account} · {room}"))
+                            .unwrap_or_else(|| format!("Monogram XMPP login · {account}")),
                         attrs,
                         password.as_bytes(),
                         false,
@@ -162,6 +211,33 @@ async fn execute(account: &str, operation: Operation) -> Result<Option<Password>
             }
         }
         Operation::Remove => {
+            if room.is_none() {
+                let mut query = attributes(account);
+                query.insert("purpose", ROOM_PURPOSE);
+                let found = service.search_items(query).await?;
+                for item in found.unlocked.into_iter().chain(found.locked) {
+                    let values = item.get_attributes().await?;
+                    let Some(room) = values.get("room") else {
+                        continue;
+                    };
+                    if crate::protocol::bare(room).ok().as_deref() != Some(room.as_str()) {
+                        continue;
+                    }
+                    let mut exact = attributes(account);
+                    exact.insert("purpose", ROOM_PURPOSE);
+                    exact.insert("room", room);
+                    let schema = values
+                        .get("xdg:schema")
+                        .is_some_and(|value| value == "org.freedesktop.Secret.Generic");
+                    if values.len() == exact.len() + usize::from(schema)
+                        && exact.iter().all(|(key, value)| {
+                            values.get(*key).map(String::as_str) == Some(*value)
+                        })
+                    {
+                        items.push(item);
+                    }
+                }
+            }
             for item in &items {
                 item.ensure_unlocked().await?;
             }

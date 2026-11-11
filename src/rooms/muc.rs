@@ -30,15 +30,21 @@ enum Membership {
         occupant: Jid,
         can_send: bool,
         locked: bool,
+        created: bool,
+        owner: bool,
     },
     Failed(String),
 }
 pub struct Rooms {
     owner: String,
     bookmarks: BTreeMap<String, Bookmark>,
+    server_bookmarks: BTreeMap<String, Bookmark>,
     membership: BTreeMap<String, Membership>,
     stable_ids: BTreeSet<String>,
     identities: members::Registry,
+    choices: BTreeMap<String, LocalBookmark>,
+    join_ids: BTreeMap<String, u64>,
+    join_serial: u64,
 }
 pub(super) fn occupant(room: &str, nick: &str) -> Result<Jid> {
     if nick.is_empty() || nick.len() > 1023 {
@@ -93,19 +99,75 @@ impl Rooms {
         Self {
             owner,
             bookmarks: BTreeMap::new(),
+            server_bookmarks: BTreeMap::new(),
             membership: BTreeMap::new(),
             stable_ids: BTreeSet::new(),
             identities: members::Registry::default(),
+            choices: BTreeMap::new(),
+            join_ids: BTreeMap::new(),
+            join_serial: 0,
         }
     }
     /// Refresh bookmark metadata without discarding current verified membership.
     pub fn import(&mut self, bookmarks: Vec<Bookmark>) -> Vec<BookmarkInfo> {
-        let info = bookmarks.iter().map(|entry| entry.info().clone()).collect();
-        self.bookmarks = bookmarks
+        self.server_bookmarks = bookmarks
             .into_iter()
             .map(|entry| (entry.info().jid.clone(), entry))
             .collect();
-        info
+        self.apply_choices(false);
+        self.bookmarks
+            .values()
+            .map(|entry| entry.info().clone())
+            .collect()
+    }
+    pub fn update_choices(&mut self, choices: Vec<LocalBookmark>) {
+        self.choices = choices
+            .into_iter()
+            .filter(|entry| bare(&entry.info.jid).is_ok())
+            .take(1024)
+            .map(|entry| (entry.info.jid.clone(), entry))
+            .collect();
+        self.apply_choices(false);
+    }
+    pub fn cached_choices(&mut self) -> Vec<BookmarkInfo> {
+        self.apply_choices(true);
+        self.bookmarks
+            .values()
+            .map(|entry| entry.info().clone())
+            .collect()
+    }
+    fn apply_choices(&mut self, offline: bool) {
+        self.bookmarks = self.server_bookmarks.clone();
+        for (room, choice) in &self.choices {
+            if !choice.dirty && !offline {
+                continue;
+            }
+            let password = self
+                .bookmarks
+                .get(room)
+                .and_then(Bookmark::password)
+                .map(|value| zeroize::Zeroizing::new(value.into()));
+            if let Ok(entry) = Bookmark::new(choice.info.clone(), password) {
+                self.bookmarks.insert(room.clone(), entry);
+            }
+        }
+    }
+    pub fn preferred_nick(&self, room: &str) -> String {
+        self.bookmarks
+            .get(room)
+            .and_then(|entry| entry.info().nick.clone())
+            .unwrap_or_else(|| {
+                self.owner
+                    .split_once('@')
+                    .map(|(name, _)| name.to_string())
+                    .unwrap_or_default()
+            })
+    }
+    pub fn imported_password(&self, room: &str) -> Option<manage::Password> {
+        self.bookmarks
+            .get(room)
+            .and_then(Bookmark::password)
+            .map(|value| manage::Password(zeroize::Zeroizing::new(value.into())))
     }
     pub fn known(&self, jid: &str) -> bool {
         self.bookmarks.contains_key(jid) || self.membership.contains_key(jid)
@@ -120,6 +182,15 @@ impl Rooms {
             .collect()
     }
     pub fn join(&mut self, jid: &str, nick: Option<&str>) -> Result<Element> {
+        self.join_with(jid, nick, None, 30)
+    }
+    pub fn join_with(
+        &mut self,
+        jid: &str,
+        nick: Option<&str>,
+        password: Option<&str>,
+        history: u32,
+    ) -> Result<Element> {
         let jid = bare(jid)?;
         match self.membership.get(&jid) {
             Some(Membership::Joining { .. }) => return Err(Error::Joining),
@@ -134,13 +205,22 @@ impl Rooms {
             .ok_or(Error::Invalid)?;
         let occupant = occupant(&jid, nick)?;
         let mut join = el("x", MUC);
-        join.append_child(attr(el("history", MUC), "maxstanzas", "30"));
-        if let Some(password) = bookmark.and_then(Bookmark::password) {
+        join.append_child(attr(
+            el("history", MUC),
+            "maxstanzas",
+            history.min(50).to_string(),
+        ));
+        if let Some(password) = password.or_else(|| bookmark.and_then(Bookmark::password)) {
+            if password.len() > 1023 {
+                return Err(Error::Invalid);
+            }
             join.append_child(Element::builder("password", MUC).append(password).build());
         }
         let mut stanza = attr(el("presence", CLIENT), "to", occupant.to_string());
         stanza.append_child(join);
         self.identities.reset(&jid);
+        self.join_serial = self.join_serial.wrapping_add(1);
+        self.join_ids.insert(jid.clone(), self.join_serial);
         self.membership.insert(
             jid,
             Membership::Joining {
@@ -154,6 +234,7 @@ impl Rooms {
         self.membership.clear();
         self.stable_ids.clear();
         self.identities.clear();
+        self.join_ids.clear();
     }
 
     pub fn enable_stable_ids(&mut self, room: String) {
@@ -239,13 +320,16 @@ impl Rooms {
         {
             return None;
         }
-        let (expected, locked) = match previous {
+        let (expected, locked, created) = match previous {
             Membership::Joining { occupant, .. } => {
-                (address == *occupant || code(user, "210"), false)
+                (address == *occupant || code(user, "210"), false, false)
             }
             Membership::Joined {
-                occupant, locked, ..
-            } => (address == *occupant, *locked),
+                occupant,
+                locked,
+                created,
+                ..
+            } => (address == *occupant, *locked, *created),
             Membership::Failed(_) => return None,
         };
         if !expected {
@@ -262,6 +346,8 @@ impl Rooms {
                     None
                 };
                 let next = if let Some(occupant) = replacement {
+                    self.join_serial = self.join_serial.wrapping_add(1);
+                    self.join_ids.insert(jid.clone(), self.join_serial);
                     Membership::Joining {
                         occupant,
                         started: Instant::now(),
@@ -285,6 +371,8 @@ impl Rooms {
                         occupant: address,
                         can_send: matches!(role, "moderator" | "participant"),
                         locked: locked || code(user, "201"),
+                        created: created || code(user, "201"),
+                        owner: item?.attr("affiliation") == Some("owner"),
                     },
                 );
             }
@@ -294,6 +382,67 @@ impl Rooms {
     }
     pub fn is_joined(&self, jid: &str) -> bool {
         matches!(self.membership.get(jid), Some(Membership::Joined { .. }))
+    }
+    pub fn joining(&self, room: &str) -> bool {
+        matches!(self.membership.get(room), Some(Membership::Joining { .. }))
+    }
+    pub fn join_id(&self, room: &str) -> Option<u64> {
+        self.join_ids.get(room).copied()
+    }
+    pub fn join_receipt(&self, room: &str) -> Option<manage::JoinReceipt> {
+        let Membership::Joined {
+            occupant,
+            created,
+            owner,
+            ..
+        } = self.membership.get(room)?
+        else {
+            return None;
+        };
+        Some(manage::JoinReceipt {
+            room: room.into(),
+            nick: occupant.resource()?.as_str().into(),
+            id: self.join_id(room)?,
+            created: *created,
+            owner: *owner,
+        })
+    }
+    pub fn configured(&mut self, room: &str, id: u64) -> Result<()> {
+        if self.join_id(room) != Some(id) {
+            return Err(Error::Cancelled);
+        }
+        let Some(Membership::Joined {
+            locked,
+            created,
+            owner,
+            ..
+        }) = self.membership.get_mut(room)
+        else {
+            return Err(Error::NotJoined);
+        };
+        if !*created || !*owner {
+            return Err(Error::Forbidden);
+        }
+        *locked = false;
+        Ok(())
+    }
+    pub fn leave(&mut self, room: &str) -> Result<Element> {
+        let room = bare(room)?;
+        let address = match self.membership.get(&room) {
+            Some(Membership::Joining { occupant, .. } | Membership::Joined { occupant, .. }) => {
+                occupant.clone()
+            }
+            _ => return Err(Error::NotJoined),
+        };
+        self.membership.remove(&room);
+        self.identities.remove(&room);
+        self.join_ids.remove(&room);
+        self.stable_ids.remove(&room);
+        Ok(attr(
+            attr(el("presence", CLIENT), "to", address.to_string()),
+            "type",
+            "unavailable",
+        ))
     }
 
     pub fn begin_member_refresh(&mut self, room: &str) -> Option<u64> {
