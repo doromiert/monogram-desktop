@@ -109,6 +109,9 @@ fn main() -> gtk::glib::ExitCode {
         }
         if std::env::var_os("MONOGRAM_CAPTURE_VIDEO").is_some() {
             ui.window.set_default_size(1120, 760);
+            if std::env::var_os("MONOGRAM_CAPTURE_PATH").is_some() {
+                ui.window.set_resizable(false);
+            }
         }
         present_window(&ui.window, monitor.as_deref(), started);
         if !ui.smoke {
@@ -134,6 +137,9 @@ fn main() -> gtk::glib::ExitCode {
                         .map(|chat| chat.id.clone());
                     if let Some(id) = id {
                         ui.select_chat(&id);
+                        if let Ok(video) = std::env::var("MONOGRAM_CAPTURE_VIDEO") {
+                            ui.load_timeline(Some(video));
+                        }
                     }
                 }
             });
@@ -164,8 +170,9 @@ fn main() -> gtk::glib::ExitCode {
             });
         }
         if let Some(path) = std::env::var_os("MONOGRAM_CAPTURE_PATH") {
+            let paintable = gtk::WidgetPaintable::new(Some(&ui.window));
             let window = ui.window.downgrade();
-            gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || {
+            gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(6), move || {
                 let Some(window) = window.upgrade().filter(|window| window.is_mapped()) else {
                     return;
                 };
@@ -178,11 +185,7 @@ fn main() -> gtk::glib::ExitCode {
                     window.is_maximized()
                 );
                 let snapshot = gtk::Snapshot::new();
-                gtk::WidgetPaintable::new(Some(&window)).snapshot(
-                    &snapshot,
-                    width as f64,
-                    height as f64,
-                );
+                paintable.snapshot(&snapshot, width as f64, height as f64);
                 if let Some(node) = snapshot.to_node()
                     && let Some(renderer) = window.renderer()
                 {
@@ -195,12 +198,29 @@ fn main() -> gtk::glib::ExitCode {
                             eprintln!("Monogram progress screenshot saved");
                         }
                     });
+                } else {
+                    eprintln!("Monogram capture: no render node available");
                 }
+                window.set_resizable(true);
             });
         }
         ROOT.with(|root| root.replace(Some(ui)));
     });
-    app.run_with_args(&args)
+    let result = app.run_with_args(&args);
+    let display = gtk::gdk::Display::default();
+    for window in app.windows() {
+        window.destroy();
+    }
+    ROOT.with(|root| root.borrow_mut().take());
+    // Drain asynchronous video/GL releases before libEGL's process-exit teardown.
+    let cleanup = gtk::glib::MainLoop::new(None, false);
+    let finish = cleanup.clone();
+    gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
+        finish.quit();
+    });
+    cleanup.run();
+    drop(display);
+    result
 }
 
 fn present_window(

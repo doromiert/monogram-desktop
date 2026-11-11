@@ -1399,10 +1399,20 @@ impl MediaViewer {
                 };
                 if player.media.error().is_some() {
                     if current {
+                        viewer.set_active_video(None);
                         viewer.preview_status.set_text("Video playback unavailable");
                         viewer.preview_status.set_visible(true);
                     }
                     return glib::ControlFlow::Continue;
+                }
+                {
+                    let mut playbacks = viewer.playbacks.borrow_mut();
+                    playbacks.clear();
+                    playbacks.insert(id.clone(), player.clone());
+                }
+                if current {
+                    // Clapper must be mapped before it can preroll its real controls and sink.
+                    viewer.set_active_video(Some(player.clone()));
                 }
                 if !player.media.is_prepared() || !player.media.has_video() {
                     if current {
@@ -1412,14 +1422,8 @@ impl MediaViewer {
                     return glib::ControlFlow::Continue;
                 }
                 picture.set_paintable(Some(&player.media));
-                {
-                    let mut playbacks = viewer.playbacks.borrow_mut();
-                    playbacks.clear();
-                    playbacks.insert(id.clone(), player.clone());
-                }
                 if current {
                     viewer.preview_status.set_visible(false);
-                    viewer.set_active_video(Some(player));
                 }
                 return glib::ControlFlow::Continue;
             }

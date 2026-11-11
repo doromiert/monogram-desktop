@@ -11,6 +11,7 @@ typedef struct {
   GdkPaintable *paintable;
   GtkWidget *replay;
   gboolean has_played;
+  gboolean starting;
   gboolean syncing_audio;
   double gtk_volume;
   int width, height;
@@ -62,6 +63,8 @@ static void state_changed (ClapperPlayer *player, GParamSpec *pspec, MonogramVid
   /* Native controls and keyboard callers both update the same GTK state. */
   if (clapper_player_get_state (player) == CLAPPER_PLAYER_STATE_BUFFERING) return;
   gboolean playing = clapper_player_get_state (player) == CLAPPER_PLAYER_STATE_PLAYING;
+  if (playing) self->starting = FALSE;
+  if (!playing && self->starting) return;
   if (gtk_media_stream_get_playing (GTK_MEDIA_STREAM (self)) != playing)
     gtk_media_stream_set_playing (GTK_MEDIA_STREAM (self), playing);
 }
@@ -96,12 +99,14 @@ static gboolean play (GtkMediaStream *stream) {
   if (duration > 0 && clapper_player_get_position (self->player) >= duration - .05)
     clapper_player_seek (self->player, 0);
   if (item) g_object_unref (item);
+  self->starting = TRUE;
   clapper_player_play (self->player);
   return TRUE;
 }
 static void pause_video (GtkMediaStream *stream) {
-  ClapperPlayer *player = ((MonogramVideo *) stream)->player;
-  if (player) clapper_player_pause (player);
+  MonogramVideo *self = (MonogramVideo *) stream;
+  self->starting = FALSE;
+  if (self->player) clapper_player_pause (self->player);
 }
 static void seek (GtkMediaStream *stream, gint64 timestamp) {
   clapper_player_seek (((MonogramVideo *) stream)->player, timestamp / (double) G_USEC_PER_SEC);
@@ -145,13 +150,13 @@ static void paintable_init (GdkPaintableInterface *iface) {
 }
 static void dispose (GObject *object) {
   MonogramVideo *self = (MonogramVideo *) object;
-  if (self->player) {
+  if (self->player)
     g_signal_handlers_disconnect_by_data (self->player, self);
-    clapper_player_stop (self->player);
-  }
   if (self->paintable) g_signal_handlers_disconnect_by_data (self->paintable, self);
   g_clear_object (&self->replay);
+  /* GtkMediaStream may pause here; STOP must be the final player command. */
   G_OBJECT_CLASS (monogram_video_parent_class)->dispose (object);
+  if (self->player) clapper_player_stop (self->player);
   g_clear_object (&self->paintable);
   g_clear_object (&self->video);
   g_clear_object (&self->player);

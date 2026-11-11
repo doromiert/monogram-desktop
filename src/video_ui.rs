@@ -13,7 +13,13 @@ unsafe extern "C" {
         replay: *mut *mut gtk::ffi::GtkWidget,
     ) -> *mut gtk::ffi::GtkMediaStream;
 }
-use std::{cell::Cell, os::fd::AsRawFd, rc::Rc, time::Duration};
+use std::{
+    cell::Cell,
+    os::fd::AsRawFd,
+    rc::Rc,
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 
 pub(crate) struct Playback {
     pub(crate) media: gtk::MediaStream,
@@ -110,31 +116,31 @@ impl Ui {
         path: &std::path::Path,
     ) -> Option<Rc<Playback>> {
         let key = file.key();
+        let owner = self.state.borrow().account.clone();
+        let cancel = self.downloads.borrow().token(&owner, file)?;
         {
             let mut images = self.images.borrow_mut();
             if let Some(player) = images.video(&key) {
                 return Some(player);
             }
+            images
+                .video_tasks
+                .retain(|_, token| !token.load(Ordering::Acquire));
             if images.video_failures.contains_key(&key)
-                || images.video_tasks.contains(&key)
+                || images.video_tasks.contains_key(&key)
                 || images.video_tasks.len() >= 2
             {
                 return None;
             }
-            images.video_tasks.insert(key.clone());
+            images.video_tasks.insert(key.clone(), cancel.clone());
         }
-        let owner = self.state.borrow().account.clone();
-        let Some(cancel) = self.downloads.borrow().token(&owner, file) else {
-            self.images.borrow_mut().video_tasks.remove(&key);
-            return None;
-        };
-        let generation = self.generation.get();
         let source = file.clone();
         let path = path.to_path_buf();
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
+            let worker_cancel = cancel.clone();
             let verified = gio::spawn_blocking(move || {
-                let input = crate::downloads::verified_input(&path, &source, &cancel)?;
+                let input = crate::downloads::verified_input(&path, &source, &worker_cancel)?;
                 // Plugin scanning and Clapper initialization must never block GTK input.
                 if unsafe { monogram_playback_init() } == 0 {
                     return Err("Video playback initialization failed");
@@ -142,12 +148,23 @@ impl Ui {
                 Ok(input)
             })
             .await;
-            let Some(ui) = weak.upgrade().filter(|ui| {
-                ui.state.borrow().account == owner && ui.generation.get() == generation
-            }) else {
+            let Some(ui) = weak.upgrade() else {
                 return;
             };
-            ui.images.borrow_mut().video_tasks.remove(&key);
+            {
+                let mut images = ui.images.borrow_mut();
+                if images
+                    .video_tasks
+                    .get(&key)
+                    .is_some_and(|token| Arc::ptr_eq(token, &cancel))
+                {
+                    images.video_tasks.remove(&key);
+                }
+            }
+            // A network reconnect does not invalidate authenticated local bytes.
+            if ui.state.borrow().account != owner || cancel.load(Ordering::Acquire) {
+                return;
+            }
             match verified {
                 Ok(Ok(input)) => {
                     if let Some(player) = Playback::new(input) {
@@ -179,7 +196,6 @@ impl Ui {
         let owner = self.state.borrow().account.clone();
         let peer = self.state.borrow().current().jid.clone();
         let id = message.id.clone();
-        let generation = self.generation.get();
         let image = AspectImage::thumbnail(320, false);
         let button = gtk::Button::builder()
             .child(&image)
@@ -213,7 +229,18 @@ impl Ui {
             ) else {
                 return glib::ControlFlow::Break;
             };
-            if ui.state.borrow().account != owner || ui.generation.get() != generation {
+            let valid = {
+                let state = ui.state.borrow();
+                state.account == owner
+                    && state
+                        .chats
+                        .iter()
+                        .find(|chat| chat.jid == peer)
+                        .and_then(|chat| chat.messages.iter().find(|message| message.id == id))
+                        .and_then(|message| message.attachment.as_ref())
+                        .is_some_and(|attachment| attachment.key() == file.key())
+            };
+            if !valid {
                 return glib::ControlFlow::Break;
             }
             if let Some(binding) = attached.as_ref()

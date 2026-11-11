@@ -38,7 +38,7 @@ pub struct Images {
     remembered: HashSet<(String, String, String)>,
     disk_checked: HashSet<(String, u32)>,
     pub(crate) videos: VecDeque<(String, Rc<crate::video_ui::Playback>)>,
-    pub(crate) video_tasks: HashSet<String>,
+    pub(crate) video_tasks: HashMap<String, Arc<AtomicBool>>,
     pub(crate) video_failures: HashMap<String, &'static str>,
 }
 impl Images {
