@@ -1,4 +1,4 @@
-//! Standards-only XMPP boundary. No GTK, database access, or implicit plaintext fallback.
+//! Standards-only XMPP boundary. No GTK or implicit plaintext fallback.
 use crate::crypto::{legacy, service as modern};
 use crate::encryption_policy::Mode;
 use crate::model::{Account, Message};
@@ -27,7 +27,7 @@ fn bare_of(value: &str) -> String {
 }
 fn subscription_peer(presence: &Element, owner: &str) -> Option<String> {
     if !presence.is("presence", NS)
-        || !matches!(presence.attr("type"), Some("subscribe" | "unsubscribe"))
+        || !matches!(presence.attr("type"), Some("subscribe" | "unsubscribe" | "subscribed" | "unsubscribed"))
         || presence.attr("to").is_some_and(|to| {
             to.parse::<tokio_xmpp::jid::Jid>()
                 .ok()
@@ -36,6 +36,7 @@ fn subscription_peer(presence: &Element, owner: &str) -> Option<String> {
     {
         return None;
     }
+    if presence.children().any(|child| matches!(child.ns().as_str(), "urn:xmpp:delay" | "jabber:x:delay" | "urn:xmpp:carbons:2" | "urn:xmpp:forward:0" | "urn:xmpp:mam:1" | "urn:xmpp:mam:2")) { return None; }
     let from = presence.attr("from")?;
     (from != owner && bare(from).ok().as_deref() == Some(from)).then(|| from.to_owned())
 }
@@ -525,13 +526,15 @@ pub enum BackendEvent {
         error: bool,
         text: String,
     },
-    Roster(Vec<(String, String, String)>),
+    Roster(crate::contact_access::RosterUpdate),
+    ContactAccessError(String),
     RoomBookmarks(Vec<crate::rooms::BookmarkInfo>),
     RoomPresence(crate::rooms::Presence),
     RoomError(String),
     Presence {
         peer: String,
         online: bool,
+        visible: bool,
     },
     AvatarChanged {
         peer: String,
@@ -735,6 +738,27 @@ pub enum Command {
         peer: String,
         composing: bool,
     },
+    ContactAccessState {
+        peer: String,
+        reply: tokio::sync::oneshot::Sender<Result<crate::contact_access::State, String>>,
+    },
+    ContactAccess {
+        peer: String,
+        action: crate::contact_access::Action,
+        reply: tokio::sync::oneshot::Sender<Result<crate::contact_access::State, String>>,
+    },
+    ContactIq {
+        epoch: u64,
+        kind: crate::iq::Kind,
+        payload: Element,
+        reply: tokio::sync::oneshot::Sender<crate::iq::Reply>,
+    },
+    ContactWire {
+        epoch: u64,
+        peer: String,
+        kind: String,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
     Authorize {
         peer: String,
         allow: bool,
@@ -853,6 +877,8 @@ impl Session {
                 let mut client = Client::new(config, password);
                 let crypto=modern::Handle::start(owner.clone(),generation,network.clone(),events.clone());
                 let legacy=legacy::service::Handle::start(owner.clone(),generation,network.clone(),events.clone());
+                let contacts=crate::contact_access::Manager::new(owner.clone(),generation,events.clone()).await;
+                let mut contact_queries=HashMap::<String,(u64,std::time::Instant,u64)>::new();
                 let mut iq=crate::iq::Pending::default();
                 let mut rooms=crate::rooms::Rooms::new(owner.clone());
                 rooms.update_choices(choices);
@@ -860,7 +886,7 @@ impl Session {
                 let mut room_epoch=0u64;
                 let mut loading_rooms=false;
                 let mut subscribing_rooms=false;
-                let mut crypto_ready=false;let mut legacy_ready=false;let mut online=false;let mut mam:HashMap<String,archive::Page>=HashMap::new();let mut resources:HashMap<String,std::collections::HashSet<String>>=HashMap::new();let mut timer=tokio::time::interval(Duration::from_secs(1));let mut handshake=std::time::Instant::now();
+                let mut crypto_ready=false;let mut legacy_ready=false;let mut online=false;let mut mam:HashMap<String,archive::Page>=HashMap::new();let mut timer=tokio::time::interval(Duration::from_secs(1));let mut handshake=std::time::Instant::now();
                 emit(BackendEvent::Status{online:false,error:false,text:"Connecting…".into()});
                 loop{tokio::select!{
                     command=rx.recv()=>{match command{
@@ -1111,23 +1137,43 @@ impl Session {
                             }
                         },
                         Some(Command::Typing{peer,composing})=>{if online{send(&mut client,Element::builder("message",NS).attr("type".try_into().expect("static XML attribute"),"chat").attr("to".try_into().expect("static XML attribute"),peer).append(el(if composing{"composing"}else{"paused"},"http://jabber.org/protocol/chatstates")).build()).await;}},
+                        Some(Command::ContactAccessState{peer,reply})=>{
+                            let result=if rooms.known(&peer) {Err("A direct contact is required".into())}else{contacts.state(&peer)};
+                            let _=reply.send(result);
+                        },
+                        Some(Command::ContactAccess{peer,action,reply})=>{
+                            if reply.is_closed(){continue}
+                            if !online || rooms.known(&peer) || !crate::contact_access::valid_peer(&owner,&peer){let _=reply.send(Err("Reconnect and choose a direct contact's bare address".into()));continue}
+                            let (manager,network,epoch)=(contacts.clone(),network.clone(),contacts.epoch());
+                            tokio::spawn(async move{let _=reply.send(manager.act(&network,epoch,&peer,action).await);});
+                        },
+                        Some(Command::ContactIq{epoch,kind,payload,reply})=>{
+                            if reply.is_closed(){continue}
+                            if !online || !contacts.valid(epoch) || !payload.is("query",crate::contact_access::ROSTER){let _=reply.send(Err(crate::iq::Error::Closed));continue}
+                            let full=matches!(kind,crate::iq::Kind::Get);
+                            let serial=if full{match contacts.begin_full(epoch){Ok(serial)=>Some(serial),Err(_)=>{let _=reply.send(Err(crate::iq::Error::Busy));continue}}}else{None};
+                            let payload=if full{payload}else{contacts.roster_write(payload)};
+                            if let Some(root)=iq.start(owner.clone(),kind,payload,reply){let id=root.attr("id").unwrap().to_string();if let Some(serial)=serial{contact_queries.insert(id.clone(),(epoch,std::time::Instant::now(),serial));}if !send(&mut client,root).await{contact_queries.remove(&id);if let Some(serial)=serial{contacts.clear_full(epoch,Some(serial));}iq.fail(&id)}}else if let Some(serial)=serial{contacts.clear_full(epoch,Some(serial));}
+                        },
+                        Some(Command::ContactWire{epoch,peer,kind,reply})=>{
+                            let valid=online&&contacts.valid(epoch)&&!rooms.known(&peer)&&crate::contact_access::valid_peer(&owner,&peer)&&matches!(kind.as_str(),"subscribe"|"subscribed"|"unsubscribe"|"unsubscribed");
+                            let result=valid&&send(&mut client,Element::builder("presence",NS).attr("to".try_into().unwrap(),peer).attr("type".try_into().unwrap(),kind).build()).await;
+                            let _=reply.send(result);
+                        },
                         Some(Command::Authorize{peer,allow,reply})=>{
-                            if reply.is_closed() { continue; }
-                            let valid = bare(&peer).ok().as_deref() == Some(peer.as_str()) && peer != owner;
-                            let result = if !online { Err("Reconnect to respond to this request".into()) }
-                                else if !valid { Err("Invalid contact address".into()) }
-                                else if send(&mut client,Element::builder("presence",NS).attr("to".try_into().expect("static XML attribute"),peer).attr("type".try_into().expect("static XML attribute"),if allow{"subscribed"}else{"unsubscribed"}).build()).await { Ok(()) }
-                                else { Err("The request response could not be sent. Try again.".into()) };
-                            let _ = reply.send(result);
+                            if reply.is_closed(){continue}
+                            if !online || rooms.known(&peer) || !crate::contact_access::valid_peer(&owner,&peer){let _=reply.send(Err("Reconnect and choose a direct contact's bare address".into()));continue}
+                            let (manager,network,epoch)=(contacts.clone(),network.clone(),contacts.epoch());
+                            tokio::spawn(async move{let action=if allow{crate::contact_access::Action::Accept}else{crate::contact_access::Action::Deny};let _=reply.send(manager.act(&network,epoch,&peer,action).await.map(|_|()));});
                         },
                         Some(Command::Receipt{peer,id})=>{if online{send(&mut client,Element::builder("message",NS).attr("to".try_into().expect("static XML attribute"),peer).attr("type".try_into().expect("static XML attribute"),"chat").append(Element::builder("received","urn:xmpp:receipts").attr("id".try_into().expect("static XML attribute"),id).build()).build()).await;}},
                     }},
                     event=client.next()=>{match event{
-                        Some(Event::Online)=>{online=true;room_epoch=room_epoch.wrapping_add(1);let _=network.send(Command::LoadRoomBookmarks);crypto.send(modern::Request::Online(true));legacy.send(legacy::service::Request::Online(true));emit(BackendEvent::Status{online:true,error:false,text:"Connected · TLS".into()});send(&mut client,el("presence",NS)).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"get").attr("id".try_into().expect("static XML attribute"),"roster").append(el("query","jabber:iq:roster")).build()).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"set").attr("id".try_into().expect("static XML attribute"),"carbons").append(el("enable","urn:xmpp:carbons:2")).build()).await;},
-                        Some(Event::Disconnected(error))=>{#[cfg(test)] eprintln!("fixture disconnect: {error:?}");online=false;room_jobs.disconnect();rooms.disconnect();loading_rooms=false;subscribing_rooms=false;crypto_ready=false;legacy_ready=false;crypto.send(modern::Request::Online(false));legacy.send(legacy::service::Request::Online(false));iq.disconnect();mam.clear();resources.clear();handshake=std::time::Instant::now();let fatal = fatal_error(&error);emit(BackendEvent::Status{online:false,error:fatal,text:if fatal{"Sign-in failed. Check credentials, TLS certificate and server configuration."}else{"Disconnected. Reconnecting…"}.into()});if fatal{break}},
+                        Some(Event::Online)=>{online=true;let contact_epoch=contacts.online();let (manager,contact_network)=(contacts.clone(),network.clone());tokio::spawn(async move{if let Err(error)=manager.refresh(&contact_network,contact_epoch).await{if manager.valid(contact_epoch){manager.error(error)}}});room_epoch=room_epoch.wrapping_add(1);let _=network.send(Command::LoadRoomBookmarks);crypto.send(modern::Request::Online(true));legacy.send(legacy::service::Request::Online(true));emit(BackendEvent::Status{online:true,error:false,text:"Connected · TLS".into()});send(&mut client,el("presence",NS)).await;send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"set").attr("id".try_into().expect("static XML attribute"),"carbons").append(el("enable","urn:xmpp:carbons:2")).build()).await;},
+                        Some(Event::Disconnected(error))=>{#[cfg(test)] eprintln!("fixture disconnect: {error:?}");online=false;contacts.disconnect();contact_queries.clear();room_jobs.disconnect();rooms.disconnect();loading_rooms=false;subscribing_rooms=false;crypto_ready=false;legacy_ready=false;crypto.send(modern::Request::Online(false));legacy.send(legacy::service::Request::Online(false));iq.disconnect();mam.clear();handshake=std::time::Instant::now();let fatal = fatal_error(&error);emit(BackendEvent::Status{online:false,error:fatal,text:if fatal{"Sign-in failed. Check credentials, TLS certificate and server configuration."}else{"Disconnected. Reconnecting…"}.into()});if fatal{break}},
                         None=>break,
                         Some(Event::Stanza(stanza))=>{
-                            let root:Element=stanza.into();if iq.receive(&root,&owner){continue}let from=root.attr("from").unwrap_or("");
+                            let root:Element=stanza.into();if iq.receive(&root,&owner){if let Some((epoch,_,serial))=contact_queries.remove(root.attr("id").unwrap_or("")){if root.attr("type")==Some("result")&&root.children().count()==1{if let Some(query)=root.get_child("query",crate::contact_access::ROSTER){if let Err(error)=crate::contact_access::parse_roster(query,true).and_then(|update|contacts.finish_full(epoch,serial,update)){contacts.clear_full(epoch,Some(serial));if contacts.valid(epoch){contacts.error(error)}}}else{contacts.clear_full(epoch,Some(serial));}}else{contacts.clear_full(epoch,Some(serial));}}continue}let from=root.attr("from").unwrap_or("");
                             if root.is("message",NS){
                                 rooms.configuration_changed(&root);
                                 refresh_room_members(&mut rooms,&bare_of(from),room_epoch,&network);
@@ -1180,14 +1226,29 @@ impl Session {
                                     continue;
                                 }
                                 if root.get_child("x","http://jabber.org/protocol/muc#user").is_some(){continue;}
-                                let peer=bare_of(from);let kind=root.attr("type").unwrap_or("");if kind.is_empty() {if let Some(hint)=crate::avatar::presence_hash(&root){let avatar_peer=if root.get_child("x","http://jabber.org/protocol/muc#user").is_some(){from.to_string()}else{peer.clone()};if bare(&peer).ok().as_deref()==Some(&peer){emit(BackendEvent::AvatarChanged{peer:avatar_peer,hint:Some(hint)});}}}if matches!(kind,"subscribe"|"unsubscribe") {
-                                    if let Some(peer)=subscription_peer(&root,&owner).filter(|peer| !rooms.known(peer)) {
-                                        emit(if kind=="subscribe" { BackendEvent::Request(peer) } else { BackendEvent::RequestCancelled(peer) });
+                                let peer=bare_of(from);let kind=root.attr("type").unwrap_or("");
+                                if kind.is_empty(){if let Some(hint)=crate::avatar::presence_hash(&root){if bare(&peer).ok().as_deref()==Some(&peer){emit(BackendEvent::AvatarChanged{peer:peer.clone(),hint:Some(hint)});}}}
+                                if matches!(kind,"subscribe"|"unsubscribe"|"subscribed"|"unsubscribed"){
+                                    if let Some(peer)=subscription_peer(&root,&owner).filter(|peer|!rooms.known(peer)){
+                                        match kind{
+                                            "subscribe"=>{contacts.subscription(&peer,true);emit(BackendEvent::Request(peer.clone()));let (manager,network,epoch)=(contacts.clone(),network.clone(),contacts.epoch());tokio::spawn(async move{if let Err(error)=manager.approve_if_allowed(&network,epoch,&peer).await{if manager.valid(epoch){manager.error(error)}}});},
+                                            "unsubscribe"=>{contacts.subscription(&peer,false);emit(BackendEvent::RequestCancelled(peer));},
+                                            "unsubscribed"=>contacts.revoked_by_contact(&peer),
+                                            _=>{},
+                                        }
                                     }
                                     continue;
-                                }let set=resources.entry(peer.clone()).or_default();if kind=="unavailable"{set.remove(from);}else if kind.is_empty(){set.insert(from.into());}emit(BackendEvent::Presence{peer,online:!set.is_empty()});
+                                }
+                                if !rooms.known(&peer){contacts.presence(&root);}
                             }else if root.is("iq",NS){let id=root.attr("id").unwrap_or("");let trusted=from.is_empty()||from==owner;
-                                if trusted{if let Some(query)=root.get_child("query","jabber:iq:roster"){let contacts=query.children().filter(|c|c.is("item","jabber:iq:roster")).filter_map(|c|Some((c.attr("jid")?.into(),c.attr("name").unwrap_or("").into(),c.attr("subscription").unwrap_or("none").into()))).collect();emit(BackendEvent::Roster(contacts));if root.attr("type")==Some("set"){send(&mut client,Element::builder("iq",NS).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).build()).await;}}}
+                                if trusted&&!id.is_empty()&&root.children().count()==1&&root.attr("type")==Some("set")&&root.attr("to").is_none_or(|to|to.parse::<tokio_xmpp::jid::Jid>().ok().is_some_and(|jid|jid.to_bare().as_str()==owner)){
+                                    if let Some(query)=root.get_child("query",crate::contact_access::ROSTER){
+                                        match crate::contact_access::parse_roster(query,false).and_then(|update|contacts.apply_roster(contacts.epoch(),update)){
+                                            Ok(())=>{send(&mut client,Element::builder("iq",NS).attr("type".try_into().unwrap(),"result").attr("id".try_into().unwrap(),id).build()).await;},
+                                            Err(error)=>contacts.error(error),
+                                        }
+                                    }
+                                }
                                 if let Some(page)=mam.get(id) {
                                     if page.accepts(&root,&owner) && matches!(root.attr("type"),Some("result"|"error")) {
                                         let page=mam.remove(id).expect("matched archive query");
@@ -1199,13 +1260,13 @@ impl Session {
                             }
                         }
                     }},
-                    _=timer.tick()=>{iq.expire();for stanza in room_jobs.expire(&mut rooms){let peer=bare_of(stanza.attr("to").unwrap_or(""));send(&mut client,stanza).await;emit(BackendEvent::RoomPresence(rooms.status(&peer)));}for presence in rooms.expire(){emit(BackendEvent::RoomPresence(presence));}if !online&&handshake.elapsed()>Duration::from_secs(45){emit(BackendEvent::Status{online:false,error:true,text:"Connection timed out. Check the account settings.".into()});break}mam.retain(|_,page| {
+                    _=timer.tick()=>{iq.expire();contact_queries.retain(|_,(epoch,started,serial)|{let keep=contacts.valid(*epoch)&&started.elapsed()<Duration::from_secs(25);if !keep{contacts.clear_full(*epoch,Some(*serial));}keep});for stanza in room_jobs.expire(&mut rooms){let peer=bare_of(stanza.attr("to").unwrap_or(""));send(&mut client,stanza).await;emit(BackendEvent::RoomPresence(rooms.status(&peer)));}for presence in rooms.expire(){emit(BackendEvent::RoomPresence(presence));}if !online&&handshake.elapsed()>Duration::from_secs(45){emit(BackendEvent::Status{online:false,error:true,text:"Connection timed out. Check the account settings.".into()});break}mam.retain(|_,page| {
                         let expired=page.started.elapsed()>Duration::from_secs(20);
                         if expired { emit(archive::failed(page.peer.clone())); }
                         !expired
                     });}
                 }}
-                room_jobs.disconnect();iq.disconnect();
+                contacts.disconnect();contact_queries.clear();room_jobs.disconnect();iq.disconnect();
                 let _=tokio::time::timeout(Duration::from_secs(2),client.send_end()).await;
             } => {} } });
         }).expect("network thread");
@@ -1340,7 +1401,7 @@ mod tests {
     use super::*;
     #[test]
     fn subscriptions_require_a_real_bare_contact_for_this_account() {
-        for kind in ["subscribe", "unsubscribe"] {
+        for kind in ["subscribe", "unsubscribe", "subscribed", "unsubscribed"] {
             let xml: Element = format!("<presence xmlns='jabber:client' type='{kind}' from='friend@example.org' to='me@example.org/desktop'/>").parse().unwrap();
             assert_eq!(
                 subscription_peer(&xml, "me@example.org").as_deref(),
@@ -1350,6 +1411,11 @@ mod tests {
                 let mut invalid = xml.clone();
                 invalid.set_attr("".into(), "from".try_into().unwrap(), from);
                 assert!(subscription_peer(&invalid, "me@example.org").is_none());
+            }
+            for namespace in ["urn:xmpp:delay", "jabber:x:delay", "urn:xmpp:carbons:2", "urn:xmpp:forward:0", "urn:xmpp:mam:2"] {
+                let mut delayed = xml.clone();
+                delayed.append_child(Element::builder("wrapper", namespace).build());
+                assert!(subscription_peer(&delayed, "me@example.org").is_none());
             }
             let mut wrong_account = xml;
             wrong_account.set_attr("".into(), "to".try_into().unwrap(), "other@example.org");

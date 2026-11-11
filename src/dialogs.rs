@@ -177,6 +177,7 @@ impl Ui {
         choices.add(&sending);
         let owner = self.state.borrow().account.clone();
         if peer != owner && !self.state.borrow().current().group {
+            let contact_access = crate::contact_access::valid_peer(&owner, &peer);
             let trust = adw::SwitchRow::builder()
                 .title("Blindly Trust This Contact")
                 .subtitle("Applies to Legacy OMEMO and OMEMO 2")
@@ -219,6 +220,23 @@ impl Ui {
                 confirm.present(Some(&ui.window));
             });
             choices.add(&trust);
+            if contact_access {
+                let access = adw::ActionRow::builder()
+                    .title("Control Access")
+                    .subtitle("Presence subscriptions and contact-only profile data")
+                    .activatable(true)
+                    .build();
+                access.add_prefix(&gtk::Image::from_icon_name("changes-prevent-symbolic"));
+                access.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+                let weak = Rc::downgrade(self);
+                let target = peer.clone();
+                access.connect_activated(move |_| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.contact_access(&target);
+                    }
+                });
+                choices.add(&access);
+            }
         }
         page.add(&choices);
         let (modern_group, modern) = self.fingerprint_group(Mode::Omemo2, &peer);

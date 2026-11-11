@@ -298,6 +298,10 @@ impl Ui {
         body.append(&label(&chat.name, "title-2"));
         body.append(&label(&chat.subtitle, "dim-label"));
         let g = adw::PreferencesGroup::new();
+        let live_access = !demo
+            && !chat.group
+            && chat.jid != self.state.borrow().account
+            && crate::protocol::bare(&chat.jid).ok().as_deref() == Some(chat.jid.as_str());
         for (title, icon, key) in [
             ("Shared Media", "image-x-generic-symbolic", "media"),
             (
@@ -307,7 +311,7 @@ impl Ui {
             ),
             ("Control Access", "changes-prevent-symbolic", "access"),
         ] {
-            if key == "access" && !demo {
+            if key == "access" && !demo && !live_access {
                 continue;
             }
             let row = adw::ActionRow::builder()
@@ -317,12 +321,16 @@ impl Ui {
             row.add_prefix(&gtk::Image::from_icon_name(icon));
             row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
             let weak = Rc::downgrade(self);
+            let peer = chat.jid.clone();
             row.connect_activated(move |_| {
                 if let Some(ui) = weak.upgrade() {
                     match key {
                         "media" => ui.shared_media(),
                         "security" => ui.security(),
-                        _ => ui.preview_form("Control Access", &["Contact address"]),
+                        _ if ui.state.borrow().account.is_empty() => {
+                            ui.preview_form("Control Access", &["Contact address"])
+                        }
+                        _ => ui.contact_access(&peer),
                     }
                 }
             });

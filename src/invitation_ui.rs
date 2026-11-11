@@ -1,10 +1,5 @@
 //! Native presentation for durable contact requests and room invitations.
-use crate::{
-    rooms::Password,
-    storage::{ContactRequest, RoomInvitation},
-    ui::Ui,
-    widgets::*,
-};
+use crate::{rooms::Password, storage::RoomInvitation, ui::Ui, widgets::*};
 use adw::prelude::*;
 use gtk::glib;
 use std::{cell::RefCell, rc::Rc};
@@ -61,14 +56,22 @@ impl Ui {
         if !no_contacts {
             let group = adw::PreferencesGroup::builder()
                 .title("Contact requests")
-                .description("Choose who may contact you and see your presence.")
+                .description("Choose who may see your presence and contact-only profile data.")
                 .build();
             for request in pending.contacts {
                 let row = adw::ActionRow::builder()
                     .title(&request.peer)
                     .subtitle(&request.description)
                     .use_markup(false)
+                    .activatable(true)
                     .build();
+                let weak = Rc::downgrade(self);
+                let peer = request.peer.clone();
+                row.connect_activated(move |_| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.contact_access(&peer);
+                    }
+                });
                 let actions = bx(false, 6);
                 actions.set_valign(gtk::Align::Center);
                 let spinner = gtk::Spinner::builder()
@@ -76,7 +79,13 @@ impl Ui {
                     .visible(false)
                     .build();
                 let decline = gtk::Button::with_label("Decline");
-                let accept = gtk::Button::with_label("Accept");
+                let accept_label = gtk::Label::builder()
+                    .label("Accept and request back")
+                    .wrap(true)
+                    .max_width_chars(14)
+                    .justify(gtk::Justification::Center)
+                    .build();
+                let accept = gtk::Button::builder().child(&accept_label).build();
                 accept.add_css_class("suggested-action");
                 actions.append(&spinner);
                 actions.append(&decline);

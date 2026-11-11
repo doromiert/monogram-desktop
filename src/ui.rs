@@ -86,6 +86,7 @@ pub struct Ui {
     pub room_sync_retry: RefCell<HashMap<String, (Instant, u8)>>,
     pub request_secrets: RefCell<crate::request_logic::SecretJobs>,
     pub security_widgets: RefCell<Option<crate::dialogs::SecurityControls>>,
+    pub contact_access_widgets: RefCell<Option<crate::contact_access_ui::ContactAccessControls>>,
     pub review_request: RefCell<Option<(String, crate::encryption_policy::Mode)>>,
     pub status: RefCell<String>,
     pub event_tx: mpsc::Sender<Envelope>,
@@ -332,6 +333,7 @@ impl Ui {
             room_sync_retry: RefCell::new(HashMap::new()),
             request_secrets: RefCell::new(Default::default()),
             security_widgets: RefCell::new(None),
+            contact_access_widgets: RefCell::new(None),
             review_request: RefCell::new(None),
             status: RefCell::new("Not connected".into()),
             event_tx: tx,
@@ -1733,6 +1735,7 @@ impl Ui {
         self.legacy_crypto.replace(Default::default());
         self.encryption_checks.borrow_mut().clear();
         self.security_widgets.borrow_mut().take();
+        self.contact_access_widgets.borrow_mut().take();
         self.review_request.borrow_mut().take();
         self.status.replace("Disconnected".into());
         let dialogs = std::mem::take(&mut *self.dialogs.borrow_mut());
@@ -1927,7 +1930,11 @@ impl Ui {
                     self.typing.borrow_mut().clear();
                     let mut s = self.state.borrow_mut();
                     for c in &mut s.chats {
-                        c.subtitle = "Offline".into();
+                        if c.group {
+                            c.subtitle = "Disconnected".into();
+                        } else if c.jid != owner {
+                            c.subtitle.clear();
+                        }
                         c.room_joined = false;
                         c.room_can_send = false;
                         for m in &mut c.messages {
@@ -1954,6 +1961,7 @@ impl Ui {
                     }
                 }
                 self.update_mode();
+                self.refresh_contact_access();
                 if online {
                     self.room_sync_retry.borrow_mut().clear();
                     self.sync_room_bookmarks();
@@ -1964,22 +1972,31 @@ impl Ui {
                     self.notice(&text)
                 }
             }
-            BackendEvent::Roster(contacts) => {
+            BackendEvent::Roster(update) => {
                 let mut resolved = Vec::new();
                 let mut s = self.state.borrow_mut();
-                for (jid, name, subscription) in contacts {
-                    if matches!(subscription.as_str(), "from" | "both") {
-                        resolved.push(jid.clone());
+                if update.full {
+                    for chat in &mut s.chats {
+                        if !chat.group {
+                            chat.contact = false;
+                        }
                     }
-                    let c = s.chat_for(&jid);
-                    if !name.is_empty() {
-                        c.name = name
+                }
+                for item in update.items {
+                    if matches!(item.subscription.as_str(), "from" | "both") {
+                        resolved.push(item.jid.clone());
                     }
-                    c.contact = subscription != "none";
+                    let c = s.chat_for(&item.jid);
+                    if !item.name.is_empty() {
+                        c.name = item.name;
+                    }
+                    c.contact = item.subscription != "remove" && !c.group && c.jid != owner;
                 }
                 drop(s);
                 self.clear_contact_requests(&resolved);
+                self.refresh_contact_access();
             }
+            BackendEvent::ContactAccessError(error) => self.notice(&error),
             BackendEvent::RoomBookmarks(bookmarks) => {
                 if self
                     .store
@@ -2123,10 +2140,21 @@ impl Ui {
                 self.queue_chat_refresh();
                 return;
             }
-            BackendEvent::Presence { peer, online } => {
+            BackendEvent::Presence {
+                peer,
+                online,
+                visible,
+            } => {
                 let mut s = self.state.borrow_mut();
                 if let Some(c) = s.chats.iter_mut().find(|c| c.jid == peer) {
-                    c.subtitle = if online { "Online" } else { "Offline" }.into();
+                    c.subtitle = if !visible {
+                        ""
+                    } else if online {
+                        "Online"
+                    } else {
+                        "Offline"
+                    }
+                    .into();
                 }
                 drop(s);
                 if self.pages.visible_child_name().as_deref() == Some("chat") {
@@ -2176,9 +2204,11 @@ impl Ui {
             }
             BackendEvent::Request(peer) => {
                 self.receive_contact_request(peer);
+                self.refresh_contact_access();
             }
             BackendEvent::RequestCancelled(peer) => {
                 self.clear_contact_request(&peer);
+                self.refresh_contact_access();
             }
             BackendEvent::RoomInvitation(invitation) => {
                 self.receive_room_invitation(invitation);

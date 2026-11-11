@@ -8,7 +8,7 @@ use crate::{
 use adw::prelude::*;
 use gtk::glib;
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -364,6 +364,21 @@ impl Ui {
             .active(true)
             .build();
         fields.add(&address);
+        let browse = adw::ActionRow::builder()
+            .title("Browse Public Rooms")
+            .subtitle("Choose from rooms listed by this account’s group services")
+            .activatable(true)
+            .build();
+        browse.add_prefix(&gtk::Image::from_icon_name("system-search-symbolic"));
+        browse.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+        let weak = Rc::downgrade(self);
+        let target = address.downgrade();
+        browse.connect_activated(move |_| {
+            if let (Some(ui), Some(address)) = (weak.upgrade(), target.upgrade()) {
+                ui.public_room_browser(address);
+            }
+        });
+        fields.add(&browse);
         fields.add(&nick);
         fields.add(&password);
         fields.add(&saved);
@@ -458,6 +473,324 @@ impl Ui {
             });
             running.replace(Some(task));
         });
+    }
+
+    fn public_room_browser(self: &Rc<Self>, address: adw::EntryRow) {
+        let Some(iq) = self
+            .session
+            .borrow()
+            .as_ref()
+            .map(|session| crate::iq::Client::new(session.tx.clone()))
+        else {
+            self.notice("Reconnect before browsing public rooms");
+            return;
+        };
+        let page = adw::PreferencesPage::new();
+        let rooms = adw::PreferencesGroup::builder()
+            .title("Public Rooms")
+            .build();
+        let status = adw::ActionRow::builder()
+            .title("Finding public rooms…")
+            .subtitle("You can keep entering a room address while this loads.")
+            .build();
+        let spinner = gtk::Spinner::builder().spinning(true).build();
+        let retry = gtk::Button::with_label("Retry");
+        retry.set_visible(false);
+        let more = gtk::Button::with_label("Load More");
+        more.set_visible(false);
+        let controls = bx(false, 6);
+        controls.set_valign(gtk::Align::Center);
+        controls.append(&spinner);
+        controls.append(&retry);
+        controls.append(&more);
+        status.add_suffix(&controls);
+        rooms.add(&status);
+        page.add(&rooms);
+        let (dialog, _) = self.dialog("Public Rooms", &scroll(&page), 520, 560);
+        let directory = Rc::new(RefCell::new(None));
+        let count = Rc::new(Cell::new(0usize));
+        let rendered = Rc::new(RefCell::new(Vec::<adw::ActionRow>::new()));
+        let failures = Rc::new(RefCell::new(Vec::<String>::new()));
+        let task = Rc::new(RefCell::new(None::<glib::JoinHandle<()>>));
+
+        let weak = Rc::downgrade(self);
+        let dialog_weak = dialog.downgrade();
+        let target = address.downgrade();
+        let rooms_weak = rooms.downgrade();
+        let status_weak = status.downgrade();
+        let spinner_weak = spinner.downgrade();
+        let retry_weak = retry.downgrade();
+        let more_weak = more.downgrade();
+        let iq_retry = iq.clone();
+        let directory_retry = directory.clone();
+        let count_retry = count.clone();
+        let rendered_retry = rendered.clone();
+        let failures_retry = failures.clone();
+        let task_retry = task.clone();
+        retry.connect_clicked(move |_| {
+            let (
+                Some(ui),
+                Some(dialog),
+                Some(address),
+                Some(rooms),
+                Some(status),
+                Some(spinner),
+                Some(retry),
+                Some(more),
+            ) = (
+                weak.upgrade(),
+                dialog_weak.upgrade(),
+                target.upgrade(),
+                rooms_weak.upgrade(),
+                status_weak.upgrade(),
+                spinner_weak.upgrade(),
+                retry_weak.upgrade(),
+                more_weak.upgrade(),
+            )
+            else {
+                return;
+            };
+            ui.load_public_room_page(
+                iq_retry.clone(),
+                address,
+                dialog,
+                rooms,
+                status,
+                spinner,
+                retry,
+                more,
+                directory_retry.clone(),
+                count_retry.clone(),
+                rendered_retry.clone(),
+                failures_retry.clone(),
+                task_retry.clone(),
+                true,
+            );
+        });
+
+        let weak = Rc::downgrade(self);
+        let dialog_weak = dialog.downgrade();
+        let target = address.downgrade();
+        let rooms_weak = rooms.downgrade();
+        let status_weak = status.downgrade();
+        let spinner_weak = spinner.downgrade();
+        let retry_weak = retry.downgrade();
+        let more_weak = more.downgrade();
+        let iq_more = iq.clone();
+        let directory_more = directory.clone();
+        let count_more = count.clone();
+        let rendered_more = rendered.clone();
+        let failures_more = failures.clone();
+        let task_more = task.clone();
+        more.connect_clicked(move |_| {
+            let (
+                Some(ui),
+                Some(dialog),
+                Some(address),
+                Some(rooms),
+                Some(status),
+                Some(spinner),
+                Some(retry),
+                Some(more),
+            ) = (
+                weak.upgrade(),
+                dialog_weak.upgrade(),
+                target.upgrade(),
+                rooms_weak.upgrade(),
+                status_weak.upgrade(),
+                spinner_weak.upgrade(),
+                retry_weak.upgrade(),
+                more_weak.upgrade(),
+            )
+            else {
+                return;
+            };
+            ui.load_public_room_page(
+                iq_more.clone(),
+                address,
+                dialog,
+                rooms,
+                status,
+                spinner,
+                retry,
+                more,
+                directory_more.clone(),
+                count_more.clone(),
+                rendered_more.clone(),
+                failures_more.clone(),
+                task_more.clone(),
+                false,
+            );
+        });
+
+        let pending = task.clone();
+        dialog.connect_closed(move |_| {
+            if let Some(task) = pending.borrow_mut().take() {
+                task.abort();
+            }
+        });
+        self.load_public_room_page(
+            iq, address, dialog, rooms, status, spinner, retry, more, directory, count, rendered,
+            failures, task, true,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_public_room_page(
+        self: &Rc<Self>,
+        iq: crate::iq::Client,
+        address: adw::EntryRow,
+        dialog: adw::Dialog,
+        rooms: adw::PreferencesGroup,
+        status: adw::ActionRow,
+        spinner: gtk::Spinner,
+        retry: gtk::Button,
+        more: gtk::Button,
+        directory: Rc<RefCell<Option<crate::rooms::discovery::Directory>>>,
+        count: Rc<Cell<usize>>,
+        rendered: Rc<RefCell<Vec<adw::ActionRow>>>,
+        failures: Rc<RefCell<Vec<String>>>,
+        task: Rc<RefCell<Option<glib::JoinHandle<()>>>>,
+        initial: bool,
+    ) {
+        if task.borrow().is_some() {
+            return;
+        }
+        status.set_title(if initial {
+            "Finding public rooms…"
+        } else {
+            "Loading more rooms…"
+        });
+        status.set_subtitle("");
+        spinner.set_spinning(true);
+        spinner.set_visible(true);
+        retry.set_visible(false);
+        more.set_visible(false);
+        if initial {
+            for row in rendered.borrow_mut().drain(..) {
+                rooms.remove(&row);
+            }
+            directory.borrow_mut().take();
+            failures.borrow_mut().clear();
+            count.set(0);
+        }
+        let owner = self.state.borrow().account.clone();
+        let generation = self.generation.get();
+        let current = if initial {
+            None
+        } else {
+            directory.borrow_mut().take()
+        };
+        let weak = Rc::downgrade(self);
+        let dialog_weak = dialog.downgrade();
+        let row_dialog = dialog.downgrade();
+        let handle_slot = task.clone();
+        let handle = glib::MainContext::default().spawn_local(async move {
+            let result = async {
+                let mut directory = if let Some(directory) = current {
+                    directory
+                } else {
+                    crate::rooms::discovery::Directory::discover(&iq, &owner)
+                        .await
+                        .map_err(|error| error.to_string())?
+                };
+                let page = directory.next_page(&iq).await;
+                Ok::<_, String>((directory, page))
+            }
+            .await;
+            if weak
+                .upgrade()
+                .filter(|ui| {
+                    ui.generation.get() == generation && ui.state.borrow().account == owner
+                })
+                .is_none()
+            {
+                handle_slot.borrow_mut().take();
+                return;
+            }
+            if dialog_weak.upgrade().is_none() {
+                handle_slot.borrow_mut().take();
+                return;
+            }
+            spinner.set_spinning(false);
+            spinner.set_visible(false);
+            match result {
+                Err(error) => {
+                    status.set_title("Could Not Load Public Rooms");
+                    status.set_subtitle(&format!(
+                        "{error}. You can still enter a room address directly."
+                    ));
+                    retry.set_visible(true);
+                }
+                Ok((next, batch)) => {
+                    directory.replace(Some(next));
+                    for room in batch.rooms {
+                        let row = adw::ActionRow::builder()
+                            .title(if room.name.trim().is_empty() {
+                                &room.jid
+                            } else {
+                                &room.name
+                            })
+                            .subtitle(&room.jid)
+                            .use_markup(false)
+                            .activatable(true)
+                            .build();
+                        row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+                        let address = address.downgrade();
+                        let dialog = row_dialog.clone();
+                        let jid = room.jid;
+                        row.connect_activated(move |_| {
+                            if let Some(address) = address.upgrade() {
+                                address.set_text(&jid);
+                                address.grab_focus();
+                            }
+                            if let Some(dialog) = dialog.upgrade() {
+                                dialog.close();
+                            }
+                        });
+                        rooms.add(&row);
+                        rendered.borrow_mut().push(row);
+                        count.set(count.get().saturating_add(1));
+                    }
+                    for failure in batch
+                        .failures
+                        .iter()
+                        .map(|failure| format!("{}: {}", failure.service, failure.error))
+                    {
+                        if !failures.borrow().contains(&failure) {
+                            failures.borrow_mut().push(failure);
+                        }
+                    }
+                    let failure_text = failures.borrow().join("\n");
+                    if count.get() == 0 {
+                        status.set_title(if !failure_text.is_empty() {
+                            "Some Services Could Not Be Reached"
+                        } else if batch.more {
+                            "No Rooms From This Service"
+                        } else {
+                            "No Public Rooms Listed"
+                        });
+                        status.set_subtitle(if !failure_text.is_empty() {
+                            &failure_text
+                        } else if batch.more {
+                            "Try the next group service."
+                        } else {
+                            "You can still enter a room address directly."
+                        });
+                    } else {
+                        status.set_title(&format!("{} rooms loaded", count.get()));
+                        status.set_subtitle(&failure_text);
+                    }
+                    more.set_visible(batch.more);
+                    if !batch.more && !failure_text.is_empty() {
+                        retry.set_label("Refresh");
+                        retry.set_visible(true);
+                    }
+                }
+            }
+            handle_slot.borrow_mut().take();
+        });
+        task.replace(Some(handle));
     }
     pub fn room_preferences(self: &Rc<Self>) {
         let state = self.state.borrow();

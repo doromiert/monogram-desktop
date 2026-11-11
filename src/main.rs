@@ -3,6 +3,8 @@ mod action_store;
 mod attachment_ui;
 mod avatar;
 mod avatar_ui;
+mod contact_access;
+mod contact_access_ui;
 mod credentials;
 mod crypto;
 mod dialogs;
@@ -175,36 +177,15 @@ fn main() -> gtk::glib::ExitCode {
         if let Some(path) = std::env::var_os("MONOGRAM_CAPTURE_PATH") {
             let paintable = gtk::WidgetPaintable::new(Some(&ui.window));
             let window = ui.window.downgrade();
-            gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(6), move || {
-                let Some(window) = window.upgrade().filter(|window| window.is_mapped()) else {
-                    return;
-                };
-                let (width, height) = (window.width() as f32, window.height() as f32);
-                eprintln!(
-                    "Monogram capture: {}x{}, fullscreen={}, maximized={}",
-                    width,
-                    height,
-                    window.is_fullscreen(),
-                    window.is_maximized()
-                );
-                let snapshot = gtk::Snapshot::new();
-                paintable.snapshot(&snapshot, width as f64, height as f64);
-                if let Some(node) = snapshot.to_node()
-                    && let Some(renderer) = window.renderer()
-                {
-                    let texture = renderer.render_texture(
-                        &node,
-                        Some(&gtk::graphene::Rect::new(0., 0., width, height)),
-                    );
-                    gtk::gio::spawn_blocking(move || {
-                        if texture.save_to_png(std::path::PathBuf::from(path)).is_ok() {
-                            eprintln!("Monogram progress screenshot saved");
-                        }
-                    });
-                } else {
-                    eprintln!("Monogram capture: no render node available");
+            let capture = gtk::gio::SimpleAction::new("capture", None);
+            capture.connect_activate(move |_, _| {
+                if let Some(window) = window.upgrade().filter(|window| window.is_mapped()) {
+                    capture_window(&window, &paintable, std::path::PathBuf::from(&path));
                 }
-                window.set_resizable(true);
+            });
+            ui.window.add_action(&capture);
+            gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(6), move || {
+                capture.activate(None);
             });
         }
         ROOT.with(|root| root.replace(Some(ui)));
@@ -224,6 +205,36 @@ fn main() -> gtk::glib::ExitCode {
     cleanup.run();
     drop(display);
     result
+}
+
+fn capture_window(
+    window: &adw::ApplicationWindow,
+    paintable: &gtk::WidgetPaintable,
+    path: std::path::PathBuf,
+) {
+    let (width, height) = (window.width() as f32, window.height() as f32);
+    eprintln!(
+        "Monogram capture: {}x{}, fullscreen={}, maximized={}",
+        width, height, window.is_fullscreen(), window.is_maximized()
+    );
+    let snapshot = gtk::Snapshot::new();
+    paintable.snapshot(&snapshot, width as f64, height as f64);
+    if let Some(node) = snapshot.to_node()
+        && let Some(renderer) = window.renderer()
+    {
+        let texture = renderer.render_texture(
+            &node,
+            Some(&gtk::graphene::Rect::new(0., 0., width, height)),
+        );
+        gtk::gio::spawn_blocking(move || {
+            if texture.save_to_png(path).is_ok() {
+                eprintln!("Monogram progress screenshot saved");
+            }
+        });
+    } else {
+        eprintln!("Monogram capture: no render node available");
+    }
+    window.set_resizable(true);
 }
 
 fn present_window(

@@ -429,6 +429,9 @@ impl State {
             })
         }
         for c in &mut chats {
+            if !c.group && c.jid != account {
+                c.subtitle.clear();
+            }
             for m in &mut c.messages {
                 if m.delivery == "sending" {
                     m.delivery = "uncertain".into()
@@ -483,7 +486,7 @@ impl State {
                 jid: peer.into(),
                 name: peer.into(),
                 color: "blue".into(),
-                subtitle: "Offline".into(),
+                subtitle: String::new(),
                 notifications: "all".into(),
                 ..Default::default()
             })
