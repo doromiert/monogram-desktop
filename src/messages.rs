@@ -257,6 +257,11 @@ impl Ui {
                 order.push(row.row.clone());
                 continue;
             }
+            if let Some(displaced) = rendered.rows.remove(&m.id)
+                && displaced.row.parent().as_ref() == Some(self.timeline.upcast_ref())
+            {
+                self.timeline.remove(&displaced.row);
+            }
             let outer = bx(false, 8);
             outer.set_valign(gtk::Align::Start);
             outer.set_vexpand(false);
