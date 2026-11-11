@@ -9,6 +9,8 @@ Structured poll work additionally tracks the adjacent mobile checkout's
 and [current poll status](../../mobile/docs/POLLS.md). This newer shared work does
 not change the historical inventory below or establish full poll parity.
 
+Current OMEMO2 policy also tracks [mobile 0.2.197 hybrid trust](https://github.com/doromiert/monogram/blob/ec4a3fa3e9f7167e7e4976427dee290d3bbc3e02/docs/pq-omemo.md), including conversation-scoped approval of authenticated own-device keys.
+
 - [ARTICLE_FORMATTING.md](https://github.com/doromiert/monogram/blob/be6876c045163e32fe07a84416621770b0964b30/docs/ARTICLE_FORMATTING.md)
 - [BATTERY_PERFORMANCE.md](https://github.com/doromiert/monogram/blob/be6876c045163e32fe07a84416621770b0964b30/docs/BATTERY_PERFORMANCE.md)
 - [CALENDAR_HISTORY.md](https://github.com/doromiert/monogram/blob/be6876c045163e32fe07a84416621770b0964b30/docs/CALENDAR_HISTORY.md)
