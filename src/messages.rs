@@ -141,16 +141,37 @@ fn message_status(meta: &gtk::Box, m: &Message) {
             }
             status => {
                 let read = status == "read";
-                let tick = label(if read { "✓✓" } else { "✓" }, "message-status-tick");
-                tick.add_css_class(if read { "read" } else { "sent" });
-                tick.set_tooltip_text(Some(if read {
+                let title = if read {
                     "Read"
                 } else if status == "delivered" {
                     "Delivered"
                 } else {
                     "Sent"
-                }));
-                meta.append(&tick);
+                };
+                if read {
+                    let checks = gtk::Overlay::new();
+                    checks.add_css_class("message-status-check");
+                    checks.add_css_class("read");
+                    let first = gtk::Image::from_icon_name("object-select-symbolic");
+                    first.set_pixel_size(12);
+                    checks.set_child(Some(&first));
+                    let second = gtk::Image::from_icon_name("object-select-symbolic");
+                    second.set_pixel_size(12);
+                    second.set_halign(gtk::Align::Start);
+                    second.set_margin_start(5);
+                    checks.add_overlay(&second);
+                    checks.set_tooltip_text(Some(title));
+                    checks.update_property(&[gtk::accessible::Property::Label(title)]);
+                    meta.append(&checks);
+                } else {
+                    let check = gtk::Image::from_icon_name("object-select-symbolic");
+                    check.set_pixel_size(12);
+                    check.add_css_class("message-status-check");
+                    check.add_css_class("sent");
+                    check.set_tooltip_text(Some(title));
+                    check.update_property(&[gtk::accessible::Property::Label(title)]);
+                    meta.append(&check);
+                }
             }
         }
     }

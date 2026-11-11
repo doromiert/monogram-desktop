@@ -64,9 +64,9 @@
 .reaction-emoji { font-size: 16px; }
 .reaction-count { font-size: 11px; }
 .message-status-spinner { min-width: 12px; min-height: 12px; }
-.message-status-tick { color: white; font-size: 12px; font-weight: 700; letter-spacing: -3px; }
-.message-status-tick.sent { opacity: .5; }
-.message-status-tick.read { opacity: 1; }
+.message-status-check { color: white; min-width: 12px; min-height: 12px; }
+.message-status-check.sent { opacity: .5; }
+.message-status-check.read { min-width: 17px; opacity: 1; }
 .composer-shell { padding: 8px; }
 .composer { padding: 4px; border-radius: 12px; }
 .composer textview { padding: 0; }

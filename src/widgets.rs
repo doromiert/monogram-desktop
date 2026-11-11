@@ -139,8 +139,7 @@ mod message_bubble_limit_imp {
                 return (0, 0, -1, -1);
             };
             if orientation == gtk::Orientation::Horizontal {
-                let (minimum, natural, _, _) =
-                    child.measure(gtk::Orientation::Horizontal, for_size);
+                let (minimum, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
                 return (minimum, natural.max(minimum), -1, -1);
             }
             let (minimum, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
