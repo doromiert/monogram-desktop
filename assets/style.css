@@ -27,10 +27,10 @@
 .message-reply { border-left: 3px solid @accent_bg_color; padding: 4px 8px; margin-bottom: 7px; background: alpha(@accent_bg_color,.08); border-radius: 4px; font-size: 12px; }
 .date-pill { background: alpha(@window_fg_color,.06); border-radius: 20px; padding: 4px 12px; font-size: 11px; opacity: .65; }
 .reaction { background: alpha(@accent_bg_color,.12); border-radius: 16px; padding: 3px 9px; font-size: 11px; min-height: 20px; }
-.composer-shell { background: @view_bg_color; border-top: 1px solid alpha(@borders,.4); padding: 12px 20px 16px; }
-.composer { background: @card_bg_color; border-radius: 16px; padding: 4px 8px; border: 1px solid alpha(@borders,.5); }
-.composer textview, .composer textview text { background: transparent; }
-.composer textview { padding: 7px 4px; }
+.composer-shell { background: @view_bg_color; border: none; box-shadow: none; padding: 12px 20px 16px; }
+.composer { background: transparent; border: none; border-radius: 0; box-shadow: none; padding: 4px 8px; }
+.composer scrolledwindow, .composer textview, .composer textview text { background: transparent; border: none; box-shadow: none; outline: none; }
+.composer textview { padding: 0; }
 .send { border-radius: 50%; min-width: 36px; min-height: 36px; padding: 0; }
 .utility-sidebar { background: @window_bg_color; border-left: 1px solid alpha(@borders,.6); }
 .chat-sidebar headerbar, .utility-sidebar headerbar { background: transparent; box-shadow: none; }
@@ -74,7 +74,7 @@
 .message-status-check.sent { opacity: .5; }
 .message-status-check.read { min-width: 17px; opacity: 1; }
 .composer-shell { padding: 8px; }
-.composer { padding: 4px; border-radius: 12px; }
+.composer { padding: 4px; border-radius: 0; }
 .composer textview { padding: 0; }
 .composer button, .composer menubutton button { min-height: 28px; min-width: 28px; padding: 0; }
 .send { min-height: 36px; min-width: 36px; }

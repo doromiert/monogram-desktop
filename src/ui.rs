@@ -227,8 +227,10 @@ impl Ui {
             .wrap_mode(gtk::WrapMode::WordChar)
             .accepts_tab(false)
             .hexpand(true)
-            .top_margin(4)
-            .bottom_margin(4)
+            .top_margin(6)
+            .bottom_margin(6)
+            .left_margin(4)
+            .right_margin(4)
             .build();
         let composer_inline = crate::inline_emoji_ui::ComposerInlineEmoji::new(&composer.buffer());
         let request_button = icon_button("contact-new-symbolic", "Requests and invitations");
@@ -332,8 +334,8 @@ impl Ui {
                 .build(),
             send_button: icon_button("mail-send-symbolic", "Send"),
             input_scroll: gtk::ScrolledWindow::builder()
-                .min_content_height(28)
-                .max_content_height(96)
+                .min_content_height(32)
+                .max_content_height(108)
                 .propagate_natural_height(true)
                 .hexpand(true)
                 .build(),
@@ -1032,6 +1034,7 @@ impl Ui {
     }
     fn make_content(self: &Rc<Self>) {
         let view = adw::ToolbarView::new();
+        view.set_top_bar_style(adw::ToolbarStyle::Flat);
         view.add_css_class("conversation-view");
         let header = adw::HeaderBar::builder()
             .show_start_title_buttons(false)
@@ -1245,8 +1248,11 @@ impl Ui {
         self.weak_button(&self.send_button, |s| s.send());
         line.append(&self.send_button);
         shell.append(&line);
-        chat.append(&shell);
-        self.pages.add_named(&chat, Some("chat"));
+        let conversation = adw::ToolbarView::new();
+        conversation.set_bottom_bar_style(adw::ToolbarStyle::Flat);
+        conversation.set_content(Some(&chat));
+        conversation.add_bottom_bar(&shell);
+        self.pages.add_named(&conversation, Some("chat"));
         self.pages
             .add_named(&scroll(&self.search_page), Some("search"));
         view.set_content(Some(&self.pages));
@@ -1293,7 +1299,7 @@ impl Ui {
             .set_visible(composer_text.is_empty());
         let lines = self.composer.buffer().line_count();
         self.input_scroll
-            .set_min_content_height((lines * 20).clamp(28, 96));
+            .set_min_content_height((lines * 20 + 12).clamp(32, 108));
         self.input_scroll.set_vscrollbar_policy(if lines > 4 {
             gtk::PolicyType::Automatic
         } else {
