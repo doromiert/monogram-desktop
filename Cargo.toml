@@ -31,6 +31,10 @@ percent-encoding = "2"
 curve25519-dalek = "4"
 secret-service = { version = "5.2", features = ["rt-tokio-crypto-rust"] }
 reqwest = { version = "=0.13.5", default-features = false, features = ["native-tls", "stream"] }
+pq_signal = { package = "libsignal-protocol", git = "https://codeberg.org/monocles/pq-omemo-2.git", rev = "10861bff671740174f4e99f7e30dc492fcf6ec8b", features = ["mlkem1024"] }
+async-trait = "0.1"
+rand = "=0.9.4"
+tiny-keccak = { version = "=2.0.2", features = ["kmac"] }
 
 [build-dependencies]
 cc = "1"
@@ -45,3 +49,5 @@ lto = "thin"
 [patch.crates-io]
 # Bounded tokens for mobile invitation passwords; see vendor/tokio-xmpp/MONOGRAM-NOTICE.md.
 tokio-xmpp = { path = "vendor/tokio-xmpp" }
+# Match the protocol backend's pinned Signal curve implementation.
+curve25519-dalek = { git = "https://github.com/signalapp/curve25519-dalek", tag = "signal-curve25519-4.1.3" }
