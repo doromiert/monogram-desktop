@@ -58,6 +58,13 @@ fn subscription_peer(presence: &Element, owner: &str) -> Option<String> {
 pub fn el(name: &str, ns: &str) -> Element {
     Element::builder(name, ns).build()
 }
+fn carbon_payload(wrapper: &Element) -> Option<(&Element, bool)> {
+    let forwarded = wrapper.get_child("forwarded", "urn:xmpp:forward:0")?;
+    let message = forwarded.get_child("message", NS)?;
+    let historical = forwarded.get_child("delay", "urn:xmpp:delay").is_some()
+        || forwarded.get_child("x", "jabber:x:delay").is_some();
+    Some((message, historical))
+}
 pub fn reply_content(xml: &Element, body: &str) -> (String, String, String, String) {
     reply_projection(xml, body).0
 }
@@ -1402,14 +1409,14 @@ impl Session {
                                 let mut carbon_wrappers=root.children().filter(|c|c.is("received","urn:xmpp:carbons:2")||c.is("sent","urn:xmpp:carbons:2"));
                                 if let Some(wrapper)=carbon_wrappers.next(){
                                     if carbon_wrappers.next().is_some()||from!=owner||root.attr("to").is_some_and(|to|bare_of(to)!=owner){continue}
-                                    if let Some(inner)=wrapper.get_child("forwarded","urn:xmpp:forward:0").and_then(|f|f.get_child("message",NS)){
+                                    if let Some((inner,historical))=carbon_payload(wrapper){
                                         if wrapper.is("sent","urn:xmpp:carbons:2"){
                                             if let Some(notice)=crate::read_markers::own_displayed(inner,&owner).filter(|n|!rooms.known(&n.peer)){emit(BackendEvent::OwnRead{peer:notice.peer,id:notice.id});}
                                         }else{
                                             if let Some(notice)=crate::read_markers::incoming_receipt(inner,&owner).filter(|n|!rooms.known(&n.peer)){emit(BackendEvent::Receipt{peer:notice.peer,id:notice.id});}
                                             if let Some(notice)=crate::read_markers::incoming(inner,&owner).filter(|n|!rooms.known(&n.peer)){emit(BackendEvent::Read{peer:notice.peer,id:notice.id});}
                                         }
-                                        deliver(&crypto,&legacy,&emit,inner,&owner,None,true,None);
+                                        deliver(&crypto,&legacy,&emit,inner,&owner,None,historical,None);
                                     }continue
                                 }
                                 if let Some((_peer,message,historical))=normalize(&root,&owner,None){let receipt_to=(!historical&&!message.own&&!message.wire_id.is_empty()&&root.get_child("request","urn:xmpp:receipts").is_some()).then(||from.to_string());deliver(&crypto,&legacy,&emit,&root,&owner,None,historical,receipt_to);}
@@ -1691,6 +1698,16 @@ async fn send(client: &mut Client, root: Element) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_carbons_are_not_archive_messages() {
+        for delay in ["", "<delay xmlns='urn:xmpp:delay' stamp='2026-11-11T18:00:00Z'/>"] {
+            let wrapper: Element = format!("<sent xmlns='urn:xmpp:carbons:2'><forwarded xmlns='urn:xmpp:forward:0'>{delay}<message xmlns='jabber:client' from='me@example.org/phone' to='friend@example.org' type='chat'><body>From phone</body></message></forwarded></sent>").parse().unwrap();
+            let (inner, historical) = carbon_payload(&wrapper).unwrap();
+            let (_, message, delayed) = normalize(inner, "me@example.org", None).unwrap();
+            assert!(message.own);
+            assert_eq!(historical || delayed, !delay.is_empty());
+        }
+    }
     #[test]
     fn preview_history_waits_for_metadata_workers_without_using_the_chat_cursor() {
         let runtime = tokio::runtime::Builder::new_current_thread()
