@@ -71,3 +71,18 @@ Reference: https://github.com/doromiert/monogram/blob/be6876c045163e32fe07a84416
 Folder type/exclusion/override precedence follows Android MessagesController.DialogFilter
 and FilterCreateActivity. The prototype evaluates rules against changing fixture
 state, rather than snapshotting a folder's current member IDs.
+
+The focused chat window routes Enter/Keypad Enter and Escape through the
+composer even when a non-editor control has focus. Shift+Enter retains its
+newline behavior; dialogs, popovers and other text inputs keep their native
+keys. A short body fills the bubble width supplied by replies/reactions so
+its timestamp aligns to the right. Plain bubbles tighten to rendered line
+extents while preserving wider media/reply/reaction children. Reply previews
+mark truncation with an ellipsis and keep whole words unless a word itself
+exceeds the preview budget.
+
+Native GTK acceptance uses the production widgets in an isolated chat: reply-
+and reaction-stretched timestamps reach the right edge; the reported wrapped
+body leaves under 4 px of unused line width. Real header-focused Enter/Escape,
+Shift+Enter and dialog key isolation pass. The reply truncation unit check
+covers complete text, whole words and an oversized Unicode word.

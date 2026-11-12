@@ -113,11 +113,7 @@ impl Ui {
                 ..Default::default()
             };
             if let Some(reply) = &reply {
-                message.reply = format!(
-                    "{} · {}",
-                    reply.author,
-                    reply.preview().chars().take(80).collect::<String>()
-                );
+                message.reply = format!("{} · {}", reply.author, reply.reply_preview());
                 message.reply_id = reply.wire_id.clone();
                 message.reply_to = if group && !reply.sender.is_empty() {
                     reply.sender.clone()
@@ -206,11 +202,7 @@ impl Ui {
         message.encrypted = false;
         message.encryption_mode = None;
         if let Some(reply) = reply {
-            message.reply = format!(
-                "{} · {}",
-                reply.author,
-                reply.preview().chars().take(80).collect::<String>()
-            );
+            message.reply = format!("{} · {}", reply.author, reply.reply_preview());
             message.reply_id = reply.wire_id.clone();
             message.reply_to = if group && !reply.sender.is_empty() {
                 reply.sender

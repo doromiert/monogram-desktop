@@ -521,11 +521,7 @@ impl Ui {
                 ..Default::default()
             };
             if let Some(r) = &reply {
-                message.reply = format!(
-                    "{} · {}",
-                    r.author,
-                    r.preview().chars().take(80).collect::<String>()
-                );
+                message.reply = format!("{} · {}", r.author, r.reply_preview());
                 message.reply_id = r.wire_id.clone();
                 message.reply_to = if group && !r.sender.is_empty() {
                     r.sender.clone()

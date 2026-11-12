@@ -87,3 +87,6 @@ device. This also applies to encrypted reaction payloads and own-device copies.
 Native hybrid-crypto checks cover stale own/contact entries, existing sessions,
 conversation blind trust and preserved blocks. Live user send acceptance remains
 open; no real contact was messaged for verification.
+
+The unrestricted battery-usage reminder is Android-only at the user’s explicit
+request. Desktop has no corresponding Android power-exemption prompt.

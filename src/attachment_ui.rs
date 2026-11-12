@@ -366,7 +366,7 @@ impl Ui {
                         "Cancel download",
                         None,
                         total
-                            .filter(|total| *total > 0)
+                            .filter(|total| *total > 0 && bytes > 0)
                             .map(|total| bytes as f64 / total as f64),
                     ),
                     Some(Status::Ready(_)) => {

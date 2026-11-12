@@ -548,18 +548,24 @@ impl Ui {
             let printable = key
                 .to_unicode()
                 .is_some_and(|character| !character.is_control());
+            let compose_control = matches!(key, gdk::Key::Return | gdk::Key::KP_Enter)
+                || key == gdk::Key::Escape
+                    && (!ui.composer_text().is_empty() || ui.replying.borrow().is_some());
             let focus_is_editable =
                 gtk::prelude::GtkWindowExt::focus(&ui.window).is_some_and(|focus| {
                     let mut current = Some(focus);
                     while let Some(widget) = current {
-                        if widget.is::<gtk::Editable>() || widget.is::<gtk::TextView>() {
+                        if widget.is::<gtk::Editable>()
+                            || widget.is::<gtk::TextView>()
+                            || widget.is::<gtk::Popover>()
+                        {
                             return true;
                         }
                         current = widget.parent();
                     }
                     false
                 });
-            if !printable
+            if !(printable || compose_control)
                 || modifiers.intersects(blocked_modifiers)
                 || focus_is_editable
                 || ui.pages.visible_child_name().as_deref() != Some("chat")
@@ -1845,11 +1851,7 @@ impl Ui {
                 message.set_encryption(mode, fingerprint);
             }
             if let Some(ref r) = reply {
-                message.reply = format!(
-                    "{} · {}",
-                    r.author,
-                    r.preview().chars().take(80).collect::<String>()
-                );
+                message.reply = format!("{} · {}", r.author, r.reply_preview());
                 message.reply_id = if live {
                     r.wire_id.clone()
                 } else {
@@ -2834,11 +2836,7 @@ impl Ui {
                     self.store
                         .resolve_reply(owner, &peer, &message.reply_to, &message.reply_id)
                 {
-                    message.reply = format!(
-                        "{} · {}",
-                        target.author,
-                        target.preview().chars().take(80).collect::<String>()
-                    )
+                    message.reply = format!("{} · {}", target.author, target.reply_preview())
                 } else if message.reply.is_empty() {
                     message.reply = "Original message is not loaded".into()
                 }

@@ -178,3 +178,9 @@ HTTP headers twice, then completed verified decryption on retry in 0.81 s. This
 is evidence of intermittent response timeout; it does not identify the remote
 or network cause. A local TLS fixture verifies the timeout label and no cache
 commit before headers.
+
+While a media request is waiting for its first byte, a known advertised size
+does not make its progress determinate: the ring keeps rotating at the frame
+clock rate until bytes arrive. The reported 19:37 WebP sticker timed out before
+HTTP headers; the user confirmed immediate success with a fresh retry. The
+underlying intermittent network/server cause has not been established.

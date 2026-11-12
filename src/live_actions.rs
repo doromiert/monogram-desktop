@@ -85,7 +85,7 @@ impl Ui {
                     format!(
                         "{} · {}",
                         target.author,
-                        target.preview().chars().take(80).collect::<String>()
+                        target.reply_preview()
                     )
                 };
             }

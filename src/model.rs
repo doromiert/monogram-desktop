@@ -114,6 +114,31 @@ impl Default for Message {
     }
 }
 impl Message {
+    pub fn reply_preview(&self) -> String {
+        let preview = self.preview();
+        let Some((end, _)) = preview.char_indices().nth(80) else {
+            return preview;
+        };
+        let prefix = &preview[..end];
+        let boundary = prefix.rfind(char::is_whitespace);
+        let at_boundary = preview[end..]
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace);
+        let word_start = boundary.map_or(0, |index| {
+            index + preview[index..].chars().next().unwrap().len_utf8()
+        });
+        let word_end = preview[end..]
+            .find(char::is_whitespace)
+            .map_or(preview.len(), |index| end + index);
+        let long_word = preview[word_start..word_end].chars().count() > 80;
+        let keep = if at_boundary || long_word {
+            prefix
+        } else {
+            boundary.map_or(prefix, |index| &preview[..index])
+        };
+        format!("{}…", keep.trim_end())
+    }
     pub fn mode(&self) -> Mode {
         if !self.encrypted {
             Mode::Plain
@@ -596,5 +621,38 @@ impl std::fmt::Debug for UploadDraft {
         f.debug_struct("UploadDraft")
             .field("failed", &self.error.is_some())
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod reply_preview_tests {
+    use super::*;
+    #[test]
+    fn truncation_marks_omission_and_keeps_whole_words_unless_unbreakable() {
+        let short = Message {
+            text: "already complete".into(),
+            ..Default::default()
+        };
+        assert_eq!(short.reply_preview(), "already complete");
+        let source = (0..30)
+            .map(|i| format!("word{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let message = Message {
+            text: source.clone(),
+            ..Default::default()
+        };
+        let preview = message.reply_preview();
+        assert!(preview.ends_with('…'));
+        let kept = preview.trim_end_matches('…');
+        assert!(source.starts_with(kept));
+        assert!(source[kept.len()..].starts_with(' '));
+        let long = Message {
+            text: "é".repeat(120),
+            ..Default::default()
+        };
+        let preview = long.reply_preview();
+        assert_eq!(preview.chars().count(), 81);
+        assert!(preview.ends_with('…'));
     }
 }

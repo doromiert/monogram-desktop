@@ -435,13 +435,7 @@ impl Store {
         let quote = self
             .resolve_reply(account, peer, &reply.to, &reply.id)
             .filter(|target| !target.retracted)
-            .map(|target| {
-                format!(
-                    "{} · {}",
-                    target.author,
-                    target.preview().chars().take(80).collect::<String>()
-                )
-            })
+            .map(|target| format!("{} · {}", target.author, target.reply_preview()))
             .unwrap_or(reply.quote);
         let tx = self.db.unchecked_transaction()?;
         for table in ["messages", "message_bases"] {

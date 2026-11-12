@@ -190,6 +190,32 @@ mod message_bubble_limit_imp {
             let transform =
                 gtk::gsk::Transform::new().translate(&gtk::graphene::Point::new(x as f32, 0.));
             child.allocate(child_width, height, baseline, Some(transform));
+            if let Some(text) = text.as_ref() {
+                if let Some((body_width, rendered_width)) = text.rendered_body_width() {
+                    let outer_inset = (child_width - child.width()).max(0);
+                    let mut needed = rendered_width + (child_width - body_width).max(0);
+                    let mut sibling = child.first_child();
+                    while let Some(widget) = sibling {
+                        sibling = widget.next_sibling();
+                        if widget.is_visible() && widget != *text.upcast_ref::<gtk::Widget>() {
+                            needed = needed.max(
+                                widget.measure(gtk::Orientation::Horizontal, -1).1 + outer_inset,
+                            );
+                        }
+                    }
+                    let tight = needed.clamp(1, child_width);
+                    if tight < child_width {
+                        let x = if self.own.get() {
+                            width.saturating_sub(tight)
+                        } else {
+                            0
+                        };
+                        let transform = gtk::gsk::Transform::new()
+                            .translate(&gtk::graphene::Point::new(x as f32, 0.));
+                        child.allocate(tight, height, baseline, Some(transform));
+                    }
+                }
+            }
             if let Some(text) = text {
                 let weak = text.downgrade();
                 glib::idle_add_local_once(move || {
@@ -313,6 +339,11 @@ pub fn linkify_message_label(
 }
 
 impl MessageText {
+    fn rendered_body_width(&self) -> Option<(i32, i32)> {
+        let body = self.imp().body.borrow();
+        let body = body.as_ref()?;
+        (body.width() > 0).then(|| (body.width(), body.layout().pixel_size().0 + 1))
+    }
     pub fn new(body: &gtk::Label, status: &gtk::Box) -> Self {
         Self::with_links(body, status, Vec::new())
     }
@@ -352,6 +383,7 @@ impl MessageText {
             }
         });
         let overlay = gtk::Overlay::new();
+        overlay.set_hexpand(true);
         overlay.set_child(Some(body));
         status.set_halign(gtk::Align::End);
         status.set_valign(gtk::Align::End);
