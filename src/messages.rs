@@ -872,6 +872,7 @@ impl Ui {
                     });
                     row.append(&b)
                 }
+                MessageText::attach_reaction_row(&bubble, &row);
                 bubble.append(&row)
             }
             if action.is_some() {

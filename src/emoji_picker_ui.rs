@@ -684,14 +684,18 @@ pub(crate) fn refresh_emoji_surfaces(ui: &Rc<Ui>) {
 }
 
 pub(crate) struct ReactionPicker {
-    pub root: gtk::Stack,
-    quick: gtk::Box,
+    pub root: gtk::Box,
+    stack: gtk::Stack,
+    actions: gtk::Revealer,
     _surface: Rc<EmojiSurface>,
 }
 
 impl ReactionPicker {
     pub fn attach_actions(&self, actions: &impl IsA<gtk::Widget>) {
-        self.quick.append(actions);
+        let inset = bx(true, 0);
+        inset.set_margin_top(8);
+        inset.append(actions);
+        self.actions.set_child(Some(&inset));
     }
 }
 
@@ -760,6 +764,9 @@ impl Ui {
         let quick = preferences.quick_reactions(&message.reactions);
         let collapsed = bx(false, 0);
         collapsed.add_css_class("message-menu-panel");
+        collapsed.add_css_class("quick-reactions");
+        collapsed.set_valign(gtk::Align::Start);
+        collapsed.set_halign(gtk::Align::Start);
         for emoji in quick.into_iter().take(7) {
             let button = gtk::Button::with_label(&emoji);
             button.add_css_class("flat");
@@ -787,6 +794,8 @@ impl Ui {
         expanded.add_css_class("expanded-reactions");
         expanded.add_css_class("message-menu-panel");
         expanded.set_width_request(300);
+        expanded.set_valign(gtk::Align::Start);
+        expanded.set_halign(gtk::Align::Start);
         let search = gtk::SearchEntry::builder()
             .placeholder_text("Search")
             .build();
@@ -810,32 +819,43 @@ impl Ui {
         expanded.append(&surface.root);
 
         let stack = gtk::Stack::builder()
-            .transition_type(gtk::StackTransitionType::SlideUpDown)
+            .transition_type(gtk::StackTransitionType::Crossfade)
             .transition_duration(350)
             .interpolate_size(true)
             .vhomogeneous(false)
             .hhomogeneous(false)
             .build();
-        let quick = bx(true, 8);
-        quick.append(&collapsed);
-        stack.add_named(&quick, Some("quick"));
+        stack.set_overflow(gtk::Overflow::Hidden);
+        stack.add_named(&collapsed, Some("quick"));
         stack.add_named(&expanded, Some("all"));
         stack.set_visible_child_name("quick");
+        let actions = gtk::Revealer::builder()
+            .transition_type(gtk::RevealerTransitionType::SlideUp)
+            .transition_duration(350)
+            .reveal_child(true)
+            .build();
+        let root = bx(true, 0);
+        root.set_overflow(gtk::Overflow::Hidden);
+        root.append(&stack);
+        root.append(&actions);
         let picker = Rc::new(ReactionPicker {
-            root: stack,
-            quick,
+            root,
+            stack,
+            actions,
             _surface: surface,
         });
         let weak = Rc::downgrade(&picker);
         expand.connect_clicked(move |_| {
             let Some(picker) = weak.upgrade() else { return };
-            picker.root.set_visible_child_name("all");
+            picker.actions.set_reveal_child(false);
+            picker.stack.set_visible_child_name("all");
             search.grab_focus();
         });
         let weak = Rc::downgrade(&picker);
         collapse.connect_clicked(move |_| {
             if let Some(picker) = weak.upgrade() {
-                picker.root.set_visible_child_name("quick");
+                picker.actions.set_reveal_child(true);
+                picker.stack.set_visible_child_name("quick");
             }
         });
         let keys = gtk::EventControllerKey::new();
@@ -843,9 +863,10 @@ impl Ui {
         keys.connect_key_pressed(move |_, key, _, _| {
             if key == gdk::Key::Escape
                 && let Some(picker) = weak.upgrade()
-                && picker.root.visible_child_name().as_deref() == Some("all")
+                && picker.stack.visible_child_name().as_deref() == Some("all")
             {
-                picker.root.set_visible_child_name("quick");
+                picker.actions.set_reveal_child(true);
+                picker.stack.set_visible_child_name("quick");
                 return glib::Propagation::Stop;
             }
             glib::Propagation::Proceed

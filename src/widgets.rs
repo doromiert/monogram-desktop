@@ -108,7 +108,7 @@ pub fn horizontal_strip(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
 mod message_bubble_limit_imp {
     use super::*;
 
-    fn message_text_descendant(widget: &gtk::Widget) -> Option<super::MessageText> {
+    pub(super) fn message_text_descendant(widget: &gtk::Widget) -> Option<super::MessageText> {
         if let Ok(found) = widget.clone().downcast::<super::MessageText>() {
             return Some(found);
         }
@@ -235,6 +235,9 @@ mod message_text_imp {
         pub links: RefCell<Vec<crate::link_previews::ClickableUrl>>,
         pub rtl: Cell<bool>,
         pub compact: Cell<bool>,
+        pub status_in_reactions: Cell<bool>,
+        pub reaction_row: RefCell<glib::WeakRef<gtk::Box>>,
+        pub reaction_status: RefCell<Option<gtk::Box>>,
     }
     #[glib::object_subclass]
     impl ObjectSubclass for MessageText {
@@ -368,14 +371,18 @@ impl MessageText {
 
     fn render_body(&self) {
         let source = self.imp().source.borrow();
-        let suffix = format!(
-            "{}\u{fffc}",
-            if self.imp().compact.get() || self.imp().rtl.get() {
-                "\n"
-            } else {
-                " "
-            }
-        );
+        let suffix = if self.imp().status_in_reactions.get() {
+            String::new()
+        } else {
+            format!(
+                "{}\u{fffc}",
+                if self.imp().compact.get() || self.imp().rtl.get() {
+                    "\n"
+                } else {
+                    " "
+                }
+            )
+        };
         if let Some(body) = self.imp().body.borrow().as_ref() {
             // Inline emoji shapes can arrive asynchronously; retain them when
             // compact/status reflow rebuilds the native anchor markup.
@@ -421,19 +428,93 @@ impl MessageText {
         }
     }
 
-    fn refresh_compact(&self) {
-        let body = self.imp().body.borrow();
-        let Some(body) = body.as_ref() else {
+    pub fn attach_reaction_row(bubble: &gtk::Box, row: &gtk::Box) {
+        let Some(text) = message_bubble_limit_imp::message_text_descendant(bubble.upcast_ref())
+        else {
             return;
         };
-        let source = self.imp().source.borrow();
+        let slot = bx(false, 0);
+        slot.add_css_class("reaction-status");
+        slot.set_hexpand(true);
+        slot.set_halign(gtk::Align::End);
+        slot.set_valign(gtk::Align::End);
+        slot.set_margin_start(8);
+        slot.set_visible(false);
+        row.append(&slot);
+        text.imp().reaction_row.replace(row.downgrade());
+        text.imp().reaction_status.replace(Some(slot));
+    }
+
+    fn refresh_compact(&self) {
+        let Some(body) = self.imp().body.borrow().as_ref().cloned() else {
+            return;
+        };
+        let Some(status) = self.imp().status.borrow().as_ref().cloned() else {
+            return;
+        };
+        if body.width() <= 0 {
+            return;
+        }
+        let source = self.imp().source.borrow().clone();
         let Some((last, _)) = source.char_indices().last() else {
             return;
         };
-        let layout = body.layout();
-        let (source_line, _) = layout.index_to_line_x(last as i32, false);
-        let (status_line, _) = layout.index_to_line_x(source.len() as i32 + 1, false);
-        self.set_compact(status_line > source_line);
+        // Measure the inline timestamp even while its real widget lives in the reaction row.
+        let probe = body.layout().copy();
+        probe.set_text(&format!("{source} \u{fffc}"));
+        probe.set_width(body.width() * gtk::pango::SCALE);
+        let (_, width, _, _) = status.measure(gtk::Orientation::Horizontal, -1);
+        let (_, height, _, _) = status.measure(gtk::Orientation::Vertical, width);
+        let attrs = body
+            .attributes()
+            .and_then(|attrs| attrs.copy())
+            .unwrap_or_default();
+        let mut shape = gtk::pango::AttrShape::new(
+            &gtk::pango::Rectangle::new(0, 0, 0, 0),
+            &gtk::pango::Rectangle::new(
+                0,
+                (3 - height) * gtk::pango::SCALE,
+                (width + 8) * gtk::pango::SCALE,
+                height * gtk::pango::SCALE,
+            ),
+        );
+        shape.set_start_index(source.len() as u32 + 1);
+        shape.set_end_index(u32::MAX);
+        attrs.change(shape);
+        probe.set_attributes(Some(&attrs));
+        let (source_line, _) = probe.index_to_line_x(last as i32, false);
+        let (status_line, _) = probe.index_to_line_x(source.len() as i32 + 1, false);
+        let wrapped = self.imp().rtl.get() || status_line > source_line;
+        let row = self.imp().reaction_row.borrow().upgrade();
+        let share = wrapped
+            && row.as_ref().is_some_and(|row| {
+                let (_, natural, _, _) = row.measure(gtk::Orientation::Horizontal, -1);
+                let needed = if self.imp().status_in_reactions.get() {
+                    natural
+                } else {
+                    natural + width + 8 + row.spacing()
+                };
+                row.width() >= needed
+            });
+        if self.imp().status_in_reactions.replace(share) != share {
+            if let (Some(slot), Some(overlay)) = (
+                self.imp().reaction_status.borrow().as_ref(),
+                body.parent().and_downcast::<gtk::Overlay>(),
+            ) {
+                if share {
+                    overlay.remove_overlay(&status);
+                    slot.append(&status);
+                    slot.set_visible(true);
+                } else {
+                    slot.remove(&status);
+                    slot.set_visible(false);
+                    overlay.add_overlay(&status);
+                }
+            }
+            self.render_body();
+            self.refresh_shape();
+        }
+        self.set_compact(wrapped && !share);
     }
 }
 

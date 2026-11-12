@@ -1,6 +1,6 @@
 Monogram — current user-reported issues
 Updated: 2026-11-12
-Reported build: efb2375. Current desktop: d1ce7bd (PQ port, media insets, HTTPS diagnostics).
+Reported build: efb2375. Current desktop: 1328d40 (continuous reactions, PQ port, media insets, HTTPS diagnostics).
 Full feature scope and remaining parity gaps: FEATURE_PARITY.md.
 
 FIX IMPLEMENTED, LIVE ACCEPTANCE OPEN — Sending still rejects the user's own fingerprints
@@ -86,3 +86,21 @@ OPEN — Mobile export lifecycle follow-up
   Normal native SAF export to .xmsp and import/re-export by the actual desktop
   library are verified. Process-death restoration during the system file picker
   and large-copy progress/lifecycle behavior remain open.
+
+FIX IMPLEMENTED — Wrapped timestamp should share the reaction row
+  If the timestamp would occupy a separate line and reactions are present,
+  put it at the right end of the reaction row and remove its extra text line.
+  Native rendering/resizing checks pass; timestamps that already fit stay inline.
+
+FIX IMPLEMENTED — Expanded reaction animation is anchored below the compact strip
+  The full quick-actions page was used as the initial animation bounds.
+  Anchor expansion/collapse to the compact reaction strip itself; make the
+  action menu leave separately rather than moving the picker origin downward.
+  Both native child origins now remain (0,0); bounds animate 40 -> 416 -> 40 px.
+
+FIX IMPLEMENTED — Collapsed reaction picker should be a pill
+  The compact reaction strip now uses a fully rounded pill background.
+
+FIX IMPLEMENTED — Expanded reactions should reach the picker bottom
+  Removed the bottom inset from the expanded reaction picker; keep its top
+  and side padding while extending the scrolling viewport to the bottom edge.

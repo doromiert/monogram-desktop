@@ -106,7 +106,8 @@
 .context-menu-row label { margin: 0; }
 .reaction-choice { font-size: 19px; padding: 4px; min-width: 24px; }
 .reaction-expand { margin: 2px; min-width: 28px; min-height: 28px; }
-.expanded-reactions { padding: 8px; }
+.expanded-reactions { padding: 8px 8px 0; }
+.expanded-reactions .emoji-picker-surface { padding-bottom: 0; }
 .emoji-picker-surface { padding: 2px; background: transparent; }
 .emoji-sidebar { margin: 0 10px; background: transparent; }
 .emoji-picker-surface > label { margin: 4px 6px 2px; }
@@ -208,3 +209,5 @@
 .message-bubble.emoji-only { background: transparent; border: none; box-shadow: none; padding: 0; }
 .favorite-dragging { opacity: .45; }
 .favorite-drop-target { outline: 2px solid @accent_color; outline-offset: -2px; }
+
+.message-menu-panel.quick-reactions { border-radius: 999px; }
