@@ -807,9 +807,10 @@ impl ReactionPicker {
             .set_width_request((300. + (width as f64 - 300.) * progress).round() as i32);
         self.canvas
             .set_margin_start((10. + (x - 10.) * progress).round() as i32);
-        self.canvas.set_margin_top((y * progress).round() as i32);
+        self.canvas
+            .set_margin_top((4. + (y - 4.) * progress).round() as i32);
         self.base.set_height_request(
-            (40. + (self.full_height.get() as f64 - 40.) * progress).round() as i32,
+            (48. + (self.full_height.get() as f64 - 48.) * progress).round() as i32,
         );
     }
     fn set_expanded(self: &Rc<Self>, expanded: bool) {
@@ -827,6 +828,13 @@ impl ReactionPicker {
         self.moving.set(true);
         self.is_expanded.set(expanded);
         self.expanded.set_visible(true);
+        self.expanded.set_can_target(expanded);
+        if expanded {
+            self.expanded.set_opacity(1.);
+            self.expanded.set_sensitive(true);
+            self.expanded
+                .update_state(&[gtk::accessible::State::Hidden(false)]);
+        }
         self.detach_quick();
         self.quick.add_css_class("compact");
         self.canvas.set_visible(true);
@@ -870,10 +878,15 @@ impl ReactionPicker {
                     }
                     picker.search.grab_focus();
                 } else {
-                    picker.expanded.set_visible(false);
+                    picker.expanded.set_can_target(false);
+                    picker.expanded.set_opacity(0.);
+                    picker.expanded.set_sensitive(false);
+                    picker
+                        .expanded
+                        .update_state(&[gtk::accessible::State::Hidden(true)]);
                     picker.quick.set_width_request(300);
                     picker.canvas.set_margin_start(10);
-                    picker.canvas.set_margin_top(0);
+                    picker.canvas.set_margin_top(4);
                 }
             }
         });
@@ -992,6 +1005,9 @@ impl Ui {
                 .map_or(emoji.as_str(), |entry| entry.name.as_str());
             let button = surface.emoji_button(emoji, name, preferences.favorites.contains(emoji));
             button.add_css_class("reaction-choice");
+            button.set_size_request(36, 36);
+            button.set_halign(gtk::Align::Center);
+            button.set_valign(gtk::Align::Center);
             choices.append(&button);
             buttons.push((emoji.clone(), button));
         }
@@ -1013,7 +1029,11 @@ impl Ui {
         expanded.add_css_class("expanded-reactions");
         expanded.set_valign(gtk::Align::Start);
         expanded.set_halign(gtk::Align::Fill);
-        expanded.set_visible(false);
+        expanded.set_visible(true);
+        expanded.set_can_target(false);
+        expanded.set_opacity(0.);
+        expanded.set_sensitive(false);
+        expanded.update_state(&[gtk::accessible::State::Hidden(true)]);
         let header = bx(false, 6);
         let search = gtk::SearchEntry::builder()
             .placeholder_text("Search")
@@ -1026,7 +1046,7 @@ impl Ui {
         surface.bind_search(&search, false);
         expanded.append(&surface.root);
         let base = bx(true, 0);
-        base.set_size_request(320, 40);
+        base.set_size_request(320, 48);
         let morph = gtk::Overlay::new();
         morph.add_css_class("reaction-morph");
         morph.set_overflow(gtk::Overflow::Hidden);
@@ -1043,13 +1063,13 @@ impl Ui {
         canvas.append(&quick);
         quick.set_width_request(300);
         canvas.set_margin_start(10);
+        canvas.set_margin_top(4);
         let arrow = icon_button("go-down-symbolic", "Show all reactions");
         arrow.add_css_class("reaction-expand");
         arrow.set_halign(gtk::Align::End);
-        arrow.set_valign(gtk::Align::Start);
+        arrow.set_valign(gtk::Align::Center);
         arrow.set_size_request(36, 36);
-        arrow.set_margin_end(2);
-        arrow.set_margin_top(2);
+        arrow.set_margin_end(4);
         morph.add_overlay(&arrow);
         morph.set_measure_overlay(&arrow, false);
         let actions = gtk::Revealer::builder()

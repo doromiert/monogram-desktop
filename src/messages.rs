@@ -36,6 +36,29 @@ struct RenderedRow {
     heading: gtk::Box,
     avatar: Option<adw::Avatar>,
 }
+fn message_focus(root: &gtk::Widget, emoji: Option<&str>) -> Option<gtk::Widget> {
+    if let Some(emoji) = emoji {
+        if root.has_css_class("reaction")
+            && root
+                .first_child()
+                .and_then(|child| child.first_child())
+                .and_downcast::<gtk::Label>()
+                .is_some_and(|label| label.text() == emoji)
+        {
+            return Some(root.clone());
+        }
+    } else if root.has_css_class("message-text") && root.is_focusable() {
+        return Some(root.clone());
+    }
+    let mut child = root.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        if let Some(target) = message_focus(&widget, emoji) {
+            return Some(target);
+        }
+    }
+    None
+}
 fn same_content(a: &Message, b: &Message) -> bool {
     a.text == b.text
         && a.kind == b.kind
@@ -478,10 +501,22 @@ impl Ui {
             }
             created += 1;
             let row_started = std::time::Instant::now();
-            if let Some(displaced) = rendered.rows.remove(&m.id)
-                && displaced.row.parent().as_ref() == Some(self.timeline.upcast_ref())
-            {
-                self.timeline.remove(&displaced.row);
+            let displaced = rendered.rows.remove(&m.id);
+            let focused = gtk::prelude::GtkWindowExt::focus(&self.window).filter(|focus| {
+                displaced
+                    .as_ref()
+                    .is_some_and(|old| focus == &old.row || focus.is_ancestor(&old.row))
+            });
+            let focused_emoji = focused
+                .as_ref()
+                .filter(|focus| focus.has_css_class("reaction"))
+                .and_then(|focus| focus.first_child())
+                .and_then(|child| child.first_child())
+                .and_downcast::<gtk::Label>()
+                .map(|label| label.text().to_string());
+            if focused.is_some() {
+                // Detaching a focused row otherwise focuses the date separator and scrolls to it.
+                gtk::prelude::GtkWindowExt::set_focus(&self.window, None::<&gtk::Widget>);
             }
             let action = {
                 let state = self.state.borrow();
@@ -850,8 +885,9 @@ impl Ui {
                 row.add_css_class("message-reactions");
                 row.set_margin_top(if media && !m.text.is_empty() { 3 } else { 8 });
                 if media {
-                    row.set_margin_start(11);
-                    row.set_margin_end(11);
+                    let horizontal = if m.text.is_empty() { 5 } else { 11 };
+                    row.set_margin_start(horizontal);
+                    row.set_margin_end(horizontal);
                     row.set_margin_bottom(5);
                 }
                 for reaction in &m.reactions {
@@ -895,35 +931,40 @@ impl Ui {
             self.bubbles
                 .borrow_mut()
                 .insert(m.id.clone(), bubble.clone().upcast());
-            let row = gtk::ListBoxRow::builder()
-                .child(&outer)
-                .activatable(false)
-                .valign(gtk::Align::Start)
-                .vexpand(false)
-                .build();
+            let reused = displaced.is_some();
+            let row = displaced.map(|old| old.row).unwrap_or_else(|| {
+                gtk::ListBoxRow::builder()
+                    .activatable(false)
+                    .valign(gtk::Align::Start)
+                    .vexpand(false)
+                    .build()
+            });
+            row.set_child(Some(&outer));
             row.add_css_class("message-row");
             row.set_widget_name(&m.id);
             if self.selected.borrow().contains(&m.id) {
                 row.add_css_class("selected-message")
             }
-            let click = gtk::GestureClick::new();
-            click.set_button(1);
-            click.set_propagation_phase(gtk::PropagationPhase::Capture);
-            let id = m.id.clone();
-            let weak = Rc::downgrade(self);
-            click.connect_pressed(move |g, _, _, _| {
-                if let Some(ui) = weak.upgrade() {
-                    let flags = g.current_event_state();
-                    if flags
-                        .intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK)
-                        || !ui.selected.borrow().is_empty()
-                    {
-                        g.set_state(gtk::EventSequenceState::Claimed);
-                        ui.select_message(&id, flags.contains(gdk::ModifierType::SHIFT_MASK));
+            if !reused {
+                let click = gtk::GestureClick::new();
+                click.set_button(1);
+                click.set_propagation_phase(gtk::PropagationPhase::Capture);
+                let id = m.id.clone();
+                let weak = Rc::downgrade(self);
+                click.connect_pressed(move |g, _, _, _| {
+                    if let Some(ui) = weak.upgrade() {
+                        let flags = g.current_event_state();
+                        if flags.intersects(
+                            gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK,
+                        ) || !ui.selected.borrow().is_empty()
+                        {
+                            g.set_state(gtk::EventSequenceState::Claimed);
+                            ui.select_message(&id, flags.contains(gdk::ModifierType::SHIFT_MASK));
+                        }
                     }
-                }
-            });
-            row.add_controller(click);
+                });
+                row.add_controller(click);
+            }
             let right = gtk::GestureClick::new();
             right.set_button(3);
             right.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -946,6 +987,12 @@ impl Ui {
                 avatar,
             };
             cluster_style(&entry, previous, next, group);
+            if focused.is_some() {
+                message_focus(entry.bubble.upcast_ref(), focused_emoji.as_deref())
+                    .or_else(|| message_focus(entry.bubble.upcast_ref(), None))
+                    .unwrap_or_else(|| row.clone().upcast())
+                    .grab_focus();
+            }
             rendered.rows.insert(m.id.clone(), entry);
             order.push(row);
             if row_started.elapsed() >= Duration::from_millis(50) {
@@ -1685,3 +1732,7 @@ mod action_command_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/reaction_scroll_native.rs"]
+mod reaction_scroll_native;

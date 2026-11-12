@@ -558,6 +558,7 @@ impl Ui {
                         if widget.is::<gtk::Editable>()
                             || widget.is::<gtk::TextView>()
                             || widget.is::<gtk::Popover>()
+                            || key == gdk::Key::space && widget.has_css_class("reaction")
                         {
                             return true;
                         }

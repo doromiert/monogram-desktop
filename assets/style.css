@@ -104,8 +104,7 @@
 .message-menu-panel { background: @popover_bg_color; border-radius: 12px; padding: 4px; box-shadow: 0 2px 8px alpha(black,.2); }
 .context-menu-row { min-height: 34px; padding: 5px 10px; border-radius: 8px; }
 .context-menu-row label { margin: 0; }
-.reaction-choice { font-size: 19px; padding: 4px; min-width: 24px; }
-.reaction-expand { margin: 2px; min-width: 28px; min-height: 28px; }
+.reaction-expand { padding: 0; min-width: 32px; min-height: 32px; border-radius: 999px; }
 .expanded-reactions { padding: 8px 8px 0; }
 .expanded-reactions .emoji-picker-surface { padding-bottom: 0; }
 .emoji-picker-surface { padding: 2px; background: transparent; }
@@ -203,6 +202,7 @@
 .message-bubble.has-reactions { padding: 8px; }
 .message-bubble.media-bubble.has-reactions { padding: 2px; }
 .picker-section-list .emoji-picker-item { min-width: 0; min-height: 0; padding: 2px; }
+.shared-reaction-bundle .reaction-choice { font-size: 19px; padding: 2px; min-width: 32px; min-height: 32px; border-radius: 999px; }
 
 .message-menu-panel .picker-menu-row { min-height: 20px; padding: 4px 8px; }
 .sticker-sidebar, .gif-library-page { padding: 2px; }
