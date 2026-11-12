@@ -109,7 +109,7 @@ fn cluster_style(row: &RenderedRow, previous: bool, next: bool, group: bool) {
         avatar.set_visible(!next);
     }
 }
-// XEP-0245 changes presentation only; the original body remains copyable and encrypted as sent.
+// Action commands change presentation only; original bodies remain copyable and encrypted as sent.
 fn action_body(message: &Message) -> Option<&str> {
     if message.kind != "text"
         || message.unavailable
@@ -119,7 +119,20 @@ fn action_body(message: &Message) -> Option<&str> {
     {
         return None;
     }
-    message.text.strip_prefix("/me ")
+    ["/me ", "/you ", "/nar "]
+        .iter()
+        .find_map(|prefix| message.text.strip_prefix(prefix))
+}
+
+fn action_presentation(message: &Message, chat: &Chat, owner: &str) -> Option<String> {
+    let body = action_body(message)?;
+    Some(if message.text.starts_with("/nar ") {
+        body.to_owned()
+    } else if message.text.starts_with("/you ") {
+        format!("* you {body}")
+    } else {
+        format!("* {} {body}", action_actor(message, chat, owner))
+    })
 }
 
 fn action_actor(message: &Message, chat: &Chat, owner: &str) -> String {
@@ -470,13 +483,10 @@ impl Ui {
             {
                 self.timeline.remove(&displaced.row);
             }
-            let action = action_body(m).map(|body| {
+            let action = {
                 let state = self.state.borrow();
-                format!(
-                    "* {} {body}",
-                    action_actor(m, state.current(), &state.account)
-                )
-            });
+                action_presentation(m, state.current(), &state.account)
+            };
             let outer = bx(false, 8);
             outer.set_valign(gtk::Align::Start);
             outer.set_vexpand(false);
@@ -1617,5 +1627,61 @@ impl Ui {
         });
         actions.append(&save);
         bubble.append(&actions);
+    }
+}
+
+#[cfg(test)]
+mod action_command_tests {
+    use super::*;
+
+    #[test]
+    fn action_commands_preserve_body_and_match_exact_prefixes() {
+        let chat = Chat {
+            name: "Alex".into(),
+            ..Default::default()
+        };
+        for own in [false, true] {
+            for (body, expected) in [
+                (
+                    "/me waves",
+                    if own { "* Sam waves" } else { "* Alex waves" },
+                ),
+                ("/you waves 👋", "* you waves 👋"),
+                (
+                    "/nar The room falls silent.\nThen a bell rings.",
+                    "The room falls silent.\nThen a bell rings.",
+                ),
+            ] {
+                let mut message = Message {
+                    text: body.into(),
+                    own,
+                    ..Default::default()
+                };
+                assert_eq!(
+                    action_presentation(&message, &chat, "Sam@example.invalid").as_deref(),
+                    Some(expected)
+                );
+                assert_eq!(message.text, body);
+                message.unavailable = true;
+                assert!(action_presentation(&message, &chat, "Sam").is_none());
+            }
+        }
+        for body in [
+            "/you",
+            "/nar",
+            "/YOU waves",
+            " /nar text",
+            "/narrator text",
+            "/you\twaves",
+            "hello /nar text",
+        ] {
+            assert!(
+                action_body(&Message {
+                    text: body.into(),
+                    ..Default::default()
+                })
+                .is_none()
+            );
+        }
     }
 }

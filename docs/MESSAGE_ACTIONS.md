@@ -97,3 +97,13 @@ width. The timestamp remains inline when it already fits. A native Pango probe
 checks the prospective inline layout even while the status widget is in the
 reaction row; removing its anchor also removes the otherwise empty time line.
 Native text/reaction rendering and narrow/restore resize checks pass.
+
+Action text also supports `/you ` (literal `* you …`) and `/nar ` (narration
+without an actor prefix), using the same cell as `/me `. Raw bodies remain
+unchanged. See [the local presentation proposal](PROPOSED_ACTION_COMMANDS.md).
+
+The focused action regression checks pass for `/you` and `/nar`; mobile tests
+verify the production MessageObject path across plaintext/Legacy/OMEMO 2/PQ
+metadata in both directions. Desktop native acceptance verifies five centered
+action pills, including unchanged `/me`, incoming/outgoing `/you` and narration.
+No real contact was messaged for these presentation checks.

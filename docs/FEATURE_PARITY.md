@@ -90,3 +90,8 @@ open; no real contact was messaged for verification.
 
 The unrestricted battery-usage reminder is Android-only at the user’s explicit
 request. Desktop has no corresponding Android power-exemption prompt.
+
+Both clients render exact leading `/you ` and `/nar ` as action messages beside
+`/me `, preserving their original bodies and ordinary encryption/persistence.
+`/you ` displays literal `you`; `/nar ` displays only its suffix. These are local
+presentation extensions, documented in [the proposal](PROPOSED_ACTION_COMMANDS.md).
