@@ -1,0 +1,46 @@
+{
+  "emoji_tabs_faves.webp": {
+    "source": "../mobile/TMessagesProj/src/main/res/drawable-xxhdpi/emoji_tabs_faves.webp",
+    "sha256": "5df82c26a9886f0ca27a2ae79d22ab90058d73c86b340593ecc145fed9ef46b9"
+  },
+  "msg_emoji_recent.webp": {
+    "source": "../mobile/TMessagesProj/src/main/res/drawable-xxhdpi/msg_emoji_recent.webp",
+    "sha256": "4fc993640cfa0258c1888cea51a33aa5e7285bcaf51f7575210e436120341de5"
+  },
+  "msg_emoji_smiles.webp": {
+    "source": "../mobile/TMessagesProj/src/main/res/drawable-xxhdpi/msg_emoji_smiles.webp",
+    "sha256": "0658368e907051c7be66e3ed7b8a1f7ceb3d8834a2589b671db482d67dfad647"
+  },
+  "msg_emoji_cat.webp": {
+    "source": "../mobile/TMessagesProj/src/main/res/drawable-xxhdpi/msg_emoji_cat.webp",
+    "sha256": "ab81ef489a51c53acdb6b8aa399b353c54aee7a9b6a398860486103e9165cd42"
+  },
+  "msg_emoji_food.webp": {
+    "source": "../mobile/TMessagesProj/src/main/res/drawable-xxhdpi/msg_emoji_food.webp",
+    "sha256": "2409d190209ce32a198d9ad8dfb5133c80916ba751c6442b6883fa99c6503917"
+  },
+  "msg_emoji_activities.webp": {
+    "source": "../mobile/TMessagesProj/src/main/res/drawable-xxhdpi/msg_emoji_activities.webp",
+    "sha256": "4dcdde59c76d1fed69de2c94a72130496f240da46c19dc813394bb04ba6e2c2e"
+  },
+  "msg_emoji_travel.webp": {
+    "source": "../mobile/TMessagesProj/src/main/res/drawable-xxhdpi/msg_emoji_travel.webp",
+    "sha256": "11b146ee43f0c215f52e603675a487318559dff5b054df5c61bed06982bd6db3"
+  },
+  "msg_emoji_objects.webp": {
+    "source": "../mobile/TMessagesProj/src/main/res/drawable-xxhdpi/msg_emoji_objects.webp",
+    "sha256": "5558c3c7f31d8a668244293f07f90882d71840cc39bd6c801527893adeb6a836"
+  },
+  "msg_emoji_other.webp": {
+    "source": "../mobile/TMessagesProj/src/main/res/drawable-xxhdpi/msg_emoji_other.webp",
+    "sha256": "c2e23951dd4f8145885de3b049b5d48d3f3e9909047b72d407b83f36ba9f220c"
+  },
+  "msg_emoji_flags.webp": {
+    "source": "../mobile/TMessagesProj/src/main/res/drawable-xxhdpi/msg_emoji_flags.webp",
+    "sha256": "d7bd9cc791b99d66a86acc554ccf7eb8fa87c8aba59cc878c0a23d4b58538f20"
+  },
+  "smiles_tab_settings.webp": {
+    "source": "../mobile/TMessagesProj/src/main/res/drawable-xxhdpi/smiles_tab_settings.webp",
+    "sha256": "abf3581fe43bb1c4b6dd2dc95e7cd877565835aa7405cd9254649a172496ea5f"
+  }
+}
