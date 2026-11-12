@@ -752,6 +752,12 @@ pub enum Command {
         peer: String,
         ticket: crate::rooms::manage::Ticket,
     },
+    RoomJoinFinished {
+        epoch: u64,
+        peer: String,
+        ticket: crate::rooms::manage::Ticket,
+        result: Result<(), crate::rooms::Error>,
+    },
     ManagedCancel {
         epoch: u64,
         peer: String,
@@ -1109,6 +1115,11 @@ impl Session {
                             emit(BackendEvent::RoomPresence(rooms.status(&peer)));let _=reply.send(result);
                         },
                         Some(Command::RoomOperationFinished{peer,ticket})=>room_jobs.finished(&peer,&ticket),
+                        Some(Command::RoomJoinFinished{epoch,peer,ticket,result})=>{
+                            if online&&epoch==room_epoch {
+                                if let Some(presence)=room_jobs.join_finished(&mut rooms,&peer,&ticket,result){emit(BackendEvent::RoomPresence(presence));}
+                            }
+                        },
                         Some(Command::ManagedCancel{epoch,peer,ticket,leave})=>{
                             if epoch==room_epoch&&room_jobs.valid(&peer,&ticket){
                                 let owned=room_jobs.owned_join(&peer,&ticket);room_jobs.cancel(&peer);
@@ -1166,7 +1177,7 @@ impl Session {
                                     for peer in rooms.autojoin(){ let _=network.send(Command::JoinRoom{peer,nick:None}); }
                                 }
                                 Err(error)=>{
-                                    emit(BackendEvent::RoomError(error.to_string()));emit(BackendEvent::RoomBookmarks(rooms.cached_choices()));
+                                    eprintln!("Background room bookmark synchronization: {error}");emit(BackendEvent::RoomBookmarks(rooms.cached_choices()));
                                     for peer in rooms.autojoin(){let _=network.send(Command::JoinRoom{peer,nick:None});}
                                 },
                             }
@@ -1229,16 +1240,15 @@ impl Session {
                             let _=reply.send(allowed && send(&mut client,xml).await);
                         },
                         Some(Command::JoinRoom{peer,nick})=>{
-                            if !online {emit(BackendEvent::RoomError("Connect before joining a room".into()));continue}
+                            if !online {continue}
                             if rooms.is_joined(&peer)||rooms.joining(&peer){continue}
                             let ticket=match room_jobs.begin(&peer){Ok(ticket)=>ticket,Err(_)=>continue};
                             let imported=rooms.imported_password(&peer);
                             let nick=nick.unwrap_or_else(||rooms.preferred_nick(&peer));
-                            let (network,owner,epoch,events)=(network.clone(),owner.clone(),room_epoch,events.clone());
+                            let (network,owner,epoch)=(network.clone(),owner.clone(),room_epoch);
                             tokio::spawn(async move {
                                 let result=crate::rooms::manage::join(&network,&owner,epoch,&peer,&nick,None,imported,&ticket).await;
-                                let _=network.send(Command::RoomOperationFinished{peer,ticket});
-                                if let Err(error)=result{let _=events.send((generation,owner,BackendEvent::RoomError(error.to_string())));}
+                                let _=network.send(Command::RoomJoinFinished{epoch,peer,ticket,result:result.map(|_|())});
                             });
                         },
                         Some(Command::Avatar { peer, source, reply })=>{

@@ -86,6 +86,19 @@ impl Pending {
             self.operations.remove(room);
         }
     }
+    pub fn join_finished(
+        &mut self,
+        rooms: &mut Rooms,
+        room: &str,
+        ticket: &Ticket,
+        result: Result<()>,
+    ) -> Option<super::Presence> {
+        if !self.valid(room, ticket) {
+            return None;
+        }
+        self.finished(room, ticket);
+        result.err().map(|error| rooms.join_failed(room, &error))
+    }
     pub fn owned_join(&self, room: &str, ticket: &Ticket) -> Option<u64> {
         self.operations
             .get(room)
@@ -154,6 +167,7 @@ impl Pending {
                     if let Ok(stanza) = rooms.leave(&room) {
                         cleanup.push(stanza)
                     }
+                    rooms.join_failed(&room, &Error::Request(iq::Error::Timeout));
                 }
                 let _ = job.reply.send(Err(Error::Request(iq::Error::Timeout)));
                 self.cancel(&room);
@@ -639,6 +653,56 @@ pub async fn invite(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn restored_join_failure_stays_in_its_room_and_stale_work_is_ignored() {
+        let room = "group@conference.example.invalid";
+        let mut rooms = Rooms::new("owner@example.invalid".into());
+        let mut jobs = Pending::default();
+        let ticket = jobs.begin(room).unwrap();
+        let presence = jobs
+            .join_finished(
+                &mut rooms,
+                room,
+                &ticket,
+                Err(Error::Request(iq::Error::Timeout)),
+            )
+            .unwrap();
+        assert_eq!(presence.jid, room);
+        assert!(!presence.joined && !presence.can_send);
+        assert!(presence.detail.contains("did not answer"));
+        assert_eq!(rooms.status(room).detail, presence.detail);
+        assert_eq!(
+            rooms.status("other@conference.example.invalid").detail,
+            "Not joined"
+        );
+        assert!(
+            jobs.join_finished(&mut rooms, room, &ticket, Err(Error::Forbidden))
+                .is_none()
+        );
+        let stale = jobs.begin(room).unwrap();
+        jobs.disconnect();
+        let current = jobs.begin(room).unwrap();
+        assert!(
+            jobs.join_finished(&mut rooms, room, &stale, Err(Error::Forbidden))
+                .is_none()
+        );
+        assert!(jobs.valid(room, &current));
+        assert_eq!(rooms.status(room).detail, presence.detail);
+        assert!(
+            jobs.join_finished(&mut rooms, room, &current, Ok(()))
+                .is_none()
+        );
+        assert!(!jobs.valid(room, &current));
+        let current = jobs.begin(room).unwrap();
+        rooms.join_with(room, Some("Own"), None, 0).unwrap();
+        let (reply, _received) = oneshot::channel();
+        jobs.insert(room.into(), rooms.join_id(room).unwrap(), reply);
+        jobs.joins.get_mut(room).unwrap().started = Instant::now() - Duration::from_secs(21);
+        assert_eq!(jobs.expire(&mut rooms).len(), 1);
+        assert!(!rooms.joining(room));
+        assert_eq!(rooms.status(room).detail, presence.detail);
+        assert!(!jobs.valid(room, &current));
+    }
     #[test]
     fn private_form_join_ownership_and_local_choice_lifecycle() {
         let room = "group@conference.example.invalid";

@@ -262,6 +262,20 @@ impl Rooms {
             detail: detail.into(),
         }
     }
+    pub fn join_failed(&mut self, jid: &str, error: &Error) -> Presence {
+        if !self.is_joined(jid)
+            && !matches!(self.membership.get(jid), Some(Membership::Failed(_)) if error == &Error::Forbidden)
+        {
+            self.identities.remove(jid);
+            self.membership
+                .insert(jid.into(), Membership::Failed(error.to_string()));
+        }
+        let mut presence = self.status(jid);
+        if presence.joined {
+            presence.detail = error.to_string();
+        }
+        presence
+    }
     pub fn expire(&mut self) -> Vec<Presence> {
         let expired: Vec<_> = self.membership.iter().filter_map(|(jid, membership)| {
             matches!(membership, Membership::Joining { started, .. } if started.elapsed() >= Duration::from_secs(20)).then_some(jid.clone())
