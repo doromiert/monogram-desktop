@@ -2442,6 +2442,9 @@ impl Ui {
                         self.render_messages(false);
                     }
                 }
+                // The scoped update above is already durable; do not rewrite the loaded history.
+                self.queue_chat_refresh();
+                return;
             }
             BackendEvent::PreviewSpoilers { peer, id, context } => {
                 if self
@@ -2467,6 +2470,9 @@ impl Ui {
                         self.render_messages(false);
                     }
                 }
+                // The scoped update above is already durable; do not rewrite the loaded history.
+                self.queue_chat_refresh();
+                return;
             }
             BackendEvent::CryptoAliases {
                 legacy_sticker,
@@ -2501,6 +2507,9 @@ impl Ui {
                         self.render_messages(false);
                     }
                 }
+                // The scoped update above is already durable; do not rewrite the loaded history.
+                self.queue_chat_refresh();
+                return;
             }
             BackendEvent::EncryptedMessage {
                 peer,
