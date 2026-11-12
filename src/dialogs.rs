@@ -1583,6 +1583,32 @@ impl Ui {
         general.add(&privacy);
         if !owner.is_empty() {
             general.add(&self.link_preview_preferences());
+            let gifs = adw::PreferencesGroup::builder().title("GIFs").build();
+            let row = adw::ActionRow::builder()
+                .title("GIF search")
+                .subtitle("Add, replace or remove this account’s GIPHY API key")
+                .activatable(true)
+                .build();
+            row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+            let weak = Rc::downgrade(self);
+            let parent = dialog.downgrade();
+            let account = owner.clone();
+            let generation = self.generation.get();
+            row.connect_activated(move |_| {
+                if let (Some(ui), Some(parent)) = (weak.upgrade(), parent.upgrade()) {
+                    if ui.generation.get() != generation || ui.state.borrow().account != account {
+                        return;
+                    }
+                    let page = ui.gif_page.borrow().clone();
+                    if let Some(page) = page {
+                        page.settings(&parent);
+                    } else {
+                        ui.notice("GIF library is still loading. Try again shortly.");
+                    }
+                }
+            });
+            gifs.add(&row);
+            general.add(&gifs);
         }
         dialog.add(&general);
         let account = adw::PreferencesPage::builder()

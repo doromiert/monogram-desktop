@@ -50,8 +50,8 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Cancelled => "GIF request cancelled.",
-            Self::KeyRequired => "Add a GIPHY API key in Settings → GIF search.",
-            Self::KeyRejected => "GIPHY rejected the API key. Replace it in Settings → GIF search.",
+            Self::KeyRequired => "Add a GIPHY API key to search online.",
+            Self::KeyRejected => "GIPHY rejected the API key. Add a replacement key.",
             Self::RateLimited => "GIPHY's request limit was reached. Try again later.",
             Self::InvalidKey => "Enter a valid GIPHY API key.",
             Self::InvalidQuery => "GIF searches can contain up to 50 characters.",
@@ -316,6 +316,33 @@ impl Library {
     }
     pub fn account(&self) -> &str {
         &self.owner.account
+    }
+    #[cfg(test)]
+    pub(crate) async fn fixture_cached_page(
+        &self,
+        key: &str,
+        query: &str,
+        offset: u32,
+        page: Page,
+    ) {
+        let owner = self.owner.clone();
+        let id = hash(format!("{key}\n{query}\n{offset}").as_bytes());
+        worker(move || {
+            let _gate = owner.gate.lock().unwrap();
+            open_db(&owner)?
+                .execute(
+                    "INSERT OR REPLACE INTO pages VALUES(?,?,?)",
+                    params![
+                        id,
+                        serde_json::to_string(&page).unwrap(),
+                        seconds() + CACHE_SECONDS
+                    ],
+                )
+                .map_err(|_| Error::Storage)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     }
     /// Account lifecycle only; close individual views with Request::cancel instead.
     pub fn cancel(&self) {

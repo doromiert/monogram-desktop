@@ -211,16 +211,21 @@ fn install_lottie(
     }
 }
 
+#[path = "gif_grid.rs"]
+mod gif_grid;
+
 pub(crate) struct GifLibraryPage {
     pub(crate) root: gtk::Box,
     ui: std::rc::Weak<Ui>,
     library: crate::gifs::Library,
     status: gtk::Label,
-    grid: gtk::FlowBox,
+    grid: gif_grid::Mosaic,
     scroll: gtk::ScrolledWindow,
     items: RefCell<Vec<crate::gifs::GifItem>>,
-    rendered: Cell<usize>,
-    more: gtk::Button,
+    add_key: gtk::Button,
+    retry: gtk::Button,
+    configured: Cell<bool>,
+    failed: Cell<bool>,
     request: RefCell<Option<crate::gifs::Request>>,
     request_serial: Cell<u64>,
     query: RefCell<String>,
@@ -241,33 +246,29 @@ impl GifLibraryPage {
         root.set_margin_end(10);
         root.set_margin_bottom(10);
         root.set_vexpand(true);
-        let settings = gtk::Button::builder()
-            .icon_name("emblem-system-symbolic")
-            .tooltip_text("GIF search settings")
-            .halign(gtk::Align::End)
+        let feedback = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let status = gtk::Label::builder()
+            .xalign(0.)
+            .wrap(true)
+            .hexpand(true)
             .build();
-        settings.add_css_class("flat");
-        root.append(&settings);
-        let status = gtk::Label::builder().xalign(0.).wrap(true).build();
         status.add_css_class("dim-label");
-        root.append(&status);
-        let grid = gtk::FlowBox::builder()
-            .selection_mode(gtk::SelectionMode::None)
-            .min_children_per_line(2)
-            .max_children_per_line(2)
-            .homogeneous(true)
-            .column_spacing(6)
-            .row_spacing(6)
-            .build();
+        feedback.append(&status);
+        let add_key = gtk::Button::with_label("Add key");
+        add_key.set_visible(false);
+        feedback.append(&add_key);
+        let retry = gtk::Button::with_label("Retry");
+        retry.set_visible(false);
+        feedback.append(&retry);
+        root.append(&feedback);
+        let grid = gif_grid::Mosaic::new(|_| gtk::Box::new(gtk::Orientation::Vertical, 0).upcast());
         grid.add_css_class("gif-library-grid");
         let scroll = gtk::ScrolledWindow::builder()
             .child(&grid)
+            .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
             .build();
         root.append(&scroll);
-        let more = gtk::Button::with_label("Load More");
-        more.set_visible(false);
-        root.append(&more);
         let page = Rc::new(Self {
             root,
             ui,
@@ -276,61 +277,61 @@ impl GifLibraryPage {
             grid,
             scroll: scroll.clone(),
             items: RefCell::new(Vec::new()),
-            rendered: Cell::new(0),
-            more,
+            add_key,
+            retry,
+            configured: Cell::new(false),
+            failed: Cell::new(false),
             request: RefCell::new(None),
             request_serial: Cell::new(0),
             query: RefCell::new(String::new()),
             offset: RefCell::new(None),
             on_send: Box::new(on_send),
         });
-        {
-            let weak = Rc::downgrade(&page);
-            scroll
-                .vadjustment()
-                .connect_value_changed(move |adjustment| {
-                    if adjustment.value() + adjustment.page_size() + 180. >= adjustment.upper() {
-                        if let Some(page) = weak.upgrade() {
-                            page.render_next_gifs();
-                        }
-                    }
-                });
-        }
-        {
-            let weak = Rc::downgrade(&page);
-            scroll.vadjustment().connect_changed(move |adjustment| {
-                if adjustment.upper() <= adjustment.page_size() + 180.
-                    && let Some(page) = weak.upgrade()
-                {
-                    page.render_next_gifs();
-                }
-            });
-        }
-        {
-            let weak = Rc::downgrade(&page);
-            scroll.connect_map(move |_| {
-                if let Some(page) = weak.upgrade() {
-                    page.render_next_gifs();
-                }
-            });
-        }
-        {
-            let weak = Rc::downgrade(&page);
-            page.more.connect_clicked(move |_| {
-                if let Some(page) = weak.upgrade() {
-                    page.load(true);
-                }
-            });
-        }
-        {
-            let weak = Rc::downgrade(&page);
-            let parent = parent.downgrade();
-            settings.connect_clicked(move |_| {
-                if let (Some(page), Some(parent)) = (weak.upgrade(), parent.upgrade()) {
-                    page.settings(&parent);
-                }
-            });
-        }
+        let weak = Rc::downgrade(&page);
+        page.grid.set_factory(move |index| {
+            let Some(page) = weak.upgrade() else {
+                return gtk::Box::new(gtk::Orientation::Vertical, 0).upcast();
+            };
+            let item = page.items.borrow().get(index).cloned();
+            item.map(|item| page.gif_tile(item))
+                .unwrap_or_else(|| gtk::Box::new(gtk::Orientation::Vertical, 0).upcast())
+        });
+        let weak = Rc::downgrade(&page);
+        scroll.vadjustment().connect_value_changed(move |_| {
+            if let Some(page) = weak.upgrade() {
+                page.grid.refresh();
+                page.maybe_load_more();
+            }
+        });
+        let weak = Rc::downgrade(&page);
+        scroll.vadjustment().connect_changed(move |_| {
+            if let Some(page) = weak.upgrade() {
+                page.grid.refresh();
+                page.maybe_load_more();
+            }
+        });
+        let weak = Rc::downgrade(&page);
+        scroll.connect_map(move |_| {
+            if let Some(page) = weak.upgrade() {
+                page.grid.refresh();
+                page.maybe_load_more();
+            }
+        });
+        let weak = Rc::downgrade(&page);
+        let parent = parent.downgrade();
+        page.add_key.connect_clicked(move |_| {
+            if let (Some(page), Some(parent)) = (weak.upgrade(), parent.upgrade()) {
+                page.settings(&parent);
+            }
+        });
+        let weak = Rc::downgrade(&page);
+        page.retry.connect_clicked(move |_| {
+            if let Some(page) = weak.upgrade() {
+                page.failed.set(false);
+                let append = page.offset.borrow().is_some();
+                page.load(append);
+            }
+        });
         page.show_saved();
         page
     }
@@ -338,61 +339,107 @@ impl GifLibraryPage {
     pub(crate) fn bind_search(self: &Rc<Self>, search: &gtk::SearchEntry) {
         let weak = Rc::downgrade(self);
         search.connect_search_changed(move |search| {
-            let Some(page) = weak.upgrade() else {
+            let Some(page) = weak.upgrade().filter(|page| page.root.is_mapped()) else {
                 return;
             };
-            if !page.root.is_mapped() {
-                return;
-            }
             page.query.replace(search.text().trim().to_string());
             page.offset.replace(None);
-            page.load(false);
+            page.failed.set(false);
+            if page.configured.get() {
+                page.load(false);
+            } else {
+                page.show_saved();
+            }
         });
     }
 
     fn show_saved(self: &Rc<Self>) {
+        if let Some(request) = self.request.take() {
+            request.cancel();
+        }
+        let serial = self.request_serial.get().wrapping_add(1);
+        self.request_serial.set(serial);
         self.status.set_label("Loading saved GIFs…");
         let library = self.library.clone();
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let result = library.snapshot().await;
-            let Some(page) = weak.upgrade() else {
+            let (saved, configured) =
+                futures_util::future::join(library.snapshot(), library.configured()).await;
+            let Some(page) = weak
+                .upgrade()
+                .filter(|page| page.request_serial.get() == serial)
+            else {
                 return;
             };
-            match result {
+            let has_key = matches!(configured, Ok(true));
+            page.configured.set(has_key);
+            page.add_key.set_visible(!has_key);
+            match saved {
                 Ok(snapshot) => {
+                    let query = page.query.borrow().to_lowercase();
                     let mut items = snapshot.favorites;
-                    let saved = items
-                        .iter()
-                        .map(|item| item.id.clone())
-                        .collect::<std::collections::HashSet<_>>();
+                    let ids: std::collections::HashSet<_> =
+                        items.iter().map(|item| item.id.clone()).collect();
                     items.extend(
                         snapshot
                             .recents
                             .into_iter()
-                            .filter(|item| !saved.contains(&item.id)),
+                            .filter(|item| !ids.contains(&item.id)),
                     );
-                    page.status.set_label(if items.is_empty() {
-                        "Saved GIFs appear here. Add a GIPHY key to search online."
-                    } else {
+                    items.retain(|item| {
+                        query.is_empty() || item.title.to_lowercase().contains(&query)
+                    });
+                    page.status.set_label(if has_key {
                         "Saved GIFs"
+                    } else {
+                        "Saved GIFs · Add a GIPHY key to search online"
                     });
                     page.render(items, false);
+                    if has_key && page.items.borrow().is_empty() {
+                        page.load(false);
+                    }
                 }
                 Err(error) => page.status.set_label(&error.to_string()),
+            }
+            if let Err(error) = configured {
+                page.status.set_label(&error.to_string());
             }
         });
     }
 
-    fn load(self: &Rc<Self>, append: bool) {
-        if let Some(request) = self.request.borrow_mut().take() {
-            request.cancel();
+    fn maybe_load_more(self: &Rc<Self>) {
+        let adjustment = self.scroll.vadjustment();
+        if self.root.is_mapped()
+            && self.request.borrow().is_none()
+            && !self.failed.get()
+            && self.offset.borrow().is_some()
+            && adjustment.value() + adjustment.page_size() + 300. >= adjustment.upper()
+        {
+            self.load(true);
         }
-        let offset = append.then(|| *self.offset.borrow()).flatten();
+    }
+
+    fn load(self: &Rc<Self>, append: bool) {
+        if append && self.request.borrow().is_some() {
+            return;
+        }
+        let offset = if append { *self.offset.borrow() } else { None };
         if append && offset.is_none() {
             return;
         }
-        self.status.set_label(if self.query.borrow().is_empty() {
+        if let Some(request) = self.request.take() {
+            request.cancel();
+        }
+        self.failed.set(false);
+        self.retry.set_visible(false);
+        if !append {
+            self.offset.replace(None);
+            self.render(Vec::new(), false);
+            self.scroll.vadjustment().set_value(0.);
+        }
+        self.status.set_label(if append {
+            "Loading more GIFs…"
+        } else if self.query.borrow().is_empty() {
             "Loading trending GIFs…"
         } else {
             "Searching GIFs…"
@@ -405,7 +452,7 @@ impl GifLibraryPage {
         let query = self.query.borrow().clone();
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let result = library.search(query, offset, request.clone()).await;
+            let result = library.search(query, offset, request).await;
             let Some(page) = weak
                 .upgrade()
                 .filter(|page| page.request_serial.get() == serial)
@@ -415,177 +462,254 @@ impl GifLibraryPage {
             page.request.take();
             match result {
                 Ok(result) => {
-                    page.offset.replace(result.next_offset);
-                    page.more.set_visible(result.next_offset.is_some());
-                    page.status.set_label(if result.items.is_empty() {
-                        "No GIFs found"
-                    } else {
-                        "Powered by GIPHY"
-                    });
+                    page.offset.replace(
+                        result
+                            .next_offset
+                            .filter(|next| offset.is_none_or(|previous| *next > previous)),
+                    );
+                    page.status.set_label(
+                        if result.items.is_empty() && page.items.borrow().is_empty() {
+                            "No GIFs found"
+                        } else {
+                            "Powered by GIPHY"
+                        },
+                    );
                     page.render(result.items, append);
+                    let weak = Rc::downgrade(&page);
+                    glib::idle_add_local_once(move || {
+                        if let Some(page) = weak.upgrade() {
+                            page.maybe_load_more();
+                        }
+                    });
                 }
-                Err(error) => page.status.set_label(&error.to_string()),
+                Err(error) => {
+                    page.failed.set(true);
+                    page.status.set_label(&error.to_string());
+                    if matches!(
+                        error,
+                        crate::gifs::Error::KeyRequired | crate::gifs::Error::KeyRejected
+                    ) {
+                        page.add_key.set_visible(true);
+                    } else {
+                        page.retry.set_visible(true);
+                    }
+                }
             }
         });
     }
 
     fn render(self: &Rc<Self>, items: Vec<crate::gifs::GifItem>, append: bool) {
         if !append {
-            while let Some(child) = self.grid.first_child() {
-                self.grid.remove(&child);
-            }
-            self.items.replace(items);
-            self.rendered.set(0);
-        } else {
-            self.items.borrow_mut().extend(items);
+            self.items.borrow_mut().clear();
         }
-        self.render_next_gifs();
+        let mut current = self.items.borrow_mut();
+        let mut ids: std::collections::HashSet<_> =
+            current.iter().map(|item| item.id.clone()).collect();
+        current.extend(items.into_iter().filter(|item| ids.insert(item.id.clone())));
+        let ratios = current
+            .iter()
+            .map(|item| item.preview.width.max(1) as f64 / item.preview.height.max(1) as f64)
+            .collect();
+        drop(current);
+        self.grid.set_items(ratios, append);
     }
 
-    fn render_next_gifs(self: &Rc<Self>) {
-        let start = self.rendered.get();
-        let end = (start + 10).min(self.items.borrow().len());
-        if start >= end {
-            return;
-        }
-        let items = self.items.borrow()[start..end].to_vec();
-        self.rendered.set(end);
-        for item in items {
-            let tile = gtk::Box::new(gtk::Orientation::Vertical, 2);
-            tile.add_css_class("gif-library-tile");
-            let button = gtk::Button::builder().tooltip_text(&item.title).build();
-            button.add_css_class("gif-library-item");
-            let spinner = gtk::Spinner::new();
-            spinner.start();
-            button.set_child(Some(&spinner));
-            tile.append(&button);
-            let favorite = gtk::ToggleButton::builder()
-                .icon_name(if item.favorite {
-                    "starred-symbolic"
-                } else {
-                    "non-starred-symbolic"
-                })
-                .tooltip_text(if item.favorite {
-                    "Remove from favorites"
-                } else {
-                    "Add to favorites"
-                })
-                .active(item.favorite)
-                .halign(gtk::Align::End)
-                .build();
-            favorite.add_css_class("flat");
-            tile.append(&favorite);
-            self.grid.insert(&tile, -1);
-            let weak = Rc::downgrade(self);
-            let preview_library = self.library.clone();
-            let preview_item = item.clone();
-            let button_weak = button.downgrade();
-            glib::spawn_future_local(async move {
-                let request = crate::gifs::Request::new();
-                let Ok(asset) = preview_library.preview(preview_item.clone(), request).await else {
-                    return;
-                };
-                let (Some(path), Some(file)) = (asset.path.clone(), asset.attachment()) else {
-                    return;
-                };
-                let play_path = path.clone();
-                let play_file = file.clone();
-                let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let cancel = gio::Cancellable::new();
-                let worker_stopped = stopped.clone();
-                let decoded = gio::spawn_blocking(move || {
-                    crate::image_loader::preview(&file, &path, 320, &cancel, &worker_stopped, true)
-                })
-                .await;
-                if let (Some(page), Some(button), Ok(Ok(image))) =
-                    (weak.upgrade(), button_weak.upgrade(), decoded)
-                {
-                    let picture = gtk::Picture::for_paintable(&image.texture);
-                    picture.set_content_fit(gtk::ContentFit::Cover);
-                    button.set_child(Some(&picture));
-                    let scroll = page.scroll.downgrade();
-                    crate::image_loader::play(
-                        &picture,
-                        play_path,
-                        play_file,
-                        320,
-                        move |picture| {
-                            scroll.upgrade().is_some_and(|scroll| {
-                                picture.compute_bounds(&scroll).is_some_and(|bounds| {
-                                    bounds.y() + bounds.height() >= 0.
-                                        && bounds.y() <= scroll.height() as f32
-                                })
+    fn gif_tile(self: &Rc<Self>, item: crate::gifs::GifItem) -> gtk::Widget {
+        let tile = gtk::Overlay::new();
+        tile.add_css_class("gif-library-tile");
+        let button = gtk::Button::builder().tooltip_text(&item.title).build();
+        button.add_css_class("gif-library-item");
+        let spinner = gtk::Spinner::new();
+        spinner.set_size_request(24, 24);
+        spinner.set_halign(gtk::Align::Center);
+        spinner.set_valign(gtk::Align::Center);
+        spinner.start();
+        button.set_child(Some(&spinner));
+        tile.set_child(Some(&button));
+        let favorite = gtk::ToggleButton::builder()
+            .icon_name(if item.favorite {
+                "starred-symbolic"
+            } else {
+                "non-starred-symbolic"
+            })
+            .tooltip_text(if item.favorite {
+                "Remove from favorites"
+            } else {
+                "Add to favorites"
+            })
+            .active(item.favorite)
+            .halign(gtk::Align::End)
+            .build();
+        favorite.add_css_class("flat");
+        favorite.set_valign(gtk::Align::Start);
+        favorite.set_margin_top(4);
+        favorite.set_margin_end(4);
+        favorite.add_css_class("gif-favorite");
+        tile.add_overlay(&favorite);
+        let weak = Rc::downgrade(self);
+        let preview_library = self.library.clone();
+        let preview_item = item.clone();
+        let button_weak = button.downgrade();
+        let request = crate::gifs::Request::new();
+        let cancelled = request.clone();
+        button.connect_unmap(move |_| cancelled.cancel());
+        glib::spawn_future_local(async move {
+            let Ok(asset) = preview_library.preview(preview_item.clone(), request).await else {
+                Self::preview_failed(&button_weak);
+                return;
+            };
+            let (Some(path), Some(file)) = (asset.path.clone(), asset.attachment()) else {
+                Self::preview_failed(&button_weak);
+                return;
+            };
+            let play_path = path.clone();
+            let play_file = file.clone();
+            let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let cancel = gio::Cancellable::new();
+            let worker_stopped = stopped.clone();
+            let decoded = gio::spawn_blocking(move || {
+                crate::image_loader::preview(&file, &path, 320, &cancel, &worker_stopped, true)
+            })
+            .await;
+            let Ok(Ok(image)) = decoded else {
+                Self::preview_failed(&button_weak);
+                return;
+            };
+            if let (Some(page), Some(button)) = (weak.upgrade(), button_weak.upgrade()) {
+                let picture = gtk::Picture::for_paintable(&image.texture);
+                picture.set_content_fit(gtk::ContentFit::Cover);
+                button.set_child(Some(&picture));
+                let scroll = page.scroll.downgrade();
+                crate::image_loader::play(
+                    &picture,
+                    play_path,
+                    play_file,
+                    320,
+                    move |picture| {
+                        scroll.upgrade().is_some_and(|scroll| {
+                            picture.compute_bounds(&scroll).is_some_and(|bounds| {
+                                bounds.y() + bounds.height() >= 0.
+                                    && bounds.y() <= scroll.height() as f32
                             })
-                        },
-                        |picture, texture| picture.set_paintable(Some(&texture)),
-                    );
-                }
-            });
-            let favorite_library = self.library.clone();
-            let favorite_item = item.clone();
-            favorite.connect_toggled(move |button| {
-                let enabled = button.is_active();
-                button.set_icon_name(if enabled {
-                    "starred-symbolic"
-                } else {
-                    "non-starred-symbolic"
-                });
-                let library = favorite_library.clone();
-                let item = favorite_item.clone();
-                glib::spawn_future_local(async move {
-                    let _ = library
-                        .set_favorite(item, enabled, crate::gifs::Request::new())
-                        .await;
-                });
-            });
-            let weak = Rc::downgrade(self);
-            let library = self.library.clone();
-            button.connect_clicked(move |_| {
-                let Some(page) = weak.upgrade() else {
-                    return;
-                };
-                let Some(ui) = page.ui.upgrade() else { return };
-                let peer = ui.state.borrow().current().jid.clone();
-                let owner = ui.state.borrow().account.clone();
-                let generation = ui.generation.get();
-                page.status.set_label("Preparing GIF…");
-                let library = library.clone();
-                let item = item.clone();
-                let weak = Rc::downgrade(&page);
-                glib::spawn_future_local(async move {
-                    let request = crate::gifs::Request::new();
-                    let asset = match library.original(item.clone(), request.clone()).await {
-                        Ok(asset) => asset,
-                        Err(error) => {
-                            if let Some(page) = weak.upgrade() {
-                                page.status.set_label(&error.to_string());
-                            }
-                            return;
+                        })
+                    },
+                    |picture, texture| picture.set_paintable(Some(&texture)),
+                );
+            }
+        });
+        let weak = Rc::downgrade(self);
+        let favorite_item = item.clone();
+        let restoring = Rc::new(Cell::new(false));
+        favorite.connect_toggled(move |button| {
+            if restoring.get() {
+                return;
+            }
+            let Some(page) = weak.upgrade() else { return };
+            let enabled = button.is_active();
+            button.set_sensitive(false);
+            let button = button.downgrade();
+            let library = page.library.clone();
+            let item = favorite_item.clone();
+            let restoring = restoring.clone();
+            let weak = Rc::downgrade(&page);
+            glib::spawn_future_local(async move {
+                let result = library
+                    .set_favorite(item.clone(), enabled, crate::gifs::Request::new())
+                    .await;
+                let Some(page) = weak.upgrade() else { return };
+                if let Some(button) = button.upgrade() {
+                    button.set_sensitive(true);
+                    match &result {
+                        Ok(_) => {
+                            button.set_icon_name(if enabled {
+                                "starred-symbolic"
+                            } else {
+                                "non-starred-symbolic"
+                            });
+                            button.set_tooltip_text(Some(if enabled {
+                                "Remove from favorites"
+                            } else {
+                                "Add to favorites"
+                            }));
                         }
-                    };
-                    let Some(path) = asset.path else {
-                        return;
-                    };
-                    let _ = library.remember(item, crate::gifs::Request::new()).await;
-                    if let Some(page) = weak.upgrade() {
-                        if page.ui.upgrade().is_some_and(|ui| {
-                            ui.generation.get() == generation
-                                && ui.state.borrow().account == owner
-                                && ui.state.borrow().current().jid == peer
-                        }) {
-                            (page.on_send)(path);
-                            page.status.set_label("Saved GIFs");
-                        } else {
-                            page.status
-                                .set_label("Chat changed. Choose the GIF again to attach it here.");
+                        Err(_) => {
+                            restoring.set(true);
+                            button.set_active(!enabled);
+                            restoring.set(false);
                         }
                     }
-                });
+                }
+                match result {
+                    Ok(_) => {
+                        for entry in page
+                            .items
+                            .borrow_mut()
+                            .iter_mut()
+                            .filter(|entry| entry.id == item.id)
+                        {
+                            entry.favorite = enabled;
+                        }
+                    }
+                    Err(error) => page.status.set_label(&error.to_string()),
+                }
             });
-        }
+        });
+        let weak = Rc::downgrade(self);
+        let library = self.library.clone();
+        button.connect_clicked(move |_| {
+            let Some(page) = weak.upgrade() else {
+                return;
+            };
+            let Some(ui) = page.ui.upgrade() else { return };
+            let peer = ui.state.borrow().current().jid.clone();
+            let owner = ui.state.borrow().account.clone();
+            let generation = ui.generation.get();
+            page.status.set_label("Preparing GIF…");
+            let library = library.clone();
+            let item = item.clone();
+            let weak = Rc::downgrade(&page);
+            glib::spawn_future_local(async move {
+                let request = crate::gifs::Request::new();
+                let asset = match library.original(item.clone(), request.clone()).await {
+                    Ok(asset) => asset,
+                    Err(error) => {
+                        if let Some(page) = weak.upgrade() {
+                            page.status.set_label(&error.to_string());
+                        }
+                        return;
+                    }
+                };
+                let Some(path) = asset.path else {
+                    return;
+                };
+                let _ = library.remember(item, crate::gifs::Request::new()).await;
+                if let Some(page) = weak.upgrade() {
+                    if page.ui.upgrade().is_some_and(|ui| {
+                        ui.generation.get() == generation
+                            && ui.state.borrow().account == owner
+                            && ui.state.borrow().current().jid == peer
+                    }) {
+                        (page.on_send)(path);
+                        page.status.set_label("Saved GIFs");
+                    } else {
+                        page.status
+                            .set_label("Chat changed. Choose the GIF again to attach it here.");
+                    }
+                }
+            });
+        });
+        tile.upcast()
     }
 
-    fn settings(self: &Rc<Self>, parent: &adw::ApplicationWindow) {
+    fn preview_failed(button: &glib::WeakRef<gtk::Button>) {
+        if let Some(button) = button.upgrade() {
+            let image = gtk::Image::from_icon_name("image-missing-symbolic");
+            image.set_pixel_size(24);
+            button.set_child(Some(&image));
+            button.set_tooltip_text(Some("Preview unavailable. Click to attach this GIF."));
+        }
+    }
+    pub(crate) fn settings(self: &Rc<Self>, parent: &impl IsA<gtk::Widget>) {
         let entry = adw::PasswordEntryRow::builder()
             .title("GIPHY API key")
             .build();
@@ -615,14 +739,30 @@ impl GifLibraryPage {
             if response != "save" && !remove {
                 return;
             }
+            page.status.set_label(if remove {
+                "Removing GIF search key…"
+            } else {
+                "Saving GIF search key…"
+            });
+            page.add_key.set_sensitive(false);
             glib::spawn_future_local(async move {
                 let result = if remove {
                     library.remove_key().await
                 } else {
                     library.save_key(value).await
                 };
-                if let Err(error) = result {
-                    page.status.set_label(&error.to_string());
+                page.add_key.set_sensitive(true);
+                match result {
+                    Ok(()) => {
+                        page.configured.set(!remove);
+                        page.add_key.set_visible(remove);
+                        if remove {
+                            page.show_saved();
+                        } else {
+                            page.load(false);
+                        }
+                    }
+                    Err(error) => page.status.set_label(&error.to_string()),
                 }
             });
         });
@@ -2003,5 +2143,259 @@ mod tests {
             changes.load(Ordering::Relaxed) >= stopped + 3
         }));
         window.close();
+    }
+}
+
+#[cfg(test)]
+mod gif_native_tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn wait(mut ready: impl FnMut() -> bool) {
+        let context = glib::MainContext::default();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            for _ in 0..50 {
+                if !context.pending() {
+                    break;
+                }
+                context.iteration(false);
+            }
+            if ready() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        assert!(ready(), "native GIF page did not settle");
+    }
+    fn children(widget: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
+        let mut result = Vec::new();
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            child = current.next_sibling();
+            result.push(current);
+        }
+        result
+    }
+    #[test]
+    #[ignore = "requires an isolated native display, data roots and Secret Service"]
+    fn gif_page_virtualizes_and_handles_keyless_paging() {
+        let app = adw::Application::builder()
+            .application_id("com.negzero.MonogramDesktop.GifFixture")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gio::Cancellable>).unwrap();
+        let css = gtk::CssProvider::new();
+        css.load_from_path(crate::widgets::asset("style.css"));
+        gtk::style_context_add_provider_for_display(
+            &gtk::gdk::Display::default().unwrap(),
+            &css,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        let window = adw::ApplicationWindow::builder()
+            .application(&app)
+            .default_width(400)
+            .default_height(700)
+            .build();
+        let context = glib::MainContext::default();
+        let library = context
+            .block_on(crate::gifs::Library::open("gif-native@fixture.invalid"))
+            .unwrap();
+        let page = GifLibraryPage::new(library.clone(), &window, std::rc::Weak::new(), |_| {
+            panic!("fixture must not send")
+        });
+        window.set_content(Some(&page.root));
+        window.present();
+        wait(|| page.add_key.is_visible());
+        assert!(!page.configured.get());
+        page.add_key.emit_clicked();
+        wait(|| window.visible_dialog().is_some());
+        assert_eq!(
+            window
+                .visible_dialog()
+                .unwrap()
+                .downcast::<adw::AlertDialog>()
+                .unwrap()
+                .heading()
+                .as_deref(),
+            Some("GIF Search")
+        );
+        window.visible_dialog().unwrap().close();
+        assert!(!children(&page.root).iter().any(|child| {
+            child.downcast_ref::<gtk::Button>().is_some_and(|button| {
+                button.icon_name().as_deref() == Some("emblem-system-symbolic")
+            })
+        }));
+        let path = std::path::PathBuf::from(std::env::var_os("XDG_CACHE_HOME").unwrap())
+            .join("gif-fixture.gif");
+        std::fs::write(&path,b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff\x2c\0\0\0\0\x01\0\x01\0\0\x02\x02\x44\x01\0\x3b").unwrap();
+        let source = context
+            .block_on(library.import_local(path, "Fixture GIF".into(), crate::gifs::Request::new()))
+            .unwrap();
+        let items = (0..2000)
+            .map(|index| {
+                let mut item = source.clone();
+                if index > 0 {
+                    item.id = format!("fixture-{index}");
+                }
+                item.title = format!("Tile {index}");
+                item.preview.width = [40, 100, 160, 240, 400][index % 5];
+                item.preview.height = 100;
+                item
+            })
+            .collect();
+        let start = Instant::now();
+        page.render(items, false);
+        wait(|| children(&page.grid).len() >= 4);
+        assert!(
+            start.elapsed() < Duration::from_millis(400),
+            "first GIF controls took {:?}",
+            start.elapsed()
+        );
+        let count = children(&page.grid).len();
+        assert!(count < 100, "created {count} controls for 2000 items");
+        wait(|| children(&page.grid).len() >= 8);
+        for child in children(&page.grid) {
+            assert!(child.width() >= 64 && child.height() >= 64);
+            let overlay = child.downcast::<gtk::Overlay>().unwrap();
+            assert!(
+                children(&overlay)
+                    .iter()
+                    .any(|child| child.has_css_class("gif-favorite"))
+            );
+        }
+        let first = children(&page.grid)
+            .into_iter()
+            .find_map(|child| {
+                let overlay = child.downcast::<gtk::Overlay>().ok()?;
+                let button = overlay.child()?.downcast::<gtk::Button>().ok()?;
+                (button.tooltip_text().as_deref() == Some("Tile 0")).then(|| {
+                    children(&overlay)
+                        .into_iter()
+                        .find_map(|child| child.downcast::<gtk::ToggleButton>().ok())
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        first.set_active(true);
+        wait(|| first.is_sensitive());
+        assert!(
+            context
+                .block_on(library.snapshot())
+                .unwrap()
+                .favorites
+                .iter()
+                .any(|item| item.id == source.id)
+        );
+        if let Some(path) = std::env::var_os("MONOGRAM_GIF_CAPTURE") {
+            let snapshot = gtk::Snapshot::new();
+            let paintable = gtk::WidgetPaintable::new(Some(&window));
+            paintable.snapshot(&snapshot, window.width() as f64, window.height() as f64);
+            let renderer = window.renderer().unwrap();
+            renderer
+                .render_texture(&snapshot.to_node().unwrap(), None)
+                .save_to_png(path)
+                .unwrap();
+        }
+        let start = Instant::now();
+        page.scroll.vadjustment().set_value(12000.);
+        wait(|| {
+            children(&page.grid)
+                .iter()
+                .filter_map(|child| child.compute_bounds(&page.grid))
+                .all(|bounds| bounds.y() > 10000.)
+        });
+        assert!(
+            start.elapsed() < Duration::from_millis(400),
+            "scroll feedback took {:?}",
+            start.elapsed()
+        );
+        assert!(children(&page.grid).len() < 100);
+        let previous = page.items.borrow().len();
+        page.render(vec![source.clone()], true);
+        assert_eq!(page.items.borrow().len(), previous, "duplicate append");
+        // A pending provider page at the edge must start automatically, then stop
+        // after a keyless error rather than repeatedly retrying while at the edge.
+        page.offset.replace(Some(25));
+        page.scroll
+            .vadjustment()
+            .set_value(page.scroll.vadjustment().upper());
+        page.maybe_load_more();
+        assert!(page.request.borrow().is_some());
+        wait(|| page.failed.get());
+        assert!(page.add_key.is_visible());
+        let serial = page.request_serial.get();
+        page.maybe_load_more();
+        assert_eq!(page.request_serial.get(), serial);
+        page.offset.replace(None);
+        page.failed.set(false);
+        page.maybe_load_more();
+        assert_eq!(
+            page.request_serial.get(),
+            serial,
+            "exhausted grid requested again"
+        );
+        context
+            .block_on(library.save_key(zeroize::Zeroizing::new("fixture-key-only".into())))
+            .unwrap();
+        for (offset, next) in [(0, Some(25)), (25, Some(50)), (50, None)] {
+            let items = (0..2)
+                .map(|index| {
+                    let mut item = source.clone();
+                    item.id = format!("page-{offset}-{index}");
+                    item
+                })
+                .collect();
+            context.block_on(library.fixture_cached_page(
+                "fixture-key-only",
+                "paging",
+                offset,
+                crate::gifs::Page {
+                    items,
+                    next_offset: next,
+                },
+            ));
+        }
+        page.query.replace("paging".into());
+        page.load(false);
+        wait(|| {
+            page.items.borrow().len() == 6
+                && page.offset.borrow().is_none()
+                && page.request.borrow().is_none()
+        });
+        assert!(!page.failed.get());
+        for (query, id) in [("old-query", "stale"), ("new-query", "fresh")] {
+            let mut item = source.clone();
+            item.id = id.into();
+            context.block_on(library.fixture_cached_page(
+                "fixture-key-only",
+                query,
+                0,
+                crate::gifs::Page {
+                    items: vec![item],
+                    next_offset: None,
+                },
+            ));
+        }
+        page.query.replace("old-query".into());
+        page.load(false);
+        page.query.replace("new-query".into());
+        page.load(false);
+        wait(|| page.request.borrow().is_none());
+        assert_eq!(
+            page.items
+                .borrow()
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fresh"]
+        );
+        println!(
+            "GIF PAGING PASS three cached provider pages append automatically, then exhaust; stale query result rejected"
+        );
+        window.close();
+        println!(
+            "GIF NATIVE PASS keyless Add key, no gear, 2000-item viewport controls, overlay favorite persistence, <400ms first/scroll feedback, duplicate append and automatic paging/error/exhaustion guards"
+        );
     }
 }
