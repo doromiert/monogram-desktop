@@ -15,6 +15,17 @@ pub(crate) struct RenderedRows {
     big_emoji: bool,
     group: bool,
     render_request: Option<ScrollTarget>,
+    serial: u64,
+    rendering: bool,
+}
+struct PreparedMessages {
+    messages: Vec<Message>,
+    days: Vec<String>,
+    links: Vec<Vec<crate::link_previews::ClickableUrl>>,
+    scope: (String, String),
+    group: bool,
+    serial: u64,
+    generation: u64,
 }
 struct RenderedRow {
     message: Message,
@@ -225,6 +236,7 @@ fn local_day(message: &Message) -> String {
         })
         .unwrap_or_else(|_| "Today".into())
 }
+#[derive(Clone)]
 pub enum ScrollTarget {
     Bottom,
     Message(String),
@@ -234,6 +246,9 @@ pub enum ScrollTarget {
     },
 }
 impl Ui {
+    pub(crate) fn rendering_messages(&self) -> bool {
+        self.rendered_rows.borrow().rendering
+    }
     pub(crate) fn refresh_link_preview_rows(self: &Rc<Self>, url: &str) {
         let ids: Vec<_> = self
             .state
@@ -264,6 +279,8 @@ impl Ui {
             self.capture_scroll_position()
         };
         let mut rows = self.rendered_rows.borrow_mut();
+        rows.serial = rows.serial.wrapping_add(1);
+        rows.rendering = true;
         let scheduled = rows.render_request.is_some();
         if !scheduled || bottom {
             rows.render_request = Some(position);
@@ -283,17 +300,75 @@ impl Ui {
         }
     }
     pub fn render_messages_at(self: &Rc<Self>, position: ScrollTarget) {
-        self.rendered_rows.borrow_mut().render_request.take();
-        self.bubbles.borrow_mut().clear();
+        let serial = {
+            let mut rendered = self.rendered_rows.borrow_mut();
+            rendered.render_request.take();
+            rendered.serial = rendered.serial.wrapping_add(1);
+            rendered.rendering = true;
+            rendered.serial
+        };
+        self.update_history_spinner();
         let state = self.state.borrow();
-        let messages = crate::media_caption::display_messages(&state.current().messages);
+        let messages = state.current().messages.clone();
         let group = state.current().group;
         let scope = (state.account.clone(), state.current().jid.clone());
-        let messages: Vec<_> = messages
-            .into_iter()
-            .filter(|message| !message.retracted)
-            .collect();
         drop(state);
+        let generation = self.generation.get();
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let planned = gtk::gio::spawn_blocking(move || {
+                let messages: Vec<_> = crate::media_caption::display_messages(&messages)
+                    .into_iter()
+                    .filter(|message| !message.retracted)
+                    .collect();
+                let days = messages.iter().map(local_day).collect();
+                let links = messages
+                    .iter()
+                    .map(|message| {
+                        crate::link_previews::clickable_urls(
+                            &message.text,
+                            message.preview_spoilers.as_ref(),
+                        )
+                    })
+                    .collect();
+                PreparedMessages {
+                    messages,
+                    days,
+                    links,
+                    scope,
+                    group,
+                    serial,
+                    generation,
+                }
+            })
+            .await;
+            if let Some(ui) = weak.upgrade() {
+                if let Ok(planned) = planned {
+                    ui.apply_message_batch(Rc::new(planned), position);
+                } else if ui.rendered_rows.borrow().serial == serial {
+                    ui.rendered_rows.borrow_mut().rendering = false;
+                    ui.update_history_spinner();
+                    ui.notice("Messages could not be prepared");
+                }
+            }
+        });
+    }
+    fn apply_message_batch(self: &Rc<Self>, planned: Rc<PreparedMessages>, position: ScrollTarget) {
+        if self.generation.get() != planned.generation
+            || self.rendered_rows.borrow().serial != planned.serial
+        {
+            return;
+        }
+        let state = self.state.borrow();
+        if state.account != planned.scope.0 || state.current().jid != planned.scope.1 {
+            return;
+        }
+        drop(state);
+        let started = std::time::Instant::now();
+        let messages = &planned.messages;
+        let group = planned.group;
+        let scope = planned.scope.clone();
+        self.bubbles.borrow_mut().clear();
         let mut rendered = self.rendered_rows.borrow_mut();
         let big_emoji = self.big_emoji.get();
         if rendered.scope != scope || rendered.big_emoji != big_emoji || rendered.group != group {
@@ -301,6 +376,8 @@ impl Ui {
                 scope,
                 big_emoji,
                 group,
+                serial: planned.serial,
+                rendering: true,
                 ..Default::default()
             };
         }
@@ -309,8 +386,10 @@ impl Ui {
         let mut order = Vec::new();
         let mut days = HashSet::new();
         let mut last = String::new();
+        let mut created = 0;
+        let mut pending = false;
         for (index, m) in messages.iter().enumerate() {
-            let day = local_day(m);
+            let day = planned.days[index].clone();
             if day != last {
                 let row = rendered.dates.entry(day.clone()).or_insert_with(|| {
                     let pill = label(&day, "date-pill");
@@ -362,6 +441,18 @@ impl Ui {
                 order.push(row.row.clone());
                 continue;
             }
+            if created >= 2 || created > 0 && started.elapsed() >= Duration::from_millis(4) {
+                pending = true;
+                if let Some(row) = rendered.rows.get(&m.id) {
+                    order.push(row.row.clone());
+                    self.bubbles
+                        .borrow_mut()
+                        .insert(m.id.clone(), row.bubble.clone().upcast());
+                }
+                continue;
+            }
+            created += 1;
+            let row_started = std::time::Instant::now();
             if let Some(displaced) = rendered.rows.remove(&m.id)
                 && displaced.row.parent().as_ref() == Some(self.timeline.upcast_ref())
             {
@@ -685,8 +776,7 @@ impl Ui {
                         "message-text"
                     };
                     let preview = self.link_preview_for_message(&m);
-                    let links =
-                        crate::link_previews::clickable_urls(&m.text, m.preview_spoilers.as_ref());
+                    let links = planned.links[index].clone();
                     let inline = m.inline_emoji.as_ref().map(|emoji| {
                         self.inline_message_text(
                             &m.text,
@@ -815,6 +905,14 @@ impl Ui {
             cluster_style(&entry, previous, next, group);
             rendered.rows.insert(m.id.clone(), entry);
             order.push(row);
+            if row_started.elapsed() >= Duration::from_millis(50) {
+                eprintln!(
+                    "Monogram slow message widget: {} ms, kind={}, text_bytes={}",
+                    row_started.elapsed().as_millis(),
+                    m.kind,
+                    m.text.len()
+                );
+            }
         }
         rendered.dates.retain(|day, _| days.contains(day));
         let retained: HashSet<gtk::Widget> = order.iter().map(|row| row.clone().upcast()).collect();
@@ -833,9 +931,32 @@ impl Ui {
                 self.timeline.insert(row, index as i32);
             }
         }
+        rendered.rendering = pending;
         drop(rendered);
+        self.update_history_spinner();
         self.update_selection();
-        self.queue_message_scroll(position);
+        self.queue_message_scroll(position.clone());
+        if started.elapsed() >= Duration::from_millis(50) {
+            eprintln!(
+                "Monogram slow message batch: {} ms, created={created}",
+                started.elapsed().as_millis()
+            );
+        }
+        if pending {
+            let weak = Rc::downgrade(self);
+            self.scroll.add_tick_callback(move |_, _| {
+                if let Some(ui) = weak.upgrade() {
+                    let position = match &position {
+                        ScrollTarget::Position { .. } => ui.capture_scroll_position(),
+                        _ => position.clone(),
+                    };
+                    ui.apply_message_batch(planned.clone(), position);
+                }
+                glib::ControlFlow::Break
+            });
+        } else {
+            self.schedule_history_maintenance();
+        }
     }
     fn capture_scroll_position(&self) -> ScrollTarget {
         let value = self.scroll.vadjustment().value();

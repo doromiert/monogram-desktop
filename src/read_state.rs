@@ -178,6 +178,7 @@ impl Ui {
             && self.active_media.borrow().is_none()
             && self.active_story.borrow().is_none()
             && self.history_window.newest()
+            && !self.rendering_messages()
             && self.at_message_end()
     }
 

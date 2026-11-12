@@ -60,7 +60,7 @@ feature document considered, including smaller behavior customizations. It is a
 reference inventory; the table above groups them for implementation. Keep both
 updated rather than dropping features because their mobile presentation differs.
 
-Current picker follow-up: continuous full-panel Emoji/Stickers sections, square selectors, fixed settings and a single-layer menu are requested; current category-filtered pages remain incomplete. A transient chat-switch/history-scroll UI stall was reported and remains under investigation. Managed joining of the reported room still times out although an isolated raw discovery/join succeeds.
+Current picker follow-up: continuous full-panel Emoji/Stickers sections, square selectors, fixed settings and a single-layer menu are requested; current category-filtered pages remain incomplete. Chat-switch/history-scroll responsiveness now uses worker-side caption/link preparation, bounded backend-event draining and at most two new native rows per frame, with pruning/read-state guarded until the batch finishes. The native paging/reply/incoming-update scenario passes; real-workload latency acceptance remains open. Managed joining of the reported room still times out although an isolated raw discovery/join succeeds.
 
 ## Next milestones
 

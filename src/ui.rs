@@ -467,9 +467,20 @@ impl Ui {
             let Some(ui) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
-            let events: Vec<_> = ui.event_rx.borrow().try_iter().collect();
-            for (g, a, e) in events {
-                ui.backend_event(g, &a, e)
+            let batch = Instant::now();
+            while batch.elapsed() < Duration::from_millis(4) {
+                let Ok((g, a, e)) = ui.event_rx.borrow().try_recv() else {
+                    break;
+                };
+                let kind = std::mem::discriminant(&e);
+                let started = Instant::now();
+                ui.backend_event(g, &a, e);
+                if started.elapsed() >= Duration::from_millis(50) {
+                    eprintln!(
+                        "Monogram slow backend event {kind:?}: {} ms",
+                        started.elapsed().as_millis()
+                    );
+                }
             }
             ui.poll_uploads();
             glib::ControlFlow::Continue
@@ -1128,21 +1139,26 @@ impl Ui {
         let scroll_bounds = Rc::new(Cell::new(self.history_bounds()));
         let previous_bounds = scroll_bounds.clone();
         let weak = Rc::downgrade(self);
-        self.scroll.vadjustment().connect_value_changed(move |adjustment| {
-            if let Some(ui) = weak.upgrade() {
-                let (previous_value, page, upper) = previous_bounds.get();
-                if adjustment.value() < previous_value
-                    && adjustment.page_size() == page
-                    && adjustment.upper() == upper
-                    && !ui.history_window.moving.get()
-                    && matches!(ui.message_scroll.borrow().as_ref(), Some(crate::messages::ScrollTarget::Bottom))
-                {
-                    ui.message_scroll.borrow_mut().take();
+        self.scroll
+            .vadjustment()
+            .connect_value_changed(move |adjustment| {
+                if let Some(ui) = weak.upgrade() {
+                    let (previous_value, page, upper) = previous_bounds.get();
+                    if adjustment.value() < previous_value
+                        && adjustment.page_size() == page
+                        && adjustment.upper() == upper
+                        && !ui.history_window.moving.get()
+                        && matches!(
+                            ui.message_scroll.borrow().as_ref(),
+                            Some(crate::messages::ScrollTarget::Bottom)
+                        )
+                    {
+                        ui.message_scroll.borrow_mut().take();
+                    }
+                    previous_bounds.set((adjustment.value(), page, upper));
+                    ui.schedule_history_maintenance();
                 }
-                previous_bounds.set((adjustment.value(), page, upper));
-                ui.schedule_history_maintenance();
-            }
-        });
+            });
         let weak = Rc::downgrade(self);
         self.scroll.vadjustment().connect_changed(move |_| {
             if let Some(ui) = weak.upgrade() {
@@ -1151,7 +1167,10 @@ impl Ui {
                 if upper - page - value < 24.
                     && ui.history_window.newest()
                     && ui.active_media.borrow().is_none()
-                    && !matches!(ui.message_scroll.borrow().as_ref(), Some(crate::messages::ScrollTarget::Message(_)))
+                    && !matches!(
+                        ui.message_scroll.borrow().as_ref(),
+                        Some(crate::messages::ScrollTarget::Message(_))
+                    )
                 {
                     ui.queue_message_scroll(crate::messages::ScrollTarget::Bottom);
                 }
@@ -1242,13 +1261,11 @@ impl Ui {
         self.input_scroll
             .set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         let weak = Rc::downgrade(self);
-        self.input_scroll
-            .vadjustment()
-            .connect_changed(move |_| {
-                if let Some(s) = weak.upgrade() {
-                    s.queue_composer_height();
-                }
-            });
+        self.input_scroll.vadjustment().connect_changed(move |_| {
+            if let Some(s) = weak.upgrade() {
+                s.queue_composer_height();
+            }
+        });
         let input = gtk::Overlay::builder()
             .child(&self.input_scroll)
             .hexpand(true)
@@ -1342,8 +1359,7 @@ impl Ui {
             .saturating_add(self.composer.bottom_margin());
         let viewport_height = content_height.clamp(32, 108);
         if self.input_scroll.min_content_height() != viewport_height {
-            self.input_scroll
-                .set_min_content_height(viewport_height);
+            self.input_scroll.set_min_content_height(viewport_height);
         }
         let policy = if content_height > 108 {
             gtk::PolicyType::Automatic
@@ -2940,6 +2956,7 @@ impl Ui {
         let state = self.state.borrow();
         let busy = !state.account.is_empty()
             && (self.history_window.busy()
+                || self.rendering_messages()
                 || self.history_pending.borrow().contains(&state.current().jid));
         self.history.set_visible(busy);
         self.history.set_spinning(busy);

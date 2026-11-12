@@ -61,6 +61,9 @@ impl Ui {
     }
 
     fn maintain_history_window(self: &Rc<Self>) {
+        if self.rendering_messages() {
+            return;
+        }
         self.mark_visible_chat_read();
         if self.state.borrow().account.is_empty()
             || !self.timeline.is_mapped()
@@ -412,7 +415,7 @@ mod tests {
             while main.pending() {
                 main.iteration(false);
             }
-            if condition() {
+            if !ui.rendering_messages() && condition() {
                 return;
             }
             std::thread::sleep(Duration::from_millis(4));
@@ -420,7 +423,7 @@ mod tests {
         let state = ui.state.borrow();
         let chat = state.current();
         assert!(
-            condition(),
+            !ui.rendering_messages() && condition(),
             "Native history window did not settle: mapped={} bounds={:?} rows={} first={:?} last={:?} busy={} newest={}",
             ui.timeline.is_mapped(),
             ui.history_bounds(),
