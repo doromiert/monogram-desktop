@@ -112,8 +112,8 @@
 .emoji-picker-surface > label { margin: 4px 6px 2px; }
 .emoji-category-scroll, .emoji-category-bar, .emoji-picker-surface scrolledwindow, .emoji-picker-grid { background: transparent; }
 .emoji-category-bar { padding: 0 2px; }
-.emoji-category { font-size: 18px; min-width: 32px; min-height: 32px; padding: 4px; border-radius: 9px; }
-.emoji-category-icon { min-width: 32px; min-height: 32px; }
+.emoji-category { font-size: 18px; min-width: 24px; min-height: 24px; padding: 3px; border-radius: 9px; }
+.emoji-category-icon { min-width: 24px; min-height: 24px; }
 .emoji-picker-grid { padding: 2px; }
 .emoji-picker-grid child, .emoji-picker-grid child:hover {
   padding: 0; background: transparent; box-shadow: none; outline: none;
@@ -135,7 +135,7 @@
 .pack-library-grid { padding: 2px; }
 .pack-item { min-width: 58px; min-height: 58px; padding: 2px; border: none; background: transparent; box-shadow: none; }
 .pack-item-picture { min-width: 54px; min-height: 54px; background: transparent; }
-.pack-selector-item { min-width: 32px; min-height: 32px; padding: 4px; border-radius: 9px; }
+.pack-selector-item { min-width: 24px; min-height: 24px; padding: 3px; border-radius: 9px; }
 .pack-library-progress { padding: 0 4px; }
 .gif-library-page, .gif-library-page scrolledwindow, .gif-library-grid,
 .gif-library-grid flowboxchild, .gif-library-grid flowboxchild:hover { background: transparent; }
@@ -194,7 +194,8 @@
 .emoji-category-icon { opacity: .7; }
 .emoji-category:checked image, .pack-selector-item:checked image { opacity: 1; }
 .picker-settings { padding: 0; min-width: 0; min-height: 0; }
-.picker-settings > button { min-width: 32px; min-height: 32px; padding: 4px; }
+.picker-settings > button { min-width: 24px; min-height: 24px; padding: 3px; }
 
-.picker-settings-popover > contents { background: @popover_bg_color; border: none; border-radius: 12px; padding: 4px; box-shadow: 0 2px 8px alpha(black,.2); }
-.picker-settings-popover button { border-radius: 8px; padding: 8px 12px; }
+
+.message-bubble.has-reactions { padding: 8px; }
+.picker-section-list .emoji-picker-item { min-width: 0; min-height: 0; padding: 2px; }

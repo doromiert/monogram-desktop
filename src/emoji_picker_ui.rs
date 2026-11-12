@@ -419,6 +419,7 @@ impl EmojiSurface {
         let favorite = preferences.favorites.iter().any(|value| value == emoji);
         let pinned = preferences.pinned.iter().any(|value| value == emoji);
         let popover = gtk::Popover::builder().has_arrow(false).build();
+        popover.add_css_class("message-menu");
         popover.set_parent(button);
         popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
         let menu = bx(true, 2);
@@ -497,14 +498,14 @@ impl EmojiSurface {
 }
 
 fn emoji_category_button(icon: &str, title: &str) -> gtk::ToggleButton {
-    let picture = mobile_emoji_icon(icon, 32);
+    let picture = mobile_emoji_icon(icon, 24);
     picture.add_css_class("emoji-category-icon");
     let button = gtk::ToggleButton::builder()
         .child(&picture)
         .tooltip_text(title)
         .valign(gtk::Align::Center)
         .build();
-    button.set_size_request(40, 40);
+    button.set_size_request(30, 30);
     button.update_property(&[gtk::accessible::Property::Label(title)]);
     button
 }
@@ -586,7 +587,12 @@ fn emoji_factory(surface: &Weak<EmojiSurface>) -> gtk::SignalListItemFactory {
             return;
         };
         let entry = data.borrow::<EmojiEntry>().clone();
-        item.set_child(Some(&surface.emoji_button(&entry.text, &entry.name)));
+        let cell = gtk::AspectFrame::builder()
+            .ratio(1.)
+            .obey_child(false)
+            .child(&surface.emoji_button(&entry.text, &entry.name))
+            .build();
+        item.set_child(Some(&cell));
     });
     factory.connect_unbind(|_, item| {
         item.downcast_ref::<gtk::ListItem>()
@@ -671,7 +677,7 @@ impl Ui {
     }
 
     pub(crate) fn emoji_sidebar(self: &Rc<Self>, search: &gtk::SearchEntry) -> gtk::Widget {
-        let surface = EmojiSurface::new(self, 6, None, |ui, emoji| {
+        let surface = EmojiSurface::new(self, 7, None, |ui, emoji| {
             ui.composer.buffer().insert_at_cursor(emoji);
             ui.composer.grab_focus();
         });

@@ -665,14 +665,14 @@ struct PackPreviewCell {
 }
 
 fn pack_selector_button(icon: &str, title: &str) -> gtk::ToggleButton {
-    let picture = crate::emoji_picker_ui::mobile_emoji_icon(icon, 32);
+    let picture = crate::emoji_picker_ui::mobile_emoji_icon(icon, 24);
     picture.add_css_class("emoji-category-icon");
     let button = gtk::ToggleButton::builder()
         .child(&picture)
         .tooltip_text(title)
         .valign(gtk::Align::Center)
         .build();
-    button.set_size_request(40, 40);
+    button.set_size_request(30, 30);
     button.update_property(&[gtk::accessible::Property::Label(title)]);
     button
 }
@@ -753,8 +753,10 @@ impl PackLibraryPage {
             .build();
         let manage = gtk::Button::builder().label("Manage Packs…").build();
         let menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        menu.add_css_class("message-menu-panel");
         for button in [&import, &telegram, &create, &manage] {
             button.add_css_class("flat");
+            button.add_css_class("context-menu-row");
             if let Some(label) = button.child().and_downcast::<gtk::Label>() {
                 label.set_xalign(0.);
             }
@@ -764,7 +766,7 @@ impl PackLibraryPage {
             .has_arrow(false)
             .child(&menu)
             .build();
-        popover.add_css_class("picker-settings-popover");
+        popover.add_css_class("message-menu");
         for button in [&import, &telegram, &create, &manage] {
             let popup = popover.downgrade();
             button.connect_clicked(move |_| {
@@ -774,7 +776,7 @@ impl PackLibraryPage {
             });
         }
         let settings_icon =
-            crate::emoji_picker_ui::mobile_emoji_icon("smiles_tab_settings.webp", 32);
+            crate::emoji_picker_ui::mobile_emoji_icon("smiles_tab_settings.webp", 24);
         settings_icon.add_css_class("emoji-category-icon");
         let gear = gtk::MenuButton::builder()
             .child(&settings_icon)
@@ -1077,7 +1079,7 @@ impl PackLibraryPage {
             button.add_css_class("flat");
             button.add_css_class("pack-selector-item");
             button.set_valign(gtk::Align::Center);
-            button.set_size_request(40, 40);
+            button.set_size_request(30, 30);
             if let Some(first) = &group {
                 button.set_group(Some(first));
             } else {
@@ -1112,8 +1114,8 @@ impl PackLibraryPage {
                     .await;
                     if let Ok(Ok(texture)) = texture {
                         let picture = gtk::Image::from_paintable(Some(&texture));
-                        picture.set_pixel_size(32);
-                        picture.set_size_request(32, 32);
+                        picture.set_pixel_size(24);
+                        picture.set_size_request(24, 24);
                         button.set_child(Some(&picture));
                     }
                 });
@@ -1204,10 +1206,10 @@ impl PackLibraryPage {
                 continue;
             }
             self.push_heading(&mut rows, id, &title);
-            for row in builtin.chunks(6) {
+            for row in builtin.chunks(7) {
                 Self::push_row(&mut rows, PickerRow::Emoji(row.to_vec()));
             }
-            for row in items.chunks(if self.kind == Kind::Emoji { 6 } else { 4 }) {
+            for row in items.chunks(if self.kind == Kind::Emoji { 7 } else { 4 }) {
                 Self::push_row(&mut rows, PickerRow::Pack(row.to_vec()));
             }
             if rows.len() == self.anchors.borrow()[&id] as usize + 1 {
@@ -1233,7 +1235,7 @@ impl PackLibraryPage {
                     continue;
                 }
                 self.push_heading(&mut rows, id, title);
-                for row in entries.chunks(6) {
+                for row in entries.chunks(7) {
                     Self::push_row(&mut rows, PickerRow::Emoji(row.to_vec()));
                 }
             }
@@ -1273,11 +1275,17 @@ impl PackLibraryPage {
                 if let Some(ui) = self.ui.upgrade() {
                     for entry in entries {
                         if let Some(button) = crate::emoji_picker_ui::builtin_button(&ui, entry) {
-                            row.append(&button);
+                            row.append(
+                                &gtk::AspectFrame::builder()
+                                    .ratio(1.)
+                                    .obey_child(false)
+                                    .child(&button)
+                                    .build(),
+                            );
                         }
                     }
                 }
-                for _ in entries.len()..6 {
+                for _ in entries.len()..7 {
                     row.append(&gtk::Box::new(gtk::Orientation::Horizontal, 0));
                 }
                 row.upcast()
@@ -1285,7 +1293,7 @@ impl PackLibraryPage {
             PickerRow::Pack(items) => {
                 let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
                 row.set_homogeneous(true);
-                let columns = if self.kind == Kind::Emoji { 6 } else { 4 };
+                let columns = if self.kind == Kind::Emoji { 7 } else { 4 };
                 for item in items {
                     row.append(&self.pack_cell(item));
                 }

@@ -811,7 +811,9 @@ impl Ui {
                 bubble.append(&meta);
             }
             if !m.reactions.is_empty() {
+                bubble.add_css_class("has-reactions");
                 let row = bx(false, 4);
+                row.set_margin_top(8);
                 for reaction in &m.reactions {
                     let emoji = reaction
                         .rsplit_once(' ')
