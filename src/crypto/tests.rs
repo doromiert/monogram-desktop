@@ -178,10 +178,31 @@ fn contact_blind_trust_replaces_only_the_approved_ratchet_and_preserves_blocks()
         Err(Error::TrustRequired)
     ));
 
-    let own_copy = device::prepare(&mut store(A, 303), 1).unwrap();
-    device::observe(&mut a, A, 303, &own_copy, true).unwrap();
+    let mut own_device = store(A, 303);
+    let own_copy = device::prepare(&mut own_device, 1).unwrap();
+    device::observe(&mut a, A, 303, &own_copy, false).unwrap();
     assert!(matches!(
         encrypt(&mut a, A, 303, &own_copy, b"Own device needs review"),
+        Err(Error::TrustRequired)
+    ));
+    device::observe(&mut a, A, 303, &own_copy, true).unwrap();
+    approve(&mut own_device, A, 101, &ab);
+    let copied = encrypt(&mut a, A, 303, &own_copy, b"Approved own device").unwrap();
+    assert_eq!(
+        decrypt(&mut own_device, A, 101, &copied)
+            .unwrap()
+            .as_slice(),
+        b"Approved own device"
+    );
+    device::decide(
+        &mut a,
+        &BTreeMap::from([(A.into(), BTreeMap::from([(303, own_copy.identity)]))]),
+        false,
+    )
+    .unwrap();
+    device::observe(&mut a, A, 303, &own_copy, true).unwrap();
+    assert!(matches!(
+        encrypt(&mut a, A, 303, &own_copy, b"Own block wins"),
         Err(Error::TrustRequired)
     ));
 }

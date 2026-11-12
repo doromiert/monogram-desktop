@@ -327,7 +327,12 @@ impl Worker {
             .await
             .is_ok_and(|v| v.unwrap_or(false))
     }
-    async fn observe(&mut self, peer: &str, id: u32) -> Prepared<Bundle> {
+    async fn observe(
+        &mut self,
+        peer: &str,
+        id: u32,
+        conversation: Option<&str>,
+    ) -> Prepared<Bundle> {
         let bundle = self
             .pep()?
             .bundle(peer, id)
@@ -340,7 +345,7 @@ impl Worker {
             })?;
         let blind_trust = if let Some(history) = self.history()? {
             history
-                .blind_trust(&self.owner, peer)
+                .blind_trust_for(&self.owner, peer, conversation)
                 .map_err(Error::from)?
         } else {
             false
@@ -354,7 +359,12 @@ impl Worker {
         )?;
         Ok(bundle)
     }
-    async fn targets(&mut self, peer: &str, optional: bool) -> Prepared<BTreeMap<u32, Bundle>> {
+    async fn targets(
+        &mut self,
+        peer: &str,
+        optional: bool,
+        conversation: Option<&str>,
+    ) -> Prepared<BTreeMap<u32, Bundle>> {
         let root = self.pep()?.devices(peer).await?;
         let ids = super::pep::ids(root.as_ref())?;
         let local = self
@@ -369,7 +379,7 @@ impl Worker {
             if peer == self.owner && id == local {
                 continue;
             }
-            match self.observe(peer, id).await {
+            match self.observe(peer, id, conversation).await {
                 Ok(bundle) => {
                     let store = &mut self.local.as_mut().unwrap().engine.store;
                     match store.transaction(|tx| device::trust(tx, peer, id, &bundle.identity))? {
@@ -395,6 +405,7 @@ impl Worker {
         Ok(targets)
     }
     async fn review(&mut self, peer: &str) {
+        let conversation = peer.to_owned();
         let mut errors = vec![];
         let mut peers = vec![peer.to_string()];
         if peer != self.owner {
@@ -428,7 +439,7 @@ impl Worker {
                 {
                     continue;
                 }
-                match self.observe(&peer, id).await {
+                match self.observe(&peer, id, Some(&conversation)).await {
                     Ok(bundle) => {
                         let trust = self
                             .local
@@ -503,14 +514,14 @@ impl Worker {
             .into());
         }
         address(peer, 1)?;
-        let targets = self.targets(peer, false).await?;
+        let targets = self.targets(peer, false, Some(peer)).await?;
         if targets.is_empty() {
             return Err(PreparationError::NoDevices);
         }
         let mut recipients = BTreeMap::from([(peer.to_string(), targets)]);
         if peer != self.owner {
             let owner = self.owner.clone();
-            recipients.insert(owner.clone(), self.targets(&owner, true).await?);
+            recipients.insert(owner.clone(), self.targets(&owner, true, Some(peer)).await?);
         }
         let root = protocol::outgoing(peer, message, quote);
         let mut plain = Element::builder("message", payload::CLIENT)
@@ -690,7 +701,12 @@ impl Worker {
         }
         let header = bundle::single(bundle::single(&frame.xml, "encrypted", NS)?, "header", NS)?;
         let sender = bundle::positive(header.attr("sid"))?;
-        let peer = payload::routing(&frame.xml)?.0;
+        let (peer, destination) = payload::routing(&frame.xml)?;
+        let conversation = if peer == self.owner {
+            destination
+        } else {
+            peer.clone()
+        };
         let prekey = header
             .children()
             .filter(|g| g.attr("jid") == Some(&self.owner))
@@ -701,7 +717,7 @@ impl Worker {
             });
         if prekey {
             let bundle = self
-                .observe(&peer, sender)
+                .observe(&peer, sender, Some(&conversation))
                 .await
                 .map_err(PreparationError::into_error)?;
             if self
@@ -1398,11 +1414,13 @@ mod tests {
             assert_eq!(aux_rows.len(), 1);
             assert_eq!(aux_rows[0].key, aux_bundle.identity);
             assert_eq!(aux_rows[0].trust, "Undecided");
+            history.set_blind_trust(owner, peer, false).unwrap();
             assert!(matches!(probe(&alice, peer).await, Err(Error::OwnDeviceTrustRequired)));
             let (reply, selected) = oneshot::channel();
             assert!(alice.send(Command::ChooseEncryption { peer: peer.into(), reply }));
             assert!(matches!(tokio::time::timeout(Duration::from_secs(15), selected).await.unwrap().unwrap(), Err(Error::OwnDeviceTrustRequired)));
-            decide(&alice, &a, owner, aux_rows, true);
+            history.set_blind_trust(owner, peer, true).unwrap();
+            assert!(probe(&alice, peer).await.unwrap(), "Conversation blind trust approves authenticated own-device copies");
 
             let mut other_resource = Client::new(config("carol"), "fixture-password".into());
             assert!(matches!(tokio::time::timeout(Duration::from_secs(20), other_resource.next()).await.unwrap(), Some(Event::Online)));

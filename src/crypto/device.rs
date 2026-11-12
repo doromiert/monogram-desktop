@@ -159,7 +159,7 @@ pub fn observe(
 ) -> Result<()> {
     address(peer, device)?;
     bundle.validate()?;
-    let accept = blind_trust && peer != store.owner;
+    let accept = blind_trust;
     store.transaction(|tx| {
         tx.save(SEEN, peer, device, Some(&bundle.identity))?;
         if accept

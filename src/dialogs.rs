@@ -267,7 +267,7 @@ impl Ui {
             let contact_access = crate::contact_access::valid_peer(&owner, &peer);
             let trust = adw::SwitchRow::builder()
                 .title("Blindly Trust This Contact")
-                .subtitle("Approves contact devices in all OMEMO versions; OMEMO2 also includes your own devices for this conversation")
+                .subtitle("Approves contact and own-device fingerprints for this conversation in all OMEMO versions")
                 .active(self.store.blind_trust(&owner, &peer).unwrap_or(false))
                 .build();
             let weak = Rc::downgrade(self);
@@ -291,7 +291,7 @@ impl Ui {
                 set_switch(row, &setting, false);
                 let confirm = adw::AlertDialog::builder()
                     .heading("Enable Blind Trust for This Conversation?")
-                    .body(format!("Approve new devices and changed keys for {target} across all OMEMO versions, plus your own OMEMO2 devices used in this conversation, without fingerprint verification. Explicitly blocked devices stay blocked."))
+                    .body(format!("Approve new devices and changed keys for {target} across all OMEMO versions, plus your own devices used in this conversation, without fingerprint verification. Explicitly blocked devices stay blocked."))
                     .build();
                 confirm.add_responses(&[("cancel", "Cancel"), ("enable", "Enable Blind Trust")]);
                 confirm.set_default_response(Some("cancel"));

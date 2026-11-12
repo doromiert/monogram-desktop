@@ -40,7 +40,7 @@ impl fmt::Display for Error {
             Self::Crypto(_) => "OMEMO 2 authentication failed",
             Self::TrustRequired => "Review this device's fingerprint before using encryption",
             Self::OwnDeviceTrustRequired => {
-                "Review your other devices’ fingerprints to send and read encrypted messages. Contact blind trust only approves the contact’s devices."
+                "Review these own-device fingerprints or enable automatic trust for this conversation. Explicitly blocked devices remain blocked."
             }
             Self::Changed => "The device identity changed; refresh before approving it",
             Self::Incomplete => "Incomplete OMEMO 2 state; existing identity preserved",
