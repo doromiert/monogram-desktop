@@ -143,9 +143,27 @@ impl Ui {
         pane.add_top_bar(&h);
         let body = bx(true, 16);
         margins(&body, 12);
+        body.set_width_request(0);
+        body.set_hexpand(true);
         body.append(&self.chat_avatar(&chat, 76));
-        body.append(&label(&chat.name, "title-2"));
-        body.append(&label(&chat.subtitle, "dim-label"));
+        let title = wrap(&chat.name, "title-2");
+        title.set_width_chars(1);
+        title.set_max_width_chars(34);
+        title.set_lines(3);
+        title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        title.set_xalign(0.5);
+        title.set_tooltip_text(Some(&chat.name));
+        title.update_property(&[gtk::accessible::Property::Label(&chat.name)]);
+        body.append(&title);
+        let subtitle = wrap(&chat.subtitle, "dim-label");
+        subtitle.set_width_chars(1);
+        subtitle.set_max_width_chars(42);
+        subtitle.set_lines(2);
+        subtitle.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        subtitle.set_xalign(0.5);
+        subtitle.set_tooltip_text(Some(&chat.subtitle));
+        subtitle.update_property(&[gtk::accessible::Property::Label(&chat.subtitle)]);
+        body.append(&subtitle);
         let g = adw::PreferencesGroup::new();
         let live_access = !demo
             && !chat.group

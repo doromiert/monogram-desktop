@@ -279,10 +279,13 @@ impl Ui {
             let day = local_day(m);
             if day != last {
                 let row = rendered.dates.entry(day.clone()).or_insert_with(|| {
+                    let pill = label(&day, "date-pill");
+                    pill.set_halign(gtk::Align::Center);
+                    pill.set_hexpand(false);
                     gtk::ListBoxRow::builder()
                         .selectable(false)
                         .activatable(false)
-                        .child(&label(&day, "date-pill"))
+                        .child(&pill)
                         .build()
                 });
                 order.push(row.clone());
