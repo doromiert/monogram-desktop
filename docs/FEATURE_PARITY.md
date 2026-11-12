@@ -95,3 +95,10 @@ Both clients render exact leading `/you ` and `/nar ` as action messages beside
 `/me `, preserving their original bodies and ordinary encryption/persistence.
 `/you ` displays literal `you`; `/nar ` displays only its suffix. These are local
 presentation extensions, documented in [the proposal](PROPOSED_ACTION_COMMANDS.md).
+
+2026-11-12 delivery: desktop8cdd88f adds actual mobile-style round-video seeking
+and mute, shared quick-reaction button motion, the five-screen history cache,
+and bounded transfer reconnection. Mobile0.2.202 has the same GET/immutable-wire
+PUT recovery and retains its signing identity/native backend. Real-service cold
+transfer checks pass on desktop and Android15 emulator; full parity and the
+remaining user issues in REPORTED_ISSUES.txt remain open.

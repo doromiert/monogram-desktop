@@ -1,6 +1,7 @@
 Monogram — current user-reported issues
 Updated: 2026-11-12
-Running desktop source: 0ad0f13 (history/round-video/download-recovery fixes).
+Verified running desktop source: 8cdd88f (current 2026-11-12 delivery).
+Mobile transfer recovery release: 0.2.202 / 205f3165f (original signing key).
 A local implementation or fixture pass does not mean the change is shipped.
 Items labelled LOCAL WIP are absent from the running build.
 Full feature scope and remaining parity gaps: FEATURE_PARITY.md.
@@ -16,7 +17,7 @@ FIX IMPLEMENTED, LIVE ACCEPTANCE OPEN — Sending still rejects the user's own f
   sessions before asking for trust, while requiring usable contact recipients.
   Native real-crypto checks pass for text/reactions and explicit blocks.
 
-IN PROGRESS — First-attempt downloads and uploads stall for all media/stickers
+CLIENT RECOVERY SHIPPED — First-attempt downloads and uploads stall for all media/stickers
   Media is recognized and a download/preparation spinner appears, but the job
   sometimes makes no further visible progress. Determine whether HTTP transfer,
   cache verification, preview preparation or UI observation is stalled. Keep
@@ -85,14 +86,15 @@ OPEN — Managed MUC join timeout
   succeeds, but the application's managed join still times out. Do not assume
   a server outage or weaken presence validation without evidence.
 
-IN PROGRESS — 140+ unread messages can trigger Not Responding on chat switch
+SHIPPED — 140+ unread messages can trigger Not Responding on chat switch
   Worker-side render planning and bounded row creation are implemented, but live
   backend events still sometimes exceed the 400 ms responsiveness requirement.
-  Large-backlog native acceptance passes; real startup responsiveness remains open.
+  Large-backlog native acceptance passes. The delivered package painted useful
+  startup feedback in 299 ms and its next interface frame gap was188 ms.
   Measured a correlated edit/reaction reconciliation SELECT taking 2251–2291 ms
   per event on 651 archived bases/25 actions. An equivalent uncorrelated query
   selects the same 25 records in 0.27–0.34 ms. The local fix passes native large-
-  backlog acceptance and awaits packaging. Retain only the viewport plus two screens
+  backlog acceptance and is included in the running package. Retain only the viewport plus two screens
   above and two below; the old build's three-screen buffer is being corrected.
 
 OPEN — Mobile export lifecycle follow-up
@@ -118,7 +120,7 @@ FIX IMPLEMENTED — Expanded reactions should reach the picker bottom
   Removed the bottom inset from the expanded reaction picker; keep its top
   and side padding while extending the scrolling viewport to the bottom edge.
 
-READY FOR PACKAGING — Reaction picker should grow with shared quick reactions
+SHIPPED — Reaction picker should grow with shared quick reactions
   Keep collapsed and expanded widths identical. Grow vertically with no opacity
   swap. Move the actual quick-reaction buttons into the expanded list and back;
   do not replace them with duplicate widgets. Reference: mobile user screenshots
@@ -154,7 +156,7 @@ LOCAL WIP, NOT SHIPPED — Forward attribution should look like mobile
   Use a normal-size left-aligned two-line header (Forwarded from, then sender)
   with mobile-like tint and no extra button inset. Reference: mobile12286.jpg.
 
-IN PROGRESS — Round video messages render square on desktop
+SHIPPED — Round video messages render square on desktop
   Match mobile round_video_*.mp4 recognition using verified square dimensions
   and positive duration. Circular clipping must apply to the actual frames,
   placeholder and surrounding bubble; ordinary videos remain rectangular.
@@ -190,13 +192,13 @@ SHIPPED IN 0ad0f13 — Native large-unread acceptance
   of 7.92 ms, 22 retained rows inside the requested five-screen window, and all
   180 fixture messages preserved on disk. Existing paging/reply acceptance passes.
 
-READY FOR PACKAGING — Circular scrubber and mute button for circle videos
+SHIPPED — Circular scrubber and mute button for circle videos
   Latest user request: match mobile circular seeking and mute controls on inline
   round videos. Preserve verified clipping, one audible player, explicit pauses
   and normal rectangular video behavior. Native real-pointer 25/50/75% seeking,
   paused/playing mute state, under-click prevention and sub400ms feedback pass.
 
-READY FOR PACKAGING — Automatic upload response recovery
+SHIPPED — Automatic upload response recovery
   First PUTs produced the full body but timed out waiting for HTTP headers;
   the issued GET URL returned 410, so local 100% did not prove acceptance.
   A private immutable wire snapshot now permits one identical PUT to the same
@@ -204,3 +206,20 @@ READY FOR PACKAGING — Automatic upload response recovery
   three cold real-service uploads each recovered and their downloads passed
   authenticated decryption and SHA-256. No HTTP rejection is retried. The final
   request retains its normal timeout. Underlying external service stalls remain.
+
+DELIVERY VERIFIED — Desktop and mobile transfer recovery
+  Desktop8cdd88f is packaged from isolated committed source and running fullscreen
+  on HDMI-1. It includes same-button reaction morph, circular seek/mute, bounded
+  GET recovery and identical-wire PUT recovery, alongside the query/cache fix.
+  Android0.2.202 is published on GitHub with the original signing certificate and
+  all seven native libraries. Five cold final-APK GETs and three live encrypted
+  PUT/GET cases pass on the owned Android15 emulator. The service's underlying
+  intermittent header stalls remain external; recovery is bounded, not unlimited.
+
+OPEN, NOT REPRODUCED — React/unreact scroll jump follow-up
+  A clean baseline and isolated input-serial candidate both preserve the tested
+  anchors with0px drift, about100ms feedback. Candidate wheel handling works,
+  but no improvement for the reported jump is established. The unproven guard
+  remains isolated rather than shipped. Selection/forwarding and decryption-delay
+  requests above remain open/local WIP as marked; this delivery does not finish
+  all historical desktop requests.
