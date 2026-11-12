@@ -1,0 +1,71 @@
+Monogram — current user-reported issues
+Updated: 2026-11-12
+Running desktop when the newest failures were reported: efb2375.
+Full feature scope and remaining parity gaps: FEATURE_PARITY.md.
+
+OPEN — Sending still rejects the user's own fingerprints
+  The running build still asks to review own-device fingerprints despite the
+  requested conversation blind-trust behavior. Check the actual enabled policy,
+  selected encryption profile and all send/action paths. Conversation blind
+  trust must approve authenticated own devices as well as the contact's devices.
+  Preserve explicit fingerprint blocks; do not silently change sending versions.
+
+OPEN — Some media downloads remain stuck
+  Media is recognized and a download/preparation spinner appears, but the job
+  sometimes makes no further visible progress. Determine whether HTTP transfer,
+  cache verification, preview preparation or UI observation is stalled. Keep
+  cancellation/retry usable and show a bounded, meaningful failure if stalled.
+
+OPEN — Captioned media has excessive padding
+  Keep the same thin padding around the image/video as an uncaptioned item.
+  Give the text caption its own normal message-text padding. A caption must not
+  increase the padding around the media itself.
+
+OPEN — Media with reactions has excessive padding
+  Reactions must not apply normal text-bubble padding around the image/video.
+  Keep the media inset thin and pad the reaction area separately, using the
+  normal text inset as the baseline.
+
+OPEN — Reacting fails
+  User receives: "Message change failed or delivery is uncertain. Reopen Edit to
+  recover its text." Trace the real reaction failure and its encryption/trust
+  policy. A reaction error must not instruct the user to recover an edit draft.
+
+OPEN — Expanded reaction picker lacks continuous scrolling
+  Show supported Favorites, Recent and emoji categories in one vertically
+  scrolling list. Keep category buttons horizontal and use them to jump to the
+  corresponding section, like the main emoji picker.
+
+OPEN — Reaction picker expansion/collapse has no transition
+  Animate the change between collapsed quick reactions and the expanded picker,
+  including the reverse transition, rather than replacing it abruptly.
+
+OPEN — Decryption placeholder delay (new requested behavior)
+  Show a message immediately once it has decrypted.
+  Until then, do not show its timeline row for the first two seconds after
+  arrival. At two seconds, show the undecrypted placeholder only if decryption
+  is still incomplete. If it decrypts later, replace the placeholder immediately.
+  Do not delay already decrypted messages or restart the delay on ordinary
+  rerenders, chat switches or history-window changes.
+
+IN PROGRESS — Drag to reorder favorite emoji, stickers and GIFs on both clients
+  Desktop code now handles all three, including mixed built-in/custom emoji
+  favorites, background persistence and account guards. Real native pointer-drag
+  and database-reload checks pass; this code is not yet in the running build.
+  Mobile drag reordering is still open. Keep membership and recent-item order
+  independent of favorite order, and preserve ordering across restart.
+
+OPEN — Managed MUC join timeout
+  The reported room works on mobile. An isolated raw desktop discovery/join
+  succeeds, but the application's managed join still times out. Do not assume
+  a server outage or weaken presence validation without evidence.
+
+OPEN — Chat switching/history scrolling can freeze the UI
+  Worker-side render planning and bounded row creation are implemented, but live
+  backend events still sometimes exceed the 400 ms responsiveness requirement.
+  Real startup/history responsiveness acceptance remains open.
+
+OPEN — Mobile export lifecycle follow-up
+  Normal native SAF export to .xmsp and import/re-export by the actual desktop
+  library are verified. Process-death restoration during the system file picker
+  and large-copy progress/lifecycle behavior remain open.
