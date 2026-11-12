@@ -647,11 +647,13 @@ impl Ui {
         let loaded_ids = Rc::new(RefCell::new(HashSet::<String>::new()));
         let cursor = Rc::new(RefCell::new(None::<(String, String)>));
         let finished = Rc::new(Cell::new(false));
+        let failed_page = Rc::new(Cell::new(false));
         let loading_page = Rc::new(Cell::new(false));
         let load_slot = Rc::new(RefCell::new(None::<Rc<dyn Fn()>>));
         let load_slot_weak = Rc::downgrade(&load_slot);
+        let load_failed = failed_page.clone();
         let load: Rc<dyn Fn()> = Rc::new(move || {
-            if finished.get() || loading_page.replace(true) {
+            if finished.get() || load_failed.get() || loading_page.replace(true) {
                 return;
             }
             if let (Some(feedback), Some(spinner), Some(status), Some(retry)) = (
@@ -674,11 +676,12 @@ impl Ui {
                 status_ref.clone(),
                 retry_ref.clone(),
             );
-            let (list, loaded_ids, cursor, finished, loading_page) = (
+            let (list, loaded_ids, cursor, finished, failed_page, loading_page) = (
                 list.clone(),
                 loaded_ids.clone(),
                 cursor.clone(),
                 finished.clone(),
+                load_failed.clone(),
                 loading_page.clone(),
             );
             let (load_slot_weak, scrolling_ref) =
@@ -709,6 +712,7 @@ impl Ui {
                 }
                 match page {
                     Ok(page) => {
+                        failed_page.set(false);
                         finished.set(page.next.is_none());
                         cursor.replace(page.next);
                         for message in page.messages {
@@ -749,8 +753,9 @@ impl Ui {
                         }
                     }
                     Err(_) => {
-                        content.set_visible_child_name("photos");
+                        failed_page.set(true);
                         loading_page.set(false);
+                        content.set_visible_child_name("photos");
                         if let (Some(feedback), Some(spinner), Some(status), Some(retry)) = (
                             feedback_ref.upgrade(),
                             spinner_ref.upgrade(),
@@ -769,7 +774,11 @@ impl Ui {
         });
         load_slot.replace(Some(load.clone()));
         let retry_load = load.clone();
-        retry.connect_clicked(move |_| retry_load());
+        let retry_failed = failed_page.clone();
+        retry.connect_clicked(move |_| {
+            retry_failed.set(false);
+            retry_load();
+        });
         let load_scroll = load_slot.clone();
         scrolling.vadjustment().connect_value_changed(move |a| {
             if a.page_size() > 0. && a.upper() - a.page_size() - a.value() < 120. {
