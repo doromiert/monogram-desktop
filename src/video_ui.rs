@@ -27,6 +27,7 @@ pub(crate) struct Playback {
     pub(crate) replay: gtk::Button,
     _input: VerifiedFile,
     pub(crate) expanded: Cell<bool>,
+    inline_interactive: Cell<bool>,
     inline_users: Cell<usize>,
 }
 impl Playback {
@@ -50,6 +51,7 @@ impl Playback {
             replay,
             _input: input,
             expanded: Cell::new(false),
+            inline_interactive: Cell::new(false),
             inline_users: Cell::new(0),
         }))
     }
@@ -95,6 +97,9 @@ impl InlinePlayback {
         }
         if !self.player.expanded.get() {
             let playing = self.player.inline_users.get() > 0;
+            if playing && self.player.inline_interactive.get() {
+                return;
+            }
             if self.player.media.is_playing() != playing {
                 self.player.media.set_playing(playing);
             }
@@ -209,9 +214,33 @@ impl Ui {
         button.add_css_class("message-media-tile");
         let weak = Rc::downgrade(self);
         if !file.sticker {
+            let image = image.downgrade();
+            let key = file.key();
             button.connect_clicked(move |button| {
                 if let Some(ui) = weak.upgrade() {
-                    ui.media_viewer(Some(button.clone().upcast()));
+                    if image.upgrade().is_some_and(|image| image.is_circular()) {
+                        let mut images = ui.images.borrow_mut();
+                        if let Some(player) = images.video(&key) {
+                            for (_, other) in &images.videos {
+                                if !Rc::ptr_eq(other, &player) && !other.media.is_muted() {
+                                    other.media.pause();
+                                    other.media.set_muted(true);
+                                    other.media.set_loop(true);
+                                    other.inline_interactive.set(false);
+                                }
+                            }
+                            let playing = player.media.is_muted() || !player.media.is_playing();
+                            player.inline_interactive.set(true);
+                            player.media.set_muted(false);
+                            player.media.set_loop(false);
+                            if player.media.is_ended() {
+                                player.media.seek(0);
+                            }
+                            player.media.set_playing(playing);
+                        }
+                    } else {
+                        ui.media_viewer(Some(button.clone().upcast()));
+                    }
                 }
             });
         }
@@ -222,6 +251,7 @@ impl Ui {
         let fallback = controls.downgrade();
         let location = content.downgrade();
         let mut attached: Option<InlinePlayback> = None;
+        let captionless = message.text.is_empty();
         let load = move || {
             let (Some(ui), Some(image), Some(button), Some(controls), Some(location)) = (
                 weak.upgrade(),
@@ -254,12 +284,35 @@ impl Ui {
                         controls.set_visible(true);
                         return glib::ControlFlow::Continue;
                     }
+                    let width = player.media.intrinsic_width().max(0) as u32;
+                    let height = player.media.intrinsic_height().max(0) as u32;
+                    let round = file.round_video(width, height, player.media.duration());
+                    if round && !image.is_circular() {
+                        image.set_circular(true);
+                        button.add_css_class("round-video");
+                        button.set_tooltip_text(Some("Play or pause round video"));
+                        if let Some(overlay) = controls.parent().and_downcast::<gtk::Overlay>() {
+                            overlay.add_css_class("round-video");
+                            if let Some(placeholder) = overlay.child().and_downcast::<AspectImage>()
+                            {
+                                placeholder.set_circular(true);
+                            }
+                        }
+                        let mut parent = location.parent();
+                        while let Some(widget) = parent {
+                            if widget.has_css_class("message-bubble") {
+                                if captionless {
+                                    widget.add_css_class("round-video-bubble");
+                                }
+                                break;
+                            }
+                            parent = widget.parent();
+                        }
+                    }
                     if !button.is_visible() {
                         image.set_paintable(Some(player.media.clone().upcast()));
                         button.set_visible(true);
                         reveal_media(&controls, &player.media);
-                        let width = player.media.intrinsic_width().max(0) as u32;
-                        let height = player.media.intrinsic_height().max(0) as u32;
                         if width > 0 && height > 0 {
                             let mime = if file.mime.starts_with("video/") {
                                 file.mime.as_str()

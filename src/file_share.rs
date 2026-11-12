@@ -258,6 +258,16 @@ impl Attachment {
     pub fn media_candidate(&self) -> bool {
         self.image_candidate() || self.video_candidate()
     }
+    pub fn round_video(&self, width: u32, height: u32, duration_us: i64) -> bool {
+        let name = self.name.to_ascii_lowercase();
+        !self.sticker
+            && name.starts_with("round_video_")
+            && name.ends_with(".mp4")
+            && width > 0
+            && width == height
+            && width <= 1280
+            && duration_us > 0
+    }
     pub fn video_candidate(&self) -> bool {
         self.mime.starts_with("video/") || self.video_extension()
     }
@@ -513,6 +523,19 @@ impl Attachment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn round_marker_requires_verified_square_video_metadata() {
+        let mut file = Attachment::bare("https://example.org/opaque").unwrap();
+        file.name = "ROUND_VIDEO_capture.MP4".into();
+        assert!(file.round_video(640, 640, 1_000_000));
+        for (width, height, duration) in [(0, 0, 1), (640, 480, 1), (1920, 1920, 1), (640, 640, 0)]
+        {
+            assert!(!file.round_video(width, height, duration));
+        }
+        file.name = "ordinary.mp4".into();
+        assert!(!file.round_video(640, 640, 1_000_000));
+    }
+
     #[test]
     fn actual_mobile_file_models_and_protected_captions_match() {
         let cases: Vec<serde_json::Value> =

@@ -1,4 +1,4 @@
-//! Timeline rows are a cache. Keep the visible viewport and roughly three screens on either side.
+//! Timeline rows are a cache. Keep the visible viewport and two screens on either side.
 use crate::{model::Message, storage::Store};
 use rusqlite::params;
 use std::{
@@ -8,7 +8,7 @@ use std::{
 };
 
 pub const PAGE: u32 = 36;
-pub const SCREENS: f64 = 3.0;
+pub const SCREENS: f64 = 2.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Side {
@@ -325,5 +325,19 @@ impl Store {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod bounds_tests {
+    use super::*;
+    #[test]
+    fn retains_only_viewport_and_two_screens_each_side() {
+        let rows: Vec<_> = (0..100)
+            .map(|n| n as f64 * 100.0..(n + 1) as f64 * 100.0)
+            .collect();
+        assert_eq!(retained(&rows, 4000.0..4500.0), 29..56);
+        let kept = retained(&rows, 0.0..500.0);
+        assert_eq!(kept, 0..16);
     }
 }

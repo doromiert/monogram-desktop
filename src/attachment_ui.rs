@@ -125,7 +125,11 @@ impl Ui {
             action.set_visible(!media || !matches!(status, Some(Status::Ready(_))));
             progress.set_visible(matches!(status, Some(Status::Running { .. })));
             let (title, subtitle) = match status {
-                Some(Status::Running { bytes, total }) => {
+                Some(Status::Running {
+                    bytes,
+                    total,
+                    reconnecting,
+                }) => {
                     if let Some(total) = total.filter(|n| *n > 0) {
                         progress.set_fraction((bytes as f64 / total as f64).clamp(0., 1.));
                     } else {
@@ -133,13 +137,17 @@ impl Ui {
                     }
                     (
                         "Cancel",
-                        match total {
-                            Some(total) => format!(
-                                "{} of {}",
-                                glib::format_size(bytes),
-                                glib::format_size(total)
-                            ),
-                            None => format!("{} downloaded", glib::format_size(bytes)),
+                        if reconnecting {
+                            "Reconnecting to download server…".into()
+                        } else {
+                            match total {
+                                Some(total) => format!(
+                                    "{} of {}",
+                                    glib::format_size(bytes),
+                                    glib::format_size(total)
+                                ),
+                                None => format!("{} downloaded", glib::format_size(bytes)),
+                            }
                         },
                     )
                 }
@@ -361,10 +369,14 @@ impl Ui {
                 )
             } else {
                 match state {
-                    Some(Status::Running { bytes, total }) => (
+                    Some(Status::Running {
+                        bytes,
+                        total,
+                        reconnecting,
+                    }) => (
                         "process-stop-symbolic",
                         "Cancel download",
-                        None,
+                        reconnecting.then_some("Reconnecting to download server…"),
                         total
                             .filter(|total| *total > 0 && bytes > 0)
                             .map(|total| bytes as f64 / total as f64),

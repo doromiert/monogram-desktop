@@ -12,6 +12,15 @@ borderless within 256 × 256 pixels. Known metadata sizes the progress placehold
 before decode. Retained rows keep following account-owned download/decode jobs
 across reconnects and map/unmap cycles.
 
+Round-video messages use mobile's `round_video_*.mp4` filename marker only after
+verified local playback confirms a video track, positive duration, and square
+intrinsic dimensions up to 1280 pixels. Generic attachment MIME does not prevent
+recognition. Their pixels are clipped to a circle and captionless bubbles stay
+transparent. Visible muted previews loop; tapping starts audible inline playback
+or pauses it, preserving an explicit pause during viewport updates. Starting
+another round video returns the previous one to muted preview behavior. Radial
+seeking, remaining-time labels and the mobile round-video editor remain open.
+
 ## Wire profile
 
 The existing [XEP-0447](https://xmpp.org/extensions/xep-0447.html) SFS description
@@ -184,3 +193,17 @@ does not make its progress determinate: the ring keeps rotating at the frame
 clock rate until bytes arrive. The reported 19:37 WebP sticker timed out before
 HTTP headers; the user confirmed immediate success with a fresh retry. The
 underlying intermittent network/server cause has not been established.
+
+Downloads recover one response-header stall automatically: after three seconds
+without headers, cancel that GET future and start one new GET using the same TLS
+configuration. The UI reports reconnecting, and existing cancellation, redirect,
+size, ciphertext authentication and hash checks still apply. The second request
+keeps the normal timeout. There is no automatic PUT replay.
+
+The actual affected encrypted media passed five cold `Downloads::start` runs
+with full decryption/authentication/cache commit: 404 ms without recovery, then
+3352/3294/3295/3607 ms with one recovery each. The local TLS regression withholds
+the first response and verifies the second connection returns authenticated
+bytes. Header timeout, corruption, unsafe redirect and cancellation checks pass.
+The upload service still intermittently stalls before headers in independent
+Android HTTP/1.1 requests; this recovery does not establish a server-side fix.

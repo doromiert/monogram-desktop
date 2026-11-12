@@ -25,6 +25,7 @@ pub enum Status {
     Running {
         bytes: u64,
         total: Option<u64>,
+        reconnecting: bool,
     },
     Ready(PathBuf),
     Failed(&'static str),
@@ -141,6 +142,7 @@ impl Downloads {
         let state = Arc::new(Mutex::new(Status::Running {
             bytes: 0,
             total: file.size,
+            reconnecting: false,
         }));
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -344,14 +346,35 @@ async fn download(
     let link = file.link().ok_or("Invalid attachment")?;
     let mut url = link.url.clone();
     let mut response = None;
+    let mut recovery_available = true;
     for _ in 0..=5 {
         checked(cancel)?;
-        let reply = client
-            .get(url.clone())
-            .header(reqwest::header::ACCEPT_ENCODING, "identity")
-            .send()
-            .await
-            .map_err(|error| transfer_error(&error, false))?;
+        let request = || {
+            client
+                .get(url.clone())
+                .header(reqwest::header::ACCEPT_ENCODING, "identity")
+                .send()
+        };
+        let reply = if recovery_available {
+            match tokio::time::timeout(Duration::from_secs(3), request()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    // GET is safe to repeat; dropping the stalled response future releases its connection.
+                    recovery_available = false;
+                    *state.lock().unwrap() = Status::Running {
+                        bytes: 0,
+                        total: file.size,
+                        reconnecting: true,
+                    };
+                    eprintln!("Monogram attachment response stalled; reconnecting once");
+                    checked(cancel)?;
+                    request().await
+                }
+            }
+        } else {
+            request().await
+        }
+        .map_err(|error| transfer_error(&error, false))?;
         if [301, 302, 303, 307, 308].contains(&reply.status().as_u16()) {
             let target = reply
                 .headers()
@@ -395,7 +418,11 @@ async fn download(
         return Err("Invalid download size");
     }
     let total = expected.map(|size| size - overhead).or(file.size);
-    *state.lock().unwrap() = Status::Running { bytes: 0, total };
+    *state.lock().unwrap() = Status::Running {
+        bytes: 0,
+        total,
+        reconnecting: false,
+    };
     let limit = if policy == Policy::Automatic {
         let mime = response
             .headers()
@@ -498,6 +525,7 @@ async fn download(
             *state.lock().unwrap() = Status::Running {
                 bytes: count.saturating_sub(overhead),
                 total,
+                reconnecting: false,
             };
             last = Instant::now();
         }
@@ -625,9 +653,9 @@ mod tests {
                         let Ok(mut socket)=acceptor.accept(socket)else{return;};let mut header=Vec::new();let mut byte=[0];
                         while header.len()<16384 && !header.ends_with(b"\r\n\r\n"){if socket.read(&mut byte).ok()!=Some(1){return;}header.push(byte[0]);}
                         let header=String::from_utf8(header).unwrap();assert!(!header.contains('#'));assert!(!header.contains("aesgcm"));
-                        let path=header.split_whitespace().nth(1).unwrap().to_string();seen.lock().unwrap().push(path.clone());
+                        let path=header.split_whitespace().nth(1).unwrap().to_string();let attempt={let mut requests=seen.lock().unwrap();requests.push(path.clone());requests.iter().filter(|seen|**seen==path).count()};
                         if path=="/redirect"||path=="/downgrade" {let location=if path=="/redirect"{format!("{base}/file")}else{base.replace("https:","http:")+"/file"};let _=write!(socket,"HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");return;}
-                        if path=="/headers-slow" {while !stopped.load(Ordering::Acquire){thread::sleep(Duration::from_millis(5));}return;}
+                        if path=="/headers-slow" || path=="/recover" && attempt==1 {while !stopped.load(Ordering::Acquire){thread::sleep(Duration::from_millis(5));}return;}
                         let mut body=bytes;if path=="/bad"{if let Some(b)=body.last_mut(){*b^=1;}}
                         let length=if path=="/huge"{MAX+17}else{body.len() as u64+if path=="/short"{1}else{0}};
                         let encoding=if path=="/encoding"{"Content-Encoding: gzip\r\n"}else{""};
@@ -676,6 +704,7 @@ mod tests {
         let progress = Mutex::new(Status::Running {
             bytes: 0,
             total: None,
+            reconnecting: false,
         });
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -696,6 +725,51 @@ mod tests {
             !root.exists(),
             "a request with no headers must not commit media"
         );
+    }
+
+    #[test]
+    fn first_start_recovers_a_stalled_get_once_without_manual_restart() {
+        let server = Server::new(b"authenticated after reconnect".to_vec());
+        let client = server.client();
+        let mut file = Attachment::bare(&format!("{}/recover", server.url)).unwrap();
+        file.hashes.insert(
+            "sha-256".into(),
+            openssl::sha::sha256(b"authenticated after reconnect").to_vec(),
+        );
+        let root = std::env::temp_dir().join(crate::model::new_id());
+        let progress = Mutex::new(Status::Running {
+            bytes: 0,
+            total: None,
+            reconnecting: false,
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let started = Instant::now();
+        let path = rt
+            .block_on(download(
+                &client,
+                &file,
+                &root,
+                &AtomicBool::new(false),
+                &progress,
+                Policy::Manual,
+            ))
+            .unwrap();
+        assert_eq!(fs::read(path).unwrap(), b"authenticated after reconnect");
+        assert!(started.elapsed() < Duration::from_secs(6));
+        assert_eq!(
+            server
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|path| path.as_str() == "/recover")
+                .count(),
+            2
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -735,6 +809,7 @@ mod tests {
             let progress = Mutex::new(Status::Running {
                 bytes: 0,
                 total: None,
+                reconnecting: false,
             });
             let path = rt
                 .block_on(download(

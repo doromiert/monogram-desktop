@@ -97,10 +97,8 @@ impl Ui {
         }
         let bounds: Vec<_> = rows.iter().map(|(_, bounds)| bounds.clone()).collect();
         let retained = retained(&bounds, top..top + height);
-        // Leave a half-screen margin before pruning so small scroll movements do not rebuild rows.
-        let prune_older = retained.start != 0 && top > height * (SCREENS + 0.5);
-        let prune_newer =
-            retained.end < rows.len() && end - top - height > height * (SCREENS + 0.5);
+        let prune_older = retained.start != 0;
+        let prune_newer = retained.end < rows.len();
         if !retained.is_empty() && (prune_older || prune_newer) {
             let start = if prune_older { retained.start } else { 0 };
             let end = if prune_newer {
@@ -433,6 +431,103 @@ mod tests {
             ui.history_window.busy(),
             ui.history_window.newest()
         );
+    }
+
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn switching_into_140_unread_keeps_five_screen_bound_and_input_responsive() {
+        let application = adw::Application::builder()
+            .application_id("com.negzero.MonogramDesktop.UnreadHistoryFixture")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application.register(None::<&gio::Cancellable>).unwrap();
+        let ui = Ui::new(&application, true);
+        let owner = "alice@fixture.invalid";
+        let peer = "busy@fixture.invalid";
+        ui.store
+            .save_account(&Account {
+                jid: owner.into(),
+                host: String::new(),
+                port: 5222,
+                direct_tls: false,
+            })
+            .unwrap();
+        let mut fixture = State::live(owner, vec![]);
+        fixture.active = fixture.chat_for("other@fixture.invalid").id.clone();
+        let chat = fixture.chat_for(peer);
+        chat.unread = 140;
+        for n in 0..180 {
+            chat.messages.push(Message {
+                id: format!("busy-{n:03}"),
+                wire_id: format!("busy-{n:03}"),
+                sender: peer.into(),
+                text: format!(
+                    "Unread message {n}{}",
+                    "\nContent in this message".repeat(n % 5)
+                ),
+                timestamp: format!("2026-11-12T{:02}:{:02}:00Z", 10 + n / 60, n % 60),
+                ..Default::default()
+            });
+        }
+        ui.store.save(&fixture).unwrap();
+        ui.activate_state(ui.store.load_windowed(owner));
+        ui.window.set_default_size(900, 520);
+        ui.window.present();
+        wait(&ui, || ui.timeline.is_mapped());
+        let gap = Rc::new(std::cell::Cell::new(Duration::ZERO));
+        let last = Rc::new(std::cell::Cell::new(Instant::now()));
+        let measured_gap = gap.clone();
+        let measured_last = last.clone();
+        let timer = glib::timeout_add_local(Duration::from_millis(4), move || {
+            let now = Instant::now();
+            measured_gap.set(measured_gap.get().max(now - measured_last.replace(now)));
+            glib::ControlFlow::Continue
+        });
+        let start = Instant::now();
+        ui.select_chat(peer);
+        assert!(start.elapsed() < Duration::from_millis(400));
+        wait(&ui, || {
+            ui.at_message_end()
+                && !ui.history_window.busy()
+                && ui.message_scroll.borrow().is_none()
+                && ui.bubbles.borrow().contains_key("busy-179")
+        });
+        // Allow post-allocation pruning to settle before checking retained rows.
+        let settle = Instant::now() + Duration::from_millis(100);
+        let main = glib::MainContext::default();
+        while Instant::now() < settle {
+            while main.pending() {
+                main.iteration(false);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        timer.remove();
+        assert!(
+            gap.get() < Duration::from_millis(400),
+            "GTK stalled for {:?}",
+            gap.get()
+        );
+        let (top, height, _) = ui.history_bounds();
+        let mut rows = Vec::new();
+        let mut child = ui.timeline.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            if !widget.has_css_class("message-row") {
+                continue;
+            }
+            let bounds = widget.compute_bounds(&ui.timeline).unwrap();
+            rows.push(f64::from(bounds.y())..f64::from(bounds.y() + bounds.height()));
+        }
+        assert_eq!(retained(&rows, top..top + height), 0..rows.len());
+        assert!(ui.state.borrow().current().messages.len() < 36);
+        assert_eq!(ui.store.history(owner, peer, None, 200).len(), 180);
+        eprintln!(
+            "140-unread chat: settled={:?}, max GTK gap={:?}, retained={} rows across viewport+two screens each side",
+            start.elapsed(),
+            gap.get(),
+            rows.len()
+        );
+        ui.window.close();
     }
 
     #[test]

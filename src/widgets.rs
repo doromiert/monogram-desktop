@@ -581,6 +581,7 @@ mod image_imp {
         pub max_width: Cell<i32>,
         pub max_height: Cell<i32>,
         pub borderless: Cell<bool>,
+        pub circular: Cell<bool>,
     }
     #[glib::object_subclass]
     impl ObjectSubclass for AspectImage {
@@ -626,8 +627,23 @@ mod image_imp {
             let w = obj.width() as f64;
             let h = obj.height() as f64;
             if let Some(ref p) = *self.paintable.borrow() {
-                let bounds = gtk::graphene::Rect::new(0., 0., w as f32, h as f32);
-                if !self.borderless.get() {
+                let edge = w.min(h);
+                let bounds = if self.circular.get() {
+                    gtk::graphene::Rect::new(
+                        ((w - edge) / 2.) as f32,
+                        ((h - edge) / 2.) as f32,
+                        edge as f32,
+                        edge as f32,
+                    )
+                } else {
+                    gtk::graphene::Rect::new(0., 0., w as f32, h as f32)
+                };
+                if self.circular.get() {
+                    snapshot.push_rounded_clip(&gtk::gsk::RoundedRect::from_rect(
+                        bounds,
+                        w.min(h) as f32 / 2.,
+                    ));
+                } else if !self.borderless.get() {
                     let mut radii = [10.; 4];
                     let mut parent = obj.parent();
                     while let Some(widget) = parent {
@@ -650,7 +666,15 @@ mod image_imp {
                         corner(radii[3]),
                     ));
                 }
-                if self.cover.get() {
+                if self.circular.get() {
+                    snapshot.save();
+                    snapshot.translate(&gtk::graphene::Point::new(
+                        ((w - edge) / 2.) as f32,
+                        ((h - edge) / 2.) as f32,
+                    ));
+                    p.snapshot(snapshot, edge, edge);
+                    snapshot.restore();
+                } else if self.cover.get() {
                     let ratio = p.intrinsic_aspect_ratio();
                     let (width, height) = if ratio <= 0. {
                         (w, h)
@@ -667,7 +691,7 @@ mod image_imp {
                 } else {
                     p.snapshot(snapshot, w, h);
                 }
-                if !self.borderless.get() {
+                if self.circular.get() || !self.borderless.get() {
                     snapshot.pop();
                 }
             }
@@ -680,6 +704,16 @@ impl AspectImage {
         let image: Self = glib::Object::new();
         image.imp().cover.set(true);
         image
+    }
+    pub fn set_circular(&self, circular: bool) {
+        self.imp().circular.set(circular);
+        if circular {
+            self.set_ratio(1.);
+        }
+        self.queue_draw();
+    }
+    pub fn is_circular(&self) -> bool {
+        self.imp().circular.get()
     }
     pub fn paintable(&self) -> Option<gdk::Paintable> {
         self.imp().paintable.borrow().clone()
@@ -771,6 +805,20 @@ mod media_geometry_tests {
         }
         let sticker = AspectImage::thumbnail(512, true);
         assert!(sticker.imp().borderless.get());
+        let round = AspectImage::thumbnail(320, false);
+        round.set_circular(true);
+        let pixels =
+            gtk::gdk_pixbuf::Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, true, 8, 200, 200)
+                .unwrap();
+        pixels.fill(0xff0000ff);
+        round.set_paintable(Some(gdk::Texture::for_pixbuf(&pixels).upcast()));
+        round.allocate(200, 200, -1, None);
+        let snapshot = gtk::Snapshot::new();
+        round.imp().snapshot(&snapshot);
+        let node = snapshot.to_node().unwrap();
+        assert_eq!(node.node_type(), gtk::gsk::RenderNodeType::RoundedClipNode);
+        let clip = node.downcast::<gtk::gsk::RoundedClipNode>().unwrap();
+        assert_eq!(clip.clip().corner()[0].width(), 100.);
     }
 }
 

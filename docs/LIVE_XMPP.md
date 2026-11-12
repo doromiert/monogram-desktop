@@ -42,7 +42,8 @@ drafts, authorization requests or transport.
   senders are rejected. Deduplication is scoped by account, conversation and
   direction; only the account's server-assigned stanza IDs are accepted.
 - Server history is fetched in pages of 50. The active chat keeps its visible
-  rows and roughly three viewport heights on either side. Local pages use
+  rows and two viewport heights on either side, pruning rows wholly outside that
+  five-screen span after layout. Local pages use
   timestamp and ID cursors in both directions. Scrolling to the older edge
   requests another server page after local history runs out. Paging preserves
   the visible message position. The complete local history remains in SQLite
@@ -126,3 +127,25 @@ reaction replacement sets and best-effort retractions, with durable event replay
 
 [Structured direct polls](STRUCTURED_POLLS.md) now use explicit XML definitions,
 public replacement-set ballots and author closure, with optional body fallbacks.
+
+## Responsiveness regression evidence (2026-11-12)
+
+The reconciliation base lookup used a correlated `IN` query on every incoming
+message/alias update. With 651 immutable bases and 25 action events, three
+read-only measurements took 2291, 2251 and 2286 ms. The equivalent scoped
+`JOIN`/`UNION` lookup returned the same 25 complete bodies in 0.34, 0.28 and
+0.27 ms. The indexed uncorrelated lookup is retained; sender/direction/encryption
+and collision checks still run during reconciliation. The regression fixture
+checks 1000 bases and 25 edits under the 400 ms feedback budget, including an
+unrelated peer with identical message IDs.
+
+A native GTK scenario switching into 140 unread messages retains 22 mixed-height
+rows within the viewport and two screens on either side, with all 180 fixture
+messages preserved in SQLite. Two runs measured maximum GTK callback gaps of
+7.7 and 8.5 ms. Existing older-page, reply-jump and incoming-message viewport
+checks also pass. Actual account workloads beyond the measured query and these
+native fixtures remain a separate acceptance check.
+
+An attempted HTTP/1.1-only media workaround was reverted: four consecutive cold
+HTTP/1.1 requests alternated successful headers (217/319 ms) and 10-second
+pre-header timeouts. It did not resolve the external response-header stalls.

@@ -211,3 +211,8 @@
 .favorite-drop-target { outline: 2px solid @accent_color; outline-offset: -2px; }
 
 .message-menu-panel.quick-reactions { border-radius: 999px; }
+
+/* Verified round-video pixels and their download canvas share the circular shape. */
+.round-video { border-radius: 999px; }
+.message-bubble.media-bubble.round-video-bubble { background: transparent; border: none; box-shadow: none; padding: 0; }
+.media-download.round-video { background: transparent; }

@@ -41,6 +41,10 @@ static void refresh (MonogramVideo *self) {
     }
   }
   g_clear_object (&video);
+  /* Clapper can publish the first decoded frame before duration metadata arrives. */
+  if (gtk_media_stream_is_prepared (stream) && duration > 0 &&
+      gtk_media_stream_get_duration (stream) == 0)
+    gtk_media_stream_stream_unprepared (stream);
   if (!gtk_media_stream_is_prepared (stream) && self->width > 0 && self->paintable &&
       gdk_paintable_get_intrinsic_width (self->paintable) > 1) {
     gboolean audio = clapper_stream_list_get_n_streams (clapper_player_get_audio_streams (self->player)) > 0;
@@ -57,6 +61,9 @@ static void refresh (MonogramVideo *self) {
   if (item) g_object_unref (item);
   if (gtk_media_stream_is_prepared (stream))
     gtk_media_stream_update (stream, clapper_player_get_position (self->player) * G_USEC_PER_SEC);
+}
+static void duration_changed (ClapperMediaItem *item, GParamSpec *pspec, MonogramVideo *self) {
+  refresh (self);
 }
 static void state_changed (ClapperPlayer *player, GParamSpec *pspec, MonogramVideo *self) {
   refresh (self);
@@ -255,6 +262,7 @@ GtkMediaStream *monogram_video_new (const char *uri, GtkWidget **controls, GtkWi
   g_signal_connect_object (self->player, "seek-done", G_CALLBACK (seek_done), self, 0);
   g_signal_connect (self, "notify::loop", G_CALLBACK (loop_changed), NULL);
   ClapperMediaItem *item = clapper_media_item_new (uri);
+  g_signal_connect_object (item, "notify::duration", G_CALLBACK (duration_changed), self, 0);
   clapper_queue_add_item (clapper_player_get_queue (self->player), item);
   g_object_unref (item);
   /* Preroll off-thread in Clapper's own player thread; UI feedback stays immediate. */

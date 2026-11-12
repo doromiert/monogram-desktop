@@ -1,6 +1,8 @@
 Monogram — current user-reported issues
 Updated: 2026-11-12
-Reported build: efb2375. Current desktop: 1328d40 (continuous reactions, PQ port, media insets, HTTPS diagnostics).
+Running desktop source: b4ec838 (2026-11-12, before the current regression fixes).
+A local implementation or fixture pass does not mean the change is shipped.
+Items labelled LOCAL WIP are absent from the running build.
 Full feature scope and remaining parity gaps: FEATURE_PARITY.md.
 
 FIX IMPLEMENTED, LIVE ACCEPTANCE OPEN — Sending still rejects the user's own fingerprints
@@ -14,7 +16,7 @@ FIX IMPLEMENTED, LIVE ACCEPTANCE OPEN — Sending still rejects the user's own f
   sessions before asking for trust, while requiring usable contact recipients.
   Native real-crypto checks pass for text/reactions and explicit blocks.
 
-OPEN — Some media downloads remain stuck
+IN PROGRESS — First-attempt downloads and uploads stall for all media/stickers
   Media is recognized and a download/preparation spinner appears, but the job
   sometimes makes no further visible progress. Determine whether HTTP transfer,
   cache verification, preview preparation or UI observation is stalled. Keep
@@ -24,6 +26,12 @@ OPEN — Some media downloads remain stuck
   authenticated all 1,407,353 bytes in 0.81 s. DNS/TCP/TLS checks pass. This
   establishes an intermittent response timeout, not its remote/network cause.
   Added safe timeout/connect categories; URLs and encryption keys are not logged.
+  New report: every first user start needs cancel/error then retry, including
+  uploads and stickers. The affected host can stall before response headers.
+  Desktop forced HTTP/1.1 also reproduces the timeout; forcing that protocol is
+  not a verified fix. Android already uses HTTP/1.1 and independently reproduces
+  intermittent cold-process failure. Continue connection-stage diagnosis; do not
+  mark a single successful retry or protocol change as resolution.
 
 FIX IMPLEMENTED — Captioned media has excessive padding
   Keep the same thin padding around the image/video as an uncaptioned item.
@@ -51,7 +59,7 @@ FIX IMPLEMENTED — Expanded reaction picker lacks continuous scrolling
   corresponding section, like the main emoji picker.
   Native check: 257 rows in one model, category jump and search pass.
 
-FIX IMPLEMENTED — Reaction picker expansion/collapse has no transition
+SUPERSEDED APPROACH — Reaction picker expansion/collapse transition
   Animate the change between collapsed quick reactions and the expanded picker,
   including the reverse transition, rather than replacing it abruptly.
   Native check: 248 -> 426 -> 248 px with 19/20 distinct frame heights.
@@ -77,10 +85,15 @@ OPEN — Managed MUC join timeout
   succeeds, but the application's managed join still times out. Do not assume
   a server outage or weaken presence validation without evidence.
 
-OPEN — Chat switching/history scrolling can freeze the UI
+IN PROGRESS — 140+ unread messages can trigger Not Responding on chat switch
   Worker-side render planning and bounded row creation are implemented, but live
   backend events still sometimes exceed the 400 ms responsiveness requirement.
-  Real startup/history responsiveness acceptance remains open.
+  Large-backlog native acceptance passes; real startup responsiveness remains open.
+  Measured a correlated edit/reaction reconciliation SELECT taking 2251–2291 ms
+  per event on 651 archived bases/25 actions. An equivalent uncorrelated query
+  selects the same 25 records in 0.27–0.34 ms. The local fix passes native large-
+  backlog acceptance and awaits packaging. Retain only the viewport plus two screens
+  above and two below; the old build's three-screen buffer is being corrected.
 
 OPEN — Mobile export lifecycle follow-up
   Normal native SAF export to .xmsp and import/re-export by the actual desktop
@@ -104,3 +117,70 @@ FIX IMPLEMENTED — Collapsed reaction picker should be a pill
 FIX IMPLEMENTED — Expanded reactions should reach the picker bottom
   Removed the bottom inset from the expanded reaction picker; keep its top
   and side padding while extending the scrolling viewport to the bottom edge.
+
+IN PROGRESS — Reaction picker should grow with shared quick reactions
+  Keep collapsed and expanded widths identical. Grow vertically with no opacity
+  swap. Move the actual quick-reaction buttons into the expanded list and back;
+  do not replace them with duplicate widgets. Reference: mobile user screenshots
+  12283.jpg/12284.jpg and CustomEmojiReactionsWindow.
+
+IN PROGRESS — Reacting/unreacting scrolls the conversation upward
+  Preserve the visible message/offset through replacement and layout. Count only
+  actual user input as continued scrolling, rather than GTK focus/reflow changes.
+
+LOCAL WIP, NOT SHIPPED — Selection close control should be on the left
+  Put the clear-selection X before the selected-count label.
+
+LOCAL WIP, NOT SHIPPED — Selected message highlights should be square and gapless
+  Keep normal bubble spacing as row padding so selection backgrounds cover it;
+  remove selected-row corner rounding. Adjacent selected rows should touch.
+
+LOCAL WIP, FAILING ACCEPTANCE — Brush selection by primary-button dragging
+  Crossing into a second message enters selection mode. Paint newly touched
+  messages while dragging; starting on a selected row erases touched rows.
+  Preserve ordinary text selection when dragging inside one message.
+  The native acceptance currently fails when existing selected text initiates
+  native text drag-and-drop. Do not include this implementation in a release
+  until the actual primary-pointer interaction passes.
+
+LOCAL WIP, NOT SHIPPED — Forward chooser needs search and profile pictures
+  Search by chat name/JID and use the same asynchronously loaded avatars as
+  the chat list. Keep forwarding behavior and Hide Sender unchanged.
+
+LOCAL WIP, NOT SHIPPED — Forward attribution should look like mobile
+  Use a normal-size left-aligned two-line header (Forwarded from, then sender)
+  with mobile-like tint and no extra button inset. Reference: mobile12286.jpg.
+
+IN PROGRESS — Round video messages render square on desktop
+  Match mobile round_video_*.mp4 recognition using verified square dimensions
+  and positive duration. Circular clipping must apply to the actual frames,
+  placeholder and surrounding bubble; ordinary videos remain rectangular.
+  Match inline playback interactions instead of treating a round video as a
+  plain rectangular video. Actual-MP4 native verification passes.
+
+SHIPPED — Window-wide Enter/Escape, text sizing and reply truncation
+  f9e16d3 routes chat Enter/Escape from non-editor controls, retains Shift+Enter
+  and dialog isolation, aligns short-body timestamps to a stretched bubble's
+  right edge and tightens wrapped text. Reply previews keep whole words with an
+  ellipsis, allowing oversized unbroken words to split. Native checks pass.
+
+SHIPPED — /you and /nar on mobile and desktop
+  b4ec838 renders literal '* you <suffix>' and narration without an actor prefix,
+  using the existing action cell and preserving raw encrypted/stored bodies.
+  Mobile source4581955de; fixed native packaging ships in mobile0.2.201.
+
+SHIPPED — Mobile-only unrestricted battery reminder
+  The reminder waits until setup, survives interruption before acknowledgement
+  and opens Android's package-specific power exemption request. It is Android-
+  only at the user's request. Mobile0.2.201 includes it and the sticker-pack export.
+
+READY FOR PACKAGING — Automatic download header-stall recovery
+  A first start now reconnects once after three seconds without response headers.
+  Five cold production transfers against the affected host all completed verified
+  decryption/cache commit (four recovered in 3.29–3.61 s) without manual restart.
+  Upload diagnosis remains separate; no automatic PUT replay is introduced.
+
+READY FOR PACKAGING — Native large-unread acceptance
+  Switching into 140 unread messages passes with a maximum measured GTK delay
+  of 7.92 ms, 22 retained rows inside the requested five-screen window, and all
+  180 fixture messages preserved on disk. Existing paging/reply acceptance passes.

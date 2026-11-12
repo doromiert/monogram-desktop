@@ -212,7 +212,7 @@ impl Store {
             })
             .collect();
         let bases = {
-            let mut query=self.db.prepare("SELECT b.body FROM message_bases b WHERE b.account=? AND b.peer=? AND(b.id IN(SELECT r.message FROM action_refs r WHERE r.account=b.account AND r.peer=b.peer AND r.value IN(SELECT target FROM action_events e WHERE e.account=b.account AND e.peer=b.peer)) OR b.id IN(SELECT resolved FROM action_events e WHERE e.account=b.account AND e.peer=b.peer))")?;
+            let mut query=self.db.prepare("SELECT b.body FROM message_bases b WHERE b.account=?1 AND b.peer=?2 AND b.id IN(SELECT r.message FROM action_refs r JOIN action_events e ON e.account=r.account AND e.peer=r.peer AND e.target=r.value WHERE r.account=?1 AND r.peer=?2 UNION SELECT resolved FROM action_events WHERE account=?1 AND peer=?2)")?;
             query
                 .query_map(params![a, peer], |r| r.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?
@@ -452,6 +452,57 @@ mod tests {
         db.record_action(OWNER, PEER, m, status).unwrap();
         db.reconcile_actions(OWNER, PEER).unwrap();
     }
+    #[test]
+    fn large_archive_reconciliation_stays_scoped_and_under_feedback_budget() {
+        let (db, mut state) = setup();
+        for n in 0..1000 {
+            state.chat_for(PEER).messages.push(base(
+                &format!("base-{n}"),
+                &format!("wire-{n}"),
+                false,
+            ));
+        }
+        db.save(&state).unwrap();
+        for n in 0..25 {
+            let edit = event(
+                &format!("edit-{n}"),
+                Action::Correct {
+                    target: format!("wire-{n}"),
+                },
+                false,
+                1,
+            );
+            db.record_action(OWNER, PEER, &edit, "received").unwrap();
+        }
+        // Identical IDs in another peer must never enter this reconciliation.
+        let mut unrelated = State::live(OWNER, vec![]);
+        unrelated
+            .chat_for("other@example.org")
+            .messages
+            .push(base("base-0", "wire-0", false));
+        db.save(&unrelated).unwrap();
+        let start = std::time::Instant::now();
+        db.reconcile_actions(OWNER, PEER).unwrap();
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(400),
+            "1000-base reconciliation exceeded GTK feedback budget: {:?}",
+            start.elapsed()
+        );
+        for n in [0, 24] {
+            assert_eq!(
+                db.message(OWNER, PEER, &format!("base-{n}")).unwrap().text,
+                "corrected"
+            );
+        }
+        assert_eq!(db.message(OWNER, PEER, "base-25").unwrap().text, "original");
+        assert_eq!(
+            db.message(OWNER, "other@example.org", "base-0")
+                .unwrap()
+                .text,
+            "original"
+        );
+    }
+
     #[test]
     fn delayed_edit_replay_and_collision_restore_immutable_original() {
         let (db, mut s) = setup();
