@@ -6,6 +6,8 @@ use crate::{
     widgets::*,
 };
 use adw::prelude::*;
+#[path = "favorite_order.rs"]
+pub(crate) mod favorite_order;
 use gtk::{gdk, gio, glib};
 use std::{
     cell::{Cell, RefCell},
@@ -122,6 +124,8 @@ pub struct Ui {
     pub(crate) pack_pages: RefCell<Vec<Rc<crate::media_library_ui::PackLibraryPage>>>,
     pub(crate) gif_library: RefCell<Option<crate::gifs::Library>>,
     pub(crate) gif_page: RefCell<Option<Rc<crate::media_library_ui::GifLibraryPage>>>,
+    pub(crate) favorite_orders: RefCell<HashMap<favorite_order::Kind, favorite_order::Order>>,
+    pub(crate) favorite_reorder_pending: Cell<bool>,
 }
 
 impl Ui {
@@ -413,6 +417,8 @@ impl Ui {
             pack_pages: RefCell::new(Vec::new()),
             gif_library: RefCell::new(None),
             gif_page: RefCell::new(None),
+            favorite_orders: RefCell::new(HashMap::new()),
+            favorite_reorder_pending: Cell::new(false),
         });
         ui.make_sidebar();
         ui.weak_button(&ui.welcome_sign_in, |ui| {
@@ -427,6 +433,7 @@ impl Ui {
         });
         ui.make_content();
         ui.make_media();
+        ui.load_favorite_orders();
         ui.actions();
         ui.rebuild_folders();
         ui.refresh_chats(None);
@@ -2057,6 +2064,7 @@ impl Ui {
             v.close()
         }
         self.state.replace(state);
+        self.load_favorite_orders();
         self.load_blocking_cache();
         self.rebuild_pack_library();
         self.rebuild_gif_library();

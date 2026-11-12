@@ -810,8 +810,10 @@ mod square_cell_imp {
             if orientation == gtk::Orientation::Horizontal {
                 return (minimum, natural, -1, -1);
             }
-            let side = if for_size >= 0 { for_size } else { natural }.max(1);
-            (side, side, -1, -1)
+            if for_size < 0 {
+                return (minimum.max(1), natural.max(1), -1, -1);
+            }
+            (for_size.max(1), for_size.max(1), -1, -1)
         }
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
             if let Some(child) = self.child.borrow().as_ref() {

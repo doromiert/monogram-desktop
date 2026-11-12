@@ -178,7 +178,7 @@ mod imp {
                 .visible(top, top.saturating_add(page.saturating_mul(2)));
             let active: HashSet<_> = rects.iter().map(|rect| rect.index).collect();
             self.cells.borrow_mut().retain(|index, child| {
-                if active.contains(index) {
+                if active.contains(index) || child.has_css_class("favorite-dragging") {
                     true
                 } else {
                     child.unparent();

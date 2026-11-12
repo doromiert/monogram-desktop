@@ -1,3 +1,4 @@
+use crate::ui::favorite_order::{self, Kind as FavoriteKind};
 use crate::{
     packs::{Asset, Job, Kind, Library, Pack, Snapshot},
     ui::Ui,
@@ -225,6 +226,7 @@ pub(crate) struct GifLibraryPage {
     add_key: gtk::Button,
     retry: gtk::Button,
     configured: Cell<bool>,
+    saved_view: Cell<bool>,
     failed: Cell<bool>,
     request: RefCell<Option<crate::gifs::Request>>,
     request_serial: Cell<u64>,
@@ -280,6 +282,7 @@ impl GifLibraryPage {
             add_key,
             retry,
             configured: Cell::new(false),
+            saved_view: Cell::new(true),
             failed: Cell::new(false),
             request: RefCell::new(None),
             request_serial: Cell::new(0),
@@ -354,6 +357,7 @@ impl GifLibraryPage {
     }
 
     fn show_saved(self: &Rc<Self>) {
+        self.saved_view.set(true);
         if let Some(request) = self.request.take() {
             request.cancel();
         }
@@ -378,6 +382,7 @@ impl GifLibraryPage {
                 Ok(snapshot) => {
                     let query = page.query.borrow().to_lowercase();
                     let mut items = snapshot.favorites;
+                    page.sort_saved_favorites(&mut items);
                     let ids: std::collections::HashSet<_> =
                         items.iter().map(|item| item.id.clone()).collect();
                     items.extend(
@@ -427,6 +432,7 @@ impl GifLibraryPage {
         if append && offset.is_none() {
             return;
         }
+        self.saved_view.set(false);
         if let Some(request) = self.request.take() {
             request.cancel();
         }
@@ -547,6 +553,30 @@ impl GifLibraryPage {
         favorite.set_margin_end(4);
         favorite.add_css_class("gif-favorite");
         tile.add_overlay(&favorite);
+        if self.saved_view.get() && item.favorite {
+            if let Some(ui) = self.ui.upgrade() {
+                let owner = self.library.account().to_string();
+                let weak = Rc::downgrade(self);
+                favorite_order::attach(
+                    &ui,
+                    &button,
+                    FavoriteKind::Gifs,
+                    favorite_order::gif_key(&owner, &item.id),
+                    move || {
+                        weak.upgrade()
+                            .map(|page| {
+                                page.items
+                                    .borrow()
+                                    .iter()
+                                    .filter(|item| item.favorite)
+                                    .map(|item| favorite_order::gif_key(&owner, &item.id))
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    },
+                );
+            }
+        }
         let weak = Rc::downgrade(self);
         let preview_library = self.library.clone();
         let preview_item = item.clone();
@@ -712,6 +742,31 @@ impl GifLibraryPage {
             button.set_tooltip_text(Some("Preview unavailable. Click to attach this GIF."));
         }
     }
+
+    fn sort_saved_favorites(&self, items: &mut [crate::gifs::GifItem]) {
+        if let Some(ui) = self.ui.upgrade() {
+            if let Some(order) = ui.favorite_orders.borrow().get(&FavoriteKind::Gifs) {
+                order.sort(items, |item| {
+                    favorite_order::gif_key(self.library.account(), &item.id)
+                });
+            }
+        }
+    }
+
+    fn refresh_saved_order(self: &Rc<Self>) {
+        if !self.saved_view.get() {
+            return;
+        }
+        let (mut favorites, recent): (Vec<_>, Vec<_>) = self
+            .items
+            .borrow()
+            .iter()
+            .cloned()
+            .partition(|item| item.favorite);
+        self.sort_saved_favorites(&mut favorites);
+        favorites.extend(recent);
+        self.render(favorites, false);
+    }
     pub(crate) fn settings(self: &Rc<Self>, parent: &impl IsA<gtk::Widget>) {
         let entry = adw::PasswordEntryRow::builder()
             .title("GIPHY API key")
@@ -801,6 +856,21 @@ enum PickerRow {
     Empty(String),
     Emoji(Vec<crate::emoji_completion::EmojiEntry>),
     Pack(Vec<crate::packs::Item>),
+    Favorites(Vec<FavoriteEntry>),
+}
+
+#[derive(Clone)]
+enum FavoriteEntry {
+    Emoji(crate::emoji_completion::EmojiEntry),
+    Pack(crate::packs::Item),
+}
+impl FavoriteEntry {
+    fn key(&self, owner: &str) -> String {
+        match self {
+            Self::Emoji(entry) => favorite_order::emoji_key(&entry.text),
+            Self::Pack(item) => favorite_order::pack_key(owner, item.id),
+        }
+    }
 }
 
 struct PackPreviewCell {
@@ -842,6 +912,7 @@ pub(crate) struct PackLibraryPage {
     query: RefCell<String>,
     anchors: RefCell<std::collections::HashMap<i64, u32>>,
     favorites: RefCell<std::collections::HashSet<i64>>,
+    favorite_keys: RefCell<Vec<String>>,
     preview_active: Cell<usize>,
     preview_epoch: Cell<u64>,
     preview_queue: RefCell<Vec<PackPreviewCell>>,
@@ -990,6 +1061,7 @@ impl PackLibraryPage {
             query: RefCell::new(String::new()),
             anchors: RefCell::new(Default::default()),
             favorites: RefCell::new(std::collections::HashSet::new()),
+            favorite_keys: RefCell::new(Vec::new()),
             preview_active: Cell::new(0),
             preview_epoch: Cell::new(0),
             preview_queue: RefCell::new(Vec::new()),
@@ -1314,6 +1386,7 @@ impl PackLibraryPage {
         self.preview_queue.borrow_mut().clear();
         let mut rows = Vec::new();
         self.anchors.borrow_mut().clear();
+        self.favorite_keys.borrow_mut().clear();
         self.status.set_visible(false);
         let query = self.query.borrow().trim().to_lowercase();
         let ui = self.ui.upgrade();
@@ -1357,6 +1430,33 @@ impl PackLibraryPage {
                 continue;
             }
             self.push_heading(&mut rows, id, &title);
+            if id == -1 {
+                let owner = self.library.account();
+                let mut entries: Vec<_> = builtin
+                    .into_iter()
+                    .map(FavoriteEntry::Emoji)
+                    .chain(items.into_iter().map(FavoriteEntry::Pack))
+                    .collect();
+                let category = if self.kind == Kind::Emoji {
+                    FavoriteKind::Emoji
+                } else {
+                    FavoriteKind::Stickers
+                };
+                if let Some(ui) = ui.as_ref() {
+                    if let Some(order) = ui.favorite_orders.borrow().get(&category) {
+                        order.sort(&mut entries, |entry| entry.key(owner));
+                    }
+                }
+                self.favorite_keys
+                    .replace(entries.iter().map(|entry| entry.key(owner)).collect());
+                for row in entries.chunks(if self.kind == Kind::Emoji { 8 } else { 4 }) {
+                    Self::push_row(&mut rows, PickerRow::Favorites(row.to_vec()));
+                }
+                if entries.is_empty() {
+                    Self::push_row(&mut rows, PickerRow::Empty("No favorites yet".into()));
+                }
+                continue;
+            }
             for row in builtin.chunks(8) {
                 Self::push_row(&mut rows, PickerRow::Emoji(row.to_vec()));
             }
@@ -1407,6 +1507,50 @@ impl PackLibraryPage {
 
     fn row_widget(self: &Rc<Self>, row: &PickerRow) -> gtk::Widget {
         match row {
+            PickerRow::Favorites(entries) => {
+                let row = gtk::Box::new(
+                    gtk::Orientation::Horizontal,
+                    if self.kind == Kind::Emoji { 2 } else { 6 },
+                );
+                row.set_homogeneous(true);
+                let columns = if self.kind == Kind::Emoji { 8 } else { 4 };
+                if let Some(ui) = self.ui.upgrade() {
+                    for entry in entries {
+                        let cell: gtk::Widget = match entry {
+                            FavoriteEntry::Emoji(entry) => {
+                                let Some(button) =
+                                    crate::emoji_picker_ui::builtin_button(&ui, entry)
+                                else {
+                                    continue;
+                                };
+                                button.upcast()
+                            }
+                            FavoriteEntry::Pack(item) => self.pack_cell(item).upcast(),
+                        };
+                        let weak = Rc::downgrade(self);
+                        favorite_order::attach(
+                            &ui,
+                            &cell,
+                            if self.kind == Kind::Emoji {
+                                FavoriteKind::Emoji
+                            } else {
+                                FavoriteKind::Stickers
+                            },
+                            entry.key(self.library.account()),
+                            move || {
+                                weak.upgrade()
+                                    .map(|page| page.favorite_keys.borrow().clone())
+                                    .unwrap_or_default()
+                            },
+                        );
+                        row.append(&crate::widgets::SquareCell::new(&cell));
+                    }
+                }
+                for _ in entries.len()..columns {
+                    row.append(&gtk::Box::new(gtk::Orientation::Horizontal, 0));
+                }
+                row.upcast()
+            }
             PickerRow::Heading(title) | PickerRow::Empty(title) => {
                 let label = crate::widgets::text(
                     title,
@@ -1661,6 +1805,19 @@ impl Drop for PackLibraryPage {
 }
 
 impl Ui {
+    pub(crate) fn refresh_favorite_views(self: &Rc<Self>) {
+        for page in self.pack_pages.borrow().clone() {
+            if page.kind == Kind::Stickers {
+                page.rebuild_rows();
+            }
+        }
+        crate::emoji_picker_ui::refresh_emoji_surfaces(self);
+        let page = self.gif_page.borrow().clone();
+        if let Some(page) = page {
+            page.refresh_saved_order();
+        }
+    }
+
     fn pack_library_action(
         self: &Rc<Self>,
         page: &Rc<PackLibraryPage>,
@@ -2400,6 +2557,294 @@ mod gif_native_tests {
         window.close();
         println!(
             "GIF NATIVE PASS keyless Add key, no gear, 2000-item viewport controls, overlay favorite persistence, <400ms first/scroll feedback, duplicate append and automatic paging/error/exhaustion guards"
+        );
+    }
+    fn descendants(widget: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
+        let mut found = Vec::new();
+        let mut pending = vec![widget.clone().upcast::<gtk::Widget>()];
+        while let Some(widget) = pending.pop() {
+            pending.extend(children(&widget));
+            found.push(widget);
+        }
+        found
+    }
+    fn drag_controls(root: &gtk::Widget) -> Vec<gtk::Widget> {
+        let mut controls: Vec<_> = descendants(root)
+            .into_iter()
+            .filter(|widget| {
+                widget.is_mapped()
+                    && (0..widget.observe_controllers().n_items()).any(|i| {
+                        widget
+                            .observe_controllers()
+                            .item(i)
+                            .is_some_and(|controller| controller.is::<gtk::DragSource>())
+                    })
+            })
+            .collect();
+        controls.sort_by_key(|widget| {
+            let bounds = widget.compute_bounds(root).unwrap();
+            (bounds.y().round() as i32, bounds.x().round() as i32)
+        });
+        controls
+    }
+    fn capture_favorites(window: &adw::ApplicationWindow, name: &str) {
+        if let Some(prefix) = std::env::var_os("MONOGRAM_FAVORITE_CAPTURE") {
+            let snapshot = gtk::Snapshot::new();
+            gtk::WidgetPaintable::new(Some(window)).snapshot(
+                &snapshot,
+                window.width() as f64,
+                window.height() as f64,
+            );
+            window
+                .renderer()
+                .unwrap()
+                .render_texture(&snapshot.to_node().unwrap(), None)
+                .save_to_png(format!("{}-{name}.png", prefix.to_string_lossy()))
+                .unwrap();
+        }
+    }
+    fn physical_drag(
+        window: &adw::ApplicationWindow,
+        source: &gtk::Widget,
+        target: &gtk::Widget,
+    ) -> std::thread::JoinHandle<()> {
+        let window_id = std::process::Command::new("xdotool")
+            .args([
+                "search",
+                "--onlyvisible",
+                "--pid",
+                &std::process::id().to_string(),
+                "--name",
+                "Monogram",
+            ])
+            .output()
+            .unwrap();
+        assert!(window_id.status.success());
+        let window_id = String::from_utf8(window_id.stdout)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .to_owned();
+        let center = |widget: &gtk::Widget| {
+            let b = widget.compute_bounds(window).unwrap();
+            (
+                (b.x() + b.width() / 2.).round() as i32,
+                (b.y() + b.height() / 2.).round() as i32,
+            )
+        };
+        let (sx, sy) = center(source);
+        let (tx, ty) = center(target);
+        std::thread::spawn(move || {
+            let command = |args: &[String]| {
+                assert!(
+                    std::process::Command::new("xdotool")
+                        .args(args)
+                        .status()
+                        .unwrap()
+                        .success()
+                )
+            };
+            let motion = |x: i32, y: i32| {
+                command(&[
+                    "mousemove".into(),
+                    "--sync".into(),
+                    "--window".into(),
+                    window_id.clone(),
+                    x.to_string(),
+                    y.to_string(),
+                ])
+            };
+            motion(sx, sy);
+            command(&["mousedown".into(), "1".into()]);
+            std::thread::sleep(Duration::from_millis(100));
+            for step in 1..=8 {
+                motion(sx + (tx - sx) * step / 8, sy + (ty - sy) * step / 8);
+                std::thread::sleep(Duration::from_millis(35));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            command(&["mouseup".into(), "1".into()]);
+        })
+    }
+    #[test]
+    #[ignore = "requires isolated native X11 display, data roots, xdotool and Secret Service"]
+    fn favorite_drag_reorders_real_emoji_sticker_and_gif_views() {
+        const OWNER: &str = "favorite-drag@fixture.invalid";
+        let app = adw::Application::builder()
+            .application_id("com.negzero.MonogramDesktop.FavoriteFixture")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gio::Cancellable>).unwrap();
+        let css = gtk::CssProvider::new();
+        css.load_from_path(crate::widgets::asset("style.css"));
+        gtk::style_context_add_provider_for_display(
+            &gtk::gdk::Display::default().unwrap(),
+            &css,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        let ui = Ui::new(&app, false);
+        adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
+        ui.store
+            .save_account(&crate::model::Account {
+                jid: OWNER.into(),
+                host: String::new(),
+                port: 5222,
+                direct_tls: false,
+            })
+            .unwrap();
+        let mut state = crate::model::State::live(OWNER, vec![]);
+        state.active = state.chat_for("recipient@fixture.invalid").id.clone();
+        ui.activate_state(state);
+        ui.show_main();
+        ui.store.set_emoji_favorite("❤️", true).unwrap();
+        ui.store.set_emoji_favorite("😅", true).unwrap();
+        ui.window.set_default_size(1400, 900);
+        ui.window.present();
+        ui.toggle_media();
+        wait(|| {
+            ui.pack_pages.borrow().len() == 2
+                && ui.gif_page.borrow().is_some()
+                && ui.favorite_orders.borrow().len() == 3
+        });
+        let context = glib::MainContext::default();
+        let library = ui.pack_library.borrow().as_ref().unwrap().clone();
+        context.block_on(async {
+            for (kind, count) in [(Kind::Emoji, 1), (Kind::Stickers, 3)] {
+                let inputs = (0..count)
+                    .map(|index| crate::packs::Input {
+                        path: crate::widgets::asset("icons/mobile-emoji/msg_emoji_cat.png"),
+                        name: format!("Favorite {index}"),
+                        emoji: "🐱".into(),
+                    })
+                    .collect();
+                let pack = library
+                    .create("Favorite drag".into(), kind, inputs, Job::new())
+                    .await
+                    .unwrap();
+                for item in pack.items {
+                    library
+                        .mutate(crate::packs::Mutation::Favorite {
+                            item: item.id,
+                            value: true,
+                        })
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        for page in ui.pack_pages.borrow().iter() {
+            page.refresh();
+        }
+        let emoji = ui
+            .pack_pages
+            .borrow()
+            .iter()
+            .find(|page| page.kind == Kind::Emoji)
+            .unwrap()
+            .clone();
+        let stickers = ui
+            .pack_pages
+            .borrow()
+            .iter()
+            .find(|page| page.kind == Kind::Stickers)
+            .unwrap()
+            .clone();
+        wait(|| {
+            emoji.favorite_keys.borrow().len() == 3 && stickers.favorite_keys.borrow().len() == 3
+        });
+        let mut expected = std::collections::HashMap::new();
+        for (name, page, category) in [
+            ("emoji", emoji.clone(), FavoriteKind::Emoji),
+            ("stickers", stickers.clone(), FavoriteKind::Stickers),
+        ] {
+            ui.media_stack.set_visible_child_name(name);
+            wait(|| {
+                !ui.media_stack.is_transition_running()
+                    && drag_controls(&page.root.clone().upcast()).len() == 3
+            });
+            let mut keys = page.favorite_keys.borrow().clone();
+            let source = keys.remove(0);
+            keys.push(source);
+            let widgets = drag_controls(&page.root.clone().upcast());
+            let pointer = physical_drag(&ui.window, &widgets[0], &widgets[2]);
+            wait(|| *page.favorite_keys.borrow() == keys && !ui.favorite_reorder_pending.get());
+            pointer.join().unwrap();
+            assert!(ui.composer_text().is_empty());
+            assert!(ui.state.borrow().current().messages.is_empty());
+            capture_favorites(&ui.window, name);
+            expected.insert(category, keys);
+            println!(
+                "FAVORITE DRAG PASS {name}: real pointer drag reorders production view without sending"
+            );
+        }
+        let gif_library = ui.gif_library.borrow().as_ref().unwrap().clone();
+        context.block_on(async {
+            for index in 0..3 {
+                let path=std::path::PathBuf::from(std::env::var_os("XDG_CACHE_HOME").unwrap()).join(format!("favorite-{index}.gif"));
+                let mut bytes=b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff\x2c\0\0\0\0\x01\0\x01\0\0\x02\x02\x44\x01\0\x3b".to_vec();bytes[13]=index*70;std::fs::write(&path,bytes).unwrap();
+                let item=gif_library.import_local(path,format!("Favorite GIF {index}"),crate::gifs::Request::new()).await.unwrap();gif_library.set_favorite(item,true,crate::gifs::Request::new()).await.unwrap();
+            }
+        });
+        let gifs = ui.gif_page.borrow().as_ref().unwrap().clone();
+        gifs.show_saved();
+        ui.media_stack.set_visible_child_name("gifs");
+        wait(|| {
+            !ui.media_stack.is_transition_running()
+                && gifs.items.borrow().len() == 3
+                && drag_controls(&gifs.root.clone().upcast()).len() == 3
+        });
+        let mut ids: Vec<_> = gifs
+            .items
+            .borrow()
+            .iter()
+            .map(|item| item.id.clone())
+            .collect();
+        let source = ids.remove(0);
+        ids.push(source);
+        let widgets = drag_controls(&gifs.root.clone().upcast());
+        let pointer = physical_drag(&ui.window, &widgets[0], &widgets[2]);
+        wait(|| {
+            gifs.items
+                .borrow()
+                .iter()
+                .map(|item| item.id.clone())
+                .collect::<Vec<_>>()
+                == ids
+                && !ui.favorite_reorder_pending.get()
+        });
+        pointer.join().unwrap();
+        assert!(ui.attachments.borrow().is_empty());
+        assert!(ui.composer_text().is_empty());
+        assert!(ui.state.borrow().current().messages.is_empty());
+        capture_favorites(&ui.window, "gifs");
+        let saved = context.block_on(gif_library.snapshot()).unwrap();
+        assert_eq!(saved.favorites.len(), 3);
+        assert!(saved.recents.is_empty());
+        ui.load_favorite_orders();
+        wait(|| ui.favorite_orders.borrow().len() == 3);
+        assert_eq!(
+            *emoji.favorite_keys.borrow(),
+            expected[&FavoriteKind::Emoji]
+        );
+        assert_eq!(
+            *stickers.favorite_keys.borrow(),
+            expected[&FavoriteKind::Stickers]
+        );
+        assert_eq!(
+            gifs.items
+                .borrow()
+                .iter()
+                .map(|item| item.id.clone())
+                .collect::<Vec<_>>(),
+            ids
+        );
+        assert_eq!(ui.store.emoji_preferences().unwrap().favorites.len(), 2);
+        let snapshot = context.block_on(library.snapshot()).unwrap();
+        assert_eq!(snapshot.favorites.len(), 4);
+        assert!(snapshot.recent.is_empty());
+        ui.window.close();
+        println!(
+            "FAVORITE DRAG PASS GIFs and actual database reload: membership and recents unchanged, no attachment staged"
         );
     }
 }

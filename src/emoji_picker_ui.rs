@@ -1,4 +1,5 @@
 //! Native reaction consent and shared emoji-picker presentation.
+use crate::ui::favorite_order::{self, Kind as FavoriteKind};
 use crate::{emoji_completion::EmojiEntry, model::Message, ui::Ui, widgets::*};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -267,7 +268,12 @@ impl EmojiSurface {
             return;
         }
         let Some(ui) = self.ui.upgrade() else { return };
-        let preferences = ui.store.emoji_preferences().unwrap_or_default();
+        let mut preferences = ui.store.emoji_preferences().unwrap_or_default();
+        if let Some(order) = ui.favorite_orders.borrow().get(&FavoriteKind::Emoji) {
+            order.sort(&mut preferences.favorites, |emoji| {
+                favorite_order::emoji_key(emoji)
+            });
+        }
         let query = self.query.borrow().clone();
         let searching = !query.trim().is_empty();
         let category = self.category.get();
@@ -331,6 +337,7 @@ impl EmojiSurface {
     }
 
     fn emoji_button(self: &Rc<Self>, emoji: &str, name: &str) -> gtk::Button {
+        let reorder_key = favorite_order::emoji_key(emoji);
         let button = gtk::Button::builder()
             .label(emoji)
             .tooltip_text(format!("{name} · right-click to favorite or pin"))
@@ -410,6 +417,32 @@ impl EmojiSurface {
             }
         });
         button.add_controller(keys);
+        if self.category.get() == -1
+            && self.query.borrow().trim().is_empty()
+            && self.custom_page.borrow().is_none()
+        {
+            if let Some(ui) = self.ui.upgrade() {
+                let surface = Rc::downgrade(self);
+                favorite_order::attach(&ui, &button, FavoriteKind::Emoji, reorder_key, move || {
+                    let Some(surface) = surface.upgrade().filter(|surface| {
+                        surface.category.get() == -1 && surface.query.borrow().trim().is_empty()
+                    }) else {
+                        return Vec::new();
+                    };
+                    (0..surface.model.n_items())
+                        .filter_map(|index| {
+                            surface
+                                .model
+                                .item(index)
+                                .and_downcast::<glib::BoxedAnyObject>()
+                                .map(|entry| {
+                                    favorite_order::emoji_key(&entry.borrow::<EmojiEntry>().text)
+                                })
+                        })
+                        .collect()
+                });
+            }
+        }
         button
     }
 
@@ -598,7 +631,7 @@ fn emoji_factory(surface: &Weak<EmojiSurface>) -> gtk::SignalListItemFactory {
     factory
 }
 
-fn refresh_emoji_surfaces(ui: &Rc<Ui>) {
+pub(crate) fn refresh_emoji_surfaces(ui: &Rc<Ui>) {
     let surfaces = EMOJI_SURFACES.with(|registry| {
         let mut registry = registry.borrow_mut();
         registry
@@ -687,7 +720,12 @@ impl Ui {
         popover: &gtk::Popover,
         message: &Message,
     ) -> Rc<ReactionPicker> {
-        let preferences = self.store.emoji_preferences().unwrap_or_default();
+        let mut preferences = self.store.emoji_preferences().unwrap_or_default();
+        if let Some(order) = self.favorite_orders.borrow().get(&FavoriteKind::Emoji) {
+            order.sort(&mut preferences.favorites, |emoji| {
+                favorite_order::emoji_key(emoji)
+            });
+        }
         let quick = preferences.quick_reactions(&message.reactions);
         let collapsed = bx(false, 0);
         collapsed.add_css_class("message-menu-panel");
