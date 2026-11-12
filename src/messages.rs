@@ -199,11 +199,12 @@ fn message_status(meta: &gtk::Box, m: &Message) {
                     checks.add_css_class("read");
                     let first = gtk::Image::from_icon_name("object-select-symbolic");
                     first.set_pixel_size(12);
+                    first.set_halign(gtk::Align::Start);
                     checks.set_child(Some(&first));
                     let second = gtk::Image::from_icon_name("object-select-symbolic");
                     second.set_pixel_size(12);
                     second.set_halign(gtk::Align::Start);
-                    second.set_margin_start(5);
+                    second.set_margin_start(8);
                     checks.add_overlay(&second);
                     checks.set_tooltip_text(Some(title));
                     checks.update_property(&[gtk::accessible::Property::Label(title)]);

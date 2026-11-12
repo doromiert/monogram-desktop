@@ -68,14 +68,14 @@
 .message-reply { color: @window_fg_color; background: alpha(@window_fg_color,.10); padding: 7px 9px; border-left: 3px solid @accent_color; }
 .message-reply label { color: @window_fg_color; }
 .reply-target { outline: 2px solid @accent_color; }
-.reaction { color: @window_fg_color; background: alpha(@window_fg_color,.12); margin: 8px; }
+.reaction { color: @window_fg_color; background: alpha(@window_fg_color,.12); margin: 0; }
 .reaction:checked { background: @accent_bg_color; color: @accent_fg_color; }
 .reaction-emoji { font-size: 16px; }
 .reaction-count { font-size: 11px; }
 .message-status-spinner { min-width: 12px; min-height: 12px; }
 .message-status-check { color: white; min-width: 12px; min-height: 12px; }
 .message-status-check.sent { opacity: .5; }
-.message-status-check.read { min-width: 17px; opacity: 1; }
+.message-status-check.read { min-width: 20px; opacity: 1; }
 .composer-shell { padding: 8px; }
 .composer { padding: 4px; border-radius: 12px; }
 .composer textview { padding: 0; }
