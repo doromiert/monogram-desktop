@@ -9,6 +9,12 @@ use gtk::glib;
 use std::rc::Rc;
 
 impl Ui {
+    pub(crate) fn update_send_button(&self) {
+        self.send_button.set_sensitive(
+            !self.composer_text().trim().is_empty() || !self.attachments.borrow().is_empty(),
+        );
+    }
+
     pub fn sending_mode(&self, chat: &Chat) -> Option<Mode> {
         if self.smoke && chat.sending_preference.is_none() {
             return Some(if chat.encryption {
@@ -138,6 +144,7 @@ impl Ui {
     }
 
     pub fn update_encryption_check(&self) {
+        self.update_send_button();
         let busy = self
             .encryption_checks
             .borrow()

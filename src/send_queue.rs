@@ -146,6 +146,7 @@ impl Ui {
             self.attachments.borrow_mut().clear();
             crate::widgets::clear(&self.chips);
             self.chips.set_visible(false);
+            self.update_send_button();
         }
         self.cancel_reply();
         self.save_draft();

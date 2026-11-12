@@ -1280,6 +1280,7 @@ impl Ui {
         self.send_button.remove_css_class("flat");
         self.send_button.add_css_class("suggested-action");
         self.send_button.add_css_class("send");
+        self.update_send_button();
         let plane = gtk::Image::from_file(asset("paper-plane-symbolic.svg"));
         plane.set_pixel_size(20);
         self.send_button.set_child(Some(&plane));
@@ -1385,9 +1386,7 @@ impl Ui {
         self.composer_placeholder
             .set_visible(composer_text.is_empty());
         self.queue_composer_height();
-        self.send_button.set_sensitive(
-            !composer_text.trim().is_empty() || !self.attachments.borrow().is_empty(),
-        );
+        self.update_send_button();
         if self.loading.get() {
             return;
         }
@@ -1894,6 +1893,7 @@ impl Ui {
         clear(&self.chips);
         self.chips.set_visible(false);
         self.cancel_reply();
+        self.update_send_button();
         self.save_draft();
         self.render_messages(true);
         self.refresh_chats(None);
