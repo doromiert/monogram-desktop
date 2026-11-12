@@ -21,7 +21,7 @@ or pauses it, preserving an explicit pause during viewport updates. Starting
 another round video returns the previous one to muted preview behavior. The circular progress ring starts at twelve o'clock and seeks by clicking or
 dragging its outer annulus. A separate top-left button toggles mute without
 activating underlying playback. Seeking preserves prior play/pause state and
-uses existing stream notifications rather than a new polling timer. Native real-
+uses stream notifications for position and mapped-playing frame-clock drawing. Native real-
 pointer seeks at25/50/75%, mute under-click isolation and sub400ms feedback pass.
 Remaining-time labels and the mobile round-video editor remain open.
 
@@ -244,3 +244,12 @@ Rejected diagnosis: forced HTTP/1.1 initially appeared to help an interleaved
 probe, but sequential HTTP/1.1 requests also stalled after TLS on desktop and
 Android. No protocol downgrade is retained. A per-socket 1200-byte MSS probe
 also failed to help; no network-interface or route settings were changed.
+
+Round-video progress smoothness: Clapper position notifications are approximately
+10 Hz (15 updates in1.5s, average100.0ms). The floating-point ring interpolates
+between those authoritative samples on GTK's display frame clock. It never
+advances past its latest target, so missing samples cannot accumulate fictional
+playback progress. Pause, loop and seeking reanchor the presentation; explicit
+seek preview survives in-flight seeks. Frame callbacks stop for paused/unmapped
+streams and after samples stop. The native acceptance observes90frames in1.5s
+(16.7ms average,17.1ms maximum) with existing seeking/mute/play-pause checks passing.

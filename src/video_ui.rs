@@ -46,6 +46,101 @@ fn update_round_mute_button(button: &gtk::Button, muted: bool) {
     button.update_property(&[gtk::accessible::Property::Label(label)]);
 }
 
+struct RoundProgressClock {
+    displayed: Cell<f64>,
+    start: Cell<f64>,
+    target: Cell<i64>,
+    sample_time: Cell<Instant>,
+    interval: Cell<Duration>,
+    running: Cell<bool>,
+}
+impl RoundProgressClock {
+    fn new() -> Self {
+        Self {
+            displayed: Cell::new(0.),
+            start: Cell::new(0.),
+            target: Cell::new(0),
+            sample_time: Cell::new(Instant::now()),
+            interval: Cell::new(Duration::from_millis(100)),
+            running: Cell::new(false),
+        }
+    }
+    fn anchor(&self, timestamp: i64) {
+        self.displayed.set(timestamp as f64);
+        self.start.set(timestamp as f64);
+        self.target.set(timestamp);
+        self.sample_time.set(Instant::now());
+    }
+    fn advance(&self, now: Instant) {
+        let elapsed = now.duration_since(self.sample_time.get()).as_secs_f64();
+        let period = self.interval.get().as_secs_f64().max(0.001);
+        let amount = (elapsed / period).clamp(0., 1.);
+        self.displayed
+            .set(self.start.get() + (self.target.get() as f64 - self.start.get()) * amount);
+    }
+    fn sample(&self, media: &gtk::MediaStream) {
+        let now = Instant::now();
+        self.advance(now);
+        let timestamp = media.timestamp();
+        let previous = self.target.get();
+        let period = now
+            .duration_since(self.sample_time.get())
+            .clamp(Duration::from_millis(50), Duration::from_millis(150));
+        if !media.is_playing()
+            || media.is_seeking()
+            || timestamp < previous
+            || timestamp.saturating_sub(previous) > 500_000
+        {
+            self.anchor(timestamp);
+            return;
+        }
+        // Stay one sample behind so buffering never produces invented progress.
+        self.start.set(self.displayed.get());
+        self.target.set(timestamp);
+        self.sample_time.set(now);
+        self.interval.set(period);
+    }
+    fn timestamp(&self, media: &gtk::MediaStream) -> f64 {
+        if media.is_playing() {
+            self.displayed.get()
+        } else {
+            media.timestamp() as f64
+        }
+    }
+    fn start(self: &Rc<Self>, display: &gtk::DrawingArea, media: &gtk::MediaStream) {
+        if !display.is_mapped() || !media.is_playing() || media.is_seeking() {
+            self.anchor(media.timestamp());
+            return;
+        }
+        if self.running.replace(true) {
+            return;
+        }
+        let media = media.downgrade();
+        let smooth = self.clone();
+        display.add_tick_callback(move |display, _| {
+            let Some(media) = media.upgrade() else {
+                smooth.running.set(false);
+                return glib::ControlFlow::Break;
+            };
+            if !display.is_mapped() || !media.is_playing() || media.is_seeking() {
+                smooth.anchor(media.timestamp());
+                smooth.running.set(false);
+                display.queue_draw();
+                return glib::ControlFlow::Break;
+            }
+            let now = Instant::now();
+            smooth.advance(now);
+            display.queue_draw();
+            if now.duration_since(smooth.sample_time.get()) > smooth.interval.get().mul_f64(2.) {
+                smooth.running.set(false);
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
+    }
+}
+
 pub(crate) struct Playback {
     pub(crate) media: gtk::MediaStream,
     pub(crate) controls: gtk::Widget,
@@ -263,9 +358,11 @@ impl Ui {
         let seek_origin = Rc::new(Cell::new((0., 0.)));
         let resume_after_seek = Rc::new(Cell::new(false));
         let last_seek = Rc::new(Cell::new(Instant::now()));
+        let smooth_progress = Rc::new(RoundProgressClock::new());
         let draw_player = round_player.clone();
         let draw_preview = seek_preview.clone();
         let draw_seeking = seeking.clone();
+        let draw_smooth = smooth_progress.clone();
         progress.set_draw_func(move |_, ctx, width, height| {
             let Some(player) = draw_player.borrow().as_ref().cloned() else {
                 return;
@@ -276,7 +373,7 @@ impl Ui {
             }
             let amount = draw_preview
                 .get()
-                .unwrap_or_else(|| player.media.timestamp() as f64 / duration as f64)
+                .unwrap_or_else(|| draw_smooth.timestamp(&player.media) / duration as f64)
                 .clamp(0., 1.);
             let paused = !player.media.is_playing();
             let center_x = f64::from(width) / 2.;
@@ -537,27 +634,54 @@ impl Ui {
                             parent = widget.parent();
                         }
                         round_player.replace(Some(player.clone()));
+                        smooth_progress.anchor(player.media.timestamp());
                         progress.set_visible(true);
                         mute.set_visible(player.media.has_audio());
                         update_round_mute_button(&mute, player.media.is_muted());
                         let display = progress.downgrade();
                         let preview = seek_preview.clone();
                         let dragging = seeking.clone();
+                        let smooth = smooth_progress.clone();
                         binding
                             .signals
-                            .push(player.media.connect_timestamp_notify(move |_| {
-                                if !dragging.get() {
+                            .push(player.media.connect_timestamp_notify(move |media| {
+                                if !dragging.get() && !media.is_seeking() {
                                     preview.set(None);
                                 }
                                 if let Some(display) = display.upgrade() {
+                                    if preview.get().is_some() {
+                                        smooth.anchor(media.timestamp());
+                                    } else {
+                                        smooth.sample(media);
+                                    }
+                                    smooth.start(&display, media);
                                     display.queue_draw();
                                 }
                             }));
                         let display = progress.downgrade();
+                        let smooth = smooth_progress.clone();
                         binding
                             .signals
-                            .push(player.media.connect_playing_notify(move |_| {
+                            .push(player.media.connect_playing_notify(move |media| {
                                 if let Some(display) = display.upgrade() {
+                                    smooth.anchor(media.timestamp());
+                                    smooth.start(&display, media);
+                                    display.queue_draw();
+                                }
+                            }));
+                        let display = progress.downgrade();
+                        let preview = seek_preview.clone();
+                        let dragging = seeking.clone();
+                        let smooth = smooth_progress.clone();
+                        binding
+                            .signals
+                            .push(player.media.connect_seeking_notify(move |media| {
+                                if !media.is_seeking() && !dragging.get() {
+                                    preview.set(None);
+                                }
+                                smooth.anchor(media.timestamp());
+                                if let Some(display) = display.upgrade() {
+                                    smooth.start(&display, media);
                                     display.queue_draw();
                                 }
                             }));

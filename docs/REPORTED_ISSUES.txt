@@ -223,3 +223,14 @@ OPEN, NOT REPRODUCED — React/unreact scroll jump follow-up
   remains isolated rather than shipped. Selection/forwarding and decryption-delay
   requests above remain open/local WIP as marked; this delivery does not finish
   all historical desktop requests.
+
+FIX VERIFIED — Circular video progress feels stepped
+  The ring's fraction is floating-point, but timestamp notifications arrive at
+  10 Hz: measured15updates in1.5s, average100.0ms spacing, maximum100.2ms.
+  Render motion at the display frame cadence while retaining authoritative
+  player positions and immediate pointer preview. Reanchor for pause/seek/loop,
+  stop drawing while paused/unmapped, and do not accumulate drift on stalls.
+  Frame-clock presentation now produces90frames in1.5s (16.7ms average,
+  17.1ms maximum) while the authoritative player remains10Hz. Pointer seeking,
+  mute and play/pause pass; paused rings produce zero redraws in250ms and
+  unmapped rings stop after the hide frame. This fix is awaiting packaging.
