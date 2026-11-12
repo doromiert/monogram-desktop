@@ -97,6 +97,7 @@ struct EmojiSurface {
     columns: usize,
     anchors: RefCell<std::collections::BTreeMap<i32, u32>>,
     favorite_keys: RefCell<Vec<String>>,
+    favorite_preview: favorite_order::Preview,
     category: Cell<i32>,
     query: RefCell<String>,
     activate: Rc<EmojiAction>,
@@ -145,7 +146,8 @@ impl EmojiSurface {
                 scrolling.set_max_content_height(height);
                 scrolling.set_propagate_natural_height(true);
             }
-            root.append(&scrolling);
+            let favorite_preview = favorite_order::Preview::new(&scrolling);
+            root.append(&favorite_preview);
             Self {
                 ui: Rc::downgrade(ui),
                 root,
@@ -163,6 +165,7 @@ impl EmojiSurface {
                 columns: columns as usize,
                 anchors: RefCell::new(Default::default()),
                 favorite_keys: RefCell::new(Vec::new()),
+                favorite_preview,
                 category: Cell::new(-1),
                 query: RefCell::new(String::new()),
                 activate: Rc::new(activate),
@@ -516,13 +519,20 @@ impl EmojiSurface {
         if favorite && self.custom_page.borrow().is_none() {
             if let Some(ui) = self.ui.upgrade() {
                 let surface = Rc::downgrade(self);
-                favorite_order::attach(&ui, &button, FavoriteKind::Emoji, reorder_key, move || {
-                    surface
-                        .upgrade()
-                        .filter(|surface| surface.query.borrow().trim().is_empty())
-                        .map(|surface| surface.favorite_keys.borrow().clone())
-                        .unwrap_or_default()
-                });
+                favorite_order::attach(
+                    &ui,
+                    &button,
+                    &self.favorite_preview,
+                    FavoriteKind::Emoji,
+                    reorder_key,
+                    move || {
+                        surface
+                            .upgrade()
+                            .filter(|surface| surface.query.borrow().trim().is_empty())
+                            .map(|surface| surface.favorite_keys.borrow().clone())
+                            .unwrap_or_default()
+                    },
+                );
             }
         }
         button
@@ -725,11 +735,17 @@ fn emoji_factory(surface: &Weak<EmojiSurface>) -> gtk::SignalListItemFactory {
                 let row = bx(false, 2);
                 row.set_homogeneous(true);
                 for entry in entries {
-                    row.append(&crate::widgets::SquareCell::new(&surface.emoji_button(
+                    let cell = crate::widgets::SquareCell::new(&surface.emoji_button(
                         &entry.text,
                         &entry.name,
                         *favorite,
-                    )));
+                    ));
+                    if *favorite {
+                        surface
+                            .favorite_preview
+                            .register(favorite_order::emoji_key(&entry.text), &cell);
+                    }
+                    row.append(&cell);
                 }
                 for _ in entries.len()..surface.columns {
                     row.append(&bx(false, 0));

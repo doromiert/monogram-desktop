@@ -222,6 +222,7 @@ pub(crate) struct GifLibraryPage {
     status: gtk::Label,
     grid: gif_grid::Mosaic,
     scroll: gtk::ScrolledWindow,
+    favorite_preview: favorite_order::Preview,
     items: RefCell<Vec<crate::gifs::GifItem>>,
     add_key: gtk::Button,
     retry: gtk::Button,
@@ -270,7 +271,8 @@ impl GifLibraryPage {
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
             .build();
-        root.append(&scroll);
+        let favorite_preview = favorite_order::Preview::new(&scroll);
+        root.append(&favorite_preview);
         let page = Rc::new(Self {
             root,
             ui,
@@ -278,6 +280,7 @@ impl GifLibraryPage {
             status,
             grid,
             scroll: scroll.clone(),
+            favorite_preview,
             items: RefCell::new(Vec::new()),
             add_key,
             retry,
@@ -298,6 +301,42 @@ impl GifLibraryPage {
             let item = page.items.borrow().get(index).cloned();
             item.map(|item| page.gif_tile(item))
                 .unwrap_or_else(|| gtk::Box::new(gtk::Orientation::Vertical, 0).upcast())
+        });
+        let weak = Rc::downgrade(&page);
+        page.favorite_preview.set_layout(move |keys, preview| {
+            let page = weak.upgrade()?;
+            let items = page.items.borrow();
+            let owner = page.library.account();
+            let mut ratios = Vec::with_capacity(items.len());
+            for key in keys {
+                let item = items.iter().find(|item| {
+                    item.favorite && favorite_order::gif_key(owner, &item.id) == *key
+                })?;
+                ratios.push(item.preview.width.max(1) as f64 / item.preview.height.max(1) as f64);
+            }
+            ratios.extend(
+                items.iter().filter(|item| !item.favorite).map(|item| {
+                    item.preview.width.max(1) as f64 / item.preview.height.max(1) as f64
+                }),
+            );
+            let origin = page
+                .grid
+                .compute_point(preview, &gtk::graphene::Point::new(0., 0.))?;
+            Some(
+                page.grid
+                    .prospective_rects(&ratios)
+                    .into_iter()
+                    .take(keys.len())
+                    .map(|rect| {
+                        gtk::graphene::Rect::new(
+                            origin.x() + rect.x as f32,
+                            origin.y() + rect.y as f32,
+                            rect.width as f32,
+                            rect.height as f32,
+                        )
+                    })
+                    .collect(),
+            )
         });
         let weak = Rc::downgrade(&page);
         scroll.vadjustment().connect_value_changed(move |_| {
@@ -556,10 +595,12 @@ impl GifLibraryPage {
         if self.saved_view.get() && item.favorite {
             if let Some(ui) = self.ui.upgrade() {
                 let owner = self.library.account().to_string();
+                let preview_key = favorite_order::gif_key(&owner, &item.id);
                 let weak = Rc::downgrade(self);
                 favorite_order::attach(
                     &ui,
                     &button,
+                    &self.favorite_preview,
                     FavoriteKind::Gifs,
                     favorite_order::gif_key(&owner, &item.id),
                     move || {
@@ -575,6 +616,7 @@ impl GifLibraryPage {
                             .unwrap_or_default()
                     },
                 );
+                self.favorite_preview.register(preview_key, &tile);
             }
         }
         let weak = Rc::downgrade(self);
@@ -757,15 +799,22 @@ impl GifLibraryPage {
         if !self.saved_view.get() {
             return;
         }
-        let (mut favorites, recent): (Vec<_>, Vec<_>) = self
-            .items
-            .borrow()
-            .iter()
-            .cloned()
-            .partition(|item| item.favorite);
+        let old = self.items.borrow().clone();
+        let (mut favorites, recent): (Vec<_>, Vec<_>) =
+            old.iter().cloned().partition(|item| item.favorite);
         self.sort_saved_favorites(&mut favorites);
         favorites.extend(recent);
-        self.render(favorites, false);
+        let old_index_for_new: Vec<_> = favorites
+            .iter()
+            .filter_map(|item| old.iter().position(|old| old.id == item.id))
+            .collect();
+        let ratios = favorites
+            .iter()
+            .map(|item| item.preview.width.max(1) as f64 / item.preview.height.max(1) as f64)
+            .collect();
+        if self.grid.reorder_items(ratios, &old_index_for_new) {
+            self.items.replace(favorites);
+        }
     }
     pub(crate) fn settings(self: &Rc<Self>, parent: &impl IsA<gtk::Widget>) {
         let entry = adw::PasswordEntryRow::builder()
@@ -908,6 +957,7 @@ pub(crate) struct PackLibraryPage {
     model: gio::ListStore,
     list: gtk::ListView,
     scroll: gtk::ScrolledWindow,
+    favorite_preview: favorite_order::Preview,
     ui: std::rc::Weak<Ui>,
     query: RefCell<String>,
     anchors: RefCell<std::collections::HashMap<i64, u32>>,
@@ -1043,7 +1093,8 @@ impl PackLibraryPage {
             .vscrollbar_policy(gtk::PolicyType::Automatic)
             .vexpand(true)
             .build();
-        root.append(&scroll);
+        let favorite_preview = favorite_order::Preview::new(&scroll);
+        root.append(&favorite_preview);
         let page = Rc::new(Self {
             root,
             library,
@@ -1057,6 +1108,7 @@ impl PackLibraryPage {
             model,
             list,
             scroll: scroll.clone(),
+            favorite_preview,
             ui,
             query: RefCell::new(String::new()),
             anchors: RefCell::new(Default::default()),
@@ -1531,6 +1583,7 @@ impl PackLibraryPage {
                         favorite_order::attach(
                             &ui,
                             &cell,
+                            &self.favorite_preview,
                             if self.kind == Kind::Emoji {
                                 FavoriteKind::Emoji
                             } else {
@@ -1543,7 +1596,10 @@ impl PackLibraryPage {
                                     .unwrap_or_default()
                             },
                         );
-                        row.append(&crate::widgets::SquareCell::new(&cell));
+                        let preview_cell = crate::widgets::SquareCell::new(&cell);
+                        self.favorite_preview
+                            .register(entry.key(self.library.account()), &preview_cell);
+                        row.append(&preview_cell);
                     }
                 }
                 for _ in entries.len()..columns {
@@ -2595,19 +2651,71 @@ mod gif_native_tests {
                 window.width() as f64,
                 window.height() as f64,
             );
-            window
-                .renderer()
-                .unwrap()
-                .render_texture(&snapshot.to_node().unwrap(), None)
-                .save_to_png(format!("{}-{name}.png", prefix.to_string_lossy()))
-                .unwrap();
+            if let Some(node) = snapshot.to_node() {
+                window
+                    .renderer()
+                    .unwrap()
+                    .render_texture(&node, None)
+                    .save_to_png(format!("{}-{name}.png", prefix.to_string_lossy()))
+                    .unwrap();
+            }
         }
+    }
+    fn gif_rects(page: &GifLibraryPage) -> std::collections::HashMap<String, gtk::graphene::Rect> {
+        let origin = page
+            .grid
+            .compute_point(&page.favorite_preview, &gtk::graphene::Point::new(0., 0.))
+            .unwrap();
+        let owner = page.library.account();
+        let items = page.items.borrow();
+        page.grid
+            .visible_rects()
+            .into_iter()
+            .filter_map(|rect| {
+                let item = items.get(rect.index)?;
+                Some((
+                    favorite_order::gif_key(owner, &item.id),
+                    gtk::graphene::Rect::new(
+                        origin.x() + rect.x as f32,
+                        origin.y() + rect.y as f32,
+                        rect.width as f32,
+                        rect.height as f32,
+                    ),
+                ))
+            })
+            .collect()
+    }
+    fn gif_media_identity(page: &GifLibraryPage) -> (Vec<usize>, Vec<usize>, usize) {
+        let widgets = descendants(&page.grid);
+        let mut pictures: Vec<_> = widgets
+            .iter()
+            .filter_map(|widget| widget.downcast_ref::<gtk::Picture>())
+            .map(|picture| picture.as_ptr() as usize)
+            .collect();
+        let mut paintables: Vec<_> = widgets
+            .iter()
+            .filter_map(|widget| widget.downcast_ref::<gtk::Picture>())
+            .filter_map(gtk::Picture::paintable)
+            .map(|paintable| paintable.as_ptr() as usize)
+            .collect();
+        pictures.sort_unstable();
+        paintables.sort_unstable();
+        let loading = widgets
+            .iter()
+            .filter(|widget| widget.has_css_class("loading"))
+            .count();
+        (pictures, paintables, loading)
     }
     fn physical_drag(
         window: &adw::ApplicationWindow,
         source: &gtk::Widget,
         target: &gtk::Widget,
-    ) -> std::thread::JoinHandle<()> {
+        name: &str,
+        cancel: bool,
+    ) -> (
+        std::thread::JoinHandle<()>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
         let window_id = std::process::Command::new("xdotool")
             .args([
                 "search",
@@ -2635,7 +2743,15 @@ mod gif_native_tests {
         };
         let (sx, sy) = center(source);
         let (tx, ty) = center(target);
-        std::thread::spawn(move || {
+        let capture = std::env::var_os("MONOGRAM_FAVORITE_CAPTURE").map(|prefix| {
+            format!(
+                "{}-{name}-held.png",
+                std::path::Path::new(&prefix).display()
+            )
+        });
+        let held = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dragging = held.clone();
+        let worker = std::thread::spawn(move || {
             let command = |args: &[String]| {
                 assert!(
                     std::process::Command::new("xdotool")
@@ -2663,8 +2779,55 @@ mod gif_native_tests {
                 std::thread::sleep(Duration::from_millis(35));
             }
             std::thread::sleep(Duration::from_millis(100));
+            if let Some(capture) = capture {
+                assert!(
+                    std::process::Command::new("import")
+                        .args(["-window", &window_id, &capture])
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
+            dragging.store(true, std::sync::atomic::Ordering::Release);
+            std::thread::sleep(Duration::from_millis(180));
+            if cancel {
+                command(&["key".into(), "Escape".into()]);
+            }
             command(&["mouseup".into(), "1".into()]);
-        })
+        });
+        (worker, held)
+    }
+    fn physical_key(window: &adw::ApplicationWindow, widget: &gtk::Widget, key: &str) {
+        assert!(widget.grab_focus());
+        let window_id = std::process::Command::new("xdotool")
+            .args([
+                "search",
+                "--onlyvisible",
+                "--pid",
+                &std::process::id().to_string(),
+                "--name",
+                "Monogram",
+            ])
+            .output()
+            .unwrap();
+        let window_id = String::from_utf8(window_id.stdout)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .to_owned();
+        let key = key.to_owned();
+        let worker = std::thread::spawn(move || {
+            assert!(
+                std::process::Command::new("xdotool")
+                    .args(["key", "--window", &window_id, &key])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        });
+        wait(|| worker.is_finished());
+        worker.join().unwrap();
     }
     #[test]
     #[ignore = "requires isolated native X11 display, data roots, xdotool and Secret Service"]
@@ -2766,13 +2929,53 @@ mod gif_native_tests {
             let source = keys.remove(0);
             keys.push(source);
             let widgets = drag_controls(&page.root.clone().upcast());
-            let pointer = physical_drag(&ui.window, &widgets[0], &widgets[2]);
+            let (pointer, held) = physical_drag(&ui.window, &widgets[0], &widgets[2], name, false);
+            wait(|| held.load(std::sync::atomic::Ordering::Acquire));
+            let (distance, shifted, no_overlap) = page.favorite_preview.held_metrics().unwrap();
+            assert!(distance > 20., "dragged {name} did not follow the pointer");
+            assert!(
+                shifted >= 2,
+                "{name} neighbors did not shift before release"
+            );
+            assert!(no_overlap, "{name} shifted neighbors overlap");
+            println!(
+                "FAVORITE HELD {name}: source_delta={distance:.1}px shifted={shifted} no_overlap={no_overlap}"
+            );
             wait(|| *page.favorite_keys.borrow() == keys && !ui.favorite_reorder_pending.get());
             pointer.join().unwrap();
             assert!(ui.composer_text().is_empty());
             assert!(ui.state.borrow().current().messages.is_empty());
             capture_favorites(&ui.window, name);
             expected.insert(category, keys);
+            if name == "emoji" {
+                let before = page.favorite_keys.borrow().clone();
+                let widgets = drag_controls(&page.root.clone().upcast());
+                let (cancelled, held) =
+                    physical_drag(&ui.window, &widgets[0], &widgets[1], "emoji-cancel", true);
+                wait(|| held.load(std::sync::atomic::Ordering::Acquire));
+                wait(|| cancelled.is_finished());
+                cancelled.join().unwrap();
+                wait(|| !ui.favorite_reorder_pending.get());
+                assert_eq!(
+                    *page.favorite_keys.borrow(),
+                    before,
+                    "cancel saved a favorite move"
+                );
+                println!("FAVORITE CANCEL PASS Escape restored preview without saving");
+                let mut keyboard = before.clone();
+                keyboard.swap(0, 1);
+                let controls = drag_controls(&page.root.clone().upcast());
+                physical_key(&ui.window, &controls[0], "alt+Right");
+                wait(|| {
+                    *page.favorite_keys.borrow() == keyboard && !ui.favorite_reorder_pending.get()
+                });
+                let controls = drag_controls(&page.root.clone().upcast());
+                physical_key(&ui.window, &controls[1], "alt+Left");
+                wait(|| {
+                    *page.favorite_keys.borrow() == before && !ui.favorite_reorder_pending.get()
+                });
+                println!("FAVORITE KEYBOARD PASS Alt+Right/Left reorder and restore");
+            }
             println!(
                 "FAVORITE DRAG PASS {name}: real pointer drag reorders production view without sending"
             );
@@ -2780,9 +2983,28 @@ mod gif_native_tests {
         let gif_library = ui.gif_library.borrow().as_ref().unwrap().clone();
         context.block_on(async {
             for index in 0..3 {
-                let path=std::path::PathBuf::from(std::env::var_os("XDG_CACHE_HOME").unwrap()).join(format!("favorite-{index}.gif"));
-                let mut bytes=b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff\x2c\0\0\0\0\x01\0\x01\0\0\x02\x02\x44\x01\0\x3b".to_vec();bytes[13]=index*70;std::fs::write(&path,bytes).unwrap();
-                let item=gif_library.import_local(path,format!("Favorite GIF {index}"),crate::gifs::Request::new()).await.unwrap();gif_library.set_favorite(item,true,crate::gifs::Request::new()).await.unwrap();
+                let path = std::path::PathBuf::from(std::env::var_os("XDG_CACHE_HOME").unwrap())
+                    .join(format!("favorite-{index}.gif"));
+                let size = ["96x48", "48x96", "80x56"][index];
+                assert!(
+                    std::process::Command::new("convert")
+                        .args(["-size", size, "xc:#4488aa", path.to_str().unwrap()])
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+                let item = gif_library
+                    .import_local(
+                        path,
+                        format!("Favorite GIF {index}"),
+                        crate::gifs::Request::new(),
+                    )
+                    .await
+                    .unwrap();
+                gif_library
+                    .set_favorite(item, true, crate::gifs::Request::new())
+                    .await
+                    .unwrap();
             }
         });
         let gifs = ui.gif_page.borrow().as_ref().unwrap().clone();
@@ -2792,7 +3014,11 @@ mod gif_native_tests {
             !ui.media_stack.is_transition_running()
                 && gifs.items.borrow().len() == 3
                 && drag_controls(&gifs.root.clone().upcast()).len() == 3
+                && gif_media_identity(&gifs).0.len() == 3
+                && gif_media_identity(&gifs).2 == 0
         });
+        capture_favorites(&ui.window, "gifs-before");
+        let media_before = gif_media_identity(&gifs);
         let mut ids: Vec<_> = gifs
             .items
             .borrow()
@@ -2802,7 +3028,16 @@ mod gif_native_tests {
         let source = ids.remove(0);
         ids.push(source);
         let widgets = drag_controls(&gifs.root.clone().upcast());
-        let pointer = physical_drag(&ui.window, &widgets[0], &widgets[2]);
+        let (pointer, held) = physical_drag(&ui.window, &widgets[0], &widgets[2], "gifs", false);
+        wait(|| held.load(std::sync::atomic::Ordering::Acquire));
+        let (distance, shifted, no_overlap) = gifs.favorite_preview.held_metrics().unwrap();
+        let held_neighbors = gifs.favorite_preview.held_neighbors().unwrap();
+        assert!(distance > 20., "dragged GIF did not follow the pointer");
+        assert!(shifted >= 2, "GIF neighbors did not shift before release");
+        assert!(no_overlap, "varied GIF neighbors overlap");
+        println!(
+            "FAVORITE HELD gifs: source_delta={distance:.1}px shifted={shifted} no_overlap={no_overlap}"
+        );
         wait(|| {
             gifs.items
                 .borrow()
@@ -2813,10 +3048,31 @@ mod gif_native_tests {
                 && !ui.favorite_reorder_pending.get()
         });
         pointer.join().unwrap();
+        wait(|| {
+            let settled = gif_rects(&gifs);
+            held_neighbors.iter().all(|(key, held)| {
+                settled.get(key).is_some_and(|final_rect| {
+                    (held.x() - final_rect.x()).abs() <= 1.
+                        && (held.y() - final_rect.y()).abs() <= 1.
+                        && (held.width() - final_rect.width()).abs() <= 1.
+                        && (held.height() - final_rect.height()).abs() <= 1.
+                })
+            })
+        });
+        let media_after = gif_media_identity(&gifs);
+        assert_eq!(media_after.0, media_before.0, "GIF picture widgets rebuilt");
+        assert_eq!(media_after.1, media_before.1, "GIF paintables restarted");
+        assert_eq!(
+            media_after.2, 0,
+            "GIF reorder restarted loading placeholders"
+        );
         assert!(ui.attachments.borrow().is_empty());
         assert!(ui.composer_text().is_empty());
         assert!(ui.state.borrow().current().messages.is_empty());
         capture_favorites(&ui.window, "gifs");
+        println!(
+            "FAVORITE GIF LAYOUT PASS held neighbors match settled Galeria rects within 1px; mounted pictures/paintables retained and no loading restarted"
+        );
         let saved = context.block_on(gif_library.snapshot()).unwrap();
         assert_eq!(saved.favorites.len(), 3);
         assert!(saved.recents.is_empty());
@@ -2842,6 +3098,27 @@ mod gif_native_tests {
         let snapshot = context.block_on(library.snapshot()).unwrap();
         assert_eq!(snapshot.favorites.len(), 4);
         assert!(snapshot.recent.is_empty());
+        ui.media_stack.set_visible_child_name("emoji");
+        wait(|| {
+            !ui.media_stack.is_transition_running()
+                && drag_controls(&emoji.root.clone().upcast()).len() == 3
+        });
+        let before = emoji.favorite_keys.borrow().clone();
+        let widgets = drag_controls(&emoji.root.clone().upcast());
+        let (fenced, held) =
+            physical_drag(&ui.window, &widgets[0], &widgets[1], "account-fence", false);
+        wait(|| held.load(std::sync::atomic::Ordering::Acquire));
+        ui.generation.set(ui.generation.get().wrapping_add(1));
+        ui.state.borrow_mut().account = "changed@fixture.invalid".into();
+        wait(|| fenced.is_finished());
+        fenced.join().unwrap();
+        assert_eq!(
+            *emoji.favorite_keys.borrow(),
+            before,
+            "account change saved a stale drag"
+        );
+        assert!(!ui.favorite_reorder_pending.get());
+        println!("FAVORITE FENCE PASS account/generation change rejected held drop");
         ui.window.close();
         println!(
             "FAVORITE DRAG PASS GIFs and actual database reload: membership and recents unchanged, no attachment staged"

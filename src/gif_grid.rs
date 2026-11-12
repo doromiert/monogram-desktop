@@ -266,11 +266,45 @@ impl Mosaic {
         self.imp().layout.replace(RowLayout::default());
         self.queue_resize();
     }
+    pub(super) fn prospective_rects(&self, ratios: &[f64]) -> Vec<Rect> {
+        let layout = RowLayout::new(ratios, self.width().max(64));
+        layout.visible(0, layout.height)
+    }
+    pub(super) fn reorder_items(&self, ratios: Vec<f64>, old_index_for_new: &[usize]) -> bool {
+        if ratios.len() != old_index_for_new.len()
+            || old_index_for_new.iter().any(|index| *index >= ratios.len())
+            || old_index_for_new
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>()
+                .len()
+                != ratios.len()
+        {
+            return false;
+        }
+        let mut old = self.imp().cells.take();
+        let mut reordered = BTreeMap::new();
+        for (new_index, old_index) in old_index_for_new.iter().copied().enumerate() {
+            if let Some(child) = old.remove(&old_index) {
+                reordered.insert(new_index, child);
+            }
+        }
+        debug_assert!(old.is_empty());
+        self.imp().cells.replace(reordered);
+        self.imp().ratios.replace(ratios);
+        self.imp().layout.replace(RowLayout::default());
+        self.queue_resize();
+        true
+    }
     pub(super) fn set_factory(&self, factory: impl Fn(usize) -> gtk::Widget + 'static) {
         self.imp().factory.replace(Some(Box::new(factory)));
     }
     pub(super) fn refresh(&self) {
         self.queue_allocate();
+    }
+    #[cfg(test)]
+    pub(super) fn visible_rects(&self) -> Vec<Rect> {
+        self.imp().visible.borrow().clone()
     }
     fn visible_range(&self) -> (i32, i32) {
         let mut parent = self.parent();
