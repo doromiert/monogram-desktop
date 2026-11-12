@@ -471,6 +471,8 @@ impl Ui {
         let generation = self.generation.get();
         let pane = adw::ToolbarView::new();
         pane.add_css_class("utility-sidebar");
+        pane.add_css_class("shared-media-sidebar");
+        pane.set_top_bar_style(adw::ToolbarStyle::Flat);
         let header = adw::HeaderBar::builder()
             .show_start_title_buttons(false)
             .title_widget(&label("Shared Media", "heading"))
@@ -621,30 +623,66 @@ impl Ui {
         content.add_named(&empty, Some("empty"));
         content.set_visible_child_name("loading");
         body.append(&content);
-        let more = gtk::Button::with_label("Load More");
-        more.add_css_class("flat");
-        more.set_visible(false);
-        body.append(&more);
+        let page_spinner = gtk::Spinner::new();
+        let page_status = label("Loading shared media…", "dim-label");
+        let retry = gtk::Button::with_label("Retry");
+        retry.add_css_class("flat");
+        retry.set_visible(false);
+        let page_feedback = bx(false, 6);
+        page_feedback.set_halign(gtk::Align::Center);
+        page_feedback.set_visible(false);
+        page_feedback.add_css_class("shared-media-feedback");
+        page_feedback.append(&page_spinner);
+        page_feedback.append(&page_status);
+        page_feedback.append(&retry);
+        body.append(&page_feedback);
         let weak = Rc::downgrade(self);
-        let more_ref = more.downgrade();
         let content_ref = content.downgrade();
+        let feedback_ref = page_feedback.downgrade();
+        let spinner_ref = page_spinner.downgrade();
+        let status_ref = page_status.downgrade();
+        let retry_ref = retry.downgrade();
+        let scrolling_ref = scrolling.downgrade();
         let list = model.clone();
+        let loaded_ids = Rc::new(RefCell::new(HashSet::<String>::new()));
         let cursor = Rc::new(RefCell::new(None::<(String, String)>));
         let finished = Rc::new(Cell::new(false));
+        let loading_page = Rc::new(Cell::new(false));
+        let load_slot = Rc::new(RefCell::new(None::<Rc<dyn Fn()>>));
+        let load_slot_weak = Rc::downgrade(&load_slot);
         let load: Rc<dyn Fn()> = Rc::new(move || {
-            let Some(more) = more_ref.upgrade() else {
-                return;
-            };
-            if finished.get() || !more.is_sensitive() {
+            if finished.get() || loading_page.replace(true) {
                 return;
             }
-            more.set_sensitive(false);
-            more.set_label("Loading…");
+            if let (Some(feedback), Some(spinner), Some(status), Some(retry)) = (
+                feedback_ref.upgrade(),
+                spinner_ref.upgrade(),
+                status_ref.upgrade(),
+                retry_ref.upgrade(),
+            ) {
+                feedback.set_visible(list.n_items() > 0);
+                spinner.set_spinning(true);
+                status.set_text("Loading shared media…");
+                retry.set_visible(false);
+            }
             let before = cursor.borrow().clone();
             let (owner, peer) = (owner.clone(), peer.clone());
-            let (weak, more_ref, content_ref) =
-                (weak.clone(), more_ref.clone(), content_ref.clone());
-            let (list, cursor, finished) = (list.clone(), cursor.clone(), finished.clone());
+            let (weak, content_ref) = (weak.clone(), content_ref.clone());
+            let (feedback_ref, spinner_ref, status_ref, retry_ref) = (
+                feedback_ref.clone(),
+                spinner_ref.clone(),
+                status_ref.clone(),
+                retry_ref.clone(),
+            );
+            let (list, loaded_ids, cursor, finished, loading_page) = (
+                list.clone(),
+                loaded_ids.clone(),
+                cursor.clone(),
+                finished.clone(),
+                loading_page.clone(),
+            );
+            let (load_slot_weak, scrolling_ref) =
+                (load_slot_weak.clone(), scrolling_ref.clone());
             glib::MainContext::default().spawn_local(async move {
                 let Some(ui) = weak.upgrade() else { return };
                 let (account, conversation) = (owner.clone(), peer.clone());
@@ -660,8 +698,7 @@ impl Ui {
                         )
                     })
                     .await;
-                let (Some(more), Some(content)) = (more_ref.upgrade(), content_ref.upgrade())
-                else {
+                let Some(content) = content_ref.upgrade() else {
                     return;
                 };
                 if ui.generation.get() != generation
@@ -670,41 +707,85 @@ impl Ui {
                 {
                     return;
                 }
-                more.set_sensitive(true);
                 match page {
                     Ok(page) => {
                         finished.set(page.next.is_none());
                         cursor.replace(page.next);
-                        let items: Vec<_> = page
-                            .messages
-                            .into_iter()
-                            .map(glib::BoxedAnyObject::new)
-                            .collect();
-                        list.extend_from_slice(&items);
+                        for message in page.messages {
+                            if loaded_ids.borrow_mut().insert(message.id.clone()) {
+                                list.append(&glib::BoxedAnyObject::new(message));
+                            }
+                        }
                         content.set_visible_child_name(if list.n_items() == 0 {
                             "empty"
                         } else {
                             "photos"
                         });
-                        more.set_label("Load More");
-                        more.set_visible(!finished.get());
+                        loading_page.set(false);
+                        if let (Some(feedback), Some(spinner)) =
+                            (feedback_ref.upgrade(), spinner_ref.upgrade())
+                        {
+                            spinner.set_spinning(false);
+                            feedback.set_visible(false);
+                        }
+                        if let Some(scrolling) = scrolling_ref.upgrade() {
+                            scrolling.add_tick_callback(move |scrolling, _| {
+                                let adjustment = scrolling.vadjustment();
+                                if adjustment.page_size() > 0.
+                                    && adjustment.upper()
+                                        - adjustment.page_size()
+                                        - adjustment.value()
+                                        < 120.
+                                {
+                                    let next = load_slot_weak
+                                        .upgrade()
+                                        .and_then(|slot| slot.borrow().as_ref().cloned());
+                                    if let Some(next) = next {
+                                        next();
+                                    }
+                                }
+                                glib::ControlFlow::Break
+                            });
+                        }
                     }
                     Err(_) => {
                         content.set_visible_child_name("photos");
-                        more.set_label("Retry");
-                        more.set_visible(true);
+                        loading_page.set(false);
+                        if let (Some(feedback), Some(spinner), Some(status), Some(retry)) = (
+                            feedback_ref.upgrade(),
+                            spinner_ref.upgrade(),
+                            status_ref.upgrade(),
+                            retry_ref.upgrade(),
+                        ) {
+                            feedback.set_visible(true);
+                            spinner.set_spinning(false);
+                            status.set_text("Shared media could not be loaded");
+                            retry.set_visible(true);
+                        }
                         ui.notice("Shared media could not be loaded");
                     }
                 }
             });
         });
-        // The explicit button and scroll threshold share one bounded page request.
-        let load_more = load.clone();
-        more.connect_clicked(move |_| load_more());
-        let load_scroll = load.clone();
+        load_slot.replace(Some(load.clone()));
+        let retry_load = load.clone();
+        retry.connect_clicked(move |_| retry_load());
+        let load_scroll = load_slot.clone();
         scrolling.vadjustment().connect_value_changed(move |a| {
-            if a.value() > 0. && a.upper() - a.page_size() - a.value() < 120. {
-                load_scroll();
+            if a.page_size() > 0. && a.upper() - a.page_size() - a.value() < 120. {
+                let next = load_scroll.borrow().as_ref().cloned();
+                if let Some(next) = next {
+                    next();
+                }
+            }
+        });
+        let load_resize = load_slot.clone();
+        scrolling.vadjustment().connect_changed(move |a| {
+            if a.page_size() > 0. && a.upper() - a.page_size() - a.value() < 120. {
+                let next = load_resize.borrow().as_ref().cloned();
+                if let Some(next) = next {
+                    next();
+                }
             }
         });
         load();

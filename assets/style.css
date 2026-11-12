@@ -35,6 +35,7 @@
 .send { border-radius: 50%; min-width: 36px; min-height: 36px; padding: 0; }
 .utility-sidebar { background: @window_bg_color; border-left: 1px solid alpha(@borders,.6); }
 .chat-sidebar headerbar, .utility-sidebar headerbar { background: transparent; box-shadow: none; }
+.shared-media-sidebar headerbar { background: @view_bg_color; }
 .utility-heading { padding: 16px 16px 8px; }
 .emoji-item { font-size: 26px; padding: 7px; border-radius: 9px; min-width: 28px; min-height: 28px; }
 .sticker-item { font-size: 48px; padding: 6px; min-width: 48px; min-height: 48px; }
@@ -148,6 +149,7 @@
 .message-list row.selected-message { background: alpha(@accent_bg_color,.14); color: @window_fg_color; }
 .shared-media-grid { padding: 12px; }
 .shared-media-tile { padding: 0; border: none; border-radius: 8px; background: transparent; box-shadow: none; }
+.shared-media-feedback { min-height: 32px; padding: 4px 8px 8px; }
 
 .message-list row.message-row.cluster-next { margin-bottom: 2px; }
 .message-bubble.cluster-previous { border-top-left-radius: 5px; }

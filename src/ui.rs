@@ -1413,6 +1413,14 @@ impl Ui {
         if !self.state.borrow().chats.iter().any(|c| c.id == id) {
             return;
         }
+        let visible_sidebar = self
+            .utility
+            .shows_sidebar()
+            .then(|| {
+                let mode = self.media_mode.borrow();
+                matches!(mode.as_str(), "info" | "shared-media").then(|| mode.clone())
+            })
+            .flatten();
         self.save_draft();
         let switched = self.state.borrow().active != id;
         self.timeline_scope_changed();
@@ -1437,6 +1445,13 @@ impl Ui {
         clear(&self.chips);
         self.chips.set_visible(false);
         self.load_current();
+        if switched {
+            match visible_sidebar.as_deref() {
+                Some("info") => self.show_info(),
+                Some("shared-media") => self.shared_media(),
+                _ => {}
+            }
+        }
         if !self.state.borrow().account.is_empty() {
             self.load_timeline(None);
         }
@@ -1950,6 +1965,17 @@ impl Ui {
             .set_label(if error { "Try Again" } else { "Sign In" });
     }
     pub fn activate_state(self: &Rc<Self>, mut state: State) {
+        let visible_sidebar = self
+            .utility
+            .shows_sidebar()
+            .then(|| {
+                let mode = self.media_mode.borrow();
+                matches!(mode.as_str(), "info" | "shared-media").then(|| mode.clone())
+            })
+            .flatten();
+        if visible_sidebar.is_some() {
+            self.utility.set_sidebar(gtk::Widget::NONE);
+        }
         self.stop_uploads();
         self.images.borrow_mut().clear();
         self.avatars.borrow_mut().clear();
@@ -2015,6 +2041,11 @@ impl Ui {
         self.refresh_chats(None);
         self.refresh_stories();
         self.load_current();
+        match visible_sidebar.as_deref() {
+            Some("info") => self.show_info(),
+            Some("shared-media") => self.shared_media(),
+            _ => {}
+        }
         self.update_mode();
         if !self.on_welcome() {
             let _ = self

@@ -227,6 +227,8 @@ impl Ui {
         }
         let pane = adw::ToolbarView::new();
         pane.add_css_class("utility-sidebar");
+        pane.add_css_class("shared-media-sidebar");
+        pane.set_top_bar_style(adw::ToolbarStyle::Flat);
         let header = adw::HeaderBar::builder()
             .show_start_title_buttons(false)
             .title_widget(&label("Shared Media", "heading"))
