@@ -1217,7 +1217,11 @@ impl Ui {
         self.selection.pack_start(&clear);
         self.selection.pack_start(&self.selection_count);
         for (icon, title, action) in [
-            ("edit-select-all-symbolic", "Select all", "select-all"),
+            (
+                "org.gnome.Calendar-symbolic",
+                "Select this day",
+                "select-day",
+            ),
             ("edit-copy-symbolic", "Copy selected", "copy"),
             ("mail-forward-symbolic", "Forward selected", "forward"),
             ("user-trash-symbolic", "Delete selected", "delete"),
@@ -2292,6 +2296,7 @@ impl Ui {
                 self.update_mode();
                 self.refresh_contact_access();
                 if online {
+                    self.reconnect_local_retractions();
                     self.flush_send_queue();
                     self.prepare_loaded_link_previews();
                     self.room_sync_retry.borrow_mut().clear();

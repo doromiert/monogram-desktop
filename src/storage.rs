@@ -30,6 +30,10 @@ const READY_UPLOAD_CAPTIONS: &str = "SELECT dependency.peer,caption.body
       AND COALESCE(json_type(parent.body,'$.upload'),'null')='null'
       AND json_type(parent.body,'$.attachment')='object'";
 impl Store {
+    pub(crate) fn init_selection_actions(&self) -> rusqlite::Result<()> {
+        self.db.execute_batch("CREATE TABLE IF NOT EXISTS local_retractions(account TEXT NOT NULL REFERENCES accounts(jid) ON DELETE CASCADE,peer TEXT NOT NULL,wire TEXT NOT NULL,attempted INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(account,peer,wire));")
+    }
+
     pub async fn write_snapshot<T: Send + 'static>(
         &self,
         write: impl FnOnce(&Store) -> rusqlite::Result<T> + Send + 'static,
@@ -81,13 +85,14 @@ impl Store {
         db.busy_timeout(std::time::Duration::from_millis(250))?;
         let store = Self { db };
         store.init_actions()?;
+        store.init_selection_actions()?;
         store.init_media()?;
         store.init_rooms()?;
         store.init_requests()?;
         store.init_read_markers()?;
         store.init_link_previews()?;
         store.db.execute_batch("CREATE INDEX IF NOT EXISTS queued_outbox ON messages(account,timestamp,id) WHERE json_extract(body,'$.outbox_pending')=1;")?;
-        store.db.execute_batch("CREATE TABLE IF NOT EXISTS upload_captions(account TEXT NOT NULL,peer TEXT NOT NULL,id TEXT NOT NULL,parent TEXT NOT NULL,PRIMARY KEY(account,peer,id),FOREIGN KEY(account,peer,id) REFERENCES messages(account,peer,id) ON DELETE CASCADE);")?;
+        store.db.execute_batch("CREATE TABLE IF NOT EXISTS upload_captions(account TEXT NOT NULL,peer TEXT NOT NULL,id TEXT NOT NULL,parent TEXT NOT NULL,PRIMARY KEY(account,peer,id),FOREIGN KEY(account,peer,id) REFERENCES messages(account,peer,id) ON DELETE CASCADE);CREATE INDEX IF NOT EXISTS upload_caption_parent ON upload_captions(account,peer,parent);")?;
         Ok(store)
     }
     pub fn accounts(&self) -> Vec<Account> {

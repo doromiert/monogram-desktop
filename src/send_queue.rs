@@ -239,6 +239,7 @@ impl Ui {
     }
 
     pub fn flush_send_queue(self: &Rc<Self>) {
+        self.flush_local_retractions();
         if !self.online.get() || self.send_queue.borrow().loading {
             return;
         }

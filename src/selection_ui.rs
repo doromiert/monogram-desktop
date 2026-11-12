@@ -225,6 +225,7 @@ impl Ui {
             let crossed = ui.brush_row(y).is_some_and(|id| id != current.start);
             if !current.active && crossed {
                 current.active = true;
+                ui.anchor.replace(Some(current.start.clone()));
                 if std::env::var_os("MONOGRAM_SELECTION_TRACE").is_some() {
                     eprintln!(
                         "Brush activated in {}ms",

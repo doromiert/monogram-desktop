@@ -67,6 +67,18 @@ impl Store {
         m: &Message,
         status: &str,
     ) -> rusqlite::Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        self.record_action_transaction(&tx, a, peer, m, status)?;
+        tx.commit()
+    }
+    pub(crate) fn record_action_transaction(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        a: &str,
+        peer: &str,
+        m: &Message,
+        status: &str,
+    ) -> rusqlite::Result<()> {
         let Some(action) = &m.action else {
             return Err(rusqlite::Error::InvalidQuery);
         };
@@ -84,7 +96,6 @@ impl Store {
                 return Err(rusqlite::Error::InvalidQuery);
             }
         }
-        let tx = self.db.unchecked_transaction()?;
         let identity = format!("{}:{}", m.encrypted, actions::source_key(m));
         let chat = Chat {
             jid: peer.into(),
@@ -177,7 +188,7 @@ impl Store {
                 params![a, peer, m.own, alias, format!("event:{local}")],
             )?;
         }
-        tx.commit()
+        Ok(())
     }
     pub fn reconcile_actions(&self, a: &str, peer: &str) -> rusqlite::Result<bool> {
         let mut events = {

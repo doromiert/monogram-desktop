@@ -1258,17 +1258,8 @@ impl Ui {
         self.update_selection();
     }
     pub fn selection_action(self: &Rc<Self>, action: &str) {
-        if action == "select-all" {
-            self.selected.replace(
-                self.state
-                    .borrow()
-                    .current()
-                    .messages
-                    .iter()
-                    .map(|m| m.id.clone())
-                    .collect(),
-            );
-            self.update_selection();
+        if matches!(action, "select-day" | "select-all") {
+            self.select_message_day();
             return;
         }
         if action == "delete" {
@@ -1295,59 +1286,83 @@ impl Ui {
     pub fn delete_confirmation(self: &Rc<Self>, ids: Vec<String>) {
         let owner = self.state.borrow().account.clone();
         let chat = self.state.borrow().active.clone();
-        let peer = self.state.borrow().current().jid.clone();
-        let Ok(ids) = self.store.deletion_targets(&owner, &peer, &ids) else {
-            self.notice("Message deletion could not be prepared");
-            return;
-        };
-        let d=adw::AlertDialog::builder().heading(format!("Delete {} messages?",ids.len())).body("This removes the messages locally. Server history and other devices are unaffected.").build();
-        d.add_responses(&[("cancel", "Cancel"), ("delete", "Delete Locally")]);
-        if !owner.is_empty()
-            && !ids.is_empty()
-            && ids.iter().all(|id| {
-                self.store
-                    .action_target(&owner, &peer, id, "retract")
-                    .is_ok()
-            })
-        {
-            d.set_body("Delete from this device, or request removal on other clients. A retraction cannot guarantee remote deletion or undo copies already made.");
-            d.add_response("retract", "Request Retraction");
-            d.set_response_appearance("retract", adw::ResponseAppearance::Destructive);
-        }
-        d.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        self.notice("Preparing message deletion…");
         let weak = Rc::downgrade(self);
-        d.connect_response(None, move |_, response| {
-            if matches!(response, "delete" | "retract") {
+        glib::spawn_future_local(async move {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let prepared = match ui.prepare_deletion(ids).await {
+                Ok(prepared) => prepared,
+                Err(message) => {
+                    ui.notice(message);
+                    return;
+                }
+            };
+            if ui.state.borrow().account != owner || ui.state.borrow().active != chat {
+                return;
+            }
+            if prepared.local_count == 0 {
+                ui.notice("No messages are available to delete");
+                return;
+            }
+
+            let request = gtk::CheckButton::builder()
+                .active(false)
+                .valign(gtk::Align::Center)
+                .build();
+            let d = adw::AlertDialog::builder()
+                .heading(format!(
+                    "Delete {} {}?",
+                    prepared.local_count,
+                    if prepared.local_count == 1 {
+                        "message"
+                    } else {
+                        "messages"
+                    }
+                ))
+                .body("Delete the selected messages from this device?")
+                .build();
+            if prepared.own_count > 0 {
+                let subtitle = match (prepared.eligible_own_count, prepared.ineligible_own_count) {
+                    (0, _) => "These messages have not been sent or do not support deletion requests.",
+                    (_, 0) => "",
+                    _ => "Unsent or unsupported messages will only be deleted from this device.",
+                };
+                let mut row = adw::ActionRow::builder()
+                    .title("Also request deletion of my messages")
+                    .activatable_widget(&request);
+                if !subtitle.is_empty() {
+                    row = row.subtitle(subtitle);
+                }
+                let row = row.build();
+                row.add_suffix(&request);
+                row.set_sensitive(prepared.eligible_own_count > 0);
+                let group = adw::PreferencesGroup::new();
+                group.add(&row);
+                d.set_extra_child(Some(&group));
+            }
+            d.add_responses(&[("cancel", "Cancel"), ("delete", "Delete")]);
+            d.set_default_response(Some("cancel"));
+            d.set_close_response("cancel");
+            d.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+            let prepared = Rc::new(std::cell::RefCell::new(Some(prepared)));
+            let weak = Rc::downgrade(&ui);
+            d.connect_response(None, move |_, response| {
+                if response != "delete" {
+                    return;
+                }
                 if let Some(ui) = weak.upgrade() {
                     if ui.state.borrow().account != owner || ui.state.borrow().active != chat {
                         return;
                     }
-                    if response == "retract" {
-                        for id in &ids {
-                            let target = ui
-                                .store
-                                .action_base(&owner, &peer, id)
-                                .ok()
-                                .and_then(|m| crate::message_actions::original_wire(&m));
-                            let Some(target) = target else { break };
-                            if !ui.send_action(
-                                id,
-                                crate::message_actions::Action::Retract {
-                                    target,
-                                    legacy: false,
-                                },
-                                "",
-                            ) {
-                                break;
-                            }
-                        }
-                    } else {
-                        ui.delete_messages(&ids);
+                    if let Some(prepared) = prepared.borrow_mut().take() {
+                        ui.apply_deletion(prepared, request.is_active());
                     }
                 }
-            }
+            });
+            d.present(Some(&ui.window));
         });
-        d.present(Some(&self.window));
     }
     pub fn delete_messages(self: &Rc<Self>, ids: &[String]) {
         let mut s = self.state.borrow_mut();

@@ -13,7 +13,7 @@
 .folder-bar button.dragging-folder { background: @popover_bg_color; }
 .folder-bar button:checked { background: alpha(@window_fg_color,.10); color: @window_fg_color; }
 .conversation, .conversation-view, .conversation-view headerbar { background: @view_bg_color; }
-.messages { padding: 20px 28px 12px; }
+.messages { padding: 20px 20px 12px; }
 .message-bubble { background: @card_bg_color; border-radius: 16px 16px 16px 5px; padding: 10px 13px 7px; box-shadow: 0 1px 2px alpha(black,.08); }
 .message-bubble.own { background: mix(@card_bg_color,@accent_bg_color,.16); border-radius: 16px 16px 5px 16px; }
 .message-bubble.sticker-bubble { background: transparent; border: none; box-shadow: none; padding: 0; }
@@ -98,7 +98,7 @@
 .story-top progressbar progress { min-height: 3px; background: white; }
 .message-list { background: transparent; }
 .message-list row { padding: 0; }
-.message-list row.message-row { margin-bottom: 0; padding-bottom: 9px; border-radius: 12px; }
+.message-list row.message-row { margin-bottom: 0; padding: 0 8px 9px; border-radius: 12px; }
 .message-list row:selected { background: alpha(@accent_bg_color,.14); color: @window_fg_color; }
 .message-menu > contents { padding: 0; background: transparent; border: none; box-shadow: none; }
 .message-menu-panel { background: @popover_bg_color; border-radius: 12px; padding: 4px; box-shadow: 0 2px 8px alpha(black,.2); }

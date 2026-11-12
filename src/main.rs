@@ -54,6 +54,7 @@ mod request_logic;
 mod room_ui;
 mod rooms;
 mod send_policy_ui;
+mod selection_actions;
 mod send_queue;
 mod smoke;
 mod spoilers;
