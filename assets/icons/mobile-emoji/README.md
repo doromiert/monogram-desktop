@@ -11,3 +11,6 @@ See SOURCES.json for exact file paths and SHA-256 digests.
 
 `default-recent.json` preserves Emoji.java DEFAULT_RECENT order; built-in history
 uses its initial descending usage weights, mobile frequency order and 48-item cap.
+
+The sibling PNG files are lossless decoded copies for GTK, whose GdkPixbuf
+loader set does not include WebP. No artwork or colors were changed.

@@ -21,42 +21,42 @@ struct EmojiCategory {
 
 const EMOJI_CATEGORIES: [EmojiCategory; 8] = [
     EmojiCategory {
-        icon: "😀",
+        icon: "msg_emoji_smiles.webp",
         title: "Smileys and People",
         groups: &[0, 1, 2],
     },
     EmojiCategory {
-        icon: "🐻",
+        icon: "msg_emoji_cat.webp",
         title: "Animals and Nature",
         groups: &[3],
     },
     EmojiCategory {
-        icon: "🍔",
+        icon: "msg_emoji_food.webp",
         title: "Food and Drink",
         groups: &[4],
     },
     EmojiCategory {
-        icon: "🚗",
-        title: "Travel and Places",
-        groups: &[5],
-    },
-    EmojiCategory {
-        icon: "⚽",
+        icon: "msg_emoji_activities.webp",
         title: "Activities",
         groups: &[6],
     },
     EmojiCategory {
-        icon: "💡",
+        icon: "msg_emoji_travel.webp",
+        title: "Travel and Places",
+        groups: &[5],
+    },
+    EmojiCategory {
+        icon: "msg_emoji_objects.webp",
         title: "Objects",
         groups: &[7],
     },
     EmojiCategory {
-        icon: "🔣",
+        icon: "msg_emoji_other.webp",
         title: "Symbols",
         groups: &[8],
     },
     EmojiCategory {
-        icon: "🏳️",
+        icon: "msg_emoji_flags.webp",
         title: "Flags",
         groups: &[9],
     },
@@ -66,9 +66,10 @@ struct EmojiSurface {
     ui: Weak<Ui>,
     root: gtk::Box,
     categories: gtk::Box,
-    favorites_label: gtk::Label,
-    favorites: gtk::ScrolledWindow,
-    favorites_model: gio::ListStore,
+    pack_tabs: gtk::Box,
+    settings: gtk::Box,
+    group_anchor: RefCell<Option<gtk::ToggleButton>>,
+    custom_page: RefCell<Option<Rc<crate::media_library_ui::PackLibraryPage>>>,
     emoji_label: gtk::Label,
     emoji_scroll: gtk::ScrolledWindow,
     model: gio::ListStore,
@@ -86,7 +87,6 @@ impl EmojiSurface {
     ) -> Rc<Self> {
         let surface = Rc::new_cyclic(|surface: &Weak<EmojiSurface>| {
             let model = gio::ListStore::new::<glib::BoxedAnyObject>();
-            let favorites_model = gio::ListStore::new::<glib::BoxedAnyObject>();
             let factory = emoji_factory(surface);
             let grid = gtk::GridView::new(
                 Some(gtk::NoSelection::new(Some(model.clone()))),
@@ -97,34 +97,16 @@ impl EmojiSurface {
             grid.set_single_click_activate(false);
             grid.add_css_class("emoji-picker-grid");
 
-            let favorites_label = text("Favorites", "caption dim-label");
-            let favorites_grid = gtk::GridView::new(
-                Some(gtk::NoSelection::new(Some(favorites_model.clone()))),
-                Some(emoji_factory(surface)),
-            );
-            favorites_grid.set_min_columns(columns);
-            favorites_grid.set_max_columns(columns);
-            favorites_grid.set_single_click_activate(false);
-            favorites_grid.add_css_class("emoji-picker-grid");
-            favorites_grid.add_css_class("emoji-favorites-grid");
-            let favorites = gtk::ScrolledWindow::builder()
-                .hscrollbar_policy(gtk::PolicyType::Never)
-                .vscrollbar_policy(gtk::PolicyType::Automatic)
-                .min_content_height(36)
-                .max_content_height(108)
-                .propagate_natural_height(true)
-                .child(&favorites_grid)
-                .build();
             let categories = bx(false, 2);
             categories.add_css_class("emoji-category-bar");
+            let pack_tabs = bx(false, 2);
+            let settings = bx(false, 2);
             let root = bx(true, 6);
             root.add_css_class("emoji-picker-surface");
             let category_scroll = horizontal_strip(&categories);
             category_scroll.add_css_class("emoji-category-scroll");
             root.append(&category_scroll);
-            root.append(&favorites_label);
-            root.append(&favorites);
-            let emoji_label = text("Smileys and People", "caption dim-label");
+            let emoji_label = text("Favorites", "caption dim-label");
             root.append(&emoji_label);
             let scrolling = gtk::ScrolledWindow::builder()
                 .hscrollbar_policy(gtk::PolicyType::Never)
@@ -142,13 +124,14 @@ impl EmojiSurface {
                 ui: Rc::downgrade(ui),
                 root,
                 categories,
-                favorites_label,
-                favorites,
-                favorites_model,
+                pack_tabs,
+                settings,
+                group_anchor: RefCell::new(None),
+                custom_page: RefCell::new(None),
                 emoji_label,
                 emoji_scroll: scrolling,
                 model,
-                category: Cell::new(0),
+                category: Cell::new(-1),
                 query: RefCell::new(String::new()),
                 activate: Rc::new(activate),
             }
@@ -165,35 +148,66 @@ impl EmojiSurface {
 
     fn populate_categories(self: &Rc<Self>) {
         let mut previous: Option<gtk::ToggleButton> = None;
-        for (index, icon, title) in std::iter::once((-1, "★", "Favorites")).chain(
-            EMOJI_CATEGORIES
-                .iter()
-                .enumerate()
-                .map(|(index, category)| (index as i32, category.icon, category.title)),
-        ) {
-            let button = gtk::ToggleButton::builder()
-                .label(icon)
-                .tooltip_text(title)
-                .build();
+        for (index, icon, title) in [
+            (-1, "emoji_tabs_faves.webp", "Favorites"),
+            (-2, "msg_emoji_recent.webp", "Recent"),
+        ] {
+            let button = emoji_category_button(icon, title);
             button.add_css_class("flat");
             button.add_css_class("emoji-category");
             button.update_property(&[gtk::accessible::Property::Label(title)]);
             if let Some(previous) = previous.as_ref() {
                 button.set_group(Some(previous));
             }
-            button.set_active(index == 0);
+            button.set_active(index == -1);
             let surface = Rc::downgrade(self);
             button.connect_toggled(move |button| {
                 if button.is_active()
                     && let Some(surface) = surface.upgrade()
                 {
                     surface.category.set(index);
+                    if let Some(page) = surface.custom_page.borrow().as_ref().cloned() {
+                        page.show_section(i64::from(index));
+                        page.root.set_visible(true);
+                    }
+                    surface.emoji_label.set_visible(true);
+                    surface.emoji_scroll.set_visible(true);
+                    surface.refresh();
+                }
+            });
+            self.categories.append(&button);
+            if index == -1 {
+                self.group_anchor.replace(Some(button.clone()));
+            }
+            previous = Some(button);
+        }
+        self.categories.append(&self.pack_tabs);
+        for (index, category) in EMOJI_CATEGORIES.iter().enumerate() {
+            let button = emoji_category_button(category.icon, category.title);
+            button.add_css_class("flat");
+            button.add_css_class("emoji-category");
+            button.update_property(&[gtk::accessible::Property::Label(category.title)]);
+            if let Some(previous) = previous.as_ref() {
+                button.set_group(Some(previous));
+            }
+            let surface = Rc::downgrade(self);
+            button.connect_toggled(move |button| {
+                if button.is_active()
+                    && let Some(surface) = surface.upgrade()
+                {
+                    surface.category.set(index as i32);
+                    surface.emoji_label.set_visible(true);
+                    surface.emoji_scroll.set_visible(true);
+                    if let Some(page) = surface.custom_page.borrow().as_ref().cloned() {
+                        page.root.set_visible(false);
+                    }
                     surface.refresh();
                 }
             });
             self.categories.append(&button);
             previous = Some(button);
         }
+        self.categories.append(&self.settings);
     }
 
     fn bind_search(self: &Rc<Self>, search: &gtk::SearchEntry, keep_alive: bool) {
@@ -217,7 +231,18 @@ impl EmojiSurface {
             return;
         }
         self.query.replace(query.to_owned());
-        self.categories.set_sensitive(query.trim().is_empty());
+        let searching = !query.trim().is_empty();
+        self.categories.set_sensitive(!searching);
+        if searching {
+            self.emoji_label.set_visible(true);
+            self.emoji_scroll.set_visible(true);
+        } else if self.category.get() < -2 {
+            self.emoji_label.set_visible(false);
+            self.emoji_scroll.set_visible(false);
+        }
+        if let Some(page) = self.custom_page.borrow().as_ref().cloned() {
+            page.root.set_visible(!searching && self.category.get() < 0);
+        }
         self.refresh();
     }
 
@@ -227,9 +252,15 @@ impl EmojiSurface {
         let query = self.query.borrow().clone();
         let searching = !query.trim().is_empty();
         let category = self.category.get();
+        let combined_section = !searching && matches!(category, -1 | -2);
+        self.emoji_scroll.set_vexpand(!combined_section);
+        self.emoji_scroll
+            .set_propagate_natural_height(combined_section);
+        self.emoji_scroll
+            .set_max_content_height(if combined_section { 96 } else { -1 });
         let entries: Vec<_> = if searching {
             crate::emoji_completion::search(&query)
-        } else if category < 0 {
+        } else if category == -1 {
             preferences
                 .favorites
                 .iter()
@@ -240,6 +271,19 @@ impl EmojiSurface {
                         .cloned()
                 })
                 .collect()
+        } else if category == -2 {
+            preferences
+                .recent
+                .iter()
+                .filter_map(|emoji| {
+                    crate::emoji_completion::catalog()
+                        .iter()
+                        .find(|entry| entry.text == *emoji)
+                        .cloned()
+                })
+                .collect()
+        } else if category < -2 {
+            Vec::new()
         } else {
             let groups = EMOJI_CATEGORIES[category as usize].groups;
             crate::emoji_completion::catalog()
@@ -252,36 +296,19 @@ impl EmojiSurface {
         for entry in &entries {
             self.model.append(&glib::BoxedAnyObject::new(entry.clone()));
         }
-        self.favorites_model.remove_all();
-        let visible: std::collections::HashSet<_> =
-            entries.iter().map(|entry| entry.text.as_str()).collect();
-        let mut favorite_count = 0;
-        for emoji in &preferences.favorites {
-            if !query.trim().is_empty() && !visible.contains(emoji.as_str()) {
-                continue;
-            }
-            let Some(entry) = crate::emoji_completion::catalog()
-                .iter()
-                .find(|entry| entry.text == *emoji)
-                .cloned()
-            else {
-                continue;
-            };
-            self.favorites_model
-                .append(&glib::BoxedAnyObject::new(entry));
-            favorite_count += 1;
-        }
-        let show_favorites = category >= 0 && favorite_count > 0;
-        self.favorites_label.set_visible(show_favorites);
-        self.favorites.set_visible(show_favorites);
         self.emoji_label.set_text(if searching {
             "Search Results"
-        } else if category < 0 {
+        } else if category == -1 {
             "Favorites"
+        } else if category == -2 {
+            "Recent"
+        } else if category < -2 {
+            "Custom Emoji"
         } else {
             EMOJI_CATEGORIES[category as usize].title
         });
-        self.emoji_scroll.set_visible(!entries.is_empty());
+        self.emoji_scroll
+            .set_visible(searching || matches!(category, -1 | -2) || !entries.is_empty());
     }
 
     fn emoji_button(self: &Rc<Self>, emoji: &str, name: &str) -> gtk::Button {
@@ -305,6 +332,20 @@ impl EmojiSurface {
                 return;
             };
             (surface.activate)(&ui, &emoji);
+            let weak = Rc::downgrade(&ui);
+            let emoji = emoji.clone();
+            glib::spawn_future_local(async move {
+                if let Some(ui) = weak.upgrade() {
+                    if ui
+                        .store
+                        .write_snapshot(move |store| store.record_emoji_recent(&emoji))
+                        .await
+                        .is_ok()
+                    {
+                        refresh_emoji_surfaces(&ui);
+                    }
+                }
+            });
         });
         let secondary = gtk::GestureClick::new();
         secondary.set_button(gdk::BUTTON_SECONDARY);
@@ -409,6 +450,96 @@ impl EmojiSurface {
         }
         popover.set_child(Some(&menu));
         popover.popup();
+    }
+
+    fn install_custom_page(self: &Rc<Self>, page: &Rc<crate::media_library_ui::PackLibraryPage>) {
+        if let Some(previous) = self
+            .custom_page
+            .borrow()
+            .as_ref()
+            .cloned()
+            .filter(|previous| !Rc::ptr_eq(previous, page))
+        {
+            self.root.remove(&previous.root);
+        }
+        if page.root.parent().is_none() {
+            self.root.append(&page.root);
+        }
+        self.custom_page.replace(Some(page.clone()));
+        let category = self.category.get();
+        page.root.set_visible(category < 0);
+        if matches!(category, -1 | -2) {
+            page.show_section(i64::from(category));
+        }
+    }
+
+    fn show_custom_pack(&self) {
+        self.category.set(-3);
+        self.emoji_label.set_visible(false);
+        self.emoji_scroll.set_visible(false);
+        if let Some(page) = self.custom_page.borrow().as_ref().cloned() {
+            page.root.set_visible(true);
+        }
+    }
+}
+
+fn emoji_category_button(icon: &str, title: &str) -> gtk::ToggleButton {
+    let picture = mobile_emoji_icon(icon, 24);
+    picture.add_css_class("emoji-category-icon");
+    let button = gtk::ToggleButton::builder()
+        .child(&picture)
+        .tooltip_text(title)
+        .build();
+    button.update_property(&[gtk::accessible::Property::Label(title)]);
+    button
+}
+
+pub(crate) fn mobile_emoji_icon(icon: &str, size: i32) -> gtk::Image {
+    let picture = gtk::Image::new();
+    if let Ok(pixbuf) = gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(
+        asset(&format!("icons/mobile-emoji/{}", icon.replace(".webp", ".png"))),
+        size,
+        size,
+        true,
+    ) {
+        picture.set_from_pixbuf(Some(&pixbuf));
+    }
+    picture
+}
+
+fn sidebar_surface(ui: &Rc<Ui>) -> Option<Rc<EmojiSurface>> {
+    EMOJI_SURFACES.with(|registry| {
+        registry.borrow().iter().find_map(|(owner, surface)| {
+            owner
+                .upgrade()
+                .filter(|owner| Rc::ptr_eq(owner, ui))
+                .and_then(|_| surface.upgrade())
+                .filter(|surface| surface.root.has_css_class("emoji-sidebar"))
+        })
+    })
+}
+
+pub(crate) fn emoji_pack_hosts(ui: &Rc<Ui>) -> Option<(gtk::Box, gtk::Box, gtk::ToggleButton)> {
+    let surface = sidebar_surface(ui)?;
+    Some((
+        surface.pack_tabs.clone(),
+        surface.settings.clone(),
+        surface.group_anchor.borrow().clone()?,
+    ))
+}
+
+pub(crate) fn attach_custom_emoji_page(
+    ui: &Rc<Ui>,
+    page: &Rc<crate::media_library_ui::PackLibraryPage>,
+) {
+    if let Some(surface) = sidebar_surface(ui) {
+        surface.install_custom_page(page);
+    }
+}
+
+pub(crate) fn show_custom_emoji_pack(ui: &Rc<Ui>) {
+    if let Some(surface) = sidebar_surface(ui) {
+        surface.show_custom_pack();
     }
 }
 
