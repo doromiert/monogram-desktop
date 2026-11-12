@@ -50,7 +50,9 @@ fn same_content(a: &Message, b: &Message) -> bool {
             == b.upload.as_ref().map(|u| (&u.uri, &u.name, &u.error))
 }
 fn clustered(a: &Message, b: &Message, group: bool) -> bool {
-    if a.own != b.own
+    if action_body(a).is_some()
+        || action_body(b).is_some()
+        || a.own != b.own
         || group && a.sender != b.sender
         || a.unavailable != b.unavailable
         || a.forwarded != b.forwarded
@@ -73,6 +75,10 @@ fn clustered(a: &Message, b: &Message, group: bool) -> bool {
     }
 }
 fn cluster_style(row: &RenderedRow, previous: bool, next: bool, group: bool) {
+    if row.bubble.has_css_class("action-pill") {
+        row.heading.set_visible(false);
+        return;
+    }
     for (class, enabled) in [("cluster-previous", previous), ("cluster-next", next)] {
         if enabled {
             row.bubble.add_css_class(class);
@@ -90,6 +96,34 @@ fn cluster_style(row: &RenderedRow, previous: bool, next: bool, group: bool) {
     if let Some(avatar) = row.avatar.as_ref() {
         avatar.set_visible(!next);
     }
+}
+// XEP-0245 changes presentation only; the original body remains copyable and encrypted as sent.
+fn action_body(message: &Message) -> Option<&str> {
+    if message.kind != "text"
+        || message.unavailable
+        || message.attachment.is_some()
+        || message.upload.is_some()
+        || message.forwarded.is_some()
+    {
+        return None;
+    }
+    message.text.strip_prefix("/me ")
+}
+
+fn action_actor(message: &Message, chat: &Chat, owner: &str) -> String {
+    let actor = if message.own && chat.group {
+        chat.room_nick.as_deref().unwrap_or(&message.author)
+    } else if message.own {
+        owner
+            .split_once('@')
+            .map(|(name, _)| name)
+            .unwrap_or(&message.author)
+    } else if chat.group {
+        &message.author
+    } else {
+        &chat.name
+    };
+    actor.replace(['\n', '\r'], " ")
 }
 fn message_status(meta: &gtk::Box, m: &Message) {
     clear(meta);
@@ -333,13 +367,20 @@ impl Ui {
             {
                 self.timeline.remove(&displaced.row);
             }
+            let action = action_body(m).map(|body| {
+                let state = self.state.borrow();
+                format!(
+                    "* {} {body}",
+                    action_actor(m, state.current(), &state.account)
+                )
+            });
             let outer = bx(false, 8);
             outer.set_valign(gtk::Align::Start);
             outer.set_vexpand(false);
             outer.set_halign(gtk::Align::Fill);
             outer.set_hexpand(true);
             let mut avatar = None;
-            if group && !m.own {
+            if group && !m.own && action.is_none() {
                 let a = self.chat_avatar(
                     &Chat {
                         name: m.author.clone(),
@@ -366,7 +407,13 @@ impl Ui {
             let bubble = bx(true, 0);
             bubble.set_vexpand(false);
             bubble.set_valign(gtk::Align::Start);
-            bubble.add_css_class("message-bubble");
+            if action.is_some() {
+                bubble.add_css_class("date-pill");
+                bubble.add_css_class("action-pill");
+                bubble.set_halign(gtk::Align::Center);
+            } else {
+                bubble.add_css_class("message-bubble");
+            }
             if self
                 .history_window
                 .highlighted
@@ -376,7 +423,7 @@ impl Ui {
             {
                 bubble.add_css_class("reply-target");
             }
-            if m.own {
+            if m.own && action.is_none() {
                 bubble.add_css_class("own")
             }
             if sticker {
@@ -505,6 +552,13 @@ impl Ui {
                 bubble.append(&picture)
             }
             match m.kind.as_str() {
+                _ if action.is_some() => {
+                    let label = wrap(action.as_ref().unwrap(), "message-text");
+                    label.set_justify(gtk::Justification::Center);
+                    label.set_selectable(true);
+                    bubble.append(&label);
+                    bubble.set_tooltip_text(Some(&format!("{} · {}", m.time, m.delivery)));
+                }
                 "poll" if m.poll.is_some() => {
                     bubble.append(&self.poll_content(&m));
                 }
@@ -661,7 +715,7 @@ impl Ui {
                 }
                 _ => {}
             }
-            if meta.parent().is_none() {
+            if meta.parent().is_none() && action.is_none() {
                 meta.set_halign(gtk::Align::End);
                 meta.set_margin_top(3);
                 bubble.append(&meta);
@@ -698,7 +752,13 @@ impl Ui {
                 }
                 bubble.append(&row)
             }
-            outer.append(&MessageBubbleLimit::new(&bubble, m.own));
+            if action.is_some() {
+                outer.set_halign(gtk::Align::Center);
+                outer.set_hexpand(false);
+                outer.append(&bubble);
+            } else {
+                outer.append(&MessageBubbleLimit::new(&bubble, m.own));
+            }
             self.bubbles
                 .borrow_mut()
                 .insert(m.id.clone(), bubble.clone().upcast());
