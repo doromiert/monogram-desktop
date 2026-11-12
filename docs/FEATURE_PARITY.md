@@ -130,3 +130,8 @@ wire identity, encryption mode and sender fingerprint. Unsupported/unsent messag
 remain local-only. Native 5,000-message select/delete acceptance retains 92 rows
 and reports 10 ms feedback / 17 ms maximum frame gap. Server-only day history and
 unsupported room retractions remain outside this behavior.
+
+Media-tab follow-up `73f4cf7` uses libadwaita’s native round mode control and
+exposes Emoji, Stickers and GIFs only. The unavailable Monero tab/page is removed;
+desktop still has no real wallet connection/settings, so demo wallet names never
+expose it. Native pointer and keyboard captures verify the pill control.

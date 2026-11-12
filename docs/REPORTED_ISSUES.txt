@@ -381,3 +381,30 @@ DELIVERY VERIFIED — Day selection, own-message requests and wider highlights
   Highlights extend 8 px per side without shifting bubbles. Private native and
   storage tests pass; no live-contact deletion/request was sent. Unrelated
   forwarding/source WIP remains excluded from this package.
+
+SHIPPED IN 73f4cf7 — Pill media tabs and unavailable Monero tab
+  Make media mode control and active tab pills. Hide Monero while desktop has no
+  real connected wallet; current Wallet action is preview-only and rejects live
+  accounts. Keep that wallet-settings gap explicit rather than implying a
+  functional wallet setup. Preserve all existing picker behavior.
+
+NATIVE ACCEPTANCE — Pill media modes without a dead wallet page
+  Official libadwaita ToggleGroup round style rounds outer group, active toggle
+  and keyboard focus ring. Visible/reachable modes are Emoji, Stickers and GIFs;
+  Monero toggle and unavailable placeholder page are removed. Native pointer GIF
+  selection and keyboard Sticker navigation/focus captured; compile/diff checks
+  pass. Existing horizontal slide calls are retained. No custom CSS override,
+  demo-wallet detection or fake connected-wallet state was introduced.
+  Current desktop Wallet is a preview and unavailable to live accounts; wallet
+  settings/integration remain an explicit parity gap. The broad all-feature smoke
+  attempt hit a message-gap assertion of 36 px; it is not counted as passing.
+  Scoped media-tab native evidence is recorded separately.
+
+DELIVERY VERIFIED — Pill media tabs
+  Code 73f4cf7 is packaged from clean committed source and running fullscreen
+  HDMI-1, process 106971, Nix package 2ng0iwkq7yn7j7sx3dnixkraxip68kqr.
+  Executable and 1920x1080 capture verified. Startup feedback 171 ms, interface
+  ready 328 ms, frame gap 156 ms. Outer control, active segment and focus ring
+  use native round styling. Monero toggle and dead page are absent; desktop
+  wallet connection/settings remain unimplemented. Scoped pointer/keyboard
+  checks pass; no full broad-smoke pass is claimed.
