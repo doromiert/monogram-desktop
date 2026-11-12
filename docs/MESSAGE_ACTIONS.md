@@ -107,3 +107,11 @@ verify the production MessageObject path across plaintext/Legacy/OMEMO 2/PQ
 metadata in both directions. Desktop native acceptance verifies five centered
 action pills, including unchanged `/me`, incoming/outgoing `/you` and narration.
 No real contact was messaged for these presentation checks.
+
+Reaction expansion uses the actual same quick-reaction buttons in both states.
+The 320 px pill grows vertically from 40 to 380 px over 350 ms without a content
+opacity swap. The shared row moves into Favorites/Quick Reactions in the expanded
+scroll list and returns on collapse; its inner x/width remain10/300 px. Native
+pointer activation, search, wheel-to-bottom and favorite drag reorder pass, with
+button identity retained. Only the actual emoji button draws keyboard focus,
+not a second surrounding section-row outline.

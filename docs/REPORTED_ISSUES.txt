@@ -1,6 +1,6 @@
 Monogram — current user-reported issues
 Updated: 2026-11-12
-Running desktop source: b4ec838 (2026-11-12, before the current regression fixes).
+Running desktop source: 0ad0f13 (history/round-video/download-recovery fixes).
 A local implementation or fixture pass does not mean the change is shipped.
 Items labelled LOCAL WIP are absent from the running build.
 Full feature scope and remaining parity gaps: FEATURE_PARITY.md.
@@ -118,11 +118,14 @@ FIX IMPLEMENTED — Expanded reactions should reach the picker bottom
   Removed the bottom inset from the expanded reaction picker; keep its top
   and side padding while extending the scrolling viewport to the bottom edge.
 
-IN PROGRESS — Reaction picker should grow with shared quick reactions
+READY FOR PACKAGING — Reaction picker should grow with shared quick reactions
   Keep collapsed and expanded widths identical. Grow vertically with no opacity
   swap. Move the actual quick-reaction buttons into the expanded list and back;
   do not replace them with duplicate widgets. Reference: mobile user screenshots
   12283.jpg/12284.jpg and CustomEmojiReactionsWindow.
+  Native same-button identity, 320 px fixed panel width, 40 -> 380 px vertical
+  growth, unchanged opacity, no horizontal drift, pointer expand/collapse,
+  activation, search, scroll-to-bottom and favorite drag-reorder checks pass.
 
 IN PROGRESS — Reacting/unreacting scrolls the conversation upward
   Preserve the visible message/offset through replacement and layout. Count only
@@ -174,13 +177,18 @@ SHIPPED — Mobile-only unrestricted battery reminder
   and opens Android's package-specific power exemption request. It is Android-
   only at the user's request. Mobile0.2.201 includes it and the sticker-pack export.
 
-READY FOR PACKAGING — Automatic download header-stall recovery
+SHIPPED IN 0ad0f13 — Automatic download header-stall recovery
   A first start now reconnects once after three seconds without response headers.
   Five cold production transfers against the affected host all completed verified
   decryption/cache commit (four recovered in 3.29–3.61 s) without manual restart.
   Upload diagnosis remains separate; no automatic PUT replay is introduced.
 
-READY FOR PACKAGING — Native large-unread acceptance
+SHIPPED IN 0ad0f13 — Native large-unread acceptance
   Switching into 140 unread messages passes with a maximum measured GTK delay
   of 7.92 ms, 22 retained rows inside the requested five-screen window, and all
   180 fixture messages preserved on disk. Existing paging/reply acceptance passes.
+
+IN PROGRESS — Circular scrubber and mute button for circle videos
+  Latest user request: match mobile circular seeking and mute controls on inline
+  round videos. Preserve verified clipping, one audible player, explicit pauses
+  and normal rectangular video behavior. Native pointer/audio acceptance pending.

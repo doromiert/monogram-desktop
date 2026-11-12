@@ -216,3 +216,9 @@
 .round-video { border-radius: 999px; }
 .message-bubble.media-bubble.round-video-bubble { background: transparent; border: none; box-shadow: none; padding: 0; }
 .media-download.round-video { background: transparent; }
+
+.reaction-morph { background: @popover_bg_color; border-radius: 20px; transition: border-radius 350ms ease; }
+.reaction-morph.expanded { border-radius: 12px; }
+.shared-reaction-bundle { background: @popover_bg_color; }
+.shared-reaction-bundle.compact { border-radius: 20px; }
+.reaction-morph .picker-section-list > row:focus-within { outline: none; }

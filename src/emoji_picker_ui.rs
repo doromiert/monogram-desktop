@@ -68,12 +68,24 @@ enum EmojiRow {
     Heading(String),
     Items(Vec<EmojiEntry>, bool),
     Empty(&'static str),
+    Quick,
+}
+
+struct SharedQuickRow {
+    emojis: Vec<String>,
+    row: gtk::Box,
+    buttons: Vec<(String, gtk::Button)>,
+    height: i32,
+    slot: RefCell<glib::WeakRef<gtk::Box>>,
+    bind: RefCell<Option<Box<dyn Fn(&gtk::Box)>>>,
 }
 
 struct EmojiSurface {
     ui: Weak<Ui>,
     root: gtk::Box,
     categories: gtk::Box,
+    category_row: gtk::Box,
+    quick: RefCell<Option<Rc<SharedQuickRow>>>,
     pack_tabs: gtk::Box,
     settings: gtk::Box,
     group_anchor: RefCell<Option<gtk::ToggleButton>>,
@@ -137,6 +149,8 @@ impl EmojiSurface {
                 ui: Rc::downgrade(ui),
                 root,
                 categories,
+                category_row,
+                quick: RefCell::new(None),
                 pack_tabs,
                 settings,
                 group_anchor: RefCell::new(None),
@@ -295,8 +309,80 @@ impl EmojiSurface {
         );
         let mut rows = Vec::new();
         let mut anchors = std::collections::BTreeMap::new();
-        let mut section = |id: i32, title: &str, entries: Vec<EmojiEntry>, favorite: bool| {
-            anchors.insert(id, rows.len() as u32);
+        let shared = self.quick.borrow().clone();
+        if let Some(shared) = &shared {
+            let mut ordered = shared.buttons.iter().collect::<Vec<_>>();
+            ordered.sort_by_key(|(emoji, _)| {
+                preferences
+                    .favorites
+                    .iter()
+                    .position(|value| value == emoji)
+                    .unwrap_or(usize::MAX)
+            });
+            let mut previous = None::<gtk::Button>;
+            for (_, button) in ordered {
+                shared.row.reorder_child_after(button, previous.as_ref());
+                previous = Some(button.clone());
+            }
+        }
+        let mut sections = Vec::new();
+        if searching {
+            sections.push((
+                -3,
+                "Search Results",
+                crate::emoji_completion::search(&query),
+                false,
+            ));
+        } else {
+            if shared.is_some() {
+                anchors.insert(-1, 0);
+                rows.push(glib::BoxedAnyObject::new(EmojiRow::Quick));
+            }
+            let favorites = favorite_entries
+                .into_iter()
+                .filter(|entry| {
+                    shared
+                        .as_ref()
+                        .is_none_or(|quick| !quick.emojis.contains(&entry.text))
+                })
+                .collect::<Vec<_>>();
+            if shared.is_none() || !favorites.is_empty() {
+                sections.push((-1, "Favorites", favorites, true));
+            }
+            sections.push((
+                -2,
+                if shared.is_some() {
+                    "Reactions"
+                } else {
+                    "Recent"
+                },
+                preferences
+                    .recent
+                    .iter()
+                    .filter(|emoji| {
+                        shared
+                            .as_ref()
+                            .is_none_or(|quick| !quick.emojis.contains(emoji))
+                    })
+                    .filter_map(|emoji| catalog.iter().find(|entry| entry.text == *emoji).cloned())
+                    .collect(),
+                false,
+            ));
+            for (index, category) in EMOJI_CATEGORIES.iter().enumerate() {
+                sections.push((
+                    index as i32,
+                    category.title,
+                    catalog
+                        .iter()
+                        .filter(|entry| category.groups.contains(&entry.group))
+                        .cloned()
+                        .collect(),
+                    false,
+                ));
+            }
+        }
+        for (id, title, entries, favorite) in sections {
+            anchors.entry(id).or_insert(rows.len() as u32);
             rows.push(glib::BoxedAnyObject::new(EmojiRow::Heading(title.into())));
             if entries.is_empty() {
                 rows.push(glib::BoxedAnyObject::new(EmojiRow::Empty(if searching {
@@ -312,38 +398,6 @@ impl EmojiSurface {
                     entries.to_vec(),
                     favorite,
                 )));
-            }
-        };
-        if searching {
-            section(
-                -3,
-                "Search Results",
-                crate::emoji_completion::search(&query),
-                false,
-            );
-        } else {
-            section(-1, "Favorites", favorite_entries, true);
-            section(
-                -2,
-                "Recent",
-                preferences
-                    .recent
-                    .iter()
-                    .filter_map(|emoji| catalog.iter().find(|entry| entry.text == *emoji).cloned())
-                    .collect(),
-                false,
-            );
-            for (index, category) in EMOJI_CATEGORIES.iter().enumerate() {
-                section(
-                    index as i32,
-                    category.title,
-                    catalog
-                        .iter()
-                        .filter(|entry| category.groups.contains(&entry.group))
-                        .cloned()
-                        .collect(),
-                    false,
-                );
             }
         }
         self.anchors.replace(anchors);
@@ -630,6 +684,17 @@ fn emoji_factory(surface: &Weak<EmojiSurface>) -> gtk::SignalListItemFactory {
         };
         let row = data.borrow::<EmojiRow>();
         let child: gtk::Widget = match &*row {
+            EmojiRow::Quick => {
+                let slot = bx(true, 0);
+                if let Some(quick) = surface.quick.borrow().as_ref() {
+                    slot.set_height_request(quick.height);
+                    quick.slot.replace(slot.downgrade());
+                    if let Some(bind) = quick.bind.borrow().as_ref() {
+                        bind(&slot);
+                    }
+                }
+                slot.upcast()
+            }
             EmojiRow::Heading(title) => {
                 let label = text(title, "picker-section-heading");
                 label.set_margin_top(8);
@@ -685,17 +750,135 @@ pub(crate) fn refresh_emoji_surfaces(ui: &Rc<Ui>) {
 
 pub(crate) struct ReactionPicker {
     pub root: gtk::Box,
-    stack: gtk::Stack,
+    morph: gtk::Overlay,
+    base: gtk::Box,
+    expanded: gtk::Box,
+    quick: gtk::Box,
+    heading: gtk::Revealer,
+    canvas: gtk::Box,
+    arrow: gtk::Button,
     actions: gtk::Revealer,
-    _surface: Rc<EmojiSurface>,
+    search: gtk::SearchEntry,
+    shared: Rc<SharedQuickRow>,
+    surface: Rc<EmojiSurface>,
+    is_expanded: Cell<bool>,
+    moving: Cell<bool>,
+    progress: Cell<f64>,
+    full_height: Cell<i32>,
+    target: Cell<(f64, f64, i32)>,
+    animation: RefCell<Option<adw::TimedAnimation>>,
 }
-
 impl ReactionPicker {
     pub fn attach_actions(&self, actions: &impl IsA<gtk::Widget>) {
         let inset = bx(true, 0);
         inset.set_margin_top(8);
         inset.append(actions);
         self.actions.set_child(Some(&inset));
+    }
+    fn detach_quick(&self) {
+        if let Some(parent) = self.quick.parent() {
+            if let Some(parent) = parent.downcast_ref::<gtk::Box>() {
+                parent.remove(&self.quick);
+            } else if let Some(parent) = parent.downcast_ref::<gtk::Fixed>() {
+                parent.remove(&self.quick);
+            }
+        }
+    }
+    fn dock(&self, slot: &gtk::Box) {
+        self.detach_quick();
+        self.quick.set_width_request(-1);
+        self.quick.remove_css_class("compact");
+        slot.append(&self.quick);
+        self.canvas.set_visible(false);
+    }
+    fn frame(&self, progress: f64) {
+        self.progress.set(progress);
+        if let Some(slot) = self.shared.slot.borrow().upgrade() {
+            if let Some(bounds) = slot.compute_bounds(&self.morph) {
+                self.target.set((
+                    bounds.x() as f64,
+                    bounds.y() as f64,
+                    bounds.width().round() as i32,
+                ));
+            }
+        }
+        let (x, y, width) = self.target.get();
+        self.quick
+            .set_width_request((300. + (width as f64 - 300.) * progress).round() as i32);
+        self.canvas
+            .set_margin_start((10. + (x - 10.) * progress).round() as i32);
+        self.canvas.set_margin_top((y * progress).round() as i32);
+        self.base.set_height_request(
+            (40. + (self.full_height.get() as f64 - 40.) * progress).round() as i32,
+        );
+    }
+    fn set_expanded(self: &Rc<Self>, expanded: bool) {
+        if self.is_expanded.get() == expanded && self.animation.borrow().is_none() {
+            return;
+        }
+        if let Some(animation) = self.animation.borrow_mut().take() {
+            animation.pause();
+        }
+        if !expanded {
+            self.search.set_text("");
+            self.surface.set_query("");
+            self.surface.emoji_scroll.vadjustment().set_value(0.);
+        }
+        self.moving.set(true);
+        self.is_expanded.set(expanded);
+        self.expanded.set_visible(true);
+        self.detach_quick();
+        self.quick.add_css_class("compact");
+        self.canvas.set_visible(true);
+        self.canvas.append(&self.quick);
+        self.arrow.set_visible(!expanded);
+        self.heading.set_reveal_child(expanded);
+        self.actions.set_reveal_child(!expanded);
+        if expanded {
+            self.morph.add_css_class("expanded");
+        } else {
+            self.morph.remove_css_class("expanded");
+        }
+        self.full_height.set(
+            self.expanded
+                .measure(gtk::Orientation::Vertical, 320)
+                .1
+                .max(40),
+        );
+        self.frame(self.progress.get());
+        let weak = Rc::downgrade(self);
+        let animation = adw::TimedAnimation::new(
+            &self.morph,
+            self.progress.get(),
+            if expanded { 1. } else { 0. },
+            350,
+            adw::CallbackAnimationTarget::new(move |value| {
+                if let Some(picker) = weak.upgrade() {
+                    picker.frame(value);
+                }
+            }),
+        );
+        animation.set_easing(adw::Easing::EaseOutCubic);
+        let weak = Rc::downgrade(self);
+        animation.connect_done(move |_| {
+            if let Some(picker) = weak.upgrade() {
+                picker.animation.borrow_mut().take();
+                picker.moving.set(false);
+                if picker.is_expanded.get() {
+                    if let Some(slot) = picker.shared.slot.borrow().upgrade() {
+                        picker.dock(&slot);
+                    }
+                    picker.search.grab_focus();
+                } else {
+                    picker.expanded.set_visible(false);
+                    picker.quick.set_width_request(300);
+                    picker.canvas.set_margin_start(10);
+                    picker.canvas.set_margin_top(0);
+                }
+            }
+        });
+        self.animation.replace(Some(animation.clone()));
+        animation.play();
     }
 }
 
@@ -761,51 +944,11 @@ impl Ui {
                 favorite_order::emoji_key(emoji)
             });
         }
-        let quick = preferences.quick_reactions(&message.reactions);
-        let collapsed = bx(false, 0);
-        collapsed.add_css_class("message-menu-panel");
-        collapsed.add_css_class("quick-reactions");
-        collapsed.set_valign(gtk::Align::Start);
-        collapsed.set_halign(gtk::Align::Start);
-        for emoji in quick.into_iter().take(7) {
-            let button = gtk::Button::with_label(&emoji);
-            button.add_css_class("flat");
-            button.add_css_class("reaction-choice");
-            let weak = Rc::downgrade(self);
-            let popup = popover.downgrade();
-            let id = message.id.clone();
-            button.connect_clicked(move |_| {
-                if let Some(popup) = popup.upgrade() {
-                    popup.popdown();
-                    popup.unparent();
-                }
-                if let Some(ui) = weak.upgrade() {
-                    ui.react(&id, &emoji);
-                }
-            });
-            collapsed.append(&button);
-        }
-        let expand = icon_button("go-down-symbolic", "Show all reactions");
-        expand.add_css_class("circular");
-        expand.add_css_class("reaction-expand");
-        collapsed.append(&expand);
-
-        let expanded = bx(true, 6);
-        expanded.add_css_class("expanded-reactions");
-        expanded.add_css_class("message-menu-panel");
-        expanded.set_width_request(300);
-        expanded.set_valign(gtk::Align::Start);
-        expanded.set_halign(gtk::Align::Start);
-        let search = gtk::SearchEntry::builder()
-            .placeholder_text("Search")
-            .build();
-        let header = bx(false, 6);
-        search.set_hexpand(true);
-        header.append(&search);
-        let collapse = icon_button("go-up-symbolic", "Back to quick reactions");
-        collapse.add_css_class("circular");
-        header.append(&collapse);
-        expanded.append(&header);
+        let emojis = preferences
+            .quick_reactions(&message.reactions)
+            .into_iter()
+            .take(7)
+            .collect::<Vec<_>>();
         let popup = popover.downgrade();
         let id = message.id.clone();
         let surface = EmojiSurface::new(self, 8, Some(330), move |ui, emoji| {
@@ -815,47 +958,146 @@ impl Ui {
             }
             ui.react(&id, emoji);
         });
+        surface.category_row.set_visible(false);
+        let quick = bx(true, 0);
+        quick.add_css_class("shared-reaction-bundle");
+        quick.add_css_class("compact");
+        let title = if emojis
+            .iter()
+            .all(|emoji| preferences.favorites.contains(emoji))
+        {
+            "Favorites"
+        } else {
+            "Quick Reactions"
+        };
+        let label = text(title, "picker-section-heading");
+        label.set_xalign(0.5);
+        label.set_margin_top(8);
+        label.set_margin_bottom(6);
+        let heading_height = label.measure(gtk::Orientation::Vertical, 300).1;
+        let heading = gtk::Revealer::builder()
+            .transition_type(gtk::RevealerTransitionType::SlideDown)
+            .transition_duration(350)
+            .child(&label)
+            .build();
+        quick.append(&heading);
+        let choices = bx(false, 2);
+        choices.set_homogeneous(true);
+        choices.set_height_request(40);
+        let mut buttons = Vec::new();
+        for emoji in &emojis {
+            let name = crate::emoji_completion::catalog()
+                .iter()
+                .find(|entry| entry.text == *emoji)
+                .map_or(emoji.as_str(), |entry| entry.name.as_str());
+            let button = surface.emoji_button(emoji, name, preferences.favorites.contains(emoji));
+            button.add_css_class("reaction-choice");
+            choices.append(&button);
+            buttons.push((emoji.clone(), button));
+        }
+        for _ in emojis.len()..8 {
+            choices.append(&bx(false, 0));
+        }
+        quick.append(&choices);
+        let shared = Rc::new(SharedQuickRow {
+            emojis,
+            row: choices.clone(),
+            buttons,
+            height: 40 + heading_height,
+            slot: RefCell::new(glib::WeakRef::new()),
+            bind: RefCell::new(None),
+        });
+        surface.quick.replace(Some(shared.clone()));
+        surface.refresh();
+        let expanded = bx(true, 6);
+        expanded.add_css_class("expanded-reactions");
+        expanded.set_valign(gtk::Align::Start);
+        expanded.set_halign(gtk::Align::Fill);
+        expanded.set_visible(false);
+        let header = bx(false, 6);
+        let search = gtk::SearchEntry::builder()
+            .placeholder_text("Search")
+            .hexpand(true)
+            .build();
+        header.append(&search);
+        let collapse = icon_button("go-up-symbolic", "Back to quick reactions");
+        header.append(&collapse);
+        expanded.append(&header);
         surface.bind_search(&search, false);
         expanded.append(&surface.root);
-
-        let stack = gtk::Stack::builder()
-            .transition_type(gtk::StackTransitionType::Crossfade)
-            .transition_duration(350)
-            .interpolate_size(true)
-            .vhomogeneous(false)
-            .hhomogeneous(false)
-            .build();
-        stack.set_overflow(gtk::Overflow::Hidden);
-        stack.add_named(&collapsed, Some("quick"));
-        stack.add_named(&expanded, Some("all"));
-        stack.set_visible_child_name("quick");
+        let base = bx(true, 0);
+        base.set_size_request(320, 40);
+        let morph = gtk::Overlay::new();
+        morph.add_css_class("reaction-morph");
+        morph.set_overflow(gtk::Overflow::Hidden);
+        morph.set_child(Some(&base));
+        morph.add_overlay(&expanded);
+        morph.set_measure_overlay(&expanded, false);
+        morph.set_clip_overlay(&expanded, true);
+        let canvas = bx(true, 0);
+        canvas.set_halign(gtk::Align::Start);
+        canvas.set_valign(gtk::Align::Start);
+        morph.add_overlay(&canvas);
+        morph.set_measure_overlay(&canvas, false);
+        morph.set_clip_overlay(&canvas, true);
+        canvas.append(&quick);
+        quick.set_width_request(300);
+        canvas.set_margin_start(10);
+        let arrow = icon_button("go-down-symbolic", "Show all reactions");
+        arrow.add_css_class("reaction-expand");
+        arrow.set_halign(gtk::Align::End);
+        arrow.set_valign(gtk::Align::Start);
+        arrow.set_size_request(36, 36);
+        arrow.set_margin_end(2);
+        arrow.set_margin_top(2);
+        morph.add_overlay(&arrow);
+        morph.set_measure_overlay(&arrow, false);
         let actions = gtk::Revealer::builder()
             .transition_type(gtk::RevealerTransitionType::SlideUp)
             .transition_duration(350)
             .reveal_child(true)
             .build();
         let root = bx(true, 0);
-        root.set_overflow(gtk::Overflow::Hidden);
-        root.append(&stack);
+        root.append(&morph);
         root.append(&actions);
         let picker = Rc::new(ReactionPicker {
             root,
-            stack,
+            morph,
+            base,
+            expanded,
+            quick,
+            heading,
+            canvas,
+            arrow,
             actions,
-            _surface: surface,
+            search,
+            shared: shared.clone(),
+            surface,
+            is_expanded: Cell::new(false),
+            moving: Cell::new(false),
+            progress: Cell::new(0.),
+            full_height: Cell::new(380),
+            target: Cell::new((10., 46., 300)),
+            animation: RefCell::new(None),
         });
         let weak = Rc::downgrade(&picker);
-        expand.connect_clicked(move |_| {
-            let Some(picker) = weak.upgrade() else { return };
-            picker.actions.set_reveal_child(false);
-            picker.stack.set_visible_child_name("all");
-            search.grab_focus();
+        *shared.bind.borrow_mut() = Some(Box::new(move |slot| {
+            if let Some(picker) = weak.upgrade() {
+                if picker.is_expanded.get() && !picker.moving.get() {
+                    picker.dock(slot);
+                }
+            }
+        }));
+        let weak = Rc::downgrade(&picker);
+        picker.arrow.connect_clicked(move |_| {
+            if let Some(picker) = weak.upgrade() {
+                picker.set_expanded(true);
+            }
         });
         let weak = Rc::downgrade(&picker);
         collapse.connect_clicked(move |_| {
             if let Some(picker) = weak.upgrade() {
-                picker.actions.set_reveal_child(true);
-                picker.stack.set_visible_child_name("quick");
+                picker.set_expanded(false);
             }
         });
         let keys = gtk::EventControllerKey::new();
@@ -863,18 +1105,17 @@ impl Ui {
         keys.connect_key_pressed(move |_, key, _, _| {
             if key == gdk::Key::Escape
                 && let Some(picker) = weak.upgrade()
-                && picker.stack.visible_child_name().as_deref() == Some("all")
+                && picker.is_expanded.get()
             {
-                picker.actions.set_reveal_child(true);
-                picker.stack.set_visible_child_name("quick");
+                picker.set_expanded(false);
                 return glib::Propagation::Stop;
             }
             glib::Propagation::Proceed
         });
         picker.root.add_controller(keys);
-        let keep_alive = picker.clone();
+        let keep = picker.clone();
         popover.connect_closed(move |_| {
-            let _ = &keep_alive;
+            let _ = &keep;
         });
         picker
     }
