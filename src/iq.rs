@@ -89,7 +89,10 @@ impl Pending {
         let id = format!("request-{}", new_id());
         let local_private = payload.is("query", "jabber:iq:private");
         let mut request = Element::builder("iq", CLIENT).attr("id".try_into().unwrap(), &id);
-        if !local_private {
+        if !local_private
+            && !(payload.ns() == crate::blocking::NS
+                && matches!(payload.name(), "blocklist" | "block" | "unblock"))
+        {
             request = request.attr("to".try_into().unwrap(), &to);
         }
         let request = request

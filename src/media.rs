@@ -185,6 +185,7 @@ impl Ui {
             });
             g.add(&row)
         }
+        self.append_blocking_profile(&g, &chat);
         body.append(&g);
         if !demo && chat.group {
             let saved = adw::ActionRow::builder()

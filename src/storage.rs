@@ -732,6 +732,7 @@ impl Store {
         for key in [
             format!("link-previews-enabled:{a}"),
             format!("link-previews-encrypted:{a}"),
+            format!("blocked-jids:{a}"),
         ] {
             tx.execute("DELETE FROM preferences WHERE key=?", [key])?;
         }

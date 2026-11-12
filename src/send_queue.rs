@@ -32,6 +32,22 @@ impl crate::storage::Store {
 }
 
 impl Ui {
+    pub(crate) fn peer_blocked(&self, peer: &str) -> bool {
+        self.blocking_snapshot
+            .borrow()
+            .jids
+            .as_ref()
+            .is_some_and(|list| !crate::blocking::matching_rules(list, peer).is_empty())
+    }
+    fn retain_blocked_queue(self: &Rc<Self>, owner: &str, peer: &str, messages: Vec<Message>) {
+        for mut message in messages {
+            message.delivery = "failed".into();
+            if let Some(draft) = message.upload.as_mut() {
+                draft.error = Some("Unblock this address before retrying".into());
+            }
+            self.store_queued_row(owner, peer, message);
+        }
+    }
     pub fn send_library_file(self: &Rc<Self>, path: &std::path::Path, sticker: bool) -> bool {
         if !sticker {
             return self.stage_attachment_files(vec![gtk::gio::File::for_path(path)]);
@@ -51,6 +67,10 @@ impl Ui {
             || caption.len() > 64 * 1024
             || self.state.borrow().account.is_empty()
         {
+            return false;
+        }
+        if self.peer_blocked(&self.state.borrow().current().jid) {
+            self.notice("Unblock this address before sending. Your files and caption are kept.");
             return false;
         }
         let reply = self
@@ -141,6 +161,10 @@ impl Ui {
         true
     }
     pub fn queue_text(self: &Rc<Self>, value: &str) {
+        if self.peer_blocked(&self.state.borrow().current().jid) {
+            self.notice("Unblock this address before sending. Your draft is kept.");
+            return;
+        }
         if value.len() > 64 * 1024 {
             self.notice("Message is too long");
             return;
@@ -255,6 +279,11 @@ impl Ui {
     }
 
     fn prepare_queued_peer(self: &Rc<Self>, peer: String, messages: Vec<Message>) {
+        if self.peer_blocked(&peer) {
+            let owner = self.state.borrow().account.clone();
+            self.retain_blocked_queue(&owner, &peer, messages);
+            return;
+        }
         let generation = self.generation.get();
         let revision = self.encryption_revision.get();
         let state = self.state.borrow();
@@ -317,6 +346,10 @@ impl Ui {
             } else {
                 result
             };
+            if ui.peer_blocked(&peer) {
+                ui.retain_blocked_queue(&owner, &peer, messages);
+                return;
+            }
             let mode = match result {
                 Ok(mode) => mode,
                 Err(error) => {
@@ -472,6 +505,10 @@ impl Ui {
         let owner = state.account.clone();
         let peer = state.current().jid.clone();
         drop(state);
+        if self.peer_blocked(&peer) {
+            self.notice("Unblock this address before retrying");
+            return true;
+        }
         message.delivery = "queued".into();
         if self.store_queued_row(&owner, &peer, message) {
             self.flush_send_queue();
@@ -483,6 +520,75 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn blocked_sends_keep_drafts_and_require_explicit_retry() {
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id("com.negzero.BlockingSendFixture")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let ui = Ui::new(&app, true);
+        let owner = "owner@fixture.invalid";
+        let peer = "peer@fixture.invalid";
+        ui.store
+            .save_account(&Account {
+                jid: owner.into(),
+                host: String::new(),
+                port: 5222,
+                direct_tls: false,
+            })
+            .unwrap();
+        let mut state = State::live(owner, vec![]);
+        state.active = state.chat_for(peer).id.clone();
+        ui.activate_state(state);
+        ui.blocking_snapshot.replace(crate::blocking::Snapshot {
+            jids: Some(vec![peer.into()]),
+            fresh: true,
+            supported: Some(true),
+        });
+        ui.composer.buffer().set_text("Keep the blocked draft");
+        let file = gtk::gio::File::for_path("/nonexistent/blocked-fixture.png");
+        ui.attachments.borrow_mut().push(file.clone());
+        let started = std::time::Instant::now();
+        ui.send();
+        assert!(started.elapsed() < std::time::Duration::from_millis(400));
+        ui.queue_text("Also blocked");
+        assert!(!ui.queue_local_files(vec![file], "caption", false, true));
+        assert_eq!(ui.composer_text(), "Keep the blocked draft");
+        assert_eq!(ui.attachments.borrow().len(), 1);
+        assert!(ui.state.borrow().current().messages.is_empty());
+        assert!(ui.store.queued_messages(owner).unwrap().is_empty());
+        assert!(ui.session.borrow().is_none());
+        let queued = Message {
+            id: "waiting".into(),
+            wire_id: "waiting".into(),
+            text: "Previously queued".into(),
+            own: true,
+            delivery: "queued".into(),
+            outbox_pending: true,
+            ..Default::default()
+        };
+        ui.state
+            .borrow_mut()
+            .current_mut()
+            .messages
+            .push(queued.clone());
+        assert!(ui.persist());
+        ui.prepare_queued_peer(peer.into(), vec![queued]);
+        let failed = ui.store.message(owner, peer, "waiting").unwrap();
+        assert_eq!(failed.delivery, "failed");
+        assert!(failed.outbox_pending);
+        assert!(ui.store.queued_messages(owner).unwrap().is_empty());
+        assert!(ui.retry_queued_message("waiting"));
+        assert!(ui.store.queued_messages(owner).unwrap().is_empty());
+        ui.blocking_snapshot.borrow_mut().jids = Some(vec![]);
+        assert!(ui.store.queued_messages(owner).unwrap().is_empty());
+        assert!(ui.retry_queued_message("waiting"));
+        assert_eq!(ui.store.queued_messages(owner).unwrap().len(), 1);
+        ui.window.close();
+    }
     #[test]
     #[ignore = "requires a private GTK display and D-Bus"]
     fn optimistic_text_is_durable_before_any_connection() {

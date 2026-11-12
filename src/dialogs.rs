@@ -1390,6 +1390,22 @@ impl Ui {
         let privacy = adw::PreferencesGroup::builder()
             .title("Privacy and Notifications")
             .build();
+        if !owner.is_empty() {
+            let blocked = adw::ActionRow::builder()
+                .title("Blocked Contacts")
+                .subtitle(self.blocking_summary())
+                .activatable(true)
+                .build();
+            blocked.add_prefix(&gtk::Image::from_icon_name("changes-prevent-symbolic"));
+            blocked.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+            let weak = Rc::downgrade(self);
+            blocked.connect_activated(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.blocked_contacts();
+                }
+            });
+            privacy.add(&blocked);
+        }
         for (key, title, description, default) in [
             (
                 "typing",

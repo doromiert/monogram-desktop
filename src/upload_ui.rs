@@ -230,7 +230,30 @@ impl Ui {
             }
         }
     }
+    pub(crate) fn enforce_blocked_uploads(self: &Rc<Self>) {
+        let blocked: Vec<_> = self
+            .uploads
+            .borrow()
+            .tasks
+            .iter()
+            .filter(|task| self.peer_blocked(&task.work.peer))
+            .map(|task| task.work.clone())
+            .collect();
+        for work in blocked {
+            self.uploads.borrow_mut().cancel(&work.id);
+            self.fail_upload(
+                &work.owner,
+                &work.peer,
+                &work.id,
+                "Unblock this address before retrying",
+            );
+        }
+    }
     pub fn start_upload(self: &Rc<Self>, peer: &str, id: &str) {
+        if self.peer_blocked(peer) {
+            self.notice("Unblock this address before uploading. Your file is kept.");
+            return;
+        }
         if self.uploads.borrow().phase(id).is_some() {
             return;
         }
@@ -430,6 +453,10 @@ impl Ui {
         self.refresh_chats(None);
     }
     pub fn send_files(self: &Rc<Self>, caption: &str) -> bool {
+        if self.peer_blocked(&self.state.borrow().current().jid) {
+            self.notice("Unblock this address before uploading. Your files are kept.");
+            return false;
+        }
         if !self.online.get() {
             self.notice("Connect before uploading. Your draft is kept.");
             return false;

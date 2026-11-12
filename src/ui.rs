@@ -96,6 +96,10 @@ pub struct Ui {
     pub send_queue: RefCell<crate::send_queue::Queue>,
     pub read_ui: RefCell<crate::read_state::ReadState>,
     pub contact_access_widgets: RefCell<Option<crate::contact_access_ui::ContactAccessControls>>,
+    pub blocking_snapshot: RefCell<crate::blocking::Snapshot>,
+    pub blocking_loading: Cell<bool>,
+    pub blocking_error: RefCell<Option<String>>,
+    pub blocking_list: RefCell<Option<crate::blocking_ui::ListControls>>,
     pub review_request: RefCell<Option<(String, crate::encryption_policy::Mode)>>,
     pub status: RefCell<String>,
     pub event_tx: mpsc::Sender<Envelope>,
@@ -380,6 +384,10 @@ impl Ui {
             request_secrets: RefCell::new(Default::default()),
             security_widgets: RefCell::new(None),
             contact_access_widgets: RefCell::new(None),
+            blocking_snapshot: RefCell::new(Default::default()),
+            blocking_loading: Cell::new(false),
+            blocking_error: RefCell::new(None),
+            blocking_list: RefCell::new(None),
             link_preview_jobs: RefCell::new(Default::default()),
             send_queue: RefCell::new(Default::default()),
             read_ui: RefCell::new(Default::default()),
@@ -538,6 +546,7 @@ impl Ui {
                 || focus_is_editable
                 || ui.pages.visible_child_name().as_deref() != Some("chat")
                 || ui.active_media.borrow().is_some()
+                || ui.window.visible_dialog().is_some()
             {
                 return glib::Propagation::Proceed;
             }
@@ -622,6 +631,7 @@ impl Ui {
         self.action("shortcuts", |s| s.shortcuts());
         self.action("security", |s| s.security());
         self.action("info", |s| s.show_info());
+        self.action("blocked-contacts", |s| s.blocked_contacts());
         self.action("requests", |s| s.requests());
         self.action("sync-history", |s| {
             let peer = s.state.borrow().current().jid.clone();
@@ -2031,6 +2041,7 @@ impl Ui {
             v.close()
         }
         self.state.replace(state);
+        self.load_blocking_cache();
         self.rebuild_pack_library();
         self.rebuild_gif_library();
         self.timeline_scope_changed();
@@ -2287,6 +2298,12 @@ impl Ui {
                 self.refresh_contact_access();
             }
             BackendEvent::ContactAccessError(error) => self.notice(&error),
+            BackendEvent::BlockingChanged(snapshot) => {
+                self.blocking_snapshot.replace(snapshot);
+                self.enforce_blocked_uploads();
+                self.blocking_error.borrow_mut().take();
+                self.refresh_blocking_ui();
+            }
             BackendEvent::RoomBookmarks(bookmarks) => {
                 if self
                     .store

@@ -3,6 +3,8 @@
 mod action_store;
 #[path = "../src/avatar.rs"]
 mod avatar;
+#[path = "../src/blocking.rs"]
+mod blocking;
 #[path = "../src/contact_access.rs"]
 mod contact_access;
 #[path = "../src/credentials.rs"]
