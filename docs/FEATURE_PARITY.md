@@ -102,3 +102,12 @@ and bounded transfer reconnection. Mobile0.2.202 has the same GET/immutable-wire
 PUT recovery and retains its signing identity/native backend. Real-service cold
 transfer checks pass on desktop and Android15 emulator; full parity and the
 remaining user issues in REPORTED_ISSUES.txt remain open.
+
+Desktop reaction follow-up `42a2a67` preserves the same actual quick buttons
+through expansion, adds circular highlights and compact padding, and keeps the
+popup top fixed until a progressive screen-edge clamp is needed. The virtual
+viewport realizes 48 of 1,910 emoji buttons; native cold menu / first expansion
+frame measure 144 / 50 ms. Reusing message rows and restoring logical focus
+prevents the actual pointer add/remove scroll jump. Pointer, keyboard, wheel,
+near-bottom and image-only inset checks pass. These local acceptance results do
+not establish full client parity or live-contact reaction delivery.

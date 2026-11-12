@@ -216,11 +216,13 @@ DELIVERY VERIFIED — Desktop and mobile transfer recovery
   PUT/GET cases pass on the owned Android15 emulator. The service's underlying
   intermittent header stalls remain external; recovery is bounded, not unlimited.
 
-OPEN, NOT REPRODUCED — React/unreact scroll jump follow-up
+SUPERSEDED BY ACTUAL-POINTER REPRODUCTION BELOW — React/unreact scroll jump
   A clean baseline and isolated input-serial candidate both preserve the tested
   anchors with0px drift, about100ms feedback. Candidate wheel handling works,
   but no improvement for the reported jump is established. The unproven guard
-  remains isolated rather than shipped. Selection/forwarding and decryption-delay
+  remains isolated rather than shipped. The later actual-pointer fixture below
+  reproduces the focus-induced jump missed by this direct-method test.
+  Selection/forwarding and decryption-delay
   requests above remain open/local WIP as marked; this delivery does not finish
   all historical desktop requests.
 
@@ -235,3 +237,45 @@ FIX VERIFIED — Circular video progress feels stepped
   mute and play/pause pass; paused rings produce zero redraws in250ms and
   unmapped rings stop after the hide frame. Packaged edd7156 is running on HDMI-1;
   startup feedback272ms and subsequent interface frame gap145ms were verified.
+
+SHIPPED IN 42a2a67 — Reaction picker geometry, expansion and scroll
+  Collapsed quick reactions need edge padding, circular highlights and a centered
+  expand arrow. Image-only reaction rows should use their existing vertical edge
+  inset horizontally. Expansion must respond promptly using bounded emoji rows,
+  grow downward from the same quick-bar top, and shift upward only by viewport
+  overflow. Reproduce react/unreact scrolling through actual context-menu and
+  chip pointer events; earlier direct-method acceptance did not cover this path.
+
+REPRODUCED — Reaction row replacement transfers focus and scrolls to another row
+  Native right-click -> quick reaction preserves the viewport until row update.
+  Popup closure restores focus to the original selectable label; removing that
+  message row moves focus to another GtkListBoxRow and triggers animated scrolling.
+  Measured viewport4846 ->20 and anchor movement4223px. Preserve logical message
+  focus while replacing rows; validate quick-menu add and chip remove paths.
+
+NATIVE ACCEPTANCE — Latest reaction picker/focus corrections
+  Roomy expansion keeps the top at y494 throughout; near the bottom it shifts
+  upward 125 px progressively while the popup bottom remains exactly y960 inside
+  the 990 px fixture window. No full flip or custom compensation is needed.
+  Cold menu visible: 144 ms. Expand callback: 3.3 ms; first animation frame: 50 ms,
+  versus the prior cold callback of 254 ms / frame of 284 ms. Only 48 of 1,910
+  emoji buttons are realized. Keeping the virtual viewport allocated while
+  collapsed removes cold factory work from Expand; it stays visually hidden,
+  insensitive and accessibility-hidden. Twelve Tab presses never enter search.
+  Same quick buttons, fixed width, reverse animation, search, continuous wheel
+  scrolling and favorite drag pass. Quick/arrow allocations are 36 x 36 px;
+  circular hover/focus inspected. Quick row gains 4 px vertical inset. Image-only
+  reactions use 5 px side/bottom margins; captioned media retains 11 px sides.
+  Row reuse and logical focus restoration reduce actual pointer quick-add / chip-
+  remove drift from 4,223 / 4,477 px to 0.02 px. First painted feedback: 155 / 6 ms.
+  Space toggles focused chips; intentional wheel input survives restoration.
+
+DELIVERY VERIFIED — Reaction picker and scroll correction
+  Clean committed-source package 42a2a67 is running fullscreen on HDMI-1 via
+  monogram-desktop-current.service. Process23143 resolves to the new Nix package
+  m4wjxllqzxx1bq0mgb1gd6lm41cipa2r. Native pointer/keyboard/wheel/bounds checks
+  pass; no live-contact reaction was sent. Final activation feedback181ms and
+  interface324ms, gap142ms. One preceding cold activation had282ms feedback
+  and404ms interface-construction gap: startup's existing synchronous UI setup
+  still needs a separate responsiveness follow-up. Reaction flows measured
+  under400ms; that startup observation is not claimed fixed by this patch.
