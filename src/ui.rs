@@ -359,7 +359,7 @@ impl Ui {
                 .hhomogeneous(false)
                 .vhomogeneous(false)
                 .vexpand(true)
-                .transition_type(gtk::StackTransitionType::Crossfade)
+                .transition_type(gtk::StackTransitionType::SlideLeftRight)
                 .transition_duration(150)
                 .build(),
             media_search: gtk::SearchEntry::builder()

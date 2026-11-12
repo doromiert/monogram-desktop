@@ -52,7 +52,20 @@ impl Ui {
         let stack = self.media_stack.downgrade();
         toggle.connect_active_name_notify(move |t| {
             if let (Some(stack), Some(name)) = (stack.upgrade(), t.active_name()) {
-                stack.set_visible_child_name(&name)
+                let previous = stack.visible_child_name();
+                if previous.as_deref() == Some(name.as_str()) {
+                    return;
+                }
+                let tabs = ["emoji", "stickers", "gifs", "monero"];
+                let index = |name: &str| tabs.iter().position(|tab| *tab == name).unwrap_or(0);
+                stack.set_visible_child_full(
+                    &name,
+                    if index(&name) > index(previous.as_deref().unwrap_or("emoji")) {
+                        gtk::StackTransitionType::SlideLeft
+                    } else {
+                        gtk::StackTransitionType::SlideRight
+                    },
+                );
             }
         });
         header.set_title_widget(Some(&toggle));

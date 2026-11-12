@@ -519,6 +519,7 @@ impl GifLibraryPage {
         tile.add_css_class("gif-library-tile");
         let button = gtk::Button::builder().tooltip_text(&item.title).build();
         button.add_css_class("gif-library-item");
+        button.add_css_class("loading");
         let spinner = gtk::Spinner::new();
         spinner.set_size_request(24, 24);
         spinner.set_halign(gtk::Align::Center);
@@ -578,6 +579,7 @@ impl GifLibraryPage {
             if let (Some(page), Some(button)) = (weak.upgrade(), button_weak.upgrade()) {
                 let picture = gtk::Picture::for_paintable(&image.texture);
                 picture.set_content_fit(gtk::ContentFit::Cover);
+                button.remove_css_class("loading");
                 button.set_child(Some(&picture));
                 let scroll = page.scroll.downgrade();
                 crate::image_loader::play(
@@ -703,6 +705,7 @@ impl GifLibraryPage {
 
     fn preview_failed(button: &glib::WeakRef<gtk::Button>) {
         if let Some(button) = button.upgrade() {
+            button.remove_css_class("loading");
             let image = gtk::Image::from_icon_name("image-missing-symbolic");
             image.set_pixel_size(24);
             button.set_child(Some(&image));
@@ -870,9 +873,10 @@ impl PackLibraryPage {
         let (selector, settings, group_anchor) = if let Some(hosts) = selector_hosts {
             (hosts.0, hosts.1, Some(hosts.2))
         } else {
-            let bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+            let bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
             bar.add_css_class("pack-selector");
-            let selector = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+            let selector = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+            selector.add_css_class("emoji-category-bar");
             let settings = gtk::Box::new(gtk::Orientation::Horizontal, 2);
             let selector_scroll = crate::widgets::horizontal_strip(&selector);
             selector_scroll.set_hexpand(true);

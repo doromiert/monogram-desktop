@@ -142,6 +142,7 @@
 .gif-library-grid { padding: 2px 0 10px; }
 .gif-library-tile { background: transparent; }
 .gif-library-item { min-height: 0; min-width: 0; padding: 0; border: none; border-radius: 8px; }
+.gif-library-item.loading { border-radius: 0; }
 .gif-library-item picture { min-height: 0; min-width: 0; }
 .gif-favorite { min-width: 24px; min-height: 24px; padding: 2px; border-radius: 50%; color: white; background: rgba(0,0,0,.55); }
 .inline-emoji-text {
