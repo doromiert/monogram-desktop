@@ -30,13 +30,20 @@ emoji table and variation-selector normalization as mobile. Counts aggregate one
 set per bare author, independently of message direction. Resolved control events do not create unread chat messages. An unresolved
 correction remains an ordinary visible fallback until its target is available.
 
-Delete retains the local option. Eligible own messages also offer Request
-Retraction, with an explicit statement that remote deletion/copies cannot be
-guaranteed. A pending local request does not erase content until stream send is
-confirmed. Applied retractions remove the row from history and clear original,
-resolved-edit and reply/reaction payloads for that message; identity/reference
-metadata remain for deduplication. This is not forensic secure deletion of SQLite
-pages, backups or the remote server.
+Delete removes the selection locally. If it includes your messages, confirmation
+shows an unchecked “Also request deletion of my messages” checkbox. Checked mixed
+selections queue retractions only for supported, sent own messages; incoming,
+unsent and unsupported messages are local-only deletions. Queuing and local
+scrubbing are atomic: originals and resolved edits are cleared immediately while
+minimal identity/reference data and the outgoing action remain durable. Requests
+retry after reconnect with the same wire identity, encryption mode and sender
+fingerprint. Remote deletion and removal of existing copies cannot be guaranteed.
+This is not forensic secure deletion of SQLite pages, backups or the remote server.
+
+The selection toolbar offers “Select this day”, using the selection origin’s
+local calendar date and all locally stored messages on that day. It does not load
+server-only history or mount the entire day. Midnight/DST boundaries, stale
+selection/context fencing and merged-caption IDs are covered by focused tests.
 
 ## Protocol and persistence
 

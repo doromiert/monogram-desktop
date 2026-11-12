@@ -340,3 +340,44 @@ DELIVERY VERIFIED — Reaction updates and text-to-message brush selection
   message is crossed. Highlights have square corners and0px gaps; X is left.
   Unrelated forwarding/source WIP remains outside this package. Mobile TGS burst
   remains explicitly unimplemented; the source-derived chip transition ships.
+
+SHIPPED IN 6b13456 — Select this day and optional own-message deletion requests
+  Replace selection toolbar Select all with Select this day, anchored to the
+  selection's starting local day and including locally stored off-window IDs.
+  Keep bounded rendering. Delete confirmation should show an unchecked checkbox
+  when at least one selected message is own. Checked mixed selections request
+  retraction only for eligible own messages; other selected messages are local
+  deletes. Keep queued requests durable/retryable; explain unsent eligibility.
+
+SHIPPED IN 6b13456 — Selection highlight outer padding
+  Extend selection backgrounds8px beyond each side of the message column by
+  transferring existing list padding into rows; preserve bubble position/width,
+  square joined highlights and narrow-window behavior.
+
+NATIVE ACCEPTANCE — Local day selection and optional deletion requests
+  Private native test selects 5,000 stored messages while retaining 92 loaded/
+  mounted rows. Select and Delete first-frame feedback: 10 ms; maximum frame gap:
+  17 ms. Stale selections and account-generation dialogs cannot overwrite newer
+  state. Native dialog checks: incoming-only checkbox hidden; own/mixed present,
+  enabled and unchecked; unsent/unsupported own disabled with plain explanation.
+  Cancel makes no deletion; unchecked is local-only; checked mixed requests only
+  own message wire IDs. Highlight extends 8 px per side without moving bubbles;
+  adjacent highlights remain square with 0 px gap and no horizontal scroll.
+  Five storage tests pass, including DST 23/25-hour days, account/peer scope,
+  caption IDs, own room identity, rollback and durable exact-identity retry.
+  Twelve existing action-store tests pass. Dependency-first caption lookup and
+  parent index avoid archive-size amplification: synthetic Python/SQLite test
+  measured 5,000 lookups at 3,202 ms before / 5.8 ms after; native large-day flow
+  independently passes the responsiveness budget. No live deletion was sent.
+
+DELIVERY VERIFIED — Day selection, own-message requests and wider highlights
+  Code 6b13456 is packaged from a clean committed worktree and running fullscreen
+  on HDMI-1 via monogram-desktop-current.service, process 95772. Executable is
+  Nix package 5hh39j22l2xzsbarwviw0r5jmrbgvxny; capture 1920x1080 verified.
+  Startup meaningful feedback: 340 ms; next interface frame gap: 192 ms.
+  Select this day covers all locally stored IDs while keeping the native cache
+  bounded. Checkbox is unchecked, appears for any own selection, and requests
+  only supported sent own messages. Local removal preserves durable requests.
+  Highlights extend 8 px per side without shifting bubbles. Private native and
+  storage tests pass; no live-contact deletion/request was sent. Unrelated
+  forwarding/source WIP remains excluded from this package.

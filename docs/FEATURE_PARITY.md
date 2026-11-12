@@ -121,3 +121,12 @@ selection inside a single message, then clears it and enters full-message brush
 selection when crossing another row. Highlights join squarely; selection close
 precedes the count. Actual native pointer, keyboard, remote-update, rapid-toggle,
 scroll, reduced-motion and selection handoff checks pass in private fixtures.
+
+Desktop selection follow-up `6b13456` adds whole-local-day selection without
+mounting its unloaded rows, optional own-only deletion requests in mixed batches,
+and 8 px highlight overhang while preserving bubble geometry. Confirmed local
+scrubbing and durable retraction recording share one transaction; retry preserves
+wire identity, encryption mode and sender fingerprint. Unsupported/unsent messages
+remain local-only. Native 5,000-message select/delete acceptance retains 92 rows
+and reports 10 ms feedback / 17 ms maximum frame gap. Server-only day history and
+unsupported room retractions remain outside this behavior.
