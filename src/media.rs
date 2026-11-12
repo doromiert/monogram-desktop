@@ -97,7 +97,7 @@ impl Ui {
                         t.set_active_name(Some(&name))
                     }
                     if let Some(search) = search_weak.upgrade() {
-                        search.set_visible(matches!(name.as_str(), "emoji" | "gifs"))
+                        search.set_visible(matches!(name.as_str(), "emoji" | "stickers" | "gifs"))
                     }
                 }
             });

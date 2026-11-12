@@ -22,6 +22,7 @@ struct PreparedMessages {
     messages: Vec<Message>,
     days: Vec<String>,
     links: Vec<Vec<crate::link_previews::ClickableUrl>>,
+    emoji_only: Vec<bool>,
     scope: (String, String),
     group: bool,
     serial: u64,
@@ -323,6 +324,15 @@ impl Ui {
                     .filter(|message| !message.retracted)
                     .collect();
                 let days = messages.iter().map(local_day).collect();
+                let emoji_only = messages
+                    .iter()
+                    .map(|message| {
+                        message.kind == "text"
+                            && !message.unavailable
+                            && message.attachment.is_none()
+                            && crate::emoji_completion::only_emojis(&message.text)
+                    })
+                    .collect();
                 let links = messages
                     .iter()
                     .map(|message| {
@@ -336,6 +346,7 @@ impl Ui {
                     messages,
                     days,
                     links,
+                    emoji_only,
                     scope,
                     group,
                     serial,
@@ -514,6 +525,9 @@ impl Ui {
                 .is_some_and(|(id, _)| id == &m.id)
             {
                 bubble.add_css_class("reply-target");
+            }
+            if planned.emoji_only[index] {
+                bubble.add_css_class("emoji-only");
             }
             if m.own && action.is_none() {
                 bubble.add_css_class("own")
@@ -769,8 +783,8 @@ impl Ui {
                 }
                 _ if !m.text.is_empty() => {
                     let css = if self.big_emoji.get()
+                        && planned.emoji_only[index]
                         && m.text.chars().count() < 5
-                        && m.text.chars().any(|c| c as u32 > 0x2000)
                     {
                         "large-emoji"
                     } else {

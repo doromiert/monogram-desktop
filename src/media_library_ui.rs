@@ -237,6 +237,9 @@ impl GifLibraryPage {
     ) -> Rc<Self> {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
         root.add_css_class("gif-library-page");
+        root.set_margin_start(10);
+        root.set_margin_end(10);
+        root.set_margin_bottom(10);
         root.set_vexpand(true);
         let settings = gtk::Button::builder()
             .icon_name("emblem-system-symbolic")
@@ -721,6 +724,9 @@ impl PackLibraryPage {
         root.add_css_class("pack-library-page");
         root.set_vexpand(true);
         let external_selector = selector_hosts.is_some();
+        if !external_selector {
+            root.add_css_class("sticker-sidebar");
+        }
         let (selector, settings, group_anchor) = if let Some(hosts) = selector_hosts {
             (hosts.0, hosts.1, Some(hosts.2))
         } else {
@@ -757,6 +763,7 @@ impl PackLibraryPage {
         for button in [&import, &telegram, &create, &manage] {
             button.add_css_class("flat");
             button.add_css_class("context-menu-row");
+            button.add_css_class("picker-menu-row");
             if let Some(label) = button.child().and_downcast::<gtk::Label>() {
                 label.set_xalign(0.);
             }
@@ -1206,10 +1213,10 @@ impl PackLibraryPage {
                 continue;
             }
             self.push_heading(&mut rows, id, &title);
-            for row in builtin.chunks(7) {
+            for row in builtin.chunks(8) {
                 Self::push_row(&mut rows, PickerRow::Emoji(row.to_vec()));
             }
-            for row in items.chunks(if self.kind == Kind::Emoji { 7 } else { 4 }) {
+            for row in items.chunks(if self.kind == Kind::Emoji { 8 } else { 4 }) {
                 Self::push_row(&mut rows, PickerRow::Pack(row.to_vec()));
             }
             if rows.len() == self.anchors.borrow()[&id] as usize + 1 {
@@ -1235,7 +1242,7 @@ impl PackLibraryPage {
                     continue;
                 }
                 self.push_heading(&mut rows, id, title);
-                for row in entries.chunks(7) {
+                for row in entries.chunks(8) {
                     Self::push_row(&mut rows, PickerRow::Emoji(row.to_vec()));
                 }
             }
@@ -1275,17 +1282,11 @@ impl PackLibraryPage {
                 if let Some(ui) = self.ui.upgrade() {
                     for entry in entries {
                         if let Some(button) = crate::emoji_picker_ui::builtin_button(&ui, entry) {
-                            row.append(
-                                &gtk::AspectFrame::builder()
-                                    .ratio(1.)
-                                    .obey_child(false)
-                                    .child(&button)
-                                    .build(),
-                            );
+                            row.append(&crate::widgets::SquareCell::new(&button));
                         }
                     }
                 }
-                for _ in entries.len()..7 {
+                for _ in entries.len()..8 {
                     row.append(&gtk::Box::new(gtk::Orientation::Horizontal, 0));
                 }
                 row.upcast()
@@ -1293,7 +1294,7 @@ impl PackLibraryPage {
             PickerRow::Pack(items) => {
                 let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
                 row.set_homogeneous(true);
-                let columns = if self.kind == Kind::Emoji { 7 } else { 4 };
+                let columns = if self.kind == Kind::Emoji { 8 } else { 4 };
                 for item in items {
                     row.append(&self.pack_cell(item));
                 }

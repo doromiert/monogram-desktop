@@ -587,11 +587,7 @@ fn emoji_factory(surface: &Weak<EmojiSurface>) -> gtk::SignalListItemFactory {
             return;
         };
         let entry = data.borrow::<EmojiEntry>().clone();
-        let cell = gtk::AspectFrame::builder()
-            .ratio(1.)
-            .obey_child(false)
-            .child(&surface.emoji_button(&entry.text, &entry.name))
-            .build();
+        let cell = crate::widgets::SquareCell::new(&surface.emoji_button(&entry.text, &entry.name));
         item.set_child(Some(&cell));
     });
     factory.connect_unbind(|_, item| {
@@ -677,7 +673,7 @@ impl Ui {
     }
 
     pub(crate) fn emoji_sidebar(self: &Rc<Self>, search: &gtk::SearchEntry) -> gtk::Widget {
-        let surface = EmojiSurface::new(self, 7, None, |ui, emoji| {
+        let surface = EmojiSurface::new(self, 8, None, |ui, emoji| {
             ui.composer.buffer().insert_at_cursor(emoji);
             ui.composer.grab_focus();
         });

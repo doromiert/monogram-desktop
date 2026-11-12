@@ -360,3 +360,61 @@ pub fn attach(view: &gtk::TextView) -> Rc<Completion> {
     }
     completion
 }
+
+pub(crate) fn only_emojis(body: &str) -> bool {
+    static SEQUENCES: OnceLock<std::collections::HashMap<char, Vec<String>>> = OnceLock::new();
+    fn normalized_emoji(text: &str) -> String {
+        text.chars()
+            .filter(|character| {
+                !character.is_whitespace()
+                    && *character != '\u{fe0f}'
+                    && !('\u{1f3fb}'..='\u{1f3ff}').contains(character)
+            })
+            .collect()
+    }
+    let sequences = SEQUENCES.get_or_init(|| {
+        let mut by_start = std::collections::HashMap::<char, Vec<String>>::new();
+        for entry in catalog() {
+            let text = normalized_emoji(&entry.text);
+            if let Some(first) = text.chars().next() {
+                by_start.entry(first).or_default().push(text);
+            }
+        }
+        for values in by_start.values_mut() {
+            values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+            values.dedup();
+        }
+        by_start
+    });
+    let normalized = normalized_emoji(body);
+    if normalized.is_empty() {
+        return false;
+    }
+    let mut rest = normalized.as_str();
+    while let Some(first) = rest.chars().next() {
+        let Some(matched) = sequences
+            .get(&first)
+            .and_then(|values| values.iter().find(|value| rest.starts_with(value.as_str())))
+        else {
+            return false;
+        };
+        rest = &rest[matched.len()..];
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[ignore = "requires a native GTK display for its emoji resource"]
+    fn emoji_only_matches_sequences_without_matching_text() {
+        gtk::init().unwrap();
+        for body in ["😅✌️", "👍🏽\n❤️", "👨‍👩‍👧‍👦", "🇵🇱", "1️⃣"]
+        {
+            assert!(super::only_emojis(body), "{body:?}");
+        }
+        for body in ["", "  ", "hi 😅", "123", "#", "🏽", "/me 😅"] {
+            assert!(!super::only_emojis(body), "{body:?}");
+        }
+    }
+}

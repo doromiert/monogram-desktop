@@ -778,3 +778,69 @@ impl AnimatedImage {
         obj
     }
 }
+
+mod square_cell_imp {
+    use super::*;
+    #[derive(Default)]
+    pub struct SquareCell {
+        pub child: RefCell<Option<gtk::Widget>>,
+    }
+    #[glib::object_subclass]
+    impl ObjectSubclass for SquareCell {
+        const NAME: &'static str = "MonogramSquareCell";
+        type Type = super::SquareCell;
+        type ParentType = gtk::Widget;
+    }
+    impl ObjectImpl for SquareCell {
+        fn dispose(&self) {
+            if let Some(child) = self.child.borrow_mut().take() {
+                child.unparent();
+            }
+        }
+    }
+    impl WidgetImpl for SquareCell {
+        fn request_mode(&self) -> gtk::SizeRequestMode {
+            gtk::SizeRequestMode::HeightForWidth
+        }
+        fn measure(&self, orientation: gtk::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
+            let Some(child) = self.child.borrow().as_ref().cloned() else {
+                return (0, 0, -1, -1);
+            };
+            let (minimum, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
+            if orientation == gtk::Orientation::Horizontal {
+                return (minimum, natural, -1, -1);
+            }
+            let side = if for_size >= 0 { for_size } else { natural }.max(1);
+            (side, side, -1, -1)
+        }
+        fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
+            if let Some(child) = self.child.borrow().as_ref() {
+                let side = width.min(height).max(1);
+                let transform = gtk::gsk::Transform::new().translate(&gtk::graphene::Point::new(
+                    ((width - side) / 2) as f32,
+                    ((height - side) / 2) as f32,
+                ));
+                child.allocate(side, side, baseline, Some(transform));
+            }
+        }
+        fn snapshot(&self, snapshot: &gtk::Snapshot) {
+            if let Some(child) = self.child.borrow().as_ref() {
+                self.obj().snapshot_child(child, snapshot);
+            }
+        }
+    }
+}
+glib::wrapper! {
+    pub struct SquareCell(ObjectSubclass<square_cell_imp::SquareCell>)
+        @extends gtk::Widget, @implements gtk::Accessible,gtk::Buildable,gtk::ConstraintTarget;
+}
+impl SquareCell {
+    pub fn new(child: &impl IsA<gtk::Widget>) -> Self {
+        let cell: Self = glib::Object::new();
+        let child = child.clone().upcast::<gtk::Widget>();
+        child.set_parent(&cell);
+        cell.imp().child.replace(Some(child));
+        cell.set_hexpand(true);
+        cell
+    }
+}
