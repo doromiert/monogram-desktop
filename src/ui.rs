@@ -2938,7 +2938,12 @@ impl Ui {
             Ok(true) => {
                 self.sync_actions(&owner, peer);
                 if matches!(status, "failed" | "uncertain") {
-                    self.notice("Message change failed or delivery is uncertain. Reopen Edit to recover its text.");
+                    self.notice(match self.store.action_for_wire(&owner, peer, id) {
+                        Some(crate::message_actions::Action::React { .. }) => "Reaction failed or delivery is uncertain. Try reacting again.",
+                        Some(crate::message_actions::Action::Retract { .. }) => "Message removal failed or delivery is uncertain.",
+                        Some(crate::message_actions::Action::Correct { .. }) => "Message change failed or delivery is uncertain. Reopen Edit to recover its text.",
+                        None => "Message change failed or delivery is uncertain.",
+                    });
                 }
                 self.render_messages(false);
                 self.refresh_chats(None);

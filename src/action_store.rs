@@ -267,6 +267,10 @@ impl Store {
         tx.commit()?;
         Ok(true)
     }
+    pub fn action_for_wire(&self, a: &str, peer: &str, wire: &str) -> Option<actions::Action> {
+        let body: String=self.db.query_row("SELECT body FROM action_events WHERE account=? AND peer=? AND own=1 AND wire=? ORDER BY rowid DESC LIMIT 1",params![a,peer,wire],|row|row.get(0)).ok()?;
+        Message::decode(&body).ok()?.action
+    }
     pub fn action_delivery(
         &self,
         a: &str,
@@ -666,6 +670,19 @@ mod tests {
             4,
         );
         record(&db, &own, "sending");
+        assert!(matches!(
+            db.action_for_wire(OWNER, PEER, "r3"),
+            Some(Action::React { .. })
+        ));
+        assert!(
+            db.action_for_wire("other@example.invalid", PEER, "r3")
+                .is_none()
+        );
+        assert!(
+            db.action_for_wire(OWNER, "other@example.invalid", "r3")
+                .is_none()
+        );
+        assert!(db.action_for_wire(OWNER, PEER, "r1").is_none());
         assert_eq!(
             db.message(OWNER, PEER, "first").unwrap().reactions,
             vec!["❤️ 2", "👍 1"]

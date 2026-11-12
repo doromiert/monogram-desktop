@@ -1,10 +1,10 @@
 Monogram — current user-reported issues
 Updated: 2026-11-12
-Reported build: efb2375. Current desktop includes the mobile PQ recipient port (447273f).
+Reported build: efb2375. Current desktop: d1ce7bd (PQ port, media insets, HTTPS diagnostics).
 Full feature scope and remaining parity gaps: FEATURE_PARITY.md.
 
 FIX IMPLEMENTED, LIVE ACCEPTANCE OPEN — Sending still rejects the user's own fingerprints
-  The running build still asks to review own-device fingerprints despite the
+  The reported build asked to review own-device fingerprints despite the
   requested conversation blind-trust behavior. Check the actual enabled policy,
   selected encryption profile and all send/action paths. Conversation blind
   trust must approve authenticated own devices as well as the contact's devices.
@@ -41,15 +41,21 @@ OPEN — Reacting fails
   User receives: "Message change failed or delivery is uncertain. Reopen Edit to
   recover its text." Trace the real reaction failure and its encryption/trust
   policy. A reaction error must not instruct the user to recover an edit draft.
+  Failure copy now distinguishes reactions, corrections and retractions;
+  native crypto checks already cover encrypted reactions with stale own entries.
+  Real-account reaction delivery acceptance remains open.
 
-OPEN — Expanded reaction picker lacks continuous scrolling
+FIX IMPLEMENTED — Expanded reaction picker lacks continuous scrolling
   Show supported Favorites, Recent and emoji categories in one vertically
   scrolling list. Keep category buttons horizontal and use them to jump to the
   corresponding section, like the main emoji picker.
+  Native check: 257 rows in one model, category jump and search pass.
 
-OPEN — Reaction picker expansion/collapse has no transition
+FIX IMPLEMENTED — Reaction picker expansion/collapse has no transition
   Animate the change between collapsed quick reactions and the expanded picker,
   including the reverse transition, rather than replacing it abruptly.
+  Native check: 248 -> 426 -> 248 px with 19/20 distinct frame heights.
+  Back button and Escape return to the quick reactions/actions.
 
 OPEN — Decryption placeholder delay (new requested behavior)
   Show a message immediately once it has decrypted.
@@ -62,7 +68,7 @@ OPEN — Decryption placeholder delay (new requested behavior)
 IN PROGRESS — Drag to reorder favorite emoji, stickers and GIFs on both clients
   Desktop code now handles all three, including mixed built-in/custom emoji
   favorites, background persistence and account guards. Real native pointer-drag
-  and database-reload checks pass; this code is not yet in the running build.
+  and database-reload checks pass; this code is included in the running build.
   Mobile drag reordering is still open. Keep membership and recent-item order
   independent of favorite order, and preserve ordering across restart.
 

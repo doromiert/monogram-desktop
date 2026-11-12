@@ -16,7 +16,13 @@ Failed/uncertain changes roll back their projection; reopening Edit recovers the
 latest failed correction's text. Account/chat/session changes fence callbacks.
 
 Reaction chips toggle the caller's emoji. The separate context-menu reaction
-strip keeps the action list narrower. Each outgoing event replaces the complete
+strip keeps the action list narrower. Expanded reactions use one native virtual
+section list for Favorites, Recent and the built-in emoji categories. Category
+buttons jump within this list; search filters it. Expansion/collapse slide and
+interpolate the whole quick-actions/picker bounds over 350 ms, following mobile
+`SelectAnimatedEmojiDialog` and `CustomEmojiReactionsWindow`. The Back button
+and Escape return to quick reactions. Reaction failure messages never suggest
+recovering an edit draft. Each outgoing event replaces the complete
 own set (maximum 32); an empty set removes it. Incoming sets use the same Unicode
 emoji table and variation-selector normalization as mobile. Counts aggregate one
 set per bare author, independently of message direction. Resolved control events do not create unread chat messages. An unresolved
@@ -75,3 +81,10 @@ standalone XEP-0297 quote reception and the remaining attachment/rich-content ga
 Received file metadata is retained and scrubbed on retraction. Caption corrections
 remain unresolved rather than replacing an attachment with unverified text. Active
 file transfer/cache lifecycle is documented in [file transfers](FILE_TRANSFERS.md).
+
+Native verification: actual context-menu expansion/collapse had 19/20 distinct
+frame heights (248 -> 426 -> 248 px); 257 continuous rows, Flags category jump
+and search/clear passed. Native desktop capture: `.state/reaction-picker-expanded-native.png`.
+Mobile source was inspected and its actual installed 0.2.198 picker was captured
+on an owned offline tablet fixture at `.state/mobile-reaction-reference.png`
+in the mobile repository. No transport or real-account sends were configured.

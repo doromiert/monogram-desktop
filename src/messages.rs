@@ -1453,7 +1453,9 @@ impl Ui {
             tools.append(&b)
         }
         action_menu.append(&tools);
-        content.append(&action_menu);
+        if reactions.is_none() {
+            content.append(&action_menu);
+        }
         pop.set_child(Some(&content));
         pop.connect_closed(|p| {
             if p.parent().is_some() {
