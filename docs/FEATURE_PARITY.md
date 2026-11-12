@@ -111,3 +111,13 @@ frame measure 144 / 50 ms. Reusing message rows and restoring logical focus
 prevents the actual pointer add/remove scroll jump. Pointer, keyboard, wheel,
 near-bottom and image-only inset checks pass. These local acceptance results do
 not establish full client parity or live-contact reaction delivery.
+
+Desktop follow-up `6a80eef` updates reaction chips in place, preserving image,
+video/player and download widgets and avoiding reaction-triggered history loading.
+Chip enter/exit ports mobile's 250 ms scale/opacity transition and exact Bézier;
+Telegram document-driven TGS bursts remain a gap. Compact quick reactions have
+6 px equal highlight insets and full pill ends. Primary dragging preserves text
+selection inside a single message, then clears it and enters full-message brush
+selection when crossing another row. Highlights join squarely; selection close
+precedes the count. Actual native pointer, keyboard, remote-update, rapid-toggle,
+scroll, reduced-motion and selection handoff checks pass in private fixtures.

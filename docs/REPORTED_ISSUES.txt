@@ -133,20 +133,20 @@ IN PROGRESS — Reacting/unreacting scrolls the conversation upward
   Preserve the visible message/offset through replacement and layout. Count only
   actual user input as continued scrolling, rather than GTK focus/reflow changes.
 
-LOCAL WIP, NOT SHIPPED — Selection close control should be on the left
+SHIPPED IN 6a80eef — Selection close control should be on the left
   Put the clear-selection X before the selected-count label.
 
-LOCAL WIP, NOT SHIPPED — Selected message highlights should be square and gapless
+SHIPPED IN 6a80eef — Selected message highlights should be square and gapless
   Keep normal bubble spacing as row padding so selection backgrounds cover it;
   remove selected-row corner rounding. Adjacent selected rows should touch.
 
-LOCAL WIP, FAILING ACCEPTANCE — Brush selection by primary-button dragging
+SHIPPED IN 6a80eef — Brush selection by primary-button dragging
   Crossing into a second message enters selection mode. Paint newly touched
   messages while dragging; starting on a selected row erases touched rows.
   Preserve ordinary text selection when dragging inside one message.
-  The native acceptance currently fails when existing selected text initiates
-  native text drag-and-drop. Do not include this implementation in a release
-  until the actual primary-pointer interaction passes.
+  Actual native text drag now passes: multiline text selection stays active
+  within one row; crossing a second row clears native text selection and paints
+  full-message selections. Native drag ghost and release cleanup pass.
 
 LOCAL WIP, NOT SHIPPED — Forward chooser needs search and profile pictures
   Search by chat name/JID and use the same asynchronously loaded avatars as
@@ -279,3 +279,64 @@ DELIVERY VERIFIED — Reaction picker and scroll correction
   and404ms interface-construction gap: startup's existing synchronous UI setup
   still needs a separate responsiveness follow-up. Reaction flows measured
   under400ms; that startup observation is not claimed fixed by this patch.
+
+SHIPPED IN 6a80eef — Reaction-only updates and equal compact-pill insets
+  Follow-up screenshots show unequal visible quick-reaction edge padding and
+  compact radius no longer reaching half the new height. Make edge insets equal
+  and restore a true pill. React/unreact currently flashes the history spinner
+  and rebuilds media because reaction state participates in same_content; update
+  reaction controls in place, preserving image/video/download/player identity.
+  Port mobile reaction animation after inspecting its actual implementation;
+  retain focus, intentional scroll and bounded rendering under rapid updates.
+
+SHIPPED IN 6a80eef — Ship desktop brush selection and contiguous highlights
+  User reports all selection changes still absent in running build: left-button
+  drag crossing message boundaries must enter selection mode, then brush select.
+  Fix the unshipped prototype with actual selected-text/native-drag events. Keep
+  ordinary same-message text selection. Square selected surfaces must meet with
+  no gaps; move X before count. Scope includes native pointer/reverse/release and
+  edge scrolling checks; exclude unrelated forwarding/decryption/source WIP.
+
+NATIVE ACCEPTANCE — Incremental reaction updates and mobile chip animation
+  Hydrated fake-account/store acceptance exercises actual optimistic action
+  reconciliation and remote reaction delivery without sending to contacts.
+  Baseline replaces image/video widgets and flashes the history spinner.
+  Candidate preserves body, image/video/player, download tokens and paused media
+  timestamp. Pointer add/remove paints in157/3ms with no reaction-phase spinner.
+  Rapid reversal reuses the chip; remote counts update the same chip. Delayed
+  last-chip removal above the viewport restores the wrapped timestamp with0px
+  drift and preserves selection. Intentional wheel input remains effective.
+  Later cache pruning after deliberate wheel scrolling still uses the existing
+  history maintenance spinner; that is separate from reaction handling.
+  Compact pill measures6px to each highlight edge,320x48px, with full-radius
+  ends. Native menu/expansion first frame170/59ms; shared quick buttons and
+  virtual list behavior remain intact. Chip enter/exit uses mobile250ms timing,
+  its exact cubic Bezier curve, scale0.5<->1 and opacity0<->1. Reduced motion
+  bypasses interpolation. Mobile document-driven TGS bursts remain unavailable
+  because desktop has no matching reaction-document source or RLottie renderer.
+
+NATIVE ACCEPTANCE — Text selection to brush selection handoff
+  Actual pointer horizontal and multiline text selection within one message
+  retains selection_bounds=Some and bulk count0. Crossing another message clears
+  selection_bounds toNone and selects full rows including the starting row.
+  Paint3 / erase2 / reverse3 pass. Revisited rows paint once. Native DNDEvent drag
+  handle hides the icon; unconditional label clearing avoids lazy fallback
+  bypass. One guarded idle re-hide follows GTK default icon recreation. Final
+  active screenshot has no duplicate drag glyphs or native text highlight.
+  Inside/outside release causes no composer text drop. Edge autoscroll36px;
+  explicit controls remain usable and whole media buttons remain brushable.
+  Selected highlights have exactly0px gap and square corners; X precedes count.
+  Activation max245ms; current tests use private native X11/fake accounts.
+
+DELIVERY VERIFIED — Reaction updates and text-to-message brush selection
+  Code6a80eef was packaged from a clean committed worktree and is running
+  fullscreen on HDMI-1 via monogram-desktop-current.service, process70072.
+  Executable resolves to Nix package lvwpid0jb0rms85fikvzkzp8m6fm3pn3.
+  Startup feedback193ms; interface367ms; frame gap173ms. Native media acceptance
+  passed6.77s, scroll/focus acceptance4.91s; animation/reduced-motion and actual
+  text-selection/brush/erase/reverse/release/control checks pass. Active capture
+  inspected at original resolution: text highlight clears and no drag ghost.
+  Same-message horizontal AND multiline selection remains native until another
+  message is crossed. Highlights have square corners and0px gaps; X is left.
+  Unrelated forwarding/source WIP remains outside this package. Mobile TGS burst
+  remains explicitly unimplemented; the source-derived chip transition ships.
