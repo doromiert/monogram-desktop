@@ -1106,7 +1106,10 @@ pub fn metadata(html: &str) -> HashMap<String, String> {
             } else {
                 160
             };
-            fields.entry(name).or_insert_with(|| clean(value, limit));
+            let value = clean(value, limit);
+            if !value.is_empty() {
+                fields.entry(name).or_insert(value);
+            }
         }
     }
     if let Some((start, _)) = lower.match_indices("<title").find(|(at, _)| {
@@ -1798,6 +1801,14 @@ mod tests {
         assert_eq!(fields["og:title"], "First & 😀");
         assert_eq!(fields["description"], "A \"bounded\" description");
         assert_eq!(fields["og:image"], "/image.png?x=1&y=2");
+        let fields = metadata(
+            "<meta property='og:title' content=' &#32; '><meta property='og:description' content=''><meta name='description' content='Fallback description'><meta property='og:image' content=' '><title>Fallback title</title>",
+        );
+        assert!(!fields.contains_key("og:title"));
+        assert!(!fields.contains_key("og:description"));
+        assert!(!fields.contains_key("og:image"));
+        assert_eq!(fields["title"], "Fallback title");
+        assert_eq!(fields["description"], "Fallback description");
         let youtube = safe_url("https://youtu.be/dQw4w9WgXcQ#secret").unwrap();
         assert_eq!(youtube_video_id(&youtube).as_deref(), Some("dQw4w9WgXcQ"));
         let fallback = youtube_metadata(br#"{"title":"Video", "author_name":"Never a description", "thumbnail_url":"https://example.org/thumb.jpg"}"#).unwrap();
