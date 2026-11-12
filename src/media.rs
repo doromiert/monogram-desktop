@@ -9,6 +9,7 @@ use std::{
 };
 #[path = "media/zoom.rs"]
 mod zoom;
+const FOCUS_MEDIA_INSET: i32 = 64;
 impl Ui {
     pub fn track_sidebar(&self, widget: &impl IsA<gtk::Widget>) {
         widget.set_visible(self.utility.shows_sidebar());
@@ -797,10 +798,10 @@ impl MediaViewer {
             pic.set_can_shrink(true);
             pic.set_hexpand(true);
             pic.set_vexpand(true);
-            pic.set_margin_top(20);
-            pic.set_margin_bottom(20);
-            pic.set_margin_start(20);
-            pic.set_margin_end(20);
+            pic.set_margin_top(FOCUS_MEDIA_INSET);
+            pic.set_margin_bottom(FOCUS_MEDIA_INSET);
+            pic.set_margin_start(FOCUS_MEDIA_INSET);
+            pic.set_margin_end(FOCUS_MEDIA_INSET);
             let frame: FlyFrame = glib::Object::new();
             frame.set_hexpand(true);
             frame.set_vexpand(true);
@@ -814,7 +815,9 @@ impl MediaViewer {
                 .imp()
                 .clip_enabled
                 .set(position == initial && source_clip.is_some());
-            if position == initial && let Some(radii) = source_clip {
+            if position == initial
+                && let Some(radii) = source_clip
+            {
                 frame.imp().clip_radii.set(radii);
             }
             frame.append(&pic);
@@ -1073,6 +1076,17 @@ impl MediaViewer {
             }
         });
         viewer.root.add_controller(click);
+        let context = gtk::GestureClick::new();
+        context.set_button(gdk::BUTTON_SECONDARY);
+        context.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = Rc::downgrade(&viewer);
+        context.connect_pressed(move |gesture, _, x, y| {
+            if let Some(viewer) = weak.upgrade().filter(|viewer| !viewer.closing.get()) {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                viewer.context_menu(x, y);
+            }
+        });
+        viewer.root.add_controller(context);
         let swipe = gtk::GestureSwipe::new();
         let weak = Rc::downgrade(&viewer);
         swipe.connect_swipe(move |_, x, y| {
@@ -1340,10 +1354,10 @@ impl MediaViewer {
                     .hexpand(true)
                     .vexpand(true)
                     .build();
-                pic.set_margin_top(20);
-                pic.set_margin_bottom(20);
-                pic.set_margin_start(20);
-                pic.set_margin_end(20);
+                pic.set_margin_top(FOCUS_MEDIA_INSET);
+                pic.set_margin_bottom(FOCUS_MEDIA_INSET);
+                pic.set_margin_start(FOCUS_MEDIA_INSET);
+                pic.set_margin_end(FOCUS_MEDIA_INSET);
                 let frame: FlyFrame = glib::Object::new();
                 frame.set_hexpand(true);
                 frame.set_vexpand(true);
@@ -1576,6 +1590,71 @@ impl MediaViewer {
             glib::ControlFlow::Continue
         });
     }
+    fn context_menu(self: &Rc<Self>, x: f64, y: f64) {
+        let Some(ui) = self.ui.upgrade().filter(|ui| {
+            ui.generation.get() == self.generation
+                && ui.state.borrow().account == self.owner
+                && ui.state.borrow().current().jid == self.peer
+        }) else {
+            return;
+        };
+        self.reveal_controls();
+        let item = self.items.borrow()[self.index.get()].clone();
+        let popover = gtk::Popover::builder().has_arrow(false).build();
+        popover.add_css_class("message-menu");
+        popover.set_parent(&self.root);
+        popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        let menu = bx(true, 2);
+        menu.add_css_class("message-menu-panel");
+        for (title, copy) in [("Copy Media", true), ("Save As…", false)] {
+            let button = gtk::Button::with_label(title);
+            button.add_css_class("flat");
+            button.add_css_class("context-menu-row");
+            if let Some(label) = button.child().and_downcast::<gtk::Label>() {
+                label.set_xalign(0.);
+            }
+            let weak = Rc::downgrade(&ui);
+            let viewer = Rc::downgrade(self);
+            let popup = popover.downgrade();
+            let id = item.id.clone();
+            button.connect_clicked(move |_| {
+                if let Some(popup) = popup.upgrade() {
+                    popup.popdown();
+                }
+                let (Some(ui), Some(viewer)) = (weak.upgrade(), viewer.upgrade()) else {
+                    return;
+                };
+                if ui.generation.get() != viewer.generation
+                    || ui.state.borrow().account != viewer.owner
+                    || ui.state.borrow().current().jid != viewer.peer
+                {
+                    return;
+                }
+                if copy {
+                    ui.copy_attachment(&id);
+                } else if let Some(file) = ui
+                    .store
+                    .message(&viewer.owner, &viewer.peer, &id)
+                    .and_then(|message| message.attachment)
+                {
+                    match ui.downloads.borrow().status(&viewer.owner, &file) {
+                        Some(crate::downloads::Status::Ready(path)) => {
+                            ui.save_attachment(&id, &path)
+                        }
+                        _ => ui.notice("Download this media before saving it"),
+                    }
+                }
+            });
+            menu.append(&button);
+        }
+        popover.set_child(Some(&menu));
+        popover.connect_closed(|popover| {
+            if popover.parent().is_some() {
+                popover.unparent();
+            }
+        });
+        popover.popup();
+    }
     fn reveal_controls(self: &Rc<Self>) {
         for control in &self.controls {
             control.set_reveal_child(true);
@@ -1609,7 +1688,7 @@ impl MediaViewer {
         let Some(ui) = self.ui.upgrade() else { return };
         let full = ui.window.is_fullscreen();
         for pic in self.pictures.borrow().iter() {
-            let margin = if full { 0 } else { 20 };
+            let margin = FOCUS_MEDIA_INSET;
             pic.set_margin_top(margin);
             pic.set_margin_bottom(margin);
             pic.set_margin_start(margin);

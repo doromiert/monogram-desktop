@@ -1475,6 +1475,7 @@ impl Ui {
                         ui.persist();
                         ui.render_messages(false)
                     }
+                    "copy" if m.attachment.is_some() => ui.copy_attachment(&id),
                     "copy" => ui.window.clipboard().set_text(&m.content_text()),
                     "delete" => ui.delete_confirmation(vec![id.clone()]),
                     "forward" => ui.forward(vec![m]),
