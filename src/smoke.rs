@@ -1222,7 +1222,9 @@ pub fn run(ui: Rc<Ui>) {
                     assert!(card.area.error().is_none(), "wallet GL failed");
                 }
                 ui.toggle_media();
-                ui.media_stack.set_visible_child_name("monero");
+                assert!(!ui.media_toggles.borrow().contains_key("monero"));
+                assert!(ui.media_stack.child_by_name("monero").is_none());
+                ui.media_stack.set_visible_child_name("emoji");
             }
             12 => {
                 ui.show_chat();

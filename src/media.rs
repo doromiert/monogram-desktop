@@ -39,11 +39,12 @@ impl Ui {
             .homogeneous(false)
             .can_shrink(false)
             .build();
+        toggle.add_css_class("media-mode-tabs");
+        toggle.add_css_class("round");
         for (name, title) in [
             ("emoji", "Emoji"),
             ("stickers", "Stickers"),
             ("gifs", "GIFs"),
-            ("monero", "Monero"),
         ] {
             let t = adw::Toggle::builder().name(name).label(title).build();
             toggle.add(t.clone());
@@ -56,7 +57,7 @@ impl Ui {
                 if previous.as_deref() == Some(name.as_str()) {
                     return;
                 }
-                let tabs = ["emoji", "stickers", "gifs", "monero"];
+                let tabs = ["emoji", "stickers", "gifs"];
                 let index = |name: &str| tabs.iter().position(|tab| *tab == name).unwrap_or(0);
                 stack.set_visible_child_full(
                     &name,
@@ -90,14 +91,6 @@ impl Ui {
                 .description("Saved GIFs and GIPHY search will appear here when configured.")
                 .build(),
             Some("gifs"),
-        );
-        self.media_stack.add_named(
-            &adw::StatusPage::builder()
-                .icon_name("wallet-symbolic")
-                .title("Wallet unavailable")
-                .description("No native Monero wallet is configured for this desktop client.")
-                .build(),
-            Some("monero"),
         );
         self.rebuild_pack_library();
         self.rebuild_gif_library();
