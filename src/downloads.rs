@@ -346,7 +346,7 @@ async fn download(
     let link = file.link().ok_or("Invalid attachment")?;
     let mut url = link.url.clone();
     let mut response = None;
-    let mut recovery_available = true;
+    let mut recoveries_remaining = 2;
     for _ in 0..=5 {
         checked(cancel)?;
         let request = || {
@@ -355,24 +355,24 @@ async fn download(
                 .header(reqwest::header::ACCEPT_ENCODING, "identity")
                 .send()
         };
-        let reply = if recovery_available {
+        let reply = loop {
+            if recoveries_remaining == 0 {
+                break request().await;
+            }
             match tokio::time::timeout(Duration::from_secs(3), request()).await {
-                Ok(result) => result,
+                Ok(result) => break result,
                 Err(_) => {
-                    // GET is safe to repeat; dropping the stalled response future releases its connection.
-                    recovery_available = false;
+                    // GET is safe to repeat; dropping the stalled future releases its connection.
+                    recoveries_remaining -= 1;
                     *state.lock().unwrap() = Status::Running {
                         bytes: 0,
                         total: file.size,
                         reconnecting: true,
                     };
-                    eprintln!("Monogram attachment response stalled; reconnecting once");
+                    eprintln!("Monogram attachment response stalled; reconnecting");
                     checked(cancel)?;
-                    request().await
                 }
             }
-        } else {
-            request().await
         }
         .map_err(|error| transfer_error(&error, false))?;
         if [301, 302, 303, 307, 308].contains(&reply.status().as_u16()) {
@@ -655,7 +655,7 @@ mod tests {
                         let header=String::from_utf8(header).unwrap();assert!(!header.contains('#'));assert!(!header.contains("aesgcm"));
                         let path=header.split_whitespace().nth(1).unwrap().to_string();let attempt={let mut requests=seen.lock().unwrap();requests.push(path.clone());requests.iter().filter(|seen|**seen==path).count()};
                         if path=="/redirect"||path=="/downgrade" {let location=if path=="/redirect"{format!("{base}/file")}else{base.replace("https:","http:")+"/file"};let _=write!(socket,"HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");return;}
-                        if path=="/headers-slow" || path=="/recover" && attempt==1 {while !stopped.load(Ordering::Acquire){thread::sleep(Duration::from_millis(5));}return;}
+                        if path=="/headers-slow" || path=="/recover" && attempt<=2 {while !stopped.load(Ordering::Acquire){thread::sleep(Duration::from_millis(5));}return;}
                         let mut body=bytes;if path=="/bad"{if let Some(b)=body.last_mut(){*b^=1;}}
                         let length=if path=="/huge"{MAX+17}else{body.len() as u64+if path=="/short"{1}else{0}};
                         let encoding=if path=="/encoding"{"Content-Encoding: gzip\r\n"}else{""};
@@ -728,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn first_start_recovers_a_stalled_get_once_without_manual_restart() {
+    fn first_start_recovers_two_stalled_gets_without_manual_restart() {
         let server = Server::new(b"authenticated after reconnect".to_vec());
         let client = server.client();
         let mut file = Attachment::bare(&format!("{}/recover", server.url)).unwrap();
@@ -758,7 +758,7 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(fs::read(path).unwrap(), b"authenticated after reconnect");
-        assert!(started.elapsed() < Duration::from_secs(6));
+        assert!(started.elapsed() < Duration::from_secs(9));
         assert_eq!(
             server
                 .requests
@@ -767,7 +767,7 @@ mod tests {
                 .iter()
                 .filter(|path| path.as_str() == "/recover")
                 .count(),
-            2
+            3
         );
         fs::remove_dir_all(root).unwrap();
     }

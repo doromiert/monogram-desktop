@@ -633,6 +633,14 @@ impl Ui {
                     progress.pulse();
                     detail.set_text("Preparing private file copy…");
                 }
+                Some(Phase::Waiting) => {
+                    progress.set_fraction(1.);
+                    detail.set_text("Confirming upload…");
+                }
+                Some(Phase::Reconnecting) => {
+                    progress.pulse();
+                    detail.set_text("Reconnecting upload…");
+                }
                 Some(Phase::Uploading { bytes, total }) => {
                     progress.set_fraction((bytes as f64 / total.max(1) as f64).clamp(0., 1.));
                     detail.set_text(&format!(

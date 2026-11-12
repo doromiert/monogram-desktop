@@ -189,7 +189,7 @@ impl UploadSmoke {
             4 => {
                 if matches!(
                     ui.uploads.borrow().phase(&self.id.borrow()),
-                    Some(Phase::Uploading { .. })
+                    Some(Phase::Uploading { .. } | Phase::Waiting | Phase::Reconnecting)
                 ) {
                     assert!(!self.received.get());
                     if click("Cancel") {
@@ -214,7 +214,7 @@ impl UploadSmoke {
             6 => {
                 if matches!(
                     ui.uploads.borrow().phase(&self.id.borrow()),
-                    Some(Phase::Uploading { .. })
+                    Some(Phase::Uploading { .. } | Phase::Waiting | Phase::Reconnecting)
                 ) {
                     let peer = ui.state.borrow().current().jid.clone();
                     ui.set_sending_preference(

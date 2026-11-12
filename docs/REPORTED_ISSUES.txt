@@ -181,7 +181,9 @@ SHIPPED IN 0ad0f13 — Automatic download header-stall recovery
   A first start now reconnects once after three seconds without response headers.
   Five cold production transfers against the affected host all completed verified
   decryption/cache commit (four recovered in 3.29–3.61 s) without manual restart.
-  Upload diagnosis remains separate; no automatic PUT replay is introduced.
+  This first shipped recovery was extended to two bounded GET reconnects after
+  a later request still stalled. Uploads now have separately verified identical-
+  wire PUT recovery ready for the next package.
 
 SHIPPED IN 0ad0f13 — Native large-unread acceptance
   Switching into 140 unread messages passes with a maximum measured GTK delay
@@ -192,3 +194,12 @@ IN PROGRESS — Circular scrubber and mute button for circle videos
   Latest user request: match mobile circular seeking and mute controls on inline
   round videos. Preserve verified clipping, one audible player, explicit pauses
   and normal rectangular video behavior. Native pointer/audio acceptance pending.
+
+READY FOR PACKAGING — Automatic upload response recovery
+  First PUTs produced the full body but timed out waiting for HTTP headers;
+  the issued GET URL returned 410, so local 100% did not prove acceptance.
+  A private immutable wire snapshot now permits one identical PUT to the same
+  slot, without re-encrypting modified plaintext. Six focused TLS tests pass;
+  three cold real-service uploads each recovered and their downloads passed
+  authenticated decryption and SHA-256. No HTTP rejection is retried. The final
+  request retains its normal timeout. Underlying external service stalls remain.

@@ -103,13 +103,34 @@ bounded while copying, and the actual snapshot size is checked before slot use.
 The worker copies to a private, synced, immutable account-owned snapshot. Retry
 reuses that snapshot, protecting against later changes to the original file.
 
-Uploads use at most four workers with 64 total queued files. Plaintext bytes stream
-in 64 KiB chunks; encrypted uploads use a fresh 12-byte nonce and 32-byte AES-GCM
-key for each attempt. Modern encrypted slots expose only a random `.bin` name and
+Uploads use at most four workers with 64 total queued files. File work uses
+64 KiB chunks; encrypted upload jobs use a fresh 12-byte nonce and 32-byte AES-GCM
+key. Before requesting a slot, the worker validates and encrypts the immutable
+input into a private wire snapshot. The snapshot is unlinked before networking
+and kept open only for that job. This uses up to one additional file's worth of
+temporary disk space while keeping memory bounded. Modern encrypted slots expose only a random `.bin` name and
 `application/octet-stream`; actual filename, MIME, size and plaintext SHA-256 are
 inside the protected SFS description. PUT credentials are restricted to the
 XEP's Authorization/Cookie/Expires headers. CR/LF is rejected, redirects are
 refused, and only HTTP 200/201/204 after complete body generation permits sending.
+
+After the body is consumed, a three-second response-header wait may reconnect
+once; the final request retains the normal 30-second read timeout. Transport
+failures may also trigger that one recovery. The repeated PUT
+uses the same slot, headers and byte-identical wire snapshot, following
+[RFC 9110 section 9.2.2](https://www.rfc-editor.org/rfc/rfc9110.html#name-idempotent-methods).
+It never re-encrypts changed plaintext under the original nonce. HTTP rejections
+are not retried. The UI shows confirmation and reconnection states; cancellation
+and the existing owner/generation checks still fence publication. A failed
+recovery returns an error and leaves explicit Retry available. That recovery is
+bounded connection handling, not a correction to the external server.
+
+The local TLS fixture confirms identical encrypted bytes and allowed headers on
+two connections to the same slot, one recovery at most, no replay after HTTP
+403 or cancellation, and rejection of a changed plaintext snapshot. Three cold
+production uploads of synthetic 8 KiB files completed in 3.86–4.10 seconds without
+manual restart; each resulting attachment passed authenticated decryption and
+SHA-256 verification on download. No contact message was sent.
 
 A pending placeholder is never an immutable wire-message base and cannot be
 submitted by the XMPP or crypto send path. After a successful upload, owner,
@@ -194,11 +215,12 @@ clock rate until bytes arrive. The reported 19:37 WebP sticker timed out before
 HTTP headers; the user confirmed immediate success with a fresh retry. The
 underlying intermittent network/server cause has not been established.
 
-Downloads recover one response-header stall automatically: after three seconds
-without headers, cancel that GET future and start one new GET using the same TLS
-configuration. The UI reports reconnecting, and existing cancellation, redirect,
-size, ciphertext authentication and hash checks still apply. The second request
-keeps the normal timeout. There is no automatic PUT replay.
+Downloads recover up to two response-header stalls automatically: after three
+seconds without headers, cancel that GET future and start a new GET using the
+same TLS configuration. The UI reports reconnecting, and existing cancellation, redirect,
+size, ciphertext authentication and hash checks still apply. The final request
+keeps the normal timeout. Upload recovery is described above and only repeats
+byte-identical wire snapshots.
 
 The actual affected encrypted media passed five cold `Downloads::start` runs
 with full decryption/authentication/cache commit: 404 ms without recovery, then
@@ -207,3 +229,14 @@ the first response and verifies the second connection returns authenticated
 bytes. Header timeout, corruption, unsafe redirect and cancellation checks pass.
 The upload service still intermittently stalls before headers in independent
 Android HTTP/1.1 requests; this recovery does not establish a server-side fix.
+
+A larger affected video also passed five cold starts with full authenticated
+1,407,353-byte plaintext results: 1740/3701/3821/3892/4235 ms. The TLS regression
+withholds the first two responses and asserts exactly three GET requests and
+one verified final cache entry. Reconnect attempts never restart body reads
+that are already advancing normally.
+
+Rejected diagnosis: forced HTTP/1.1 initially appeared to help an interleaved
+probe, but sequential HTTP/1.1 requests also stalled after TLS on desktop and
+Android. No protocol downgrade is retained. A per-socket 1200-byte MSS probe
+also failed to help; no network-interface or route settings were changed.

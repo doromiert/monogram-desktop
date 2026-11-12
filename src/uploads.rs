@@ -37,6 +37,8 @@ pub use crate::model::UploadDraft as Draft;
 pub enum Phase {
     Discovering,
     Preparing,
+    Waiting,
+    Reconnecting,
     Uploading { bytes: u64, total: u64 },
 }
 pub struct Job {
@@ -426,6 +428,8 @@ struct Input {
     expected: Vec<u8>,
     done: Arc<AtomicBool>,
     job: Arc<Job>,
+    report_progress: bool,
+    finished: Option<tokio::sync::oneshot::Sender<()>>,
 }
 impl Input {
     fn next(&mut self) -> Result<Option<Vec<u8>>> {
@@ -484,13 +488,162 @@ impl Input {
             }
             self.done.store(true, Ordering::Release);
         }
-        *self.job.phase.lock().unwrap() = Phase::Uploading {
-            bytes: self.bytes,
-            total: self.size,
-        };
+        if self.report_progress {
+            *self.job.phase.lock().unwrap() = if self.done.load(Ordering::Acquire) {
+                Phase::Waiting
+            } else {
+                Phase::Uploading {
+                    bytes: self.bytes,
+                    total: self.size,
+                }
+            };
+        }
+        if self.done.load(Ordering::Acquire)
+            && let Some(finished) = self.finished.take()
+        {
+            let _ = finished.send(());
+        }
         Ok(Some(output))
     }
 }
+// Keep one private, unlinked wire snapshot: retries never encrypt mutable plaintext again.
+struct Wire {
+    input: crate::downloads::VerifiedFile,
+    size: u64,
+    hash: Vec<u8>,
+}
+fn prepare_wire(prepared: &Prepared, cipher: Option<Crypter>, job: Arc<Job>) -> Result<Wire> {
+    job.check()?;
+    let partial = Partial(
+        prepared
+            .path
+            .with_extension(format!("{}.wire", uuid::Uuid::new_v4())),
+    );
+    let mut output = {
+        let _guard = crate::downloads::CACHE_IO.lock().unwrap();
+        job.check()?;
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&partial.0)
+            .map_err(|_| "Upload wire snapshot unavailable")?
+    };
+    let mut input = Input {
+        file: File::open(&prepared.path).map_err(|_| "Upload snapshot unavailable")?,
+        size: prepared.size,
+        bytes: 0,
+        cipher,
+        hash: Hasher::new(MessageDigest::sha256()).map_err(|_| "Hash unavailable")?,
+        expected: prepared.hash.clone(),
+        done: Arc::new(AtomicBool::new(false)),
+        job: job.clone(),
+        report_progress: false,
+        finished: None,
+    };
+    let mut hash = Hasher::new(MessageDigest::sha256()).map_err(|_| "Hash unavailable")?;
+    let mut size = 0;
+    while let Some(chunk) = input.next()? {
+        output
+            .write_all(&chunk)
+            .map_err(|_| "Upload wire snapshot unavailable")?;
+        hash.update(&chunk).map_err(|_| "Hash unavailable")?;
+        size += chunk.len() as u64;
+    }
+    drop(output);
+    job.check()?;
+    let input = crate::downloads::VerifiedFile(
+        File::open(&partial.0).map_err(|_| "Upload wire snapshot unavailable")?,
+    );
+    drop(partial);
+    Ok(Wire {
+        input,
+        size,
+        hash: hash.finish().map_err(|_| "Hash unavailable")?.to_vec(),
+    })
+}
+async fn put_wire(
+    client: &reqwest::Client,
+    slot: &Slot,
+    mime: &str,
+    wire: &Wire,
+    job: Arc<Job>,
+    ack_timeout: Duration,
+) -> Result<()> {
+    for attempt in 0..2 {
+        job.check()?;
+        if attempt == 1 {
+            *job.phase.lock().unwrap() = Phase::Reconnecting;
+        } else {
+            *job.phase.lock().unwrap() = Phase::Uploading {
+                bytes: 0,
+                total: wire.size,
+            };
+        }
+        let done = Arc::new(AtomicBool::new(false));
+        let (finished, consumed) = tokio::sync::oneshot::channel();
+        let input = Input {
+            file: wire
+                .input
+                .reopen()
+                .map_err(|_| "Upload wire snapshot unavailable")?
+                .0,
+            size: wire.size,
+            bytes: 0,
+            cipher: None,
+            hash: Hasher::new(MessageDigest::sha256()).map_err(|_| "Hash unavailable")?,
+            expected: wire.hash.clone(),
+            done: done.clone(),
+            job: job.clone(),
+            report_progress: true,
+            finished: Some(finished),
+        };
+        let stream = futures_util::stream::try_unfold(input, |mut input| async move {
+            input
+                .next()
+                .map(|chunk| chunk.map(|chunk| (chunk, input)))
+                .map_err(std::io::Error::other)
+        });
+        let response = client
+            .put(slot.put.clone())
+            .headers(slot.headers.clone())
+            .header(reqwest::header::CONTENT_TYPE, mime)
+            .header(reqwest::header::CONTENT_LENGTH, wire.size)
+            .body(reqwest::Body::wrap_stream(stream))
+            .send();
+        tokio::pin!(response);
+        let result = tokio::select! {
+            result = &mut response => Some(result),
+            consumed = consumed => {
+                if consumed.is_ok() && attempt == 0 {
+                    tokio::time::timeout(ack_timeout, &mut response).await.ok()
+                } else { Some(response.await) }
+            }
+        };
+        job.check()?;
+        match result {
+            Some(Ok(response)) => {
+                return if [200, 201, 204].contains(&response.status().as_u16())
+                    && done.load(Ordering::Acquire)
+                {
+                    Ok(())
+                } else {
+                    Err("Upload was not accepted")
+                };
+            }
+            Some(Err(error))
+                if attempt == 0
+                    && !error.is_body()
+                    && (error.is_timeout() || error.is_connect() || error.is_request()) => {}
+            None if attempt == 0 => {}
+            _ => return Err("HTTPS upload failed"),
+        }
+        // RFC 9110 section 9.2.2: repeat this PUT once, to the same URI with identical bytes.
+        eprintln!("Monogram upload response stalled; reconnecting once");
+    }
+    Err("HTTPS upload failed")
+}
+
 pub struct Uploaded {
     pub attachment: Attachment,
     pub snapshot: PathBuf,
@@ -524,21 +677,6 @@ pub async fn run(
         &prepared.mime
     };
     let wire_size = prepared.size + if encrypted { 16 } else { 0 };
-    let request = Element::builder("request", NS)
-        .attr("filename".try_into().unwrap(), &filename)
-        .attr("size".try_into().unwrap(), wire_size.to_string())
-        .attr("content-type".try_into().unwrap(), mime)
-        .build();
-    let root = iq
-        .request(&provider.jid, Kind::Get, request)
-        .await
-        .map_err(|_| "Upload slot request failed")?
-        .ok_or("Invalid upload slot")?;
-    let slot = slot(&root)?;
-    job.check()?;
-    let client = crate::downloads::client_builder()
-        .build()
-        .map_err(|_| "HTTPS unavailable")?;
     let mut secret = Zeroizing::new([0u8; 44]);
     let cipher = if encrypted {
         openssl::rand::rand_bytes(secret.as_mut()).map_err(|_| "Secure randomness unavailable")?;
@@ -554,40 +692,34 @@ pub async fn run(
     } else {
         None
     };
-    let done = Arc::new(AtomicBool::new(false));
-    let input = Input {
-        file: File::open(&prepared.path).map_err(|_| "Upload snapshot unavailable")?,
-        size: prepared.size,
-        bytes: 0,
-        cipher,
-        hash: Hasher::new(MessageDigest::sha256()).map_err(|_| "Hash unavailable")?,
-        expected: prepared.hash.clone(),
-        done: done.clone(),
-        job: job.clone(),
-    };
-    let stream = futures_util::stream::try_unfold(input, |mut input| async move {
-        input
-            .next()
-            .map(|chunk| chunk.map(|chunk| (chunk, input)))
-            .map_err(std::io::Error::other)
-    });
-    *job.phase.lock().unwrap() = Phase::Uploading {
-        bytes: 0,
-        total: prepared.size,
-    };
-    let response = client
-        .put(slot.put)
-        .headers(slot.headers)
-        .header(reqwest::header::CONTENT_TYPE, mime)
-        .header(reqwest::header::CONTENT_LENGTH, wire_size)
-        .body(reqwest::Body::wrap_stream(stream))
-        .send()
-        .await
-        .map_err(|_| "HTTPS upload failed")?;
-    job.check()?;
-    if ![200, 201, 204].contains(&response.status().as_u16()) || !done.load(Ordering::Acquire) {
-        return Err("Upload was not accepted");
+    let wire = prepare_wire(&prepared, cipher, job.clone())?;
+    if wire.size != wire_size {
+        return Err("Upload size mismatch");
     }
+    let request = Element::builder("request", NS)
+        .attr("filename".try_into().unwrap(), &filename)
+        .attr("size".try_into().unwrap(), wire_size.to_string())
+        .attr("content-type".try_into().unwrap(), mime)
+        .build();
+    let root = iq
+        .request(&provider.jid, Kind::Get, request)
+        .await
+        .map_err(|_| "Upload slot request failed")?
+        .ok_or("Invalid upload slot")?;
+    let slot = slot(&root)?;
+    job.check()?;
+    let client = crate::downloads::client_builder()
+        .build()
+        .map_err(|_| "HTTPS unavailable")?;
+    put_wire(
+        &client,
+        &slot,
+        mime,
+        &wire,
+        job.clone(),
+        Duration::from_secs(3),
+    )
+    .await?;
     let wire_url = if encrypted {
         let hex: String = secret.iter().map(|b| format!("{b:02x}")).collect();
         format!("aesgcm{}#{hex}", &slot.get.as_str()[5..])
@@ -635,6 +767,313 @@ mod tests {
     fn xml(text: &str) -> Element {
         text.parse().unwrap()
     }
+    struct Https {
+        url: String,
+        cert: Vec<u8>,
+        requests: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Https {
+        fn new() -> Self {
+            use openssl::{
+                asn1::Asn1Time,
+                bn::BigNum,
+                pkey::PKey,
+                rsa::Rsa,
+                ssl::{SslAcceptor, SslMethod},
+                x509::{
+                    X509, X509NameBuilder,
+                    extension::{BasicConstraints, SubjectAlternativeName},
+                },
+            };
+            let key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
+            let mut name = X509NameBuilder::new().unwrap();
+            name.append_entry_by_text("CN", "localhost").unwrap();
+            let name = name.build();
+            let mut cert = X509::builder().unwrap();
+            cert.set_version(2).unwrap();
+            cert.set_serial_number(&BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap())
+                .unwrap();
+            cert.set_subject_name(&name).unwrap();
+            cert.set_issuer_name(&name).unwrap();
+            cert.set_pubkey(&key).unwrap();
+            cert.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+                .unwrap();
+            cert.set_not_after(&Asn1Time::days_from_now(1).unwrap())
+                .unwrap();
+            cert.append_extension(BasicConstraints::new().critical().ca().build().unwrap())
+                .unwrap();
+            cert.append_extension(
+                SubjectAlternativeName::new()
+                    .dns("localhost")
+                    .build(&cert.x509v3_context(None, None))
+                    .unwrap(),
+            )
+            .unwrap();
+            cert.sign(&key, MessageDigest::sha256()).unwrap();
+            let cert = cert.build();
+            let mut tls = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
+            tls.set_certificate(&cert).unwrap();
+            tls.set_private_key(&key).unwrap();
+            let tls = tls.build();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let url = format!(
+                "https://localhost:{}",
+                listener.local_addr().unwrap().port()
+            );
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let seen = requests.clone();
+            let stop = Arc::new(AtomicBool::new(false));
+            let stopped = stop.clone();
+            let thread = std::thread::spawn(move || {
+                let mut workers = Vec::new();
+                while !stopped.load(Ordering::Acquire) {
+                    let socket = match listener.accept() {
+                        Ok((s, _)) => s,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(2));
+                            continue;
+                        }
+                        Err(e) => panic!("{e}"),
+                    };
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    socket
+                        .set_write_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let tls = tls.clone();
+                    let seen = seen.clone();
+                    let stopped = stopped.clone();
+                    workers.push(std::thread::spawn(move||{
+                        let Ok(mut socket)=tls.accept(socket) else{return;};let mut header=Vec::new();let mut byte=[0];
+                        while header.len()<16384 && !header.ends_with(b"\r\n\r\n"){if socket.read(&mut byte).ok()!=Some(1){return;}header.push(byte[0]);}
+                        let header=String::from_utf8(header).unwrap();let length=header.lines().find_map(|line|line.to_ascii_lowercase().strip_prefix("content-length:").map(|v|v.trim().parse::<usize>().unwrap())).unwrap();if header.starts_with("PUT /slow-body "){std::thread::sleep(Duration::from_millis(250));}let mut body=vec![0;length];socket.read_exact(&mut body).unwrap();
+                        let attempt={let mut requests=seen.lock().unwrap();requests.push((header.clone(),body));requests.len()};
+                        if header.starts_with("PUT /reject "){let _=write!(socket,"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");}
+                        else if header.starts_with("PUT /slow-body ") || header.starts_with("PUT /recover ") && attempt==2 {let _=write!(socket,"HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");}
+                        else {while !stopped.load(Ordering::Acquire){std::thread::sleep(Duration::from_millis(2));}}
+                    }));
+                }
+                for worker in workers {
+                    worker.join().unwrap();
+                }
+            });
+            Self {
+                url,
+                cert: cert.to_pem().unwrap(),
+                requests,
+                stop,
+                thread: Some(thread),
+            }
+        }
+        fn client(&self) -> reqwest::Client {
+            crate::downloads::client_builder()
+                .no_proxy()
+                .add_root_certificate(reqwest::Certificate::from_pem(&self.cert).unwrap())
+                .build()
+                .unwrap()
+        }
+        fn slot(&self, path: &str) -> Slot {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "authorization",
+                HeaderValue::from_static("Bearer synthetic"),
+            );
+            headers.insert("cookie", HeaderValue::from_static("fixture=1"));
+            Slot {
+                put: Url::parse(&format!("{}{path}", self.url)).unwrap(),
+                get: Url::parse(&format!("{}/object", self.url)).unwrap(),
+                headers,
+            }
+        }
+    }
+    impl Drop for Https {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            self.thread.take().unwrap().join().unwrap();
+        }
+    }
+    #[test]
+    fn one_recovery_replays_identical_private_ciphertext_and_preserves_slot_headers() {
+        let directory = Directory::new();
+        let path = directory.0.join("plain");
+        let plain = b"synthetic plaintext only";
+        fs::write(&path, plain).unwrap();
+        let prepared = Prepared {
+            path: path.clone(),
+            name: "fixture.bin".into(),
+            mime: "application/octet-stream".into(),
+            size: plain.len() as u64,
+            hash: openssl::sha::sha256(plain).to_vec(),
+        };
+        let cipher = Crypter::new(
+            Cipher::aes_256_gcm(),
+            Mode::Encrypt,
+            &[7; 32],
+            Some(&[3; 12]),
+        )
+        .unwrap();
+        let wire = prepare_wire(&prepared, Some(cipher), Arc::new(Job::default())).unwrap();
+        assert_eq!(
+            fs::read_dir(&directory.0).unwrap().count(),
+            1,
+            "wire file must be unlinked before networking"
+        );
+        let mut expected = Vec::new();
+        wire.input
+            .reopen()
+            .unwrap()
+            .0
+            .read_to_end(&mut expected)
+            .unwrap();
+        assert_ne!(expected, plain);
+        assert_eq!(expected.len(), plain.len() + 16);
+        fs::write(&path, b"mutable plaintext changed after encryption").unwrap();
+        assert!(
+            prepare_wire(&prepared, None, Arc::new(Job::default())).is_err(),
+            "changed snapshot cannot be encrypted or published"
+        );
+        let server = Https::new();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(put_wire(
+                &server.client(),
+                &server.slot("/recover"),
+                "application/octet-stream",
+                &wire,
+                Arc::new(Job::default()),
+                Duration::from_millis(80),
+            ))
+            .unwrap();
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].0, requests[1].0,
+            "same slot, length and allowed headers"
+        );
+        assert!(
+            requests[0]
+                .0
+                .to_ascii_lowercase()
+                .contains("authorization: bearer synthetic")
+        );
+        assert!(
+            requests[0]
+                .0
+                .to_ascii_lowercase()
+                .contains("cookie: fixture=1")
+        );
+        assert_eq!(requests[0].1, expected);
+        assert_eq!(requests[1].1, expected);
+    }
+    #[test]
+    fn failed_recovery_is_bounded_business_errors_and_cancellation_do_not_replay() {
+        let directory = Directory::new();
+        let path = directory.0.join("plain");
+        fs::write(&path, b"fixture").unwrap();
+        let prepared = Prepared {
+            path,
+            name: "fixture.bin".into(),
+            mime: "application/octet-stream".into(),
+            size: 7,
+            hash: openssl::sha::sha256(b"fixture").to_vec(),
+        };
+        let wire = prepare_wire(&prepared, None, Arc::new(Job::default())).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for (route, count) in [("/blackhole", 2), ("/reject", 1)] {
+            let server = Https::new();
+            let client = crate::downloads::client_builder()
+                .no_proxy()
+                .add_root_certificate(reqwest::Certificate::from_pem(&server.cert).unwrap())
+                .read_timeout(Duration::from_millis(150))
+                .build()
+                .unwrap();
+            assert!(
+                runtime
+                    .block_on(put_wire(
+                        &client,
+                        &server.slot(route),
+                        "application/octet-stream",
+                        &wire,
+                        Arc::new(Job::default()),
+                        Duration::from_millis(50)
+                    ))
+                    .is_err()
+            );
+            assert_eq!(server.requests.lock().unwrap().len(), count);
+        }
+        let server = Https::new();
+        let job = Arc::new(Job::default());
+        let stopped = job.clone();
+        let requests = server.requests.clone();
+        let cancel = std::thread::spawn(move || {
+            while requests.lock().unwrap().is_empty() {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            stopped.stop();
+        });
+        assert_eq!(
+            runtime.block_on(put_wire(
+                &server.client(),
+                &server.slot("/blackhole"),
+                "application/octet-stream",
+                &wire,
+                job,
+                Duration::from_millis(80)
+            )),
+            Err("Upload cancelled")
+        );
+        cancel.join().unwrap();
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn acknowledgement_deadline_does_not_limit_a_healthy_slow_body() {
+        let directory = Directory::new();
+        let path = directory.0.join("large");
+        let plain = vec![42; 8 * 1024 * 1024];
+        fs::write(&path, &plain).unwrap();
+        let prepared = Prepared {
+            path,
+            name: "large.bin".into(),
+            mime: "application/octet-stream".into(),
+            size: plain.len() as u64,
+            hash: openssl::sha::sha256(&plain).to_vec(),
+        };
+        let wire = prepare_wire(&prepared, None, Arc::new(Job::default())).unwrap();
+        let server = Https::new();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let start = std::time::Instant::now();
+        runtime
+            .block_on(put_wire(
+                &server.client(),
+                &server.slot("/slow-body"),
+                "application/octet-stream",
+                &wire,
+                Arc::new(Job::default()),
+                Duration::from_millis(80),
+            ))
+            .unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(250));
+        assert_eq!(
+            server.requests.lock().unwrap().len(),
+            1,
+            "slow body must not reconnect before consumption"
+        );
+    }
+
     #[test]
     fn strict_provider_limits_and_slot_authority() {
         let root = xml(
@@ -728,6 +1167,8 @@ mod tests {
             expected: openssl::sha::sha256(plain).to_vec(),
             done: Arc::new(AtomicBool::new(false)),
             job: Arc::new(Job::default()),
+            report_progress: true,
+            finished: None,
         }
     }
     #[test]
