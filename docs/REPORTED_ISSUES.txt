@@ -1,6 +1,6 @@
 Monogram — current user-reported issues
 Updated: 2026-11-12
-Verified running desktop source: 8cdd88f (current 2026-11-12 delivery).
+Verified running desktop source: edd7156 (smooth circular-progress follow-up).
 Mobile transfer recovery release: 0.2.202 / 205f3165f (original signing key).
 A local implementation or fixture pass does not mean the change is shipped.
 Items labelled LOCAL WIP are absent from the running build.
@@ -233,4 +233,5 @@ FIX VERIFIED — Circular video progress feels stepped
   Frame-clock presentation now produces90frames in1.5s (16.7ms average,
   17.1ms maximum) while the authoritative player remains10Hz. Pointer seeking,
   mute and play/pause pass; paused rings produce zero redraws in250ms and
-  unmapped rings stop after the hide frame. This fix is awaiting packaging.
+  unmapped rings stop after the hide frame. Packaged edd7156 is running on HDMI-1;
+  startup feedback272ms and subsequent interface frame gap145ms were verified.
