@@ -222,3 +222,6 @@
 .shared-reaction-bundle { background: @popover_bg_color; }
 .shared-reaction-bundle.compact { border-radius: 20px; }
 .reaction-morph .picker-section-list > row:focus-within { outline: none; }
+
+.round-video-mute { min-width: 32px; min-height: 32px; padding: 0; color: white; background: alpha(black,.55); box-shadow: none; }
+.round-video-mute:hover { background: alpha(black,.72); }

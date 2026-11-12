@@ -18,8 +18,12 @@ intrinsic dimensions up to 1280 pixels. Generic attachment MIME does not prevent
 recognition. Their pixels are clipped to a circle and captionless bubbles stay
 transparent. Visible muted previews loop; tapping starts audible inline playback
 or pauses it, preserving an explicit pause during viewport updates. Starting
-another round video returns the previous one to muted preview behavior. Radial
-seeking, remaining-time labels and the mobile round-video editor remain open.
+another round video returns the previous one to muted preview behavior. The circular progress ring starts at twelve o'clock and seeks by clicking or
+dragging its outer annulus. A separate top-left button toggles mute without
+activating underlying playback. Seeking preserves prior play/pause state and
+uses existing stream notifications rather than a new polling timer. Native real-
+pointer seeks at25/50/75%, mute under-click isolation and sub400ms feedback pass.
+Remaining-time labels and the mobile round-video editor remain open.
 
 ## Wire profile
 

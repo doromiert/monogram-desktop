@@ -190,10 +190,11 @@ SHIPPED IN 0ad0f13 — Native large-unread acceptance
   of 7.92 ms, 22 retained rows inside the requested five-screen window, and all
   180 fixture messages preserved on disk. Existing paging/reply acceptance passes.
 
-IN PROGRESS — Circular scrubber and mute button for circle videos
+READY FOR PACKAGING — Circular scrubber and mute button for circle videos
   Latest user request: match mobile circular seeking and mute controls on inline
   round videos. Preserve verified clipping, one audible player, explicit pauses
-  and normal rectangular video behavior. Native pointer/audio acceptance pending.
+  and normal rectangular video behavior. Native real-pointer 25/50/75% seeking,
+  paused/playing mute state, under-click prevention and sub400ms feedback pass.
 
 READY FOR PACKAGING — Automatic upload response recovery
   First PUTs produced the full body but timed out waiting for HTTP headers;
