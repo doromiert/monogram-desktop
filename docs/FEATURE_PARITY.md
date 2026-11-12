@@ -60,7 +60,7 @@ feature document considered, including smaller behavior customizations. It is a
 reference inventory; the table above groups them for implementation. Keep both
 updated rather than dropping features because their mobile presentation differs.
 
-Current picker follow-up: continuous full-panel Emoji/Stickers sections, square selectors, fixed settings and a single-layer menu are requested; current category-filtered pages remain incomplete. Chat-switch/history-scroll responsiveness now uses worker-side caption/link preparation, bounded backend-event draining and at most two new native rows per frame, with pruning/read-state guarded until the batch finishes. The native paging/reply/incoming-update scenario passes; real-workload latency acceptance remains open. Managed joining of the reported room still times out although an isolated raw discovery/join succeeds.
+Emoji/Stickers use a full-height native virtual section list: combined favorites/recents, installed packs, then built-in categories only for Emoji. Square mobile-icon selectors scroll to sections; Settings stays fixed outside the horizontal strip and uses one popover surface. Pack previews decode on workers; GIF selection captures the active chat at the click and rejects completion after a chat/account change. Chat-switch/history-scroll responsiveness now uses worker-side caption/link preparation, bounded backend-event draining and at most two new native rows per frame, with pruning/read-state guarded until the batch finishes. The native paging/reply/incoming-update scenario passes; real-workload latency acceptance remains open. Managed joining of the reported room still times out although an isolated raw discovery/join succeeds.
 
 ## Next milestones
 

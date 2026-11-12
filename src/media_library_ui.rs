@@ -213,6 +213,7 @@ fn install_lottie(
 
 pub(crate) struct GifLibraryPage {
     pub(crate) root: gtk::Box,
+    ui: std::rc::Weak<Ui>,
     library: crate::gifs::Library,
     status: gtk::Label,
     grid: gtk::FlowBox,
@@ -231,10 +232,12 @@ impl GifLibraryPage {
     pub(crate) fn new(
         library: crate::gifs::Library,
         parent: &adw::ApplicationWindow,
+        ui: std::rc::Weak<Ui>,
         on_send: impl Fn(std::path::PathBuf) + 'static,
     ) -> Rc<Self> {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
         root.add_css_class("gif-library-page");
+        root.set_vexpand(true);
         let settings = gtk::Button::builder()
             .icon_name("emblem-system-symbolic")
             .tooltip_text("GIF search settings")
@@ -264,6 +267,7 @@ impl GifLibraryPage {
         root.append(&more);
         let page = Rc::new(Self {
             root,
+            ui,
             library,
             status,
             grid,
@@ -537,20 +541,41 @@ impl GifLibraryPage {
                 let Some(page) = weak.upgrade() else {
                     return;
                 };
+                let Some(ui) = page.ui.upgrade() else { return };
+                let peer = ui.state.borrow().current().jid.clone();
+                let owner = ui.state.borrow().account.clone();
+                let generation = ui.generation.get();
+                page.status.set_label("Preparing GIF…");
                 let library = library.clone();
                 let item = item.clone();
                 let weak = Rc::downgrade(&page);
                 glib::spawn_future_local(async move {
                     let request = crate::gifs::Request::new();
-                    let Ok(asset) = library.original(item.clone(), request.clone()).await else {
-                        return;
+                    let asset = match library.original(item.clone(), request.clone()).await {
+                        Ok(asset) => asset,
+                        Err(error) => {
+                            if let Some(page) = weak.upgrade() {
+                                page.status.set_label(&error.to_string());
+                            }
+                            return;
+                        }
                     };
                     let Some(path) = asset.path else {
                         return;
                     };
                     let _ = library.remember(item, crate::gifs::Request::new()).await;
                     if let Some(page) = weak.upgrade() {
-                        (page.on_send)(path);
+                        if page.ui.upgrade().is_some_and(|ui| {
+                            ui.generation.get() == generation
+                                && ui.state.borrow().account == owner
+                                && ui.state.borrow().current().jid == peer
+                        }) {
+                            (page.on_send)(path);
+                            page.status.set_label("Saved GIFs");
+                        } else {
+                            page.status
+                                .set_label("Chat changed. Choose the GIF again to attach it here.");
+                        }
                     }
                 });
             });
@@ -624,6 +649,14 @@ pub(crate) enum PackSelection {
     CustomEmoji { item_id: i64, fallback: String },
 }
 
+#[derive(Clone)]
+enum PickerRow {
+    Heading(String),
+    Empty(String),
+    Emoji(Vec<crate::emoji_completion::EmojiEntry>),
+    Pack(Vec<crate::packs::Item>),
+}
+
 struct PackPreviewCell {
     button: glib::WeakRef<gtk::Button>,
     picture: gtk::Picture,
@@ -632,12 +665,14 @@ struct PackPreviewCell {
 }
 
 fn pack_selector_button(icon: &str, title: &str) -> gtk::ToggleButton {
-    let picture = crate::emoji_picker_ui::mobile_emoji_icon(icon, 24);
+    let picture = crate::emoji_picker_ui::mobile_emoji_icon(icon, 32);
     picture.add_css_class("emoji-category-icon");
     let button = gtk::ToggleButton::builder()
         .child(&picture)
         .tooltip_text(title)
+        .valign(gtk::Align::Center)
         .build();
+    button.set_size_request(40, 40);
     button.update_property(&[gtk::accessible::Property::Label(title)]);
     button
 }
@@ -654,16 +689,18 @@ pub(crate) struct PackLibraryPage {
     selector: gtk::Box,
     group_anchor: Option<gtk::ToggleButton>,
     external_selector: bool,
-    grid: gtk::FlowBox,
+    model: gio::ListStore,
+    list: gtk::ListView,
     scroll: gtk::ScrolledWindow,
-    items: RefCell<Vec<crate::packs::Item>>,
+    ui: std::rc::Weak<Ui>,
+    query: RefCell<String>,
+    anchors: RefCell<std::collections::HashMap<i64, u32>>,
     favorites: RefCell<std::collections::HashSet<i64>>,
-    rendered: Cell<usize>,
     preview_active: Cell<usize>,
     preview_epoch: Cell<u64>,
     preview_queue: RefCell<Vec<PackPreviewCell>>,
     selected: RefCell<Option<i64>>,
-    sections: RefCell<std::collections::HashMap<i64, Vec<crate::packs::Item>>>,
+    sections: RefCell<Vec<(i64, String, Vec<crate::packs::Item>)>>,
     job: RefCell<Option<Job>>,
     on_select: Box<dyn Fn(PackSelection)>,
     on_view: Box<dyn Fn(i64)>,
@@ -674,6 +711,7 @@ impl PackLibraryPage {
     pub(crate) fn new(
         library: Library,
         kind: Kind,
+        ui: std::rc::Weak<Ui>,
         selector_hosts: Option<(gtk::Box, gtk::Box, gtk::ToggleButton)>,
         on_select: impl Fn(PackSelection) + 'static,
         on_view: impl Fn(i64) + 'static,
@@ -690,11 +728,11 @@ impl PackLibraryPage {
             bar.add_css_class("pack-selector");
             let selector = gtk::Box::new(gtk::Orientation::Horizontal, 4);
             let settings = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-            bar.append(&selector);
-            bar.append(&settings);
-            let selector_scroll = crate::widgets::horizontal_strip(&bar);
+            let selector_scroll = crate::widgets::horizontal_strip(&selector);
             selector_scroll.set_hexpand(true);
-            root.append(&selector_scroll);
+            bar.append(&selector_scroll);
+            bar.append(&settings);
+            root.append(&bar);
             (selector, settings, None)
         };
         while let Some(child) = selector.first_child() {
@@ -715,14 +753,28 @@ impl PackLibraryPage {
             .build();
         let manage = gtk::Button::builder().label("Manage Packs…").build();
         let menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        menu.add_css_class("message-menu-panel");
         for button in [&import, &telegram, &create, &manage] {
             button.add_css_class("flat");
+            if let Some(label) = button.child().and_downcast::<gtk::Label>() {
+                label.set_xalign(0.);
+            }
             menu.append(button);
         }
-        let popover = gtk::Popover::builder().child(&menu).build();
+        let popover = gtk::Popover::builder()
+            .has_arrow(false)
+            .child(&menu)
+            .build();
+        popover.add_css_class("picker-settings-popover");
+        for button in [&import, &telegram, &create, &manage] {
+            let popup = popover.downgrade();
+            button.connect_clicked(move |_| {
+                if let Some(popup) = popup.upgrade() {
+                    popup.popdown();
+                }
+            });
+        }
         let settings_icon =
-            crate::emoji_picker_ui::mobile_emoji_icon("smiles_tab_settings.webp", 24);
+            crate::emoji_picker_ui::mobile_emoji_icon("smiles_tab_settings.webp", 32);
         settings_icon.add_css_class("emoji-category-icon");
         let gear = gtk::MenuButton::builder()
             .child(&settings_icon)
@@ -730,7 +782,8 @@ impl PackLibraryPage {
             .popover(&popover)
             .build();
         gear.add_css_class("flat");
-        gear.add_css_class("emoji-category");
+        gear.add_css_class("picker-settings");
+        gear.set_valign(gtk::Align::Center);
         settings.append(&gear);
 
         let status = gtk::Label::builder()
@@ -753,18 +806,17 @@ impl PackLibraryPage {
         progress_row.append(&cancel);
         progress_row.set_visible(false);
         root.append(&progress_row);
-        let grid = gtk::FlowBox::builder()
-            .selection_mode(gtk::SelectionMode::None)
-            .min_children_per_line(4)
-            .max_children_per_line(4)
-            .column_spacing(6)
-            .row_spacing(6)
-            .homogeneous(true)
-            .build();
-        grid.add_css_class("pack-library-grid");
+        let model = gio::ListStore::new::<glib::BoxedAnyObject>();
+        let factory = gtk::SignalListItemFactory::new();
+        let list = gtk::ListView::new(
+            Some(gtk::NoSelection::new(Some(model.clone()))),
+            Some(factory.clone()),
+        );
+        list.add_css_class("picker-section-list");
         let scroll = gtk::ScrolledWindow::builder()
-            .child(&grid)
+            .child(&list)
             .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
             .vexpand(true)
             .build();
         root.append(&scroll);
@@ -778,11 +830,13 @@ impl PackLibraryPage {
             selector,
             group_anchor,
             external_selector,
-            grid,
+            model,
+            list,
             scroll: scroll.clone(),
-            items: RefCell::new(Vec::new()),
+            ui,
+            query: RefCell::new(String::new()),
+            anchors: RefCell::new(Default::default()),
             favorites: RefCell::new(std::collections::HashSet::new()),
-            rendered: Cell::new(0),
             preview_active: Cell::new(0),
             preview_epoch: Cell::new(0),
             preview_queue: RefCell::new(Vec::new()),
@@ -795,33 +849,28 @@ impl PackLibraryPage {
         });
         {
             let weak = Rc::downgrade(&page);
-            scroll
-                .vadjustment()
-                .connect_value_changed(move |adjustment| {
-                    if adjustment.value() + adjustment.page_size() + 160. >= adjustment.upper() {
-                        if let Some(page) = weak.upgrade() {
-                            page.render_more(16);
-                            page.pump_pack_previews();
-                        }
-                    }
-                });
-        }
-        {
+            factory.connect_bind(move |_, item| {
+                let Some(page) = weak.upgrade() else { return };
+                let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+                let Some(data) = item.item().and_downcast::<glib::BoxedAnyObject>() else {
+                    return;
+                };
+                item.set_child(Some(&page.row_widget(&data.borrow::<PickerRow>())));
+            });
+            factory.connect_unbind(|_, item| {
+                item.downcast_ref::<gtk::ListItem>()
+                    .unwrap()
+                    .set_child(gtk::Widget::NONE);
+            });
             let weak = Rc::downgrade(&page);
-            scroll.vadjustment().connect_changed(move |adjustment| {
+            scroll.vadjustment().connect_value_changed(move |_| {
                 if let Some(page) = weak.upgrade() {
-                    if adjustment.upper() <= adjustment.page_size() + 160. {
-                        page.render_more(16);
-                    }
                     page.pump_pack_previews();
                 }
             });
-        }
-        {
             let weak = Rc::downgrade(&page);
-            scroll.connect_map(move |_| {
+            scroll.vadjustment().connect_changed(move |_| {
                 if let Some(page) = weak.upgrade() {
-                    page.render_more(16);
                     page.pump_pack_previews();
                 }
             });
@@ -975,7 +1024,12 @@ impl PackLibraryPage {
         self.sections.replace(
             sections
                 .iter()
-                .map(|(id, _, items)| (*id, items.clone()))
+                .map(|(id, title, items)| (*id, title.to_string(), items.clone()))
+                .chain(
+                    packs
+                        .iter()
+                        .map(|pack| (pack.id, pack.name.clone(), pack.items.clone())),
+                )
                 .collect(),
         );
         let selected = (*self.selected.borrow())
@@ -1004,13 +1058,12 @@ impl PackLibraryPage {
                 button.set_active(*id == selected);
                 let weak = Rc::downgrade(self);
                 let id = *id;
-                let items = items.clone();
                 button.connect_toggled(move |button| {
                     if button.is_active()
                         && let Some(page) = weak.upgrade()
                     {
                         page.selected.replace(Some(id));
-                        page.show_items(items.clone());
+                        page.show_section(id);
                         (page.on_view)(id);
                     }
                 });
@@ -1023,6 +1076,8 @@ impl PackLibraryPage {
                 .build();
             button.add_css_class("flat");
             button.add_css_class("pack-selector-item");
+            button.set_valign(gtk::Align::Center);
+            button.set_size_request(40, 40);
             if let Some(first) = &group {
                 button.set_group(Some(first));
             } else {
@@ -1035,19 +1090,32 @@ impl PackLibraryPage {
             if let Some(item) = pack.items.first() {
                 let item = item.id;
                 glib::spawn_future_local(async move {
-                    let Ok((asset, _)) = library.verified_asset(item, Job::new()).await else {
+                    let Ok((asset, verified)) = library.verified_asset(item, Job::new()).await
+                    else {
                         return;
                     };
                     let Some(button) = preview.upgrade() else {
                         return;
                     };
-                    let picture = gtk::Image::new();
-                    if let Ok(pixbuf) =
-                        gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(asset.path, 28, 28, true)
-                    {
-                        picture.set_from_pixbuf(Some(&pixbuf));
+                    let mime = asset.item.mime.clone();
+                    let texture = gio::spawn_blocking(move || {
+                        let cancel = gio::Cancellable::new();
+                        if mime == "application/x-tgsticker" {
+                            return crate::lottie::Decoder::open(verified.reopen()?, 32, &cancel)?
+                                .frame()
+                                .map(|frame| frame.texture);
+                        }
+                        crate::image_loader::Decoder::open_sticker(verified, &cancel)?
+                            .frame(32)
+                            .map(|frame| frame.texture)
+                    })
+                    .await;
+                    if let Ok(Ok(texture)) = texture {
+                        let picture = gtk::Image::from_paintable(Some(&texture));
+                        picture.set_pixel_size(32);
+                        picture.set_size_request(32, 32);
+                        button.set_child(Some(&picture));
                     }
-                    button.set_child(Some(&picture));
                 });
             }
             let pack = pack.clone();
@@ -1063,123 +1131,258 @@ impl PackLibraryPage {
             self.selector.append(&button);
         }
         if selected >= 0 {
-            self.show_pack(packs.iter().find(|pack| pack.id == selected));
-        } else {
-            self.show_section(selected);
+            self.selected.replace(Some(selected));
         }
+        self.rebuild_rows();
     }
 
     fn show_pack(self: &Rc<Self>, pack: Option<&Pack>) {
-        self.show_items(pack.map(|pack| pack.items.clone()).unwrap_or_default());
+        if let Some(pack) = pack {
+            self.show_section(pack.id);
+        }
     }
 
     pub(crate) fn show_section(self: &Rc<Self>, id: i64) {
         self.selected.replace(Some(id));
-        self.show_items(self.sections.borrow().get(&id).cloned().unwrap_or_default());
+        if let Some(position) = self.anchors.borrow().get(&id).copied() {
+            self.list
+                .scroll_to(position, gtk::ListScrollFlags::NONE, None);
+        }
     }
 
-    fn show_items(self: &Rc<Self>, items: Vec<crate::packs::Item>) {
-        while let Some(child) = self.grid.first_child() {
-            self.grid.remove(&child);
-        }
+    pub(crate) fn search(self: &Rc<Self>, query: &str) {
+        self.query.replace(query.to_owned());
+        self.rebuild_rows();
+    }
+
+    pub(crate) fn rebuild_rows(self: &Rc<Self>) {
         self.preview_epoch
             .set(self.preview_epoch.get().wrapping_add(1));
         self.preview_queue.borrow_mut().clear();
-        self.items.replace(items);
-        self.rendered.set(0);
-        let empty = self.items.borrow().is_empty();
-        self.status.set_visible(empty);
-        if empty {
-            self.status.set_label(match *self.selected.borrow() {
-                Some(-1) => "No favorites yet.",
-                Some(-2) => "No recent items yet.",
-                _ => match self.kind {
-                    Kind::Stickers => "This sticker pack is empty.",
-                    Kind::Emoji => "This custom emoji pack is empty.",
-                },
-            });
+        let mut rows = Vec::new();
+        self.anchors.borrow_mut().clear();
+        self.status.set_visible(false);
+        let query = self.query.borrow().trim().to_lowercase();
+        let ui = self.ui.upgrade();
+        let preferences = ui
+            .as_ref()
+            .and_then(|ui| ui.store.emoji_preferences().ok())
+            .unwrap_or_default();
+        let sections = self.sections.borrow().clone();
+        for (id, title, items) in sections {
+            if !query.is_empty() && id < 0 {
+                continue;
+            }
+            let items: Vec<_> = items
+                .into_iter()
+                .filter(|item| {
+                    query.is_empty()
+                        || item.name.to_lowercase().contains(&query)
+                        || item.emoji.contains(&query)
+                        || title.to_lowercase().contains(&query)
+                })
+                .collect();
+            let builtin: Vec<_> = if self.kind == Kind::Emoji && query.is_empty() && id < 0 {
+                let saved = if id == -1 {
+                    &preferences.favorites
+                } else {
+                    &preferences.recent
+                };
+                saved
+                    .iter()
+                    .filter_map(|emoji| {
+                        crate::emoji_completion::catalog()
+                            .iter()
+                            .find(|entry| entry.text == *emoji)
+                            .cloned()
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            if !query.is_empty() && items.is_empty() {
+                continue;
+            }
+            self.push_heading(&mut rows, id, &title);
+            for row in builtin.chunks(6) {
+                Self::push_row(&mut rows, PickerRow::Emoji(row.to_vec()));
+            }
+            for row in items.chunks(if self.kind == Kind::Emoji { 6 } else { 4 }) {
+                Self::push_row(&mut rows, PickerRow::Pack(row.to_vec()));
+            }
+            if rows.len() == self.anchors.borrow()[&id] as usize + 1 {
+                Self::push_row(
+                    &mut rows,
+                    PickerRow::Empty(format!("No {} yet", title.to_lowercase())),
+                );
+            }
         }
-        self.render_more(16);
+        if self.kind == Kind::Emoji {
+            let entries = if query.is_empty() {
+                crate::emoji_completion::catalog().to_vec()
+            } else {
+                crate::emoji_completion::search(&query)
+            };
+            for (id, title, groups) in crate::emoji_picker_ui::builtin_categories() {
+                let entries: Vec<_> = entries
+                    .iter()
+                    .filter(|entry| groups.contains(&entry.group))
+                    .cloned()
+                    .collect();
+                if entries.is_empty() {
+                    continue;
+                }
+                self.push_heading(&mut rows, id, title);
+                for row in entries.chunks(6) {
+                    Self::push_row(&mut rows, PickerRow::Emoji(row.to_vec()));
+                }
+            }
+        }
+        if rows.is_empty() {
+            Self::push_row(&mut rows, PickerRow::Empty("No matches".into()));
+        }
+        self.model.splice(0, self.model.n_items(), &rows);
     }
 
-    fn render_more(self: &Rc<Self>, count: usize) {
-        let start = self.rendered.get();
-        let end = (start + count).min(self.items.borrow().len());
-        if start >= end {
-            return;
-        }
-        let items = self.items.borrow()[start..end].to_vec();
-        self.rendered.set(end);
-        for item in items {
-            let button = gtk::Button::new();
-            button.add_css_class("flat");
-            button.add_css_class("pack-item");
-            button.set_size_request(64, 64);
-            button.set_halign(gtk::Align::Start);
-            button.set_valign(gtk::Align::Start);
-            button.set_tooltip_text(Some(&item.name));
-            button.update_property(&[gtk::accessible::Property::Label(&item.name)]);
-            let spinner = gtk::Spinner::new();
-            spinner.start();
-            let picture = gtk::Picture::new();
-            picture.set_can_shrink(true);
-            picture.set_content_fit(gtk::ContentFit::Contain);
-            picture.add_css_class("pack-item-picture");
-            let overlay = gtk::Overlay::builder().child(&picture).build();
-            overlay.add_overlay(&spinner);
-            let star = gtk::Image::from_icon_name("starred-symbolic");
-            star.set_halign(gtk::Align::End);
-            star.set_valign(gtk::Align::Start);
-            star.set_margin_top(3);
-            star.set_margin_end(3);
-            star.set_visible(self.favorites.borrow().contains(&item.id));
-            star.add_css_class("pack-favorite");
-            overlay.add_overlay(&star);
-            let frame = gtk::AspectFrame::builder()
-                .ratio(1.)
-                .obey_child(false)
-                .child(&overlay)
-                .build();
-            button.set_child(Some(&frame));
-            self.grid.insert(&button, -1);
-            let favorite = gtk::GestureClick::new();
-            favorite.set_button(3);
-            let weak_favorite = Rc::downgrade(self);
-            let favorite_library = self.library.clone();
-            let favorite_id = item.id;
-            favorite.connect_released(move |_, _, _, _| {
-                let Some(page) = weak_favorite.upgrade() else {
-                    return;
-                };
-                let enabled = !page.favorites.borrow().contains(&favorite_id);
-                let library = favorite_library.clone();
-                let weak = Rc::downgrade(&page);
-                glib::spawn_future_local(async move {
-                    if library
-                        .mutate(crate::packs::Mutation::Favorite {
-                            item: favorite_id,
-                            value: enabled,
-                        })
-                        .await
-                        .is_ok()
-                        && let Some(page) = weak.upgrade()
-                    {
-                        page.refresh();
+    fn push_heading(&self, rows: &mut Vec<glib::BoxedAnyObject>, id: i64, title: &str) {
+        self.anchors.borrow_mut().insert(id, rows.len() as u32);
+        Self::push_row(rows, PickerRow::Heading(title.into()));
+    }
+    fn push_row(rows: &mut Vec<glib::BoxedAnyObject>, row: PickerRow) {
+        rows.push(glib::BoxedAnyObject::new(row));
+    }
+
+    fn row_widget(self: &Rc<Self>, row: &PickerRow) -> gtk::Widget {
+        match row {
+            PickerRow::Heading(title) | PickerRow::Empty(title) => {
+                let label = crate::widgets::text(
+                    title,
+                    if matches!(row, PickerRow::Heading(_)) {
+                        "picker-section-heading"
+                    } else {
+                        "dim-label"
+                    },
+                );
+                label.set_margin_top(8);
+                label.set_margin_bottom(6);
+                label.upcast()
+            }
+            PickerRow::Emoji(entries) => {
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+                row.set_homogeneous(true);
+                if let Some(ui) = self.ui.upgrade() {
+                    for entry in entries {
+                        if let Some(button) = crate::emoji_picker_ui::builtin_button(&ui, entry) {
+                            row.append(&button);
+                        }
                     }
-                });
-            });
-            button.add_controller(favorite);
-            self.preview_queue.borrow_mut().push(PackPreviewCell {
-                button: button.downgrade(),
-                picture,
-                spinner,
-                item_id: item.id,
-            });
+                }
+                for _ in entries.len()..6 {
+                    row.append(&gtk::Box::new(gtk::Orientation::Horizontal, 0));
+                }
+                row.upcast()
+            }
+            PickerRow::Pack(items) => {
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                row.set_homogeneous(true);
+                let columns = if self.kind == Kind::Emoji { 6 } else { 4 };
+                for item in items {
+                    row.append(&self.pack_cell(item));
+                }
+                for _ in items.len()..columns {
+                    row.append(&gtk::Box::new(gtk::Orientation::Horizontal, 0));
+                }
+                row.upcast()
+            }
         }
-        self.pump_pack_previews();
+    }
+
+    fn pack_cell(self: &Rc<Self>, item: &crate::packs::Item) -> gtk::Button {
+        let button = gtk::Button::new();
+        button.add_css_class("flat");
+        button.add_css_class("pack-item");
+        if self.kind == Kind::Emoji {
+            button.add_css_class("custom-emoji-item");
+        }
+        button.set_size_request(
+            if self.kind == Kind::Emoji { 42 } else { 64 },
+            if self.kind == Kind::Emoji { 42 } else { 64 },
+        );
+        button.set_halign(gtk::Align::Fill);
+        button.set_valign(gtk::Align::Start);
+        button.set_tooltip_text(Some(&item.name));
+        button.update_property(&[gtk::accessible::Property::Label(&item.name)]);
+        let spinner = gtk::Spinner::new();
+        spinner.start();
+        let picture = gtk::Picture::new();
+        picture.set_can_shrink(true);
+        picture.set_content_fit(gtk::ContentFit::Contain);
+        picture.add_css_class("pack-item-picture");
+        let overlay = gtk::Overlay::builder().child(&picture).build();
+        overlay.add_overlay(&spinner);
+        let star = gtk::Image::from_icon_name("starred-symbolic");
+        star.set_halign(gtk::Align::End);
+        star.set_valign(gtk::Align::Start);
+        star.set_margin_top(3);
+        star.set_margin_end(3);
+        star.set_visible(self.favorites.borrow().contains(&item.id));
+        star.add_css_class("pack-favorite");
+        overlay.add_overlay(&star);
+        let frame = gtk::AspectFrame::builder()
+            .ratio(1.)
+            .obey_child(false)
+            .child(&overlay)
+            .build();
+        button.set_child(Some(&frame));
+        let favorite = gtk::GestureClick::new();
+        favorite.set_button(3);
+        let weak_favorite = Rc::downgrade(self);
+        let favorite_library = self.library.clone();
+        let favorite_id = item.id;
+        favorite.connect_released(move |_, _, _, _| {
+            let Some(page) = weak_favorite.upgrade() else {
+                return;
+            };
+            let enabled = !page.favorites.borrow().contains(&favorite_id);
+            let library = favorite_library.clone();
+            let weak = Rc::downgrade(&page);
+            glib::spawn_future_local(async move {
+                if library
+                    .mutate(crate::packs::Mutation::Favorite {
+                        item: favorite_id,
+                        value: enabled,
+                    })
+                    .await
+                    .is_ok()
+                    && let Some(page) = weak.upgrade()
+                {
+                    page.refresh();
+                }
+            });
+        });
+        button.add_controller(favorite);
+        self.preview_queue.borrow_mut().push(PackPreviewCell {
+            button: button.downgrade(),
+            picture,
+            spinner,
+            item_id: item.id,
+        });
+        let weak = Rc::downgrade(self);
+        button.connect_map(move |_| {
+            let weak = weak.clone();
+            glib::idle_add_local_once(move || {
+                if let Some(page) = weak.upgrade() {
+                    page.pump_pack_previews();
+                }
+            });
+        });
+        button
     }
 
     fn pump_pack_previews(self: &Rc<Self>) {
+        self.preview_queue
+            .borrow_mut()
+            .retain(|cell| cell.button.upgrade().is_some());
         while self.preview_active.get() < 4 {
             let next = self.preview_queue.borrow().iter().position(|cell| {
                 cell.button.upgrade().is_some_and(|button| {
@@ -1460,7 +1663,7 @@ impl Ui {
                 dialog.present(Some(&self.window));
             }
             PackLibraryAction::Manage => {
-                let Some(pack) = selected else {
+                let Some(pack) = selected.filter(|id| *id >= 0) else {
                     self.notice("Select a pack first");
                     return;
                 };
@@ -1505,7 +1708,6 @@ impl Ui {
         }
         self.gif_page.borrow_mut().take();
         let owner = self.state.borrow().account.clone();
-        let peer = self.state.borrow().current().jid.clone();
         let generation = self.generation.get();
         self.replace_media_page(
             "gifs",
@@ -1547,15 +1749,18 @@ impl Ui {
             };
             let weak = Rc::downgrade(&ui);
             let send_owner = owner.clone();
-            let page = GifLibraryPage::new(library.clone(), &ui.window, move |path| {
-                if let Some(ui) = weak.upgrade().filter(|ui| {
-                    ui.generation.get() == generation
-                        && ui.state.borrow().account == send_owner
-                        && ui.state.borrow().current().jid == peer
-                }) {
-                    ui.send_library_file(&path, false);
-                }
-            });
+            let page = GifLibraryPage::new(
+                library.clone(),
+                &ui.window,
+                Rc::downgrade(&ui),
+                move |path| {
+                    if let Some(ui) = weak.upgrade().filter(|ui| {
+                        ui.generation.get() == generation && ui.state.borrow().account == send_owner
+                    }) {
+                        ui.send_library_file(&path, false);
+                    }
+                },
+            );
             page.bind_search(&ui.media_search);
             ui.replace_media_page("gifs", &page.root);
             ui.gif_library.replace(Some(library));
@@ -1620,6 +1825,7 @@ impl Ui {
                 PackLibraryPage::new(
                     library.clone(),
                     kind,
+                    Rc::downgrade(&ui),
                     selector_hosts,
                     move |selection| {
                         let Some(ui) = select_ui.upgrade().filter(|ui| {
@@ -1682,6 +1888,15 @@ impl Ui {
             stickers.root.set_margin_start(10);
             stickers.root.set_margin_end(10);
             stickers.root.set_margin_bottom(10);
+            let sticker_search = Rc::downgrade(&stickers);
+            ui.media_search.connect_search_changed(move |search| {
+                if let Some(page) = sticker_search
+                    .upgrade()
+                    .filter(|page| page.root.is_mapped())
+                {
+                    page.search(search.text().as_str());
+                }
+            });
             ui.replace_media_page("stickers", &stickers.root);
             crate::emoji_picker_ui::attach_custom_emoji_page(&ui, &emoji);
             ui.pack_library.replace(Some(library));

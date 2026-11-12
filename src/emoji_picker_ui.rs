@@ -105,7 +105,11 @@ impl EmojiSurface {
             root.add_css_class("emoji-picker-surface");
             let category_scroll = horizontal_strip(&categories);
             category_scroll.add_css_class("emoji-category-scroll");
-            root.append(&category_scroll);
+            let category_row = bx(false, 2);
+            category_scroll.set_hexpand(true);
+            category_row.append(&category_scroll);
+            category_row.append(&settings);
+            root.append(&category_row);
             let emoji_label = text("Favorites", "caption dim-label");
             root.append(&emoji_label);
             let scrolling = gtk::ScrolledWindow::builder()
@@ -169,6 +173,7 @@ impl EmojiSurface {
                     if let Some(page) = surface.custom_page.borrow().as_ref().cloned() {
                         page.show_section(i64::from(index));
                         page.root.set_visible(true);
+                        return;
                     }
                     surface.emoji_label.set_visible(true);
                     surface.emoji_scroll.set_visible(true);
@@ -196,6 +201,10 @@ impl EmojiSurface {
                     && let Some(surface) = surface.upgrade()
                 {
                     surface.category.set(index as i32);
+                    if let Some(page) = surface.custom_page.borrow().as_ref().cloned() {
+                        page.show_section(-10 - index as i64);
+                        return;
+                    }
                     surface.emoji_label.set_visible(true);
                     surface.emoji_scroll.set_visible(true);
                     if let Some(page) = surface.custom_page.borrow().as_ref().cloned() {
@@ -207,7 +216,6 @@ impl EmojiSurface {
             self.categories.append(&button);
             previous = Some(button);
         }
-        self.categories.append(&self.settings);
     }
 
     fn bind_search(self: &Rc<Self>, search: &gtk::SearchEntry, keep_alive: bool) {
@@ -231,6 +239,10 @@ impl EmojiSurface {
             return;
         }
         self.query.replace(query.to_owned());
+        if let Some(page) = self.custom_page.borrow().as_ref().cloned() {
+            page.search(query);
+            return;
+        }
         let searching = !query.trim().is_empty();
         self.categories.set_sensitive(!searching);
         if searching {
@@ -247,6 +259,13 @@ impl EmojiSurface {
     }
 
     fn refresh(self: &Rc<Self>) {
+        if let Some(page) = self.custom_page.borrow().as_ref().cloned() {
+            self.emoji_label.set_visible(false);
+            self.emoji_scroll.set_visible(false);
+            page.root.set_visible(true);
+            page.rebuild_rows();
+            return;
+        }
         let Some(ui) = self.ui.upgrade() else { return };
         let preferences = ui.store.emoji_preferences().unwrap_or_default();
         let query = self.query.borrow().clone();
@@ -466,38 +485,39 @@ impl EmojiSurface {
             self.root.append(&page.root);
         }
         self.custom_page.replace(Some(page.clone()));
-        let category = self.category.get();
-        page.root.set_visible(category < 0);
-        if matches!(category, -1 | -2) {
-            page.show_section(i64::from(category));
-        }
+        self.emoji_label.set_visible(false);
+        self.emoji_scroll.set_visible(false);
+        page.root.set_visible(true);
     }
 
     fn show_custom_pack(&self) {
-        self.category.set(-3);
         self.emoji_label.set_visible(false);
         self.emoji_scroll.set_visible(false);
-        if let Some(page) = self.custom_page.borrow().as_ref().cloned() {
-            page.root.set_visible(true);
-        }
     }
 }
 
 fn emoji_category_button(icon: &str, title: &str) -> gtk::ToggleButton {
-    let picture = mobile_emoji_icon(icon, 24);
+    let picture = mobile_emoji_icon(icon, 32);
     picture.add_css_class("emoji-category-icon");
     let button = gtk::ToggleButton::builder()
         .child(&picture)
         .tooltip_text(title)
+        .valign(gtk::Align::Center)
         .build();
+    button.set_size_request(40, 40);
     button.update_property(&[gtk::accessible::Property::Label(title)]);
     button
 }
 
 pub(crate) fn mobile_emoji_icon(icon: &str, size: i32) -> gtk::Image {
     let picture = gtk::Image::new();
+    picture.set_pixel_size(size);
+    picture.set_size_request(size, size);
     if let Ok(pixbuf) = gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(
-        asset(&format!("icons/mobile-emoji/{}", icon.replace(".webp", ".png"))),
+        asset(&format!(
+            "icons/mobile-emoji/{}",
+            icon.replace(".webp", ".png")
+        )),
         size,
         size,
         true,
@@ -505,6 +525,17 @@ pub(crate) fn mobile_emoji_icon(icon: &str, size: i32) -> gtk::Image {
         picture.set_from_pixbuf(Some(&pixbuf));
     }
     picture
+}
+
+pub(crate) fn builtin_categories() -> Vec<(i64, &'static str, &'static [u32])> {
+    EMOJI_CATEGORIES
+        .iter()
+        .enumerate()
+        .map(|(index, category)| (-10 - index as i64, category.title, category.groups))
+        .collect()
+}
+pub(crate) fn builtin_button(ui: &Rc<Ui>, entry: &EmojiEntry) -> Option<gtk::Button> {
+    Some(sidebar_surface(ui)?.emoji_button(&entry.text, &entry.name))
 }
 
 fn sidebar_surface(ui: &Rc<Ui>) -> Option<Rc<EmojiSurface>> {
