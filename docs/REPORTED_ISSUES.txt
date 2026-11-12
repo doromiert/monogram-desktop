@@ -3,12 +3,16 @@ Updated: 2026-11-12
 Running desktop when the newest failures were reported: efb2375.
 Full feature scope and remaining parity gaps: FEATURE_PARITY.md.
 
-OPEN — Sending still rejects the user's own fingerprints
+FIX IMPLEMENTED, LIVE ACCEPTANCE OPEN — Sending still rejects the user's own fingerprints
   The running build still asks to review own-device fingerprints despite the
   requested conversation blind-trust behavior. Check the actual enabled policy,
   selected encryption profile and all send/action paths. Conversation blind
   trust must approve authenticated own devices as well as the contact's devices.
   Preserve explicit fingerprint blocks; do not silently change sending versions.
+  Found a published own-device ID with no bundle. Ported mobile
+  XmppPqOmemo.targets ordering: skip confirmed absent bundles without trusted
+  sessions before asking for trust, while requiring usable contact recipients.
+  Native real-crypto checks pass for text/reactions and explicit blocks.
 
 OPEN — Some media downloads remain stuck
   Media is recognized and a download/preparation spinner appears, but the job

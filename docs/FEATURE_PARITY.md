@@ -79,3 +79,11 @@ Current concrete user-reported regressions and pending requests are tracked in
 [REPORTED_ISSUES.txt](REPORTED_ISSUES.txt). Desktop favorite reordering passes actual
 pointer drags in all three production views plus database reload; mobile
 reordering remains open. This implementation is awaiting the next desktop package.
+
+PQ recipient selection now follows mobile `XmppPqOmemo.targets`: explicit blocks
+are checked before bundle retrieval; absent bundles are skipped unless a pinned
+session remains usable. A required contact must retain at least one usable
+device. This also applies to encrypted reaction payloads and own-device copies.
+Native hybrid-crypto checks cover stale own/contact entries, existing sessions,
+conversation blind trust and preserved blocks. Live user send acceptance remains
+open; no real contact was messaged for verification.

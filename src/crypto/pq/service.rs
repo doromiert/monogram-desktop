@@ -451,18 +451,32 @@ impl Worker {
         }
         let local_id = self.local.as_ref().ok_or(Error::Incomplete)?.id;
         let mut result = Vec::new();
+        let mut missing = false;
         for id in ids {
             if peer == self.owner && id == local_id {
                 continue;
             }
+            {
+                let tx = self.local.as_mut().ok_or(Error::Incomplete)?.begin()?;
+                if tx
+                    .get(&format!("blocked/{}", native::peer_key(peer, id)?))?
+                    .is_some()
+                {
+                    continue;
+                }
+            }
             let bundle = self.observe(peer, id, force, conversation).await?;
             let local = self.local.as_mut().ok_or(Error::Incomplete)?;
             let tx = local.begin()?;
-            let blocked = tx
-                .get(&format!("blocked/{}", native::peer_key(peer, id)?))?
-                .is_some();
-            if blocked {
-                continue;
+            if bundle.is_none() {
+                // Match mobile XmppPqOmemo.targets: absent keys need a pinned ratchet.
+                let trusted = native::trust_record(&tx, peer, id)?;
+                if trusted.as_ref().is_none_or(|pin| pin.len() != 2625)
+                    || !native::has_session(&tx, peer, id)?
+                {
+                    missing = true;
+                    continue;
+                }
             }
             let trusted = native::trust_record(&tx, peer, id)?;
             let Some(trusted) = trusted else {
@@ -482,9 +496,6 @@ impl Worker {
                 trusted[..33].try_into().map_err(|_| Error::Incomplete)?,
                 &trusted[33..],
             )?;
-            if bundle.is_none() && !native::has_session(&tx, peer, id)? {
-                return Err(Error::InvalidBundle);
-            }
             result.push(Target {
                 peer: peer.into(),
                 device: id,
@@ -492,7 +503,11 @@ impl Worker {
             });
         }
         if result.is_empty() && !optional {
-            return Err(Error::TrustRequired);
+            return Err(if missing {
+                Error::InvalidBundle
+            } else {
+                Error::TrustRequired
+            });
         }
         Ok(Some(result))
     }
@@ -1058,6 +1073,57 @@ mod actor_tests {
     use super::*;
     use crate::{encryption_policy::Mode, model::Account, protocol::Session};
     use std::sync::mpsc::Receiver;
+    #[test]
+    fn stale_own_bundle_does_not_block_conversation_blind_trust() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async{
+            const OWNER:&str="owner@example.invalid";const PEER:&str="peer@example.invalid";
+            let root=std::env::temp_dir().join(format!("monogram-pq-stale-own-{}",uuid::Uuid::new_v4()));std::fs::create_dir_all(&root).unwrap();
+            let history=crate::storage::Store{db:rusqlite::Connection::open(root.join("history.sqlite3")).unwrap()};history.db.execute_batch("CREATE TABLE preferences(key TEXT PRIMARY KEY,value TEXT)").unwrap();history.set_blind_trust(OWNER,PEER,true).unwrap();
+            let mut local=Device::memory(OWNER,81).unwrap();local.prepare().unwrap();
+            let mut phone=Device::memory(OWNER,82).unwrap();let phone_bundle=Bundle::from_parts(phone.prepare().unwrap()).unwrap();
+            let mut contact=Device::memory(PEER,83).unwrap();let contact_bundle=Bundle::from_parts(contact.prepare().unwrap()).unwrap();
+            let mut rejected=Device::memory(OWNER,85).unwrap();let rejected_bundle=Bundle::from_parts(rejected.prepare().unwrap()).unwrap();
+            local.observe(OWNER,85,&rejected_bundle,false).unwrap();local.decide(OWNER,85,&rejected_bundle.fingerprint().unwrap(),false).unwrap();
+            let hidden=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));let hide=hidden.clone();
+            let missing_contact=std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));let missing=missing_contact.clone();
+            let (network,mut requests)=channel::unbounded_channel();let (events,_)=mpsc::channel();
+            let server=tokio::spawn(async move{
+                const PUBSUB:&str="http://jabber.org/protocol/pubsub";
+                while let Some(Command::Iq{to,payload,reply,..})=requests.recv().await {
+                    let requested=payload.get_child("items",PUBSUB).unwrap();let node=requested.attr("node").unwrap();let id=requested.children().next().unwrap().attr("id").unwrap();
+                    let payload=if node==pep::DEVICES {
+                        let ids=if to==OWNER {vec![81,82,84,85]}else {match missing.load(std::sync::atomic::Ordering::Acquire) {1=>vec![83,84],2=>vec![84],_=>vec![83]}};
+                        let mut devices=Element::builder("devices",super::super::NS);
+                        for id in ids {devices=devices.append(Element::builder("device",super::super::NS).attr("id".try_into().unwrap(),id.to_string()).build());}
+                        Some(devices.build())
+                    }else if to==OWNER && id=="82" && !hide.load(std::sync::atomic::Ordering::Acquire){Some(phone_bundle.xml())}
+                    else if to==OWNER && id=="85"{Some(rejected_bundle.xml())}
+                    else if to==PEER && id=="83"{Some(contact_bundle.xml())}else{None};
+                    let mut items=Element::builder("items",PUBSUB).attr("node".try_into().unwrap(),node);
+                    if let Some(payload)=payload {items=items.append(Element::builder("item",PUBSUB).attr("id".try_into().unwrap(),id).append(payload).build());}
+                    let _=reply.send(Ok(Some(Element::builder("pubsub",PUBSUB).append(items.build()).build())));
+                }
+            });
+            let mut worker=Worker{owner:OWNER.into(),generation:1,network,events,root:root.clone(),local:Some(local),online:true,ready:true,publication_pending:false,bundles:BTreeMap::new(),lists:BTreeMap::new()};
+            let targets=worker.recipients(PEER).await.unwrap().unwrap();
+            assert_eq!(targets.iter().map(|target|(target.peer.as_str(),target.device)).collect::<Vec<_>>(),vec![(PEER,83),(OWNER,82)]);
+            let rows=worker.reviews(OWNER).unwrap();assert!(rows.iter().any(|row|row.device==82 && row.trust=="trusted"));assert!(rows.iter().any(|row|row.device==85 && row.trust=="rejected"));
+            let plain:Element=format!("<message xmlns='jabber:client' from='{OWNER}' to='{PEER}'><body>Stale own bundle regression</body></message>").parse().unwrap();
+            wire::encrypt(worker.local.as_mut().unwrap(),&plain,&targets,false).await.unwrap();
+            hidden.store(true,std::sync::atomic::Ordering::Release);
+            let own=worker.targets(OWNER,true,true,Some(PEER)).await.unwrap().unwrap();assert_eq!(own.len(),1);assert_eq!(own[0].device,82);assert!(own[0].bundle.is_none());
+            wire::encrypt(worker.local.as_mut().unwrap(),&plain,&own,false).await.unwrap();
+            let reaction:Element=format!("<message xmlns='jabber:client' from='{OWNER}' to='{PEER}'><reactions xmlns='urn:xmpp:reactions:0' id='target'><reaction>❤️</reaction></reactions></message>").parse().unwrap();
+            wire::encrypt(worker.local.as_mut().unwrap(),&reaction,&targets,false).await.unwrap();
+            missing_contact.store(1,std::sync::atomic::Ordering::Release);
+            let contact=worker.targets(PEER,false,true,Some(PEER)).await.unwrap().unwrap();
+            assert_eq!(contact.iter().map(|target|target.device).collect::<Vec<_>>(),vec![83],"mobile skips stale contact entries while retaining valid recipient devices");
+            missing_contact.store(2,std::sync::atomic::Ordering::Release);
+            assert!(matches!(worker.targets(PEER,false,true,Some(PEER)).await,Err(Error::InvalidBundle)),"a required contact with no bundle/session must still fail closed");
+            drop(worker);server.abort();drop(history);std::fs::remove_dir_all(root).unwrap();
+        });
+    }
+
     #[test]
     fn own_carbon_explicit_review_restores_original_contact_history_row() {
         tokio::runtime::Builder::new_current_thread()
