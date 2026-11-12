@@ -165,3 +165,16 @@ identity. Interrupted claims become uncertain instead of being sent twice.
 Deleting a pending parent also removes its unsent companion. Cancelled uploads
 retain the caption for retry. Upload retries preserve their captured encryption
 mode; a new mode requires reattaching the file.
+
+Media presentation follows mobile `ChatMessageCell` separation of photo bounds
+and caption bounds: the media retains its 2 px inset, while captions and reactions
+receive their own text insets. Long captions wrap at the media width rather than
+widening it. Native actual-widget checks cover short/long captions and reactions.
+
+Download failures now retain safe timeout/connect categories, following mobile
+`MonogramController.downloadFailure`; private file URLs and AES-GCM fragments
+are excluded from logs. The reported 18:11 video reproduced a 30 s wait before
+HTTP headers twice, then completed verified decryption on retry in 0.81 s. This
+is evidence of intermittent response timeout; it does not identify the remote
+or network cause. A local TLS fixture verifies the timeout label and no cache
+commit before headers.

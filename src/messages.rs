@@ -732,11 +732,20 @@ impl Ui {
                         bubble.append(&attachment);
                     }
                     if !m.text.is_empty() {
-                        let caption = MessageText::new(&wrap(&m.text, "message-text"), &meta);
-                        caption.set_margin_start(9);
-                        caption.set_margin_end(9);
-                        caption.set_margin_top(5);
-                        caption.set_margin_bottom(4);
+                        let body = wrap(&m.text, "message-text");
+                        if media {
+                            // Let the media set the bubble width; wrap to its allocation.
+                            body.set_max_width_chars(1);
+                        }
+                        let caption = MessageText::new(&body, &meta);
+                        caption.add_css_class("media-caption");
+                        if media {
+                            caption.set_orientation(gtk::Orientation::Vertical);
+                        }
+                        caption.set_margin_start(if media { 11 } else { 9 });
+                        caption.set_margin_end(if media { 11 } else { 9 });
+                        caption.set_margin_top(if media { 8 } else { 5 });
+                        caption.set_margin_bottom(if media { 5 } else { 4 });
                         bubble.append(&caption);
                     }
                 }
@@ -828,7 +837,13 @@ impl Ui {
             if !m.reactions.is_empty() {
                 bubble.add_css_class("has-reactions");
                 let row = bx(false, 4);
-                row.set_margin_top(8);
+                row.add_css_class("message-reactions");
+                row.set_margin_top(if media && !m.text.is_empty() { 3 } else { 8 });
+                if media {
+                    row.set_margin_start(11);
+                    row.set_margin_end(11);
+                    row.set_margin_bottom(5);
+                }
                 for reaction in &m.reactions {
                     let emoji = reaction
                         .rsplit_once(' ')

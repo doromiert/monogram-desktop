@@ -200,6 +200,7 @@
 
 
 .message-bubble.has-reactions { padding: 8px; }
+.message-bubble.media-bubble.has-reactions { padding: 2px; }
 .picker-section-list .emoji-picker-item { min-width: 0; min-height: 0; padding: 2px; }
 
 .message-menu-panel .picker-menu-row { min-height: 20px; padding: 4px 8px; }

@@ -226,6 +226,28 @@ pub(crate) fn client_builder() -> reqwest::ClientBuilder {
         .connect_timeout(Duration::from_secs(15))
         .read_timeout(Duration::from_secs(30))
 }
+fn transfer_error(error: &reqwest::Error, body: bool) -> &'static str {
+    // Match mobile's safe exception categories; private URLs and keys stay out of logs.
+    eprintln!(
+        "Monogram attachment HTTPS failure: body={body} timeout={} connect={} request={}",
+        error.is_timeout(),
+        error.is_connect(),
+        error.is_request()
+    );
+    if error.is_timeout() {
+        if body {
+            "Download stalled: server timed out"
+        } else {
+            "Download server timed out before responding"
+        }
+    } else if error.is_connect() {
+        "HTTPS connection failed"
+    } else if body {
+        "Download interrupted"
+    } else {
+        "HTTPS download failed"
+    }
+}
 struct Partial(PathBuf);
 impl Drop for Partial {
     fn drop(&mut self) {
@@ -329,7 +351,7 @@ async fn download(
             .header(reqwest::header::ACCEPT_ENCODING, "identity")
             .send()
             .await
-            .map_err(|_| "HTTPS download failed")?;
+            .map_err(|error| transfer_error(&error, false))?;
         if [301, 302, 303, 307, 308].contains(&reply.status().as_u16()) {
             let target = reply
                 .headers()
@@ -439,7 +461,11 @@ async fn download(
     let mut count = 0;
     let mut tail = Vec::new();
     let mut last = Instant::now();
-    while let Some(chunk) = response.chunk().await.map_err(|_| "Download interrupted")? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| transfer_error(&error, true))?
+    {
         checked(cancel)?;
         count += chunk.len() as u64;
         if count > limit + overhead {
@@ -601,6 +627,7 @@ mod tests {
                         let header=String::from_utf8(header).unwrap();assert!(!header.contains('#'));assert!(!header.contains("aesgcm"));
                         let path=header.split_whitespace().nth(1).unwrap().to_string();seen.lock().unwrap().push(path.clone());
                         if path=="/redirect"||path=="/downgrade" {let location=if path=="/redirect"{format!("{base}/file")}else{base.replace("https:","http:")+"/file"};let _=write!(socket,"HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");return;}
+                        if path=="/headers-slow" {while !stopped.load(Ordering::Acquire){thread::sleep(Duration::from_millis(5));}return;}
                         let mut body=bytes;if path=="/bad"{if let Some(b)=body.last_mut(){*b^=1;}}
                         let length=if path=="/huge"{MAX+17}else{body.len() as u64+if path=="/short"{1}else{0}};
                         let encoding=if path=="/encoding"{"Content-Encoding: gzip\r\n"}else{""};
@@ -635,6 +662,42 @@ mod tests {
             self.thread.take().unwrap().join().unwrap();
         }
     }
+    #[test]
+    fn stalled_headers_report_timeout_without_committing_a_file() {
+        let server = Server::new(b"untrusted".to_vec());
+        let client = client_builder()
+            .no_proxy()
+            .add_root_certificate(reqwest::Certificate::from_pem(&server.cert).unwrap())
+            .read_timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let file = Attachment::bare(&format!("{}/headers-slow", server.url)).unwrap();
+        let root = std::env::temp_dir().join(crate::model::new_id());
+        let progress = Mutex::new(Status::Running {
+            bytes: 0,
+            total: None,
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert_eq!(
+            runtime.block_on(download(
+                &client,
+                &file,
+                &root,
+                &AtomicBool::new(false),
+                &progress,
+                Policy::Manual
+            )),
+            Err("Download server timed out before responding")
+        );
+        assert!(
+            !root.exists(),
+            "a request with no headers must not commit media"
+        );
+    }
+
     #[test]
     fn mobile_stream_cipher_and_hashes_commit_only_verified_https_bytes() {
         let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!(
