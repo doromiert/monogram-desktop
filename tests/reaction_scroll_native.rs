@@ -359,6 +359,12 @@ fn pointer_reactions_keep_viewport_and_keyboard_focus() {
             let painted = feedback(&ui, &chip);
             pointer(&ui, &chip, "1");
             settle(&ui).await;
+            let exit_deadline = Instant::now() + Duration::from_millis(600);
+            while descendants(&ui.bubbles.borrow()[&near_target]).iter().any(|widget| widget.has_css_class("reaction")) {
+                assert!(Instant::now() < exit_deadline, "last reaction exit did not finish");
+                glib::timeout_future(Duration::from_millis(10)).await;
+            }
+            settle(&ui).await;
             let near_unreacted = position(&ui, &near_anchor);
             assert!(painted.get().unwrap() < Duration::from_millis(400));
             assert!(ui.state.borrow().message(&near_target).unwrap().reactions.is_empty());

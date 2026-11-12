@@ -1,4 +1,6 @@
 use crate::{model::*, ui::Ui, widgets::*};
+#[path = "reactions_ui.rs"]
+pub(crate) mod reactions_ui;
 use adw::prelude::*;
 use gtk::{gdk, glib};
 use std::{
@@ -35,6 +37,7 @@ struct RenderedRow {
     status: gtk::Box,
     heading: gtk::Box,
     avatar: Option<adw::Avatar>,
+    reactions: reactions_ui::MessageReactions,
 }
 fn message_focus(root: &gtk::Widget, emoji: Option<&str>) -> Option<gtk::Widget> {
     if let Some(emoji) = emoji {
@@ -73,8 +76,6 @@ fn same_content(a: &Message, b: &Message) -> bool {
         && a.poll == b.poll
         && a.poll_tally == b.poll_tally
         && a.poll_closed_at == b.poll_closed_at
-        && a.reactions == b.reactions
-        && a.my_reactions == b.my_reactions
         && a.preview_spoilers == b.preview_spoilers
         && a.inline_emoji == b.inline_emoji
         && a.unavailable == b.unavailable
@@ -287,6 +288,103 @@ impl Ui {
     pub(crate) fn rendering_messages(&self) -> bool {
         self.rendered_rows.borrow().rendering
     }
+    fn update_cached_row(
+        self: &Rc<Self>,
+        row: &mut RenderedRow,
+        message: &Message,
+        previous: bool,
+        next: bool,
+        group: bool,
+    ) {
+        if row.message.delivery != message.delivery
+            || row.message.time != message.time
+            || row.message.edited != message.edited
+            || row.message.encrypted != message.encrypted
+            || row.message.encryption_mode != message.encryption_mode
+        {
+            message_status(&row.status, message);
+        }
+        if row.message.reactions != message.reactions
+            || row.message.my_reactions != message.my_reactions
+        {
+            row.reactions.update(self, message);
+        }
+        row.message = message.clone();
+        cluster_style(row, previous, next, group);
+        if self
+            .history_window
+            .highlighted
+            .borrow()
+            .as_ref()
+            .is_some_and(|(id, _)| id == &message.id)
+        {
+            row.bubble.add_css_class("reply-target");
+        } else {
+            row.bubble.remove_css_class("reply-target");
+        }
+    }
+    // Reaction/count/status changes reuse the allocated body and never start a history render.
+    fn update_cached_rows(self: &Rc<Self>) -> bool {
+        let (messages, group) = {
+            let state = self.state.borrow();
+            let chat = state.current();
+            let rows = self.rendered_rows.borrow();
+            if rows.rendering
+                || rows.render_request.is_some()
+                || rows.rows.is_empty()
+                || rows.scope != (state.account.clone(), chat.jid.clone())
+                || rows.group != chat.group
+                || rows.big_emoji != self.big_emoji.get()
+            {
+                return false;
+            }
+            (
+                crate::media_caption::display_messages(&chat.messages)
+                    .into_iter()
+                    .filter(|message| !message.retracted)
+                    .collect::<Vec<_>>(),
+                chat.group,
+            )
+        };
+        let mut rendered = self.rendered_rows.borrow_mut();
+        let mut previous_index = -1;
+        if messages.len() != rendered.rows.len()
+            || messages.iter().any(|message| {
+                let Some(row) = rendered.rows.get(&message.id) else {
+                    return true;
+                };
+                let index = row.row.index();
+                let changed = index <= previous_index
+                    || !same_content(&row.message, message)
+                    || row.message.timestamp != message.timestamp
+                    || row.message.action != message.action
+                    || row.message.poll_source != message.poll_source
+                    || row.message.poll_fallback != message.poll_fallback;
+                previous_index = index;
+                changed
+            })
+        {
+            return false;
+        }
+        let position = self.capture_scroll_position();
+        for (index, message) in messages.iter().enumerate() {
+            let previous = index > 0 && clustered(&messages[index - 1], message, group);
+            let next = messages
+                .get(index + 1)
+                .is_some_and(|next| clustered(message, next, group));
+            self.update_cached_row(
+                rendered.rows.get_mut(&message.id).unwrap(),
+                message,
+                previous,
+                next,
+                group,
+            );
+        }
+        drop(rendered);
+        self.update_selection();
+        self.queue_message_scroll(position);
+        true
+    }
     pub(crate) fn refresh_link_preview_rows(self: &Rc<Self>, url: &str) {
         let ids: Vec<_> = self
             .state
@@ -307,6 +405,9 @@ impl Ui {
     }
 
     pub fn render_messages(self: &Rc<Self>, bottom: bool) {
+        if !bottom && self.update_cached_rows() {
+            return;
+        }
         if bottom && !self.history_window.newest() && !self.state.borrow().account.is_empty() {
             self.load_timeline(None);
             return;
@@ -462,27 +563,7 @@ impl Ui {
                 .get_mut(&m.id)
                 .filter(|row| same_content(&row.message, m))
             {
-                if row.message.delivery != m.delivery
-                    || row.message.time != m.time
-                    || row.message.edited != m.edited
-                    || row.message.encrypted != m.encrypted
-                    || row.message.encryption_mode != m.encryption_mode
-                {
-                    message_status(&row.status, m);
-                }
-                row.message = m.clone();
-                cluster_style(row, previous, next, group);
-                if self
-                    .history_window
-                    .highlighted
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|(id, _)| id == &m.id)
-                {
-                    row.bubble.add_css_class("reply-target");
-                } else {
-                    row.bubble.remove_css_class("reply-target");
-                }
+                self.update_cached_row(row, m, previous, next, group);
                 self.bubbles
                     .borrow_mut()
                     .insert(m.id.clone(), row.bubble.clone().upcast());
@@ -879,48 +960,7 @@ impl Ui {
                 meta.set_margin_top(3);
                 bubble.append(&meta);
             }
-            if !m.reactions.is_empty() {
-                bubble.add_css_class("has-reactions");
-                let row = bx(false, 4);
-                row.add_css_class("message-reactions");
-                row.set_margin_top(if media && !m.text.is_empty() { 3 } else { 8 });
-                if media {
-                    let horizontal = if m.text.is_empty() { 5 } else { 11 };
-                    row.set_margin_start(horizontal);
-                    row.set_margin_end(horizontal);
-                    row.set_margin_bottom(5);
-                }
-                for reaction in &m.reactions {
-                    let emoji = reaction
-                        .rsplit_once(' ')
-                        .map(|(e, _)| e)
-                        .unwrap_or(reaction)
-                        .to_string();
-                    if m.poll.as_ref().is_some_and(|p| p.is_option(&emoji)) {
-                        continue;
-                    }
-                    let b = gtk::ToggleButton::new();
-                    let chip = bx(false, 3);
-                    chip.append(&label(&emoji, "reaction-emoji"));
-                    if let Some((_, count)) = reaction.rsplit_once(' ') {
-                        chip.append(&label(count, "reaction-count"));
-                    }
-                    b.set_child(Some(&chip));
-                    b.update_property(&[gtk::accessible::Property::Label(reaction)]);
-                    b.set_active(m.my_reactions.contains(&emoji));
-                    b.add_css_class("reaction");
-                    let id = m.id.clone();
-                    let weak = Rc::downgrade(self);
-                    b.connect_toggled(move |_| {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.react(&id, &emoji)
-                        }
-                    });
-                    row.append(&b)
-                }
-                MessageText::attach_reaction_row(&bubble, &row);
-                bubble.append(&row)
-            }
+            let reactions = reactions_ui::MessageReactions::new(self, &m, &bubble, media);
             if action.is_some() {
                 outer.set_halign(gtk::Align::Center);
                 outer.set_hexpand(false);
@@ -985,6 +1025,7 @@ impl Ui {
                 status: meta,
                 heading,
                 avatar,
+                reactions,
             };
             cluster_style(&entry, previous, next, group);
             if focused.is_some() {
@@ -1736,3 +1777,7 @@ mod action_command_tests {
 #[cfg(test)]
 #[path = "../tests/reaction_scroll_native.rs"]
 mod reaction_scroll_native;
+
+#[cfg(test)]
+#[path = "../tests/reaction_media_native.rs"]
+mod reaction_media_native;

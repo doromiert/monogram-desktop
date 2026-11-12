@@ -98,7 +98,7 @@
 .story-top progressbar progress { min-height: 3px; background: white; }
 .message-list { background: transparent; }
 .message-list row { padding: 0; }
-.message-list row.message-row { margin-bottom: 9px; border-radius: 12px; }
+.message-list row.message-row { margin-bottom: 0; padding-bottom: 9px; border-radius: 12px; }
 .message-list row:selected { background: alpha(@accent_bg_color,.14); color: @window_fg_color; }
 .message-menu > contents { padding: 0; background: transparent; border: none; box-shadow: none; }
 .message-menu-panel { background: @popover_bg_color; border-radius: 12px; padding: 4px; box-shadow: 0 2px 8px alpha(black,.2); }
@@ -155,7 +155,7 @@
 .shared-media-tile { padding: 0; border: none; border-radius: 8px; background: transparent; box-shadow: none; }
 .shared-media-feedback { min-height: 32px; padding: 4px 8px 8px; }
 
-.message-list row.message-row.cluster-next { margin-bottom: 2px; }
+.message-list row.message-row.cluster-next { margin-bottom: 0; padding-bottom: 2px; }
 .message-bubble.cluster-previous { border-top-left-radius: 5px; }
 .message-bubble.cluster-previous.own { border-top-left-radius: 16px; border-top-right-radius: 5px; }
 .message-reply .reply-author { color: @accent_color; font-weight: bold; }
@@ -217,11 +217,13 @@
 .message-bubble.media-bubble.round-video-bubble { background: transparent; border: none; box-shadow: none; padding: 0; }
 .media-download.round-video { background: transparent; }
 
-.reaction-morph { background: @popover_bg_color; border-radius: 20px; transition: border-radius 350ms ease; }
+.reaction-morph { background: @popover_bg_color; border-radius: 999px; transition: border-radius 350ms ease; }
 .reaction-morph.expanded { border-radius: 12px; }
 .shared-reaction-bundle { background: @popover_bg_color; }
-.shared-reaction-bundle.compact { border-radius: 20px; }
+.shared-reaction-bundle.compact { border-radius: 999px; }
 .reaction-morph .picker-section-list > row:focus-within { outline: none; }
 
 .round-video-mute { min-width: 32px; min-height: 32px; padding: 0; color: white; background: alpha(black,.55); box-shadow: none; }
 .round-video-mute:hover { background: alpha(black,.72); }
+
+.message-list row.message-row.selected-message { border-radius: 0; }

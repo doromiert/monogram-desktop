@@ -8,6 +8,8 @@ use crate::{
 use adw::prelude::*;
 #[path = "favorite_order.rs"]
 pub(crate) mod favorite_order;
+#[path = "selection_ui.rs"]
+mod selection_ui;
 use gtk::{gdk, gio, glib};
 use std::{
     cell::{Cell, RefCell},
@@ -1209,10 +1211,11 @@ impl Ui {
             glib::Propagation::Proceed
         });
         self.scroll.add_controller(history_scroll);
-        self.selection.pack_start(&self.selection_count);
+        self.install_brush_selection();
         let clear = icon_button("window-close-symbolic", "Clear selection");
         self.weak_button(&clear, |s| s.clear_selection());
         self.selection.pack_start(&clear);
+        self.selection.pack_start(&self.selection_count);
         for (icon, title, action) in [
             ("edit-select-all-symbolic", "Select all", "select-all"),
             ("edit-copy-symbolic", "Copy selected", "copy"),

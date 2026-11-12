@@ -804,9 +804,9 @@ impl ReactionPicker {
         }
         let (x, y, width) = self.target.get();
         self.quick
-            .set_width_request((300. + (width as f64 - 300.) * progress).round() as i32);
+            .set_width_request((308. + (width as f64 - 308.) * progress).round() as i32);
         self.canvas
-            .set_margin_start((10. + (x - 10.) * progress).round() as i32);
+            .set_margin_start((6. + (x - 6.) * progress).round() as i32);
         self.canvas
             .set_margin_top((4. + (y - 4.) * progress).round() as i32);
         self.base.set_height_request(
@@ -884,8 +884,8 @@ impl ReactionPicker {
                     picker
                         .expanded
                         .update_state(&[gtk::accessible::State::Hidden(true)]);
-                    picker.quick.set_width_request(300);
-                    picker.canvas.set_margin_start(10);
+                    picker.quick.set_width_request(308);
+                    picker.canvas.set_margin_start(6);
                     picker.canvas.set_margin_top(4);
                 }
             }
@@ -1061,15 +1061,15 @@ impl Ui {
         morph.set_measure_overlay(&canvas, false);
         morph.set_clip_overlay(&canvas, true);
         canvas.append(&quick);
-        quick.set_width_request(300);
-        canvas.set_margin_start(10);
+        quick.set_width_request(308);
+        canvas.set_margin_start(6);
         canvas.set_margin_top(4);
         let arrow = icon_button("go-down-symbolic", "Show all reactions");
         arrow.add_css_class("reaction-expand");
         arrow.set_halign(gtk::Align::End);
         arrow.set_valign(gtk::Align::Center);
         arrow.set_size_request(36, 36);
-        arrow.set_margin_end(4);
+        arrow.set_margin_end(6);
         morph.add_overlay(&arrow);
         morph.set_measure_overlay(&arrow, false);
         let actions = gtk::Revealer::builder()
@@ -1097,7 +1097,7 @@ impl Ui {
             moving: Cell::new(false),
             progress: Cell::new(0.),
             full_height: Cell::new(380),
-            target: Cell::new((10., 46., 300)),
+            target: Cell::new((6., 46., 308)),
             animation: RefCell::new(None),
         });
         let weak = Rc::downgrade(&picker);

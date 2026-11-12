@@ -477,6 +477,12 @@ impl MessageText {
         text.imp().reaction_status.replace(Some(slot));
     }
 
+    pub(crate) fn refresh_reaction_layout(bubble: &gtk::Box) {
+        if let Some(text) = message_bubble_limit_imp::message_text_descendant(bubble.upcast_ref()) {
+            text.refresh_compact();
+        }
+    }
+
     fn refresh_compact(&self) {
         let Some(body) = self.imp().body.borrow().as_ref().cloned() else {
             return;
@@ -520,6 +526,18 @@ impl MessageText {
         let row = self.imp().reaction_row.borrow().upgrade();
         let share = wrapped
             && row.as_ref().is_some_and(|row| {
+                let mut child = row.first_child();
+                let mut has_reaction = false;
+                while let Some(widget) = child {
+                    child = widget.next_sibling();
+                    if !widget.has_css_class("reaction-status") {
+                        has_reaction = true;
+                        break;
+                    }
+                }
+                if !row.is_visible() || !has_reaction {
+                    return false;
+                }
                 let (_, natural, _, _) = row.measure(gtk::Orientation::Horizontal, -1);
                 let needed = if self.imp().status_in_reactions.get() {
                     natural
