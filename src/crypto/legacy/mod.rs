@@ -200,18 +200,21 @@ impl Legacy {
             other => other,
         })
     }
-    fn blind_trust(&self, peer: &str) -> Result<bool> {
-        if peer == self.store.owner {
-            return Ok(false);
-        }
+    fn blind_trust(&self, peer: &str, conversation: Option<&str>) -> Result<bool> {
         if let Some(history) = history(&self.history_path)? {
-            return Ok(history.blind_trust(&self.store.owner, peer)?);
+            return Ok(history.blind_trust_for(&self.store.owner, peer, conversation)?);
         }
         Ok(false)
     }
-    fn observe(&mut self, peer: &str, id: u32, key: &[u8; 32]) -> Result<Trust> {
+    fn observe(
+        &mut self,
+        peer: &str,
+        id: u32,
+        key: &[u8; 32],
+        conversation: Option<&str>,
+    ) -> Result<Trust> {
         // Read after any PEP request so disabling this preference during a lookup takes effect.
-        let accept = self.blind_trust(peer)?;
+        let accept = self.blind_trust(peer, conversation)?;
         self.store.transaction(|tx| {
             tx.save(SEEN, peer, id, Some(key))?;
             let trust = device::trust(tx, peer, id, key)?;
@@ -237,9 +240,14 @@ impl Legacy {
         }
         Ok(ids)
     }
-    async fn observe_bundle(&mut self, peer: &str, id: u32) -> Result<(Device, Bundle)> {
+    async fn observe_bundle(
+        &mut self,
+        peer: &str,
+        id: u32,
+        conversation: Option<&str>,
+    ) -> Result<(Device, Bundle)> {
         let bundle = self.bundle(peer, id).await?;
-        let trust = self.observe(peer, id, &bundle.identity)?;
+        let trust = self.observe(peer, id, &bundle.identity, conversation)?;
         Ok((
             Device {
                 peer: peer.into(),
@@ -250,17 +258,28 @@ impl Legacy {
             bundle,
         ))
     }
-    async fn devices(&mut self, peer: &str) -> Result<Vec<(Device, Bundle)>> {
+    async fn devices(
+        &mut self,
+        peer: &str,
+        conversation: Option<&str>,
+    ) -> Result<Vec<(Device, Bundle)>> {
         let mut entries = vec![];
         for id in self.published_ids(peer).await? {
-            entries.push(self.observe_bundle(peer, id).await?);
+            entries.push(self.observe_bundle(peer, id, conversation).await?);
         }
         Ok(entries)
     }
     pub async fn discover(&mut self, peer: &str) -> Result<(Vec<Device>, Vec<(u32, Error)>)> {
+        self.discover_for(peer, None).await
+    }
+    pub(crate) async fn discover_for(
+        &mut self,
+        peer: &str,
+        conversation: Option<&str>,
+    ) -> Result<(Vec<Device>, Vec<(u32, Error)>)> {
         let (mut entries, mut errors) = (vec![], vec![]);
         for id in self.published_ids(peer).await? {
-            match self.observe_bundle(peer, id).await {
+            match self.observe_bundle(peer, id, conversation).await {
                 Ok((device, _)) => entries.push(device),
                 Err(error) => errors.push((id, error)),
             }
@@ -287,7 +306,7 @@ impl Legacy {
     pub async fn encrypt(&mut self, peer: &str, body: &str, wire_id: &str) -> Result<Element> {
         address(peer, 1)?;
         let owner = self.store.owner.clone();
-        let mut targets = self.devices(peer).await?;
+        let mut targets = self.devices(peer, Some(peer)).await?;
         if !targets
             .iter()
             .any(|(device, _)| device.trust != Trust::Rejected)
@@ -306,7 +325,7 @@ impl Legacy {
         }
         if owner != peer {
             // Failure to read our own devices is not evidence that they don't exist.
-            let copies = self.devices(&owner).await.map_err(|error| {
+            let copies = self.devices(&owner, Some(peer)).await.map_err(|error| {
                 if probe_unavailable(&error) {
                     Error::Unavailable("Could not verify your other Legacy OMEMO devices")
                 } else {
@@ -340,7 +359,7 @@ impl Legacy {
         let mut seen = BTreeSet::new();
         for peer in members {
             address(peer, 1)?;
-            let devices = self.devices(peer).await?;
+            let devices = self.devices(peer, Some(room)).await?;
             if devices
                 .iter()
                 .any(|(device, _)| device.trust == Trust::Undecided)
@@ -386,7 +405,13 @@ impl Legacy {
         context: Option<Context>,
     ) -> Result<Received> {
         let envelope = Envelope::parse(outer, &self.store.owner, self.device())?;
-        self.receive_envelope(outer, envelope, sent_time, context)
+        let (sender, destination) = payload::routing(outer)?;
+        let conversation = if sender == self.store.owner {
+            destination
+        } else {
+            sender
+        };
+        self.receive_envelope(outer, envelope, sent_time, context, Some(&conversation))
             .await
     }
     pub async fn receive_room(
@@ -397,7 +422,7 @@ impl Legacy {
         context: Option<Context>,
     ) -> Result<Received> {
         let envelope = Envelope::parse_room(outer, &self.store.owner, self.device(), sender)?;
-        self.receive_envelope(outer, envelope, sent_time, context)
+        self.receive_envelope(outer, envelope, sent_time, context, Some(&sender.room))
             .await
     }
     async fn receive_envelope(
@@ -406,6 +431,7 @@ impl Legacy {
         envelope: Envelope,
         sent_time: i64,
         context: Option<Context>,
+        conversation: Option<&str>,
     ) -> Result<Received> {
         if let Some(cached) = self
             .store
@@ -419,11 +445,17 @@ impl Legacy {
         {
             return first;
         }
-        if !self.blind_trust(&envelope.peer)? {
+        if !self.blind_trust(&envelope.peer, conversation)? {
             return Err(Error::TrustRequired);
         }
         let bundle = self.bundle(&envelope.peer, envelope.sender).await?;
-        if self.observe(&envelope.peer, envelope.sender, &bundle.identity)? != Trust::Trusted {
+        if self.observe(
+            &envelope.peer,
+            envelope.sender,
+            &bundle.identity,
+            conversation,
+        )? != Trust::Trusted
+        {
             return Err(Error::TrustRequired);
         }
         self.receive_for(outer, &envelope, sent_time, context)

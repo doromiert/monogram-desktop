@@ -131,6 +131,18 @@ impl Store {
             .optional()
             .map(|value| value.unwrap_or(false))
     }
+    pub(crate) fn blind_trust_for(
+        &self,
+        owner: &str,
+        peer: &str,
+        conversation: Option<&str>,
+    ) -> rusqlite::Result<bool> {
+        Ok(self.blind_trust(owner, peer)?
+            || conversation
+                .map(|scope| self.blind_trust(owner, scope))
+                .transpose()?
+                .unwrap_or(false))
+    }
     pub fn set_blind_trust(&self, owner: &str, peer: &str, enabled: bool) -> rusqlite::Result<()> {
         if owner == peer || crate::protocol::bare(peer).ok().as_deref() != Some(peer) {
             return Err(rusqlite::Error::InvalidQuery);
@@ -785,6 +797,35 @@ pub fn same_source(old: &Message, new: &Message) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn automatic_trust_is_account_and_conversation_scoped() {
+        let store = Store::open(true).unwrap();
+        let (owner, peer, room) = (
+            "me@example.org",
+            "member@example.org",
+            "room@conference.example.org",
+        );
+        assert!(!store.blind_trust_for(owner, peer, Some(room)).unwrap());
+        store.set_blind_trust(owner, room, true).unwrap();
+        assert!(store.blind_trust_for(owner, peer, Some(room)).unwrap());
+        assert!(store.blind_trust_for(owner, owner, Some(room)).unwrap());
+        assert!(!store.blind_trust_for(owner, peer, None).unwrap());
+        assert!(
+            !store
+                .blind_trust_for(owner, peer, Some("other@conference.example.org"))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .blind_trust_for("other@example.org", peer, Some(room))
+                .unwrap()
+        );
+        store.set_blind_trust(owner, room, false).unwrap();
+        assert!(!store.blind_trust_for(owner, owner, Some(room)).unwrap());
+        store.set_blind_trust(owner, peer, true).unwrap();
+        assert!(store.blind_trust_for(owner, owner, Some(peer)).unwrap());
+        assert!(store.blind_trust_for(owner, peer, Some(room)).unwrap());
+    }
     #[test]
     fn upload_caption_claim_waits_for_scoped_parent_and_is_durable_once() {
         let store = Store::open(true).unwrap();

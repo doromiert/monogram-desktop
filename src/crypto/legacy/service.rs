@@ -569,7 +569,7 @@ impl Worker {
         let mut errors = vec![];
         for address in peers {
             let result = match self.local.as_mut().filter(|_| self.ready) {
-                Some(local) => local.discover(&address).await,
+                Some(local) => local.discover_for(&address, Some(peer)).await,
                 None => Err(Error::Unavailable("Legacy OMEMO is not ready")),
             };
             match result {
@@ -1316,7 +1316,10 @@ impl Worker {
                     let _ = reply.send(self.probe_room(&recipients).await);
                 }
             }
-            Request::ReviewRoom { peer, members } => self.review_members(&peer, members).await,
+            Request::ReviewRoom { peer, members } => {
+                self.review_members(&peer, members).await;
+                self.retry().await;
+            }
             Request::Incoming(frame) => self.receive_request(frame, None).await,
             Request::IncomingRoom {
                 frame,

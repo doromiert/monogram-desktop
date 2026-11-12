@@ -201,6 +201,68 @@ impl Ui {
         );
         choices.add(&sending);
         let owner = self.state.borrow().account.clone();
+        if peer != owner && room {
+            let trust = adw::SwitchRow::builder()
+                .title("Automatically Trust Room Fingerprints")
+                .subtitle("Approves authenticated member and own-device keys for this room in Legacy OMEMO and OMEMO2; blocked fingerprints stay blocked")
+                .active(self.store.blind_trust(&owner, &peer).unwrap_or(false))
+                .build();
+            let weak = Rc::downgrade(self);
+            let target = peer.clone();
+            let owner = owner.clone();
+            let setting = Rc::new(Cell::new(false));
+            trust.connect_active_notify(move |row| {
+                if setting.get() {
+                    return;
+                }
+                let Some(ui) = weak
+                    .upgrade()
+                    .filter(|ui| ui.generation.get() == generation)
+                else {
+                    return;
+                };
+                let Ok(enabled) = ui.store.blind_trust(&owner, &target) else {
+                    set_switch(row, &setting, !row.is_active());
+                    ui.notice("Could not read the trust setting");
+                    return;
+                };
+                if row.is_active() == enabled {
+                    return;
+                }
+                if enabled {
+                    if !ui.set_blind_trust(&owner, &target, false, true) {
+                        set_switch(row, &setting, true);
+                    }
+                    return;
+                }
+                set_switch(row, &setting, false);
+                let confirm = adw::AlertDialog::builder()
+                    .heading("Automatically Trust Room Fingerprints?")
+                    .body(format!("Approve authenticated member devices and your own authenticated devices for {target} in Legacy OMEMO and OMEMO2 without fingerprint verification. This applies only to this room, not as a global wildcard. Explicitly blocked fingerprints stay blocked."))
+                    .build();
+                confirm.add_responses(&[("cancel", "Cancel"), ("enable", "Enable Automatic Trust")]);
+                confirm.set_default_response(Some("cancel"));
+                confirm.set_response_appearance("enable", adw::ResponseAppearance::Destructive);
+                let (owner, target, weak, row, setting) = (
+                    owner.clone(),
+                    target.clone(),
+                    weak.clone(),
+                    row.downgrade(),
+                    setting.clone(),
+                );
+                confirm.connect_response(Some("enable"), move |_, _| {
+                    if let (Some(ui), Some(row)) = (weak.upgrade(), row.upgrade()) {
+                        if ui.generation.get() == generation
+                            && ui.set_blind_trust(&owner, &target, true, true)
+                        {
+                            set_switch(&row, &setting, true);
+                        }
+                    }
+                });
+                confirm.present(Some(&ui.window));
+            });
+            choices.add(&trust);
+        }
         if peer != owner && !self.state.borrow().current().group {
             let contact_access = crate::contact_access::valid_peer(&owner, &peer);
             let trust = adw::SwitchRow::builder()
@@ -221,7 +283,7 @@ impl Ui {
                 };
                 if row.is_active() == enabled { return; }
                 if enabled {
-                    if !ui.set_blind_trust(&owner, &target, false) {
+                    if !ui.set_blind_trust(&owner, &target, false, false) {
                         set_switch(row, &setting, true);
                     }
                     return;
@@ -237,7 +299,7 @@ impl Ui {
                 let (owner, target, weak, row, setting) = (owner.clone(), target.clone(), weak.clone(), row.downgrade(), setting.clone());
                 confirm.connect_response(Some("enable"), move |_, _| {
                     if let (Some(ui), Some(row)) = (weak.upgrade(), row.upgrade()) {
-                        if ui.generation.get() == generation && ui.set_blind_trust(&owner, &target, true) {
+                        if ui.generation.get() == generation && ui.set_blind_trust(&owner, &target, true, false) {
                             set_switch(&row, &setting, true);
                         }
                     }
@@ -302,13 +364,20 @@ impl Ui {
             }
         });
     }
-    fn set_blind_trust(&self, owner: &str, peer: &str, enabled: bool) -> bool {
+    fn set_blind_trust(&self, owner: &str, peer: &str, enabled: bool, room: bool) -> bool {
         if self.store.set_blind_trust(owner, peer, enabled).is_err() {
             self.notice("Could not save the trust setting");
             return false;
         }
         self.invalidate_sending_choice(peer);
         if enabled {
+            if room {
+                self.command(protocol::Command::ReviewRoom { peer: peer.into() });
+                self.command(protocol::Command::PqCrypto(
+                    crate::crypto::pq::service::Request::Review(peer.into()),
+                ));
+                return true;
+            }
             self.command(protocol::Command::Legacy(
                 crate::crypto::legacy::service::Request::RefreshTrust(peer.into()),
             ));
