@@ -41,11 +41,11 @@
 .gif-tile { border-radius: 12px; min-height: 90px; padding: 8px; background: linear-gradient(135deg,alpha(@accent_bg_color,.2),alpha(@accent_bg_color,.05)); }
 .photo-tile { border-radius: 10px; }
 .file-chip { background: alpha(@accent_bg_color,.1); border-radius: 10px; padding: 5px 10px; }
-.attachment-preview-strip { background: transparent; padding: 6px 8px 2px; }
+.attachment-preview-strip { background: transparent; padding: 6px 4px 2px; }
 .attachment-preview-card { min-width: 180px; border-radius: 12px; background: alpha(@window_fg_color,.08); }
-.attachment-preview-art { min-height: 112px; border-radius: 12px 12px 0 0; background: alpha(@window_fg_color,.06); }
-.attachment-preview-art picture { border-radius: 12px 12px 0 0; }
-.attachment-preview-name { font-weight: 600; padding: 9px 10px 10px; }
+.attachment-preview-art { min-height: 112px; border-radius: 12px; background: alpha(@window_fg_color,.06); }
+.attachment-preview-art picture { border-radius: 12px; }
+.attachment-preview-name { background: alpha(black,.64); border-radius: 9px; color: white; font-size: 11px; font-weight: 600; margin: 6px; padding: 2px 6px; }
 .attachment-preview-remove { margin: 6px; background: alpha(black,.64); color: white; }
 .poll-answer { background: alpha(@window_fg_color,.05); border-radius: 8px; padding: 6px 8px; min-height: 24px; }
 .poll-answer:checked { background: alpha(@accent_bg_color,.2); }

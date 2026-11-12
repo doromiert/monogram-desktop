@@ -21,8 +21,6 @@ impl Ui {
             card.add_css_class("attachment-preview-card");
             card.set_size_request(180, -1);
             card.update_property(&[gtk::accessible::Property::Label(&name)]);
-            let contents = bx(true, 0);
-            card.set_child(Some(&contents));
             let is_image = name.rsplit_once('.').is_some_and(|(_, extension)| {
                 matches!(
                     extension.to_ascii_lowercase().as_str(),
@@ -70,12 +68,14 @@ impl Ui {
                     );
                 }
             }
-            contents.append(&preview);
+            card.set_child(Some(&preview));
             let name_label = label(&name, "attachment-preview-name");
             name_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
             name_label.set_max_width_chars(20);
             name_label.set_single_line_mode(true);
-            contents.append(&name_label);
+            name_label.set_halign(gtk::Align::Start);
+            name_label.set_valign(gtk::Align::End);
+            card.add_overlay(&name_label);
             let remove = icon_button("window-close-symbolic", "Remove attachment");
             remove.add_css_class("attachment-preview-remove");
             remove.set_halign(gtk::Align::End);
