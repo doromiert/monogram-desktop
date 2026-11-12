@@ -424,6 +424,7 @@ pub struct State {
     pub folder: String,
     pub folders: BTreeMap<String, Folder>,
     pub folder_order: Vec<String>,
+    pub all_folder_hidden: bool,
     pub stories: Vec<Story>,
     pub requests: Vec<(String, String)>,
     pub wallets: Vec<String>,
@@ -441,6 +442,7 @@ impl State {
             folder: "All".into(),
             folders: f.folders,
             folder_order: f.folder_order,
+            all_folder_hidden: false,
             stories: f.stories,
             requests: f.requests,
             wallets: vec!["Everyday".into(), "Savings".into()],
@@ -567,10 +569,70 @@ impl State {
             self.folder_order.insert(at, name)
         }
     }
+    pub fn folder_visible(&self, name: &str) -> bool {
+        self.folder_order.iter().any(|folder| folder == name)
+            && if name == "All" {
+                !self.all_folder_hidden
+            } else {
+                self.folders.contains_key(name)
+            }
+    }
+    pub fn visible_folder_names(&self) -> Vec<String> {
+        self.folder_order
+            .iter()
+            .filter(|name| self.folder_visible(name))
+            .cloned()
+            .collect()
+    }
+    pub fn reorder_visible(&mut self, name: &str, index: usize) -> bool {
+        let mut visible = self.visible_folder_names();
+        let Some(old) = visible.iter().position(|folder| folder == name) else {
+            return false;
+        };
+        let at = index.min(visible.len() - 1);
+        if old == at {
+            return false;
+        }
+        let folder = visible.remove(old);
+        visible.insert(at, folder);
+        let mut reordered = visible.into_iter();
+        // Only replace visible slots: hidden All keeps its exact raw position.
+        let slots: Vec<_> = self
+            .folder_order
+            .iter()
+            .enumerate()
+            .filter_map(|(index, folder)| self.folder_visible(folder).then_some(index))
+            .collect();
+        for slot in slots {
+            self.folder_order[slot] = reordered.next().unwrap();
+        }
+        true
+    }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn folder_visible_reordering_preserves_hidden_all_position() {
+        let mut state = State::demo();
+        state.folder_order = vec!["Groups".into(), "All".into(), "Unread".into()];
+        assert!(state.reorder_visible("All", 2));
+        assert_eq!(state.folder_order, ["Groups", "Unread", "All"]);
+        state.all_folder_hidden = true;
+        assert!(!state.folder_visible("All"));
+        assert!(!state.reorder_visible("All", 0));
+        assert!(state.reorder_visible("Unread", 0));
+        assert_eq!(state.folder_order, ["Unread", "Groups", "All"]);
+        assert_eq!(state.visible_folder_names(), ["Unread", "Groups"]);
+        state.all_folder_hidden = false;
+        assert_eq!(state.visible_folder_names(), ["Unread", "Groups", "All"]);
+        state.folder_order = vec!["Groups".into(), "All".into(), "Unread".into()];
+        state.all_folder_hidden = true;
+        assert!(state.reorder_visible("Unread", 0));
+        assert_eq!(state.folder_order, ["Unread", "All", "Groups"]);
+        assert!(!state.reorder_visible("missing", 0));
+        assert!(!state.reorder_visible("Unread", 0));
+    }
     #[test]
     fn filters_and_order() {
         let mut s = State::demo();

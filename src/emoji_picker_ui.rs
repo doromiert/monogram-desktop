@@ -127,6 +127,7 @@ impl EmojiSurface {
             let category_scroll = horizontal_strip(&categories);
             category_scroll.add_css_class("emoji-category-scroll");
             let category_row = bx(false, 2);
+            category_row.add_css_class("emoji-category-row");
             category_scroll.set_hexpand(true);
             category_row.append(&category_scroll);
             category_row.append(&settings);
@@ -335,35 +336,16 @@ impl EmojiSurface {
             ));
         } else {
             if shared.is_some() {
-                anchors.insert(-1, 0);
+                anchors.insert(-4, 0);
                 rows.push(glib::BoxedAnyObject::new(EmojiRow::Quick));
             }
-            let favorites = favorite_entries
-                .into_iter()
-                .filter(|entry| {
-                    shared
-                        .as_ref()
-                        .is_none_or(|quick| !quick.emojis.contains(&entry.text))
-                })
-                .collect::<Vec<_>>();
-            if shared.is_none() || !favorites.is_empty() {
-                sections.push((-1, "Favorites", favorites, true));
-            }
+            sections.push((-1, "Favorites", favorite_entries, true));
             sections.push((
                 -2,
-                if shared.is_some() {
-                    "Reactions"
-                } else {
-                    "Recent"
-                },
+                "Recent",
                 preferences
                     .recent
                     .iter()
-                    .filter(|emoji| {
-                        shared
-                            .as_ref()
-                            .is_none_or(|quick| !quick.emojis.contains(emoji))
-                    })
                     .filter_map(|emoji| catalog.iter().find(|entry| entry.text == *emoji).cloned())
                     .collect(),
                 false,
@@ -417,7 +399,9 @@ impl EmojiSurface {
         let reorder_key = favorite_order::emoji_key(emoji);
         let button = gtk::Button::builder()
             .label(emoji)
-            .tooltip_text(format!("{name} · right-click to favorite or pin"))
+            .tooltip_text(format!(
+                "{name} · Alt-click or right-click to favorite or pin"
+            ))
             .build();
         button.add_css_class("flat");
         button.add_css_class("emoji-picker-item");
@@ -425,9 +409,14 @@ impl EmojiSurface {
             "{name}, {emoji}"
         ))]);
         let value = emoji.to_owned();
+        let alternate_activation = Rc::new(Cell::new(false));
         let surface = Rc::downgrade(self);
         let emoji = value.clone();
+        let skip_activation = alternate_activation.clone();
         button.connect_clicked(move |_| {
+            if skip_activation.replace(false) {
+                return;
+            }
             let Some(surface) = surface.upgrade() else {
                 return;
             };
@@ -450,6 +439,36 @@ impl EmojiSurface {
                 }
             });
         });
+        let alternate = gtk::GestureClick::new();
+        alternate.set_button(gdk::BUTTON_PRIMARY);
+        alternate.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let surface = Rc::downgrade(self);
+        let emoji = value.clone();
+        let skip_activation = alternate_activation;
+        alternate.connect_pressed(move |gesture, _, _, _| {
+            if !gesture
+                .current_event_state()
+                .contains(gdk::ModifierType::ALT_MASK)
+            {
+                return;
+            }
+            skip_activation.set(true);
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            let Some(surface) = surface.upgrade() else {
+                return;
+            };
+            let Some(ui) = surface.ui.upgrade() else {
+                return;
+            };
+            let preferences = ui.store.emoji_preferences().unwrap_or_default();
+            let favorite = preferences.favorites.iter().any(|value| value == &emoji);
+            if ui.store.set_emoji_favorite(&emoji, !favorite).is_err() {
+                ui.notice("Emoji preferences could not be saved");
+            } else {
+                refresh_emoji_surfaces(&ui);
+            }
+        });
+        button.add_controller(alternate);
         let secondary = gtk::GestureClick::new();
         secondary.set_button(gdk::BUTTON_SECONDARY);
         let surface = Rc::downgrade(self);
@@ -766,6 +785,9 @@ pub(crate) struct ReactionPicker {
     progress: Cell<f64>,
     full_height: Cell<i32>,
     target: Cell<(f64, f64, i32)>,
+    collapsed_radius: Cell<i32>,
+    radius: Cell<i32>,
+    radius_css: gtk::CssProvider,
     animation: RefCell<Option<adw::TimedAnimation>>,
 }
 impl ReactionPicker {
@@ -791,8 +813,43 @@ impl ReactionPicker {
         slot.append(&self.quick);
         self.canvas.set_visible(false);
     }
+    fn radius_styles(radius: i32) -> String {
+        (12..=radius.max(12))
+            .map(|radius| {
+                format!(
+                    ".reaction-morph.reaction-radius-{radius} {{ border-radius: {radius}px; }}"
+                )
+            })
+            .collect()
+    }
+    fn capture_collapsed_radius(&self) {
+        if self.progress.get() != 0. || self.moving.get() || self.is_expanded.get() {
+            return;
+        }
+        let height = self.morph.height();
+        if height <= 0 {
+            return;
+        }
+        let radius = (height / 2).max(12);
+        if radius != self.collapsed_radius.get() {
+            self.collapsed_radius.set(radius);
+            self.radius_css.load_from_string(&Self::radius_styles(radius));
+        }
+    }
+    fn apply_radius(&self, progress: f64) {
+        let collapsed = self.collapsed_radius.get() as f64;
+        let radius = (collapsed + (12. - collapsed) * progress).round() as i32;
+        let previous = self.radius.replace(radius);
+        if previous != radius {
+            self.morph
+                .remove_css_class(&format!("reaction-radius-{previous}"));
+            self.morph
+                .add_css_class(&format!("reaction-radius-{radius}"));
+        }
+    }
     fn frame(&self, progress: f64) {
         self.progress.set(progress);
+        self.apply_radius(progress);
         if let Some(slot) = self.shared.slot.borrow().upgrade() {
             if let Some(bounds) = slot.compute_bounds(&self.morph) {
                 self.target.set((
@@ -819,6 +876,9 @@ impl ReactionPicker {
         }
         if let Some(animation) = self.animation.borrow_mut().take() {
             animation.pause();
+        }
+        if expanded {
+            self.capture_collapsed_radius();
         }
         if !expanded {
             self.search.set_text("");
@@ -971,7 +1031,6 @@ impl Ui {
             }
             ui.react(&id, emoji);
         });
-        surface.category_row.set_visible(false);
         let quick = bx(true, 0);
         quick.add_css_class("shared-reaction-bundle");
         quick.add_css_class("compact");
@@ -1035,6 +1094,7 @@ impl Ui {
         expanded.set_sensitive(false);
         expanded.update_state(&[gtk::accessible::State::Hidden(true)]);
         let header = bx(false, 6);
+        header.add_css_class("expanded-reaction-header");
         let search = gtk::SearchEntry::builder()
             .placeholder_text("Search")
             .hexpand(true)
@@ -1049,6 +1109,13 @@ impl Ui {
         base.set_size_request(320, 48);
         let morph = gtk::Overlay::new();
         morph.add_css_class("reaction-morph");
+        morph.add_css_class("reaction-radius-24");
+        let radius_css = gtk::CssProvider::new();
+        radius_css.load_from_string(&ReactionPicker::radius_styles(24));
+        morph.style_context().add_provider(
+            &radius_css,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+        );
         morph.set_overflow(gtk::Overflow::Hidden);
         morph.set_child(Some(&base));
         morph.add_overlay(&expanded);
@@ -1098,6 +1165,9 @@ impl Ui {
             progress: Cell::new(0.),
             full_height: Cell::new(380),
             target: Cell::new((6., 46., 308)),
+            collapsed_radius: Cell::new(24),
+            radius: Cell::new(24),
+            radius_css,
             animation: RefCell::new(None),
         });
         let weak = Rc::downgrade(&picker);

@@ -174,7 +174,7 @@ impl Store {
             "INSERT OR REPLACE INTO preferences VALUES (?,?)",
             params![format!("active-chat:{}", s.account), s.active],
         )?;
-        let folders = serde_json::json!({"rules":s.folders,"order":s.folder_order});
+        let folders = serde_json::json!({"rules":s.folders,"order":s.folder_order,"all_hidden":s.all_folder_hidden});
         tx.execute(
             "INSERT OR REPLACE INTO preferences VALUES (?,?)",
             params![format!("folders:{}", s.account), folders.to_string()],
@@ -549,11 +549,22 @@ impl Store {
                 serde_json::from_value(data["rules"].clone()),
                 serde_json::from_value::<Vec<String>>(data["order"].clone()),
             ) {
-                if !o.is_empty() {
-                    s.folders = f;
-                    s.folder_order = o;
-                    s.folder = s.folder_order[0].clone()
+                s.folders = f;
+                let mut seen = std::collections::HashSet::new();
+                s.folder_order = o
+                    .into_iter()
+                    .filter(|name| {
+                        (name == "All" || s.folders.contains_key(name)) && seen.insert(name.clone())
+                    })
+                    .collect();
+                if !s.folder_order.iter().any(|name| name == "All") {
+                    s.folder_order.push("All".into());
                 }
+                s.all_folder_hidden = data["all_hidden"].as_bool().unwrap_or(false);
+                if s.visible_folder_names().is_empty() {
+                    s.all_folder_hidden = false;
+                }
+                s.folder = s.visible_folder_names()[0].clone();
             }
         }
         s
@@ -796,6 +807,49 @@ pub fn same_source(old: &Message, new: &Message) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn folder_visibility_reload_is_account_scoped_and_legacy_safe() {
+        let store = Store::open(true).unwrap();
+        for owner in ["first@fixture.invalid", "second@fixture.invalid"] {
+            store
+                .save_account(&Account {
+                    jid: owner.into(),
+                    host: String::new(),
+                    port: 5222,
+                    direct_tls: false,
+                })
+                .unwrap();
+        }
+        let mut first = State::live("first@fixture.invalid", vec![]);
+        first.folder_order = vec!["Groups".into(), "All".into(), "Unread".into()];
+        first.all_folder_hidden = true;
+        store.save(&first).unwrap();
+        let second = State::live("second@fixture.invalid", vec![]);
+        store.save(&second).unwrap();
+        let loaded = store.load("first@fixture.invalid");
+        assert!(loaded.all_folder_hidden);
+        assert_eq!(loaded.folder_order, first.folder_order);
+        assert_eq!(loaded.folder, "Groups");
+        assert_eq!(loaded.visible_folder_names(), ["Groups", "Unread"]);
+        assert!(!store.load("second@fixture.invalid").all_folder_hidden);
+        // Old configs lack visibility; unknown/deleted names cannot become active.
+        let legacy = serde_json::json!({"rules":first.folders,"order":["missing","All","Groups"]});
+        store
+            .set_pref("folders:first@fixture.invalid", &legacy.to_string())
+            .unwrap();
+        let loaded = store.load("first@fixture.invalid");
+        assert!(!loaded.all_folder_hidden);
+        assert_eq!(loaded.folder, "All");
+        assert_eq!(loaded.folder_order, ["All", "Groups"]);
+        let empty = serde_json::json!({"rules":{},"order":["All"],"all_hidden":true});
+        store
+            .set_pref("folders:first@fixture.invalid", &empty.to_string())
+            .unwrap();
+        let loaded = store.load("first@fixture.invalid");
+        assert!(!loaded.all_folder_hidden);
+        assert_eq!(loaded.visible_folder_names(), ["All"]);
+        assert_eq!(loaded.folder, "All");
+    }
     #[test]
     fn automatic_trust_is_account_and_conversation_scoped() {
         let store = Store::open(true).unwrap();

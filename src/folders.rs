@@ -63,9 +63,6 @@ impl FolderBar {
     }
 
     pub fn bind(&self, button: &gtk::ToggleButton, reorder: impl Fn(&str, usize) + 'static) {
-        if button.label().as_deref() == Some("All") {
-            return;
-        }
         let gesture = gtk::GestureDrag::new();
         gesture.set_button(1);
         gesture.set_propagation_phase(gtk::PropagationPhase::Capture);

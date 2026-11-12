@@ -858,8 +858,10 @@ impl Ui {
             self.folder_bar.remove(&c)
         }
         let state = self.state.borrow();
+        let visible_names = state.visible_folder_names();
+        let all_visible = state.folder_visible("All");
         let mut first: Option<gtk::ToggleButton> = None;
-        for name in &state.folder_order {
+        for name in &visible_names {
             let b = gtk::ToggleButton::with_label(name);
             b.add_css_class("flat");
             if let Some(ref first) = first {
@@ -881,9 +883,7 @@ impl Ui {
             let weak = Rc::downgrade(self);
             self.folder_bar.bind(&b, move |name, index| {
                 if let Some(ui) = weak.upgrade() {
-                    ui.state.borrow_mut().reorder(name, index);
-                    ui.order_folders();
-                    ui.persist();
+                    ui.reorder_visible_folder(name, index);
                 }
             });
             let mut actions = vec![
@@ -895,25 +895,13 @@ impl Ui {
             if state.folders.contains_key(&name) {
                 actions.push(("Delete folder…".into(), format!("folder-delete:{name}")));
             }
+            if name == "All" {
+                actions.push(("Hide All".into(), "folder-hide-all".into()));
+            } else if !all_visible {
+                actions.push(("Show All".into(), "folder-show-all".into()));
+            }
             self.context_actions(&b, actions);
             self.folder_bar.append(&b);
-        }
-    }
-    fn order_folders(&self) {
-        let mut buttons = HashMap::new();
-        let mut child = self.folder_bar.first_child();
-        while let Some(c) = child {
-            child = c.next_sibling();
-            if let Ok(b) = c.downcast::<gtk::ToggleButton>() {
-                buttons.insert(b.label().unwrap_or_default().to_string(), b);
-            }
-        }
-        let mut previous: Option<gtk::ToggleButton> = None;
-        for name in &self.state.borrow().folder_order {
-            if let Some(b) = buttons.get(name) {
-                self.folder_bar.reorder_child_after(b, previous.as_ref());
-                previous = Some(b.clone());
-            }
         }
     }
     pub fn set_folder(self: &Rc<Self>, name: &str) {

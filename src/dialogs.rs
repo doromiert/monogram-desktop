@@ -590,6 +590,12 @@ impl Ui {
             "story-new" => self.new_story(),
             "folder-edit" => self.edit_folder(id),
             "folder-new" => self.edit_folder(""),
+            "folder-hide-all" => {
+                self.set_all_folder_hidden(true);
+            }
+            "folder-show-all" => {
+                self.set_all_folder_hidden(false);
+            }
             "folder-delete" => {
                 let owner = self.state.borrow().account.clone();
                 let generation = self.generation.get();
