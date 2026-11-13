@@ -194,6 +194,10 @@
 .message-bubble.media-bubble.cluster-previous.own { border-top-left-radius: 12px; border-top-right-radius: 5px; }
 
 .media-download { background: alpha(@window_fg_color,.06); border-radius: 10px; }
+.media-bubble .media-download:not(.sticker-download):not(.round-video) { border-bottom-left-radius: 3px; }
+.media-bubble.own .media-download:not(.sticker-download):not(.round-video) { border-bottom-left-radius: 10px; border-bottom-right-radius: 3px; }
+.media-bubble.cluster-previous .media-download:not(.sticker-download):not(.round-video) { border-top-left-radius: 3px; }
+.media-bubble.own.cluster-previous .media-download:not(.sticker-download):not(.round-video) { border-top-left-radius: 10px; border-top-right-radius: 3px; }
 .media-download.sticker-download { background: transparent; border-radius: 0; }
 .media-download-controls { background: transparent; color: white; }
 .media-download-action { min-width: 40px; min-height: 40px; padding: 0; color: white; background: rgba(0,0,0,.48); border: none; box-shadow: none; }
