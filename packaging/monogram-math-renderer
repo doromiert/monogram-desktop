@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/lib/jvm/java-21-openjdk/bin/java -Djava.awt.headless=true -Xmx96m -XX:MaxMetaspaceSize=64m -Xss256k -cp '/usr/lib/monogram-desktop/math/*:/usr/lib/monogram-desktop/math' MonogramMath "$@"

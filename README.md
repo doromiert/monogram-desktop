@@ -39,6 +39,24 @@ standard-library script in tests/ launches disposable Prosody verification fixtu
 No system activation is needed. The flake exports x86_64-linux and aarch64-linux; the current native
 checks were run on x86_64-linux.
 
+## Arch Linux
+
+The root `PKGBUILD` builds the Git version, including the supplied temporary icon,
+pinned encryption backend, sandboxed sticker renderer and JLaTeXMath helper:
+
+```sh
+git clone https://github.com/doromiert/monogram-desktop.git
+cd monogram-desktop
+makepkg -si
+```
+
+Run `makepkg` as your normal user on an up-to-date Arch installation with
+`base-devel` installed. Cargo downloads locked dependencies during preparation;
+compilation uses `--frozen`. A Secret Service provider is needed for saved
+credentials and the OMEMO vault. KeePassXC is optional; see [KeePass setup](docs/KEEPASS.md).
+The recipe’s metadata, checksums and native helper builds were verified on
+x86_64 Linux; a complete Arch clean-chroot build and aarch64 run remain unverified.
+
 ## Try it
 
 - On first launch, choose **Sign In** to connect an XMPP account. You can also add an account from **Main Menu → Accounts → Add Account**.

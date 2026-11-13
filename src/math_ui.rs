@@ -55,7 +55,9 @@ fn render(source: &str, display: bool, color: u32) -> Result<(Vec<u8>, i32), Str
     if !std::path::Path::new(&helper).is_absolute() || !std::path::Path::new(&helper).is_file() {
         return Err("Math renderer is unavailable".into());
     }
-    let mut child = Command::new(bwrap)
+    let mut command = Command::new(bwrap);
+    crate::renderer_sandbox::runtime(&mut command);
+    let mut child = command
         .env_clear()
         .args([
             "--unshare-all",
@@ -64,9 +66,6 @@ fn render(source: &str, display: bool, color: u32) -> Result<(Vec<u8>, i32), Str
             "--cap-drop",
             "ALL",
             "--clearenv",
-            "--ro-bind",
-            "/nix/store",
-            "/nix/store",
             "--proc",
             "/proc",
             "--dev",

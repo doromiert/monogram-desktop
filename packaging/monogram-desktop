@@ -1,0 +1,8 @@
+#!/bin/sh
+export MONOGRAM_ASSET_DIR=/usr/share/monogram-desktop
+export MONOGRAM_LOTTIE_HELPER=/usr/lib/monogram-desktop/monogram-sticker-renderer
+export MONOGRAM_MATH_HELPER=/usr/lib/monogram-desktop/monogram-math-renderer
+export MONOGRAM_BWRAP=/usr/bin/bwrap
+export MONOGRAM_EPOXY_LIBRARY=libepoxy.so.0
+export GTK_USE_PORTAL=1
+exec /usr/lib/monogram-desktop/monogram-desktop "$@"

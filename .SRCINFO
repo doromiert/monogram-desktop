@@ -1,0 +1,62 @@
+pkgbase = monogram-desktop-git
+	pkgdesc = Native GTK/libadwaita Monogram XMPP client
+	pkgver = 0.2.0.r135.g6594be3
+	pkgrel = 1
+	url = https://github.com/doromiert/monogram-desktop
+	arch = x86_64
+	arch = aarch64
+	license = GPL-3.0-or-later
+	license = GPL-3.0-only
+	license = AGPL-3.0-only
+	license = LGPL-2.1-or-later
+	license = NAPL-1.1
+	makedepends = git
+	makedepends = rust
+	makedepends = cargo
+	makedepends = pkgconf
+	makedepends = protobuf
+	makedepends = cmake
+	makedepends = ninja
+	makedepends = jdk21-openjdk
+	makedepends = glib2-devel
+	depends = gtk4>=1:4.20
+	depends = libadwaita>=1:1.9
+	depends = glycin-gtk4>=2.1
+	depends = glycin
+	depends = libclapper-gtk>=0.10
+	depends = gst-plugins-base
+	depends = gst-plugins-good
+	depends = gst-plugins-bad
+	depends = gst-plugins-ugly
+	depends = gst-libav
+	depends = libepoxy
+	depends = openssl
+	depends = sqlite
+	depends = protobuf-c
+	depends = bubblewrap
+	depends = fontconfig
+	depends = ttf-dejavu
+	depends = noto-fonts-emoji
+	depends = jre21-openjdk-headless
+	optdepends = keepassxc: fill and save XMPP passwords
+	optdepends = gnome-keyring: Secret Service provider (or another compatible keyring)
+	provides = monogram-desktop
+	conflicts = monogram-desktop
+	noextract = jlatexmath-1.0.7.jar
+	noextract = jlatexmath-font-greek-1.0.7.jar
+	noextract = jlatexmath-font-cyrillic-1.0.7.jar
+	options = !lto
+	source = monogram-desktop::git+https://github.com/doromiert/monogram-desktop.git
+	source = libomemo-c-1f0b37fee3ebefc46c32f882623481899a1ba568.tar.gz::https://codeload.github.com/dino/libomemo-c/tar.gz/1f0b37fee3ebefc46c32f882623481899a1ba568
+	source = rlottie-ea06d2f29ba01b8d06c00a838d107f5e484ae59b.tar.gz::https://codeload.github.com/Samsung/rlottie/tar.gz/ea06d2f29ba01b8d06c00a838d107f5e484ae59b
+	source = https://repo.maven.apache.org/maven2/org/scilab/forge/jlatexmath/1.0.7/jlatexmath-1.0.7.jar
+	source = https://repo.maven.apache.org/maven2/org/scilab/forge/jlatexmath-font-greek/1.0.7/jlatexmath-font-greek-1.0.7.jar
+	source = https://repo.maven.apache.org/maven2/org/scilab/forge/jlatexmath-font-cyrillic/1.0.7/jlatexmath-font-cyrillic-1.0.7.jar
+	sha256sums = SKIP
+	sha256sums = f5a2b8751b3ad2a40a367e4ed45a671338b5d3ed09e36d9f86e06fd96d7da11b
+	sha256sums = a89e071a3455ccbf8f61af67aad0657259ae9aabdf3afe3a0670954370cdd37a
+	sha256sums = 6d04c3843fc98d2eea9ba4cff0be7b80540ca75c5a4e0b3463fd1219c48cc65d
+	sha256sums = cddc7e7e6f3e7ff0434c8a4805eadc3e9dc80457d582d19c3699e6aaee8f6af2
+	sha256sums = 1a0150e4be64db88c250dff41f593349f55f0c9cfdb8e39433f15ba73ecd21b8
+
+pkgname = monogram-desktop-git

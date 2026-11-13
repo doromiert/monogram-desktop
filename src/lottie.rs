@@ -158,6 +158,7 @@ impl Decoder {
         )?;
         let bwrap = program("MONOGRAM_BWRAP", env!("MONOGRAM_BUILT_BWRAP"))?;
         let mut command = Command::new(bwrap);
+        crate::renderer_sandbox::runtime(&mut command);
         command
             .env_clear()
             .args([
@@ -167,9 +168,6 @@ impl Decoder {
                 "--cap-drop",
                 "ALL",
                 "--clearenv",
-                "--ro-bind",
-                "/nix/store",
-                "/nix/store",
                 "--proc",
                 "/proc",
                 "--dev",

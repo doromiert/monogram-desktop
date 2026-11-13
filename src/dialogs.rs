@@ -985,6 +985,7 @@ impl Ui {
         connect.add_css_class("suggested-action");
         header.pack_end(&connect);
         d.set_default_widget(Some(&connect));
+        crate::keepassxc_ui::attach(&page, &d, &jid, &password);
         d.set_focus(Some(&jid));
         jid.set_activates_default(true);
         password.set_activates_default(true);
