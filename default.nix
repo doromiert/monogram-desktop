@@ -4,6 +4,10 @@
 }) { inherit pkgs; } }:
 let
   src = monogramSrc;
+  # Keep the GPU clip-state fix private to this app until GTK includes it.
+  gtk4Fixed = gtk4.overrideAttrs (old: {
+    patches = (old.patches or []) ++ [ ./native/gtk-gpu-clip-restore.patch ];
+  });
   stickerRlottie = rlottie.overrideAttrs (old: { mesonFlags = (old.mesonFlags or []) ++ [ "-Dthread=false" ]; });
   stickerRenderer = stdenv.mkDerivation {
     pname = "monogram-sticker-renderer";
@@ -52,7 +56,7 @@ in craneLib.buildPackage (commonArgs // {
   MONOGRAM_BWRAP = "${bubblewrap}/bin/bwrap";
   inherit cargoArtifacts cargoVendorDir;
   cargoBuildExtraArgs = "--bin monogram-desktop";
-  passthru = { inherit cargoArtifacts stickerRenderer; };
+  passthru = { inherit cargoArtifacts stickerRenderer gtk4Fixed; };
   nativeCheckInputs = [ xorg-server dbus prosody openssl python3 jdk21 gnome-keyring ];
   postCheck = ''
     export HOME=$TMPDIR/home XDG_CACHE_HOME=$TMPDIR/cache XDG_CONFIG_HOME=$TMPDIR/config XDG_STATE_HOME=$TMPDIR/state
@@ -95,9 +99,11 @@ in craneLib.buildPackage (commonArgs // {
     cp data/icons/com.negzero.MonogramDesktop.svg $out/share/icons/hicolor/scalable/apps/
     cp -r LICENSE LICENSES $out/share/doc/monogram-desktop/
     cp native/NOTICE.md $out/share/doc/monogram-desktop/native-NOTICE.md
+    cp native/gtk-gpu-clip-restore.patch $out/share/doc/monogram-desktop/
     mkdir -p $out/libexec
     cp ${stickerRenderer}/bin/monogram-sticker-renderer $out/libexec/monogram-sticker-renderer
     gappsWrapperArgs+=(
+      --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ gtk4Fixed ]}
       --set MONOGRAM_LOTTIE_HELPER $out/libexec/monogram-sticker-renderer
       --set MONOGRAM_BWRAP ${bubblewrap}/bin/bwrap
       --set MONOGRAM_ASSET_DIR $out/share/monogram-desktop

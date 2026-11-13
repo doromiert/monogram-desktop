@@ -49,3 +49,13 @@ the pinned libsignal fork are licensed under AGPL-3.0-only.
   protocol/codec reference revision `49c0e78045532a78033ffd448ca4316859267bf2`.
 - The AGPL text is included in `LICENSES/AGPL-3.0-only.txt`. Existing components
   retain their own licenses and attribution.
+
+## GTK GPU clip-state correction
+
+Monogram's Nix package uses GTK 4.22.4 with the one-line correction in
+`native/gtk-gpu-clip-restore.patch`, preserving the previous clip when an
+opaque-region candidate cannot be used. This dependency is private to the
+application; system GTK is unchanged. Upstream source and attribution:
+<https://github.com/GNOME/gtk/blob/4.22.4/gsk/gpu/gskgpunodeprocessor.c>.
+GTK is LGPL-2.1-or-later; the original source retains its copyright notices.
+The patch is installed beside this notice in the application documentation.

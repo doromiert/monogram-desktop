@@ -1,0 +1,22 @@
+From: Monogram Desktop <monogram@neg-zero.com>
+Subject: [PATCH] gpu: restore the previous clip after an unsuccessful first-node pass
+
+The destination was reversed, leaving the processor clipped to the opaque
+candidate even after restoring the scissor. Rounded popup content could lose
+its top radius band for a frame while controls fade in or out.
+
+Source: GNOME GTK 4.22.4, gsk/gpu/gskgpunodeprocessor.c
+https://github.com/GNOME/gtk/blob/4.22.4/gsk/gpu/gskgpunodeprocessor.c
+License: LGPL-2.1-or-later (upstream GTK)
+
+--- a/gsk/gpu/gskgpunodeprocessor.c
++++ b/gsk/gpu/gskgpunodeprocessor.c
+@@ -1436,7 +1436,7 @@ gsk_gpu_node_processor_add_first_node_clipped (GskGpuNodeProcessor   *self,
+     }
+ 
+   self->scissor = old_scissor;
+-  gsk_gpu_clip_init_copy (&old_clip, &self->clip);
++  gsk_gpu_clip_init_copy (&self->clip, &old_clip);
+ 
+   return FALSE;
+ }

@@ -558,3 +558,31 @@ DELIVERY VERIFIED — Coordinated reaction reveal, placement and glyph size
   .state/reaction-reveal-shared-regression.log,
   .state/reaction-reveal-frames-{45,90,150}.png,
   .state/reaction-reveal-release-build.log.
+
+IMPLEMENTED — GPU reaction-container top strip disappears during expansion
+  Recorded three complete native GNOME/Wayland expansions and collapses, then
+  inspected displayed pixels. Baseline loses15px of the top edge: three expansion
+  frames plus one collapse frame in the4.1s fixture-only interval. Native OpenGL
+  also reproduces; software-rendered captures do not. Layout-only checks and
+  offscreen full-node snapshots miss this onscreen failure.
+  GTK4.22.4 gsk_gpu_node_processor_add_first_node_clipped restores the scissor
+  after rejecting an opaque candidate but copies the clip in the wrong direction.
+  Correct that copy in an app-private GTK dependency selected by the package
+  wrapper. Preserve the original reaction UI, GPU renderer and occlusion feature.
+  System GTK is unchanged. Patch and upstream attribution ship with the package.
+  Corrected native recording: zero missing top frames over the same three cycles;
+  native production regression passes6.17s, including stationary-pointer input,
+  font size, text ranges, frame budget and minimum upward popup placement.
+  Instrumented native medians across three expansions:14.78/8.80/9.95ms.
+  Evidence under .state/reaction-top-edge/: before-three.mp4, after-three.mp4,
+  comparison.json, native-bad-top.png, fixed-native-regression.log,
+  native-probe-fixed-test.log. Videos crop to fictional fixture content only.
+
+PERFORMANCE ATTEMPTS — Missing reaction-container top edge
+  GSK_DEBUG=full-redraw experiment still reproduces; not shipped.
+  Disable GPU occlusion globally:0 missing frames; diagnostic only, not shipped.
+  Local alpha mask:22 missing frames; rejected and reverted.
+  Local path fill:23 missing frames; rejected and reverted.
+  Correct GTK clip-state restoration:0 missing frames; retained. These counts
+  include expansion/collapse over4.1s and exclude the fixture's final teardown.
+  Broad application suite remains unverified.

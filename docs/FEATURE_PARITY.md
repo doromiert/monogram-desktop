@@ -164,3 +164,9 @@ existing popup origin and uses the native vertical slide constraint for the
 minimum upward movement when space runs out, preserving horizontal position.
 Quick glyphs interpolate from compact19px to the regular24px grid size on the
 same transition progress, preserving the existing button and label widgets.
+
+The Nix desktop package carries a private GTK4.22.4 clip-state correction for
+missing top-edge frames during GPU reaction expansion. Three native before/after
+recordings reproduce the failure and verify its removal; software/layout-only
+fixtures do not establish GPU pixel correctness. Reaction UI and protocol behavior
+are unchanged. System GTK remains unchanged; broader parity is still open.
