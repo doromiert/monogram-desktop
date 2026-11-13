@@ -479,10 +479,10 @@ impl MessageText {
         }
     }
 
-    pub fn attach_reaction_row(bubble: &gtk::Box, row: &gtk::Box) {
+    pub fn attach_reaction_row(bubble: &gtk::Box, row: &gtk::Box) -> bool {
         let Some(text) = message_bubble_limit_imp::message_text_descendant(bubble.upcast_ref())
         else {
-            return;
+            return false;
         };
         let slot = bx(false, 0);
         slot.add_css_class("reaction-status");
@@ -494,6 +494,7 @@ impl MessageText {
         row.append(&slot);
         text.imp().reaction_row.replace(row.downgrade());
         text.imp().reaction_status.replace(Some(slot));
+        true
     }
 
     pub(crate) fn refresh_reaction_layout(bubble: &gtk::Box) {
@@ -543,28 +544,14 @@ impl MessageText {
         let (status_line, _) = probe.index_to_line_x(source.len() as i32 + 1, false);
         let wrapped = self.imp().rtl.get() || status_line > source_line;
         let row = self.imp().reaction_row.borrow().upgrade();
-        let share = wrapped
-            && row.as_ref().is_some_and(|row| {
-                let mut child = row.first_child();
-                let mut has_reaction = false;
-                while let Some(widget) = child {
-                    child = widget.next_sibling();
-                    if !widget.has_css_class("reaction-status") {
-                        has_reaction = true;
-                        break;
-                    }
-                }
-                if !row.is_visible() || !has_reaction {
-                    return false;
-                }
-                let (_, natural, _, _) = row.measure(gtk::Orientation::Horizontal, -1);
-                let needed = if self.imp().status_in_reactions.get() {
-                    natural
-                } else {
-                    natural + width + 8 + row.spacing()
-                };
-                row.width() >= needed
-            });
+        let share = row.as_ref().is_some_and(|row| {
+            let mut child=row.first_child();
+            while let Some(widget)=child {
+                child=widget.next_sibling();
+                if !widget.has_css_class("reaction-status") && widget.is_visible(){return row.is_visible();}
+            }
+            false
+        });
         if self.imp().status_in_reactions.replace(share) != share {
             if let (Some(slot), Some(overlay)) = (
                 self.imp().reaction_status.borrow().as_ref(),

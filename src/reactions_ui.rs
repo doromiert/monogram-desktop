@@ -114,6 +114,41 @@ struct ReactionItem {
     animation: RefCell<Option<adw::TimedAnimation>>,
 }
 
+// Articles and media put status outside MessageText; retain its exact original home.
+struct StatusHome {
+    status:gtk::Box,slot:gtk::Box,parent:glib::WeakRef<gtk::Widget>,
+    previous:glib::WeakRef<gtk::Widget>,sticker:bool,moved:Cell<bool>,
+}
+impl StatusHome {
+    fn new(status:&gtk::Box,row:&gtk::Box)->Self {
+        let slot=gtk::Box::new(gtk::Orientation::Horizontal,0);
+        slot.add_css_class("reaction-status");slot.set_hexpand(true);slot.set_halign(gtk::Align::End);slot.set_valign(gtk::Align::End);slot.set_margin_start(8);slot.set_visible(false);
+        let parent=status.parent().map(|p|p.downgrade()).unwrap_or_default();
+        let previous=status.prev_sibling().map(|p|p.downgrade()).unwrap_or_default();
+        row.append(&slot);
+        Self{status:status.clone(),slot,parent,previous,sticker:status.has_css_class("sticker-meta"),moved:Cell::new(false)}
+    }
+    fn sync(&self,shown:bool){
+        if self.moved.get()==shown{return;}
+        if shown {
+            match self.status.parent(){
+                Some(parent)if parent.is::<gtk::Overlay>()=>parent.downcast::<gtk::Overlay>().unwrap().remove_overlay(&self.status),
+                Some(parent)if parent.is::<gtk::Box>()=>parent.downcast::<gtk::Box>().unwrap().remove(&self.status),
+                None=>{},_=>return,
+            }
+            self.status.remove_css_class("sticker-meta");self.slot.append(&self.status);self.slot.set_visible(true);
+        }else{
+            self.slot.remove(&self.status);self.slot.set_visible(false);
+            if self.sticker{self.status.add_css_class("sticker-meta");}
+            if let Some(parent)=self.parent.upgrade(){
+                if let Some(overlay)=parent.downcast_ref::<gtk::Overlay>(){overlay.add_overlay(&self.status);}
+                else if let Some(container)=parent.downcast_ref::<gtk::Box>(){let previous=self.previous.upgrade().filter(|p|p.parent().as_ref()==Some(&parent));container.insert_child_after(&self.status,previous.as_ref());}
+            }
+        }
+        self.moved.set(shown);
+    }
+}
+
 struct ReactionsInner {
     ui: Weak<Ui>,
     row: gtk::Box,
@@ -121,12 +156,13 @@ struct ReactionsInner {
     items: RefCell<Vec<Rc<ReactionItem>>>,
     updating: Rc<Cell<bool>>,
     next_generation: Cell<u64>,
+    status_home:Option<StatusHome>,
 }
 
 pub(crate) struct MessageReactions(Rc<ReactionsInner>);
 
 impl MessageReactions {
-    pub(crate) fn new(ui: &Rc<Ui>, message: &Message, bubble: &gtk::Box, media: bool) -> Self {
+    pub(crate) fn new(ui: &Rc<Ui>, message: &Message, bubble: &gtk::Box, media: bool, status:&gtk::Box) -> Self {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         row.add_css_class("message-reactions");
         row.set_margin_top(if media && !message.text.is_empty() {
@@ -140,7 +176,7 @@ impl MessageReactions {
             row.set_margin_end(horizontal);
             row.set_margin_bottom(5);
         }
-        MessageText::attach_reaction_row(bubble, &row);
+        let status_home=(!MessageText::attach_reaction_row(bubble,&row)).then(||StatusHome::new(status,&row));
         bubble.append(&row);
         let reactions = Self(Rc::new(ReactionsInner {
             ui: Rc::downgrade(ui),
@@ -149,6 +185,7 @@ impl MessageReactions {
             items: RefCell::new(Vec::new()),
             updating: Rc::new(Cell::new(false)),
             next_generation: Cell::new(0),
+            status_home,
         }));
         reactions.sync(ui, message, false);
         reactions
@@ -207,6 +244,7 @@ impl MessageReactions {
             }
         }
         let visible = !wanted.is_empty();
+        if let Some(home)=&self.0.status_home{home.sync(visible || !self.0.items.borrow().is_empty());}
         self.0
             .row
             .set_visible(visible || !self.0.items.borrow().is_empty());
@@ -388,6 +426,7 @@ fn finish_removal(inner: &ReactionsInner, item: &Rc<ReactionItem>) {
     if inner.items.borrow().is_empty() {
         inner.row.set_visible(false);
         inner.bubble.remove_css_class("has-reactions");
+        if let Some(home)=&inner.status_home{home.sync(false);}
         MessageText::refresh_reaction_layout(&inner.bubble);
     }
     if let Some((ui, target)) = scroll {
@@ -460,5 +499,47 @@ mod tests {
         );
         settings.set_gtk_enable_animations(previous);
         window.close();
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    use crate::widgets::{asset,bx,text,wrap};
+    use std::time::Duration;
+    #[test]
+    #[ignore="requires private native GTK and Secret Service"]
+    fn native_timestamp_uses_any_reaction_and_restores_text_media_and_article_home(){
+        let app=adw::Application::builder().application_id("com.negzero.MonogramReactionStatusTest").flags(gtk::gio::ApplicationFlags::NON_UNIQUE).build();app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let ui=Ui::new(&app,true);adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
+        let css=gtk::CssProvider::new();css.load_from_path(asset("style.css"));gtk::style_context_add_provider_for_display(&gtk::gdk::Display::default().unwrap(),&css,gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        let root=bx(true,16);crate::widgets::margins(&root,20);let mut cases=vec![];
+        for kind in 0..4 {
+            let bubble=bx(true,0);bubble.add_css_class("message-bubble");bubble.set_width_request(420);bubble.set_halign(gtk::Align::Start);if kind%2==1{bubble.add_css_class("own");}
+            let status=bx(false,4);status.add_css_class("message-meta");status.append(&text("20:49 ✓",""));
+            if kind<2 {
+                if kind==1{bubble.append(&wrap("A reply preview that makes this short message wider.","message-reply"));}
+                bubble.append(&MessageText::new(&wrap(if kind==0{"A short message whose timestamp easily fits inline."}else{"Yes"},"message-text"),&status));
+            }else if kind==2 {
+                bubble.add_css_class("media-bubble");let overlay=gtk::Overlay::new();let media=gtk::DrawingArea::builder().content_width(320).content_height(110).build();overlay.set_child(Some(&media));status.add_css_class("sticker-meta");status.set_halign(gtk::Align::End);status.set_valign(gtk::Align::End);overlay.add_overlay(&status);bubble.append(&overlay);
+            }else{
+                let article=bx(true,4);article.append(&text("An article heading","heading"));article.append(&wrap("Formatted content without a MessageText wrapper.","message-text"));article.append(&status);bubble.append(&article);
+            }
+            let original=status.parent().unwrap();let previous=status.prev_sibling();
+            let message=Message{id:format!("status-{kind}"),text:"Message".into(),kind:"text".into(),..Default::default()};
+            let reactions=MessageReactions::new(&ui,&message,&bubble,kind==2,&status);root.append(&bubble);cases.push((bubble,status,original,previous,reactions,message));
+        }
+        ui.window.set_content(Some(&root));ui.window.set_default_size(600,780);ui.window.present();
+        glib::MainContext::default().block_on(async{
+            glib::timeout_future(Duration::from_millis(120)).await;
+            for(_,_,_,_,reactions,message)in &mut cases{message.reactions=vec!["🔥 1".into()];reactions.update(&ui,message);}
+            glib::timeout_future(Duration::from_millis(300)).await;
+            for(bubble,status,_,_,reactions,_)in &cases{MessageText::refresh_reaction_layout(bubble);assert!(status.parent().is_some_and(|p|p.has_css_class("reaction-status")),"timestamp did not join reactions");assert!(status.compute_bounds(&reactions.0.row).is_some());assert!(!status.has_css_class("sticker-meta"));}
+            if let Some(path)=std::env::var_os("MONOGRAM_REACTION_STATUS_CAPTURE"){let snapshot=gtk::Snapshot::new();gtk::WidgetPaintable::new(Some(&ui.window)).snapshot(&snapshot,ui.window.width() as f64,ui.window.height() as f64);ui.window.renderer().unwrap().render_texture(&snapshot.to_node().unwrap(),None).save_to_png(path).unwrap();}
+            for(_,_,_,_,reactions,message)in &mut cases{message.reactions.clear();reactions.update(&ui,message);}
+            glib::timeout_future(Duration::from_millis(300)).await;
+            for(kind,(bubble,status,original,previous,_,_))in cases.iter().enumerate(){MessageText::refresh_reaction_layout(bubble);assert_eq!(status.parent().as_ref(),Some(original));assert_eq!(status.prev_sibling(),*previous);assert_eq!(status.has_css_class("sticker-meta"),kind==2);}
+            println!("PASS timestamp on every nonempty reaction row and original home restored for text, replies, media and articles");
+        });ui.window.close();
     }
 }

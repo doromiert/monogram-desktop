@@ -15,6 +15,12 @@ edits. The bubble shows “edited”; Message Details retains original/edit text
 Failed/uncertain changes roll back their projection; reopening Edit recovers the
 latest failed correction's text. Account/chat/session changes fence callbacks.
 
+A message with at least one reaction places its timestamp and delivery/encryption
+status at the right of the reactions row, including short text, replies, media
+and articles. Removing the last reaction restores the status to its original
+inline, footer or media-overlay position after the chip exit transition. The
+same status and media widgets are retained throughout.
+
 Reaction chips toggle the caller's emoji. The separate context-menu reaction
 strip keeps the action list narrower. Expanded reactions use one native virtual
 section list for Favorites, Recent and the built-in emoji categories. Category

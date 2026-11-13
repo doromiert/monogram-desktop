@@ -959,7 +959,7 @@ impl Ui {
                 meta.set_margin_top(3);
                 bubble.append(&meta);
             }
-            let reactions = reactions_ui::MessageReactions::new(self, &m, &bubble, media);
+            let reactions = reactions_ui::MessageReactions::new(self, &m, &bubble, media, &meta);
             let presentation=self.send_animation.wrap(&m.id,&bubble);
             if action.is_some() {
                 outer.set_halign(gtk::Align::Center);
