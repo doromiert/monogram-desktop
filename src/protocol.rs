@@ -307,6 +307,7 @@ fn normalize_content(
     m.inline_emoji = (!unavailable && m.attachment.is_none() && !control)
         .then(|| crate::packs::normalized_inline(xml, &m.text))
         .flatten();
+    m.formatting = (!unavailable).then(|| crate::formatting::normalized(xml, &m.text)).flatten();
     m.preview_spoilers = if unavailable {
         None
     } else {
@@ -420,6 +421,7 @@ pub fn text_stanza(peer: &str, text: &str, id: &str, reply: Option<(&str, &str, 
 }
 pub fn outgoing(peer: &str, message: &Message, quote: &str) -> Element {
     let mut root = outgoing_content(peer, message, quote);
+    crate::formatting::decorate(message, &mut root);
     crate::read_markers::decorate(&mut root, message);
     root
 }

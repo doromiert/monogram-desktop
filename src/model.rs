@@ -16,6 +16,7 @@ fn yes() -> bool {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Message {
+    pub formatting: Option<crate::formatting::Markup>,
     pub markable_id: String,
     #[serde(default)]
     pub inline_emoji: Option<crate::packs::InlineEmoji>,
@@ -66,6 +67,7 @@ pub struct Message {
 impl Default for Message {
     fn default() -> Self {
         Self {
+            formatting: None,
             preview_spoilers: Some(crate::spoilers::Context::clear()),
             inline_emoji: None,
             markable_id: String::new(),
@@ -220,20 +222,20 @@ impl Message {
             return if self.text.is_empty() {
                 format!("📎 {}", upload.name)
             } else {
-                self.text.clone()
+                crate::formatting::preview(self)
             };
         }
         if let Some(file) = &self.attachment {
             return if self.text.is_empty() {
                 format!("📎 {}", file.name)
             } else {
-                self.text.clone()
+                crate::formatting::preview(self)
             };
         }
         self.poll
             .as_ref()
             .map(|p| format!("📊 {}", p.question))
-            .unwrap_or_else(|| self.text.clone())
+            .unwrap_or_else(|| crate::formatting::preview(self))
     }
     pub fn content_text(&self) -> String {
         if self.poll_source() == crate::polls::Source::Legacy {
@@ -309,6 +311,7 @@ pub struct Chat {
     pub pinned: bool,
     pub draft: String,
     pub draft_reply: String,
+    pub draft_formatting: Option<crate::formatting::Markup>,
 }
 impl Chat {
     pub fn encryption_preference(&self) -> Preference {

@@ -236,6 +236,7 @@ pub fn append_legacy_hints(outer: &Element, content: &mut Element) {
         return;
     };
     let context = metadata(outer, &body);
+    if crate::formatting::from_element(outer).markdown && content.get_child("content",crate::formatting::CONTENT).is_none(){content.append_child(Element::builder("content",crate::formatting::CONTENT).attr("type".try_into().unwrap(),"text/markdown").build());}
     if context.whole {
         content.append_child(Element::builder("spoiler", WHOLE).build());
     }

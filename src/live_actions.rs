@@ -101,6 +101,19 @@ impl Ui {
         text: &str,
         poll: Option<crate::polls::Poll>,
     ) -> bool {
+        self.send_action_details(id,action,text,poll,None)
+    }
+    pub fn send_formatted_action(self:&Rc<Self>,id:&str,action:Action,formatting:crate::formatting::Markup)->bool{
+        let text=formatting.body.clone();self.send_action_details(id,action,&text,None,Some(formatting))
+    }
+    fn send_action_details(
+        self: &Rc<Self>,
+        id: &str,
+        action: Action,
+        text: &str,
+        poll: Option<crate::polls::Poll>,
+        formatting:Option<crate::formatting::Markup>,
+    ) -> bool {
         let state = self.state.borrow();
         let owner = state.account.clone();
         let peer = state.current().jid.clone();
@@ -191,6 +204,8 @@ impl Ui {
         };
         let wire = new_id();
         let message = Message {
+            preview_spoilers:formatting.as_ref().map(crate::formatting::Markup::spoiler_context),
+            formatting,
             forwarded: if kind == "correct" {
                 current.forwarded.clone()
             } else {

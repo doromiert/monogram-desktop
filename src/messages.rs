@@ -25,6 +25,7 @@ struct PreparedMessages {
     days: Vec<String>,
     links: Vec<Vec<crate::link_previews::ClickableUrl>>,
     emoji_only: Vec<bool>,
+    formatting:Vec<(crate::formatting::Display,crate::markdown::RichText,Option<crate::markdown::Document>)>,
     scope: (String, String),
     group: bool,
     serial: u64,
@@ -76,6 +77,7 @@ fn same_content(a: &Message, b: &Message) -> bool {
         && a.poll == b.poll
         && a.poll_tally == b.poll_tally
         && a.poll_closed_at == b.poll_closed_at
+        && a.formatting == b.formatting
         && a.preview_spoilers == b.preview_spoilers
         && a.inline_emoji == b.inline_emoji
         && a.unavailable == b.unavailable
@@ -470,6 +472,7 @@ impl Ui {
                             && crate::emoji_completion::only_emojis(&message.text)
                     })
                     .collect();
+                let formatting:Vec<_>=messages.iter().map(|m|{let(d,r)=crate::formatting_ui::display(m);(d,r,crate::formatting_ui::article(m))}).collect();
                 let links = messages
                     .iter()
                     .map(|message| {
@@ -484,6 +487,7 @@ impl Ui {
                     days,
                     links,
                     emoji_only,
+                    formatting,
                     scope,
                     group,
                     serial,
@@ -785,7 +789,12 @@ impl Ui {
             }
             match m.kind.as_str() {
                 _ if action.is_some() => {
-                    let label = wrap(action.as_ref().unwrap(), "message-text");
+                    let presented=action.as_ref().unwrap();
+                    let body=action_body(m).unwrap();
+                    let original=crate::formatting_ui::model(m);
+                    let rich=original.slice(m.text.chars().count()-body.chars().count(),m.text.chars().count()).and_then(|content|content.in_body(presented,presented.chars().count()-body.chars().count())).map(|formatting|crate::formatting_ui::display(&Message{text:presented.clone(),formatting:Some(formatting),..Default::default()}).1).unwrap_or_else(||crate::markdown::RichText::plain(presented));
+                    let label = wrap(&rich.text, "message-text");
+                    crate::formatting_ui::FormattedLabel::new(&label,rich);
                     label.set_justify(gtk::Justification::Center);
                     label.set_selectable(true);
                     bubble.append(&label);
@@ -844,7 +853,7 @@ impl Ui {
                     }
                 }
                 "file" if m.attachment.is_some() => {
-                    let attachment = self.attachment_content(&m);
+                    let (attachment,spoiler_button) = crate::formatting_ui::hidden_media(&self.attachment_content(&m),crate::formatting_ui::model(&m).spoiler);
                     if sticker || media && m.text.is_empty() {
                         let overlay = gtk::Overlay::new();
                         overlay.set_child(Some(&attachment));
@@ -863,7 +872,11 @@ impl Ui {
                             // Let the media set the bubble width; wrap to its allocation.
                             body.set_max_width_chars(1);
                         }
-                        let caption = MessageText::new(&body, &meta);
+                        let caption = MessageText::with_rich(&body, &meta,planned.formatting[index].1.clone());
+                        if let (Some(button),Some(state))=(spoiler_button.as_ref(),caption.formatted_state()){
+                            let weak=Rc::downgrade(&state);button.connect_clicked(move|_|{if let Some(state)=weak.upgrade(){state.reveal_all();}});
+                            let button=button.downgrade();state.on_reveal(move||{if let Some(button)=button.upgrade(){if button.is_visible(){button.emit_clicked();}}});
+                        }
                         caption.add_css_class("media-caption");
                         if media {
                             caption.set_orientation(gtk::Orientation::Vertical);
@@ -925,32 +938,18 @@ impl Ui {
                     } else {
                         "message-text"
                     };
-                    let preview = self.link_preview_for_message(&m);
-                    let links = planned.links[index].clone();
-                    let inline = m.inline_emoji.as_ref().map(|emoji| {
-                        self.inline_message_text(
-                            &m.text,
-                            emoji,
-                            preview.is_none().then_some(&meta),
-                            &links,
-                        )
-                    });
-                    let l = wrap(&m.text, css);
-                    l.set_selectable(true);
-                    if let Some(preview) = preview {
-                        linkify_message_label(&l, &m.text, &links);
-                        // Keep the status row after the native card so time,
-                        // encryption and delivery state follow the full bubble.
-                        if let Some(inline) = inline.as_ref() {
-                            bubble.append(inline);
-                        } else {
-                            bubble.append(&l);
-                        }
-                        bubble.append(&crate::link_preview_ui::link_preview_card(&preview));
-                    } else if let Some(inline) = inline {
-                        bubble.append(&inline);
+                    let (display,rich,article)=&planned.formatting[index];
+                    if let Some(document)=article {
+                        bubble.append(&crate::formatting_ui::article_widget(&document,&meta));
                     } else {
-                        bubble.append(&MessageText::with_links(&l, &meta, links));
+                        let preview=self.link_preview_for_message(&m);
+                        let links=crate::link_previews::clickable_urls(&display.body,None);
+                        let inline=m.inline_emoji.as_ref().and_then(|emoji|emoji.without(&display.removed).ok()).filter(|emoji|emoji.body==display.body).map(|emoji|self.inline_message_text_formatted(&display.body,&emoji,preview.is_none().then_some(&meta),&links,Some(&rich)));
+                        let l=wrap(&display.body,css);
+                        if let Some(preview)=preview {
+                            if let Some(inline)=inline.as_ref(){bubble.append(inline);}else{crate::formatting_ui::FormattedLabel::new(&l,rich.clone());bubble.append(&l);}
+                            bubble.append(&crate::link_preview_ui::link_preview_card(&preview));
+                        }else if let Some(inline)=inline{bubble.append(&inline);}else{bubble.append(&MessageText::with_rich(&l,&meta,rich.clone()));}
                     }
                 }
                 _ => {}
@@ -1699,7 +1698,13 @@ impl Ui {
         } else {
             m.text.clone()
         };
-        editor.buffer().set_text(&draft);
+        let edit_spoiler=gtk::gio::SimpleAction::new_stateful("spoiler-all",None,&false.to_variant());
+        crate::formatting_ui::install_editor(self,&editor,&edit_spoiler);
+        let original=crate::formatting_ui::model(&m);
+        let projected=original.display();
+        let initial=if draft==m.text && !original.markdown {crate::formatting::Markup{body:projected.body,ranges:projected.ranges,unstyled:true,spoiler:original.spoiler,..Default::default()}}else{crate::formatting::Markup{body:draft.clone(),markdown:original.markdown,spoiler:original.spoiler,..Default::default()}};
+        editor.buffer().set_text(&initial.body);
+        crate::formatting_ui::restore_editor_formatting(&editor,&edit_spoiler,Some(&initial));
         let scroll = scroll(&editor);
         scroll.set_min_content_height(60);
         bubble.append(&scroll);
@@ -1733,11 +1738,10 @@ impl Ui {
                     let Some(target) = crate::message_actions::original_wire(&m) else {
                         return;
                     };
-                    ui.send_action(
-                        &id,
-                        crate::message_actions::Action::Correct { target },
-                        &value,
-                    );
+                    let mut formatting=crate::formatting_ui::editor_formatting(&editor,&edit_spoiler);
+                    formatting.markdown=original.markdown;
+                    if formatting.markdown{formatting.unstyled=true;}
+                    ui.send_formatted_action(&id,crate::message_actions::Action::Correct { target },formatting.styled());
                     return;
                 }
                 if let Some(m) = ui
@@ -1748,7 +1752,8 @@ impl Ui {
                     .iter_mut()
                     .find(|m| m.id == id)
                 {
-                    m.text = value.into();
+                    let formatting=crate::formatting_ui::editor_formatting(&editor,&edit_spoiler).styled();
+                    m.text = formatting.body.clone();m.preview_spoilers=Some(formatting.spoiler_context());m.formatting=Some(formatting);
                 }
                 ui.render_messages(false);
                 ui.refresh_chats(None);

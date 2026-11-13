@@ -52,6 +52,8 @@ pub(crate) fn display_messages(messages: &[Message]) -> Vec<Message> {
     for (parent, caption) in captions {
         if let Some(caption) = caption {
             display[parent].text = messages[caption].text.clone();
+            display[parent].formatting = messages[caption].formatting.clone();
+            display[parent].preview_spoilers = messages[caption].preview_spoilers.clone();
             hidden.insert(caption);
         }
     }

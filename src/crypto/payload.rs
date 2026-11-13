@@ -148,6 +148,7 @@ fn wrap(content: Element, from: &str, to: &str, padding: &str) -> Element {
 }
 pub fn envelope(message: &Element) -> Result<Secret> {
     let (from, to) = routing(message)?;
+    if !crate::formatting::validate_protected(message){return Err(Error::Invalid("message formatting"));}
     crate::polls::Poll::validate_protected(message)
         .map_err(|_| Error::Invalid("structured poll"))?;
     let mut content = Element::builder("content", SCE).build();
@@ -252,6 +253,7 @@ pub fn content(outer: &Element, plain: &[u8], sent_time: i64) -> Result<Element>
         }
         message.append_child(child.clone());
     }
+    if !crate::formatting::validate_protected(&message){return Err(Error::Invalid("message formatting"));}
     Ok(message)
 }
 #[cfg(test)]

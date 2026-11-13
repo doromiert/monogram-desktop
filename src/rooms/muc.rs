@@ -739,11 +739,13 @@ impl Rooms {
         message.inline_emoji = (!unavailable && message.attachment.is_none())
             .then(|| crate::packs::normalized_inline(xml, &message.text))
             .flatten();
+        message.formatting = (!unavailable).then(|| crate::formatting::normalized(xml, &message.text)).flatten();
         message.preview_spoilers = if unavailable {
             None
         } else {
             crate::spoilers::normalized(xml, &message.text)
         };
+        if let Some(markup)=message.formatting.as_ref(){message.preview_spoilers=Some(markup.spoiler_context());}
         Some((jid, message, historical))
     }
     pub fn outgoing(&self, peer: &str, message: &Message, quote: &str) -> Result<Element> {

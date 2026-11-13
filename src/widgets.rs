@@ -2,6 +2,7 @@ use gtk::{gdk, glib, prelude::*, subclass::prelude::*};
 use std::{
     cell::{Cell, RefCell},
     path::{Path, PathBuf},
+    rc::Rc,
 };
 pub fn asset(name: &str) -> PathBuf {
     std::env::var_os("MONOGRAM_ASSET_DIR")
@@ -259,6 +260,7 @@ mod message_text_imp {
         pub status: RefCell<Option<gtk::Box>>,
         pub source: RefCell<String>,
         pub links: RefCell<Vec<crate::link_previews::ClickableUrl>>,
+        pub rich: RefCell<Option<Rc<crate::formatting_ui::FormattedLabel>>>,
         pub rtl: Cell<bool>,
         pub compact: Cell<bool>,
         pub status_in_reactions: Cell<bool>,
@@ -303,6 +305,8 @@ fn link_markup(source: &str, suffix: &str, links: &[crate::link_previews::Clicka
 
 fn activate_links(label: &gtk::Label) {
     label.connect_activate_link(|label, uri| {
+        if uri.starts_with("monogram-spoiler:") || uri.starts_with('#') { return glib::Propagation::Proceed; }
+        if !crate::markdown::safe_uri(uri) { return glib::Propagation::Stop; }
         let parent = label.root().and_downcast::<gtk::Window>();
         let weak_parent = parent.as_ref().map(gtk::Window::downgrade);
         gtk::UriLauncher::new(uri).launch(
@@ -368,6 +372,7 @@ impl MessageText {
         body.update_property(&[gtk::accessible::Property::Label(&source)]);
         let original = source.clone();
         body.connect_copy_clipboard(move |label| {
+            if label.has_css_class("formatted-message-text") { return; }
             if let Some((start, end)) = label.selection_bounds() {
                 let (start, end) = (
                     start.min(end).max(0) as usize,
@@ -401,6 +406,19 @@ impl MessageText {
         widget
     }
 
+    pub fn with_rich(body:&gtk::Label,status:&gtk::Box,rich:crate::markdown::RichText)->Self {
+        body.set_text(&rich.text);
+        let widget=Self::new(body,status);
+        widget.set_rich(rich);
+        widget
+    }
+    pub fn formatted_state(&self)->Option<Rc<crate::formatting_ui::FormattedLabel>> {self.imp().rich.borrow().clone()}
+    pub fn set_rich(&self,rich:crate::markdown::RichText) {
+        if let Some(body)=self.imp().body.borrow().as_ref(){
+            self.imp().rich.replace(Some(crate::formatting_ui::FormattedLabel::new(body,rich)));
+        }
+        self.render_body();self.refresh_shape();
+    }
     fn render_body(&self) {
         let source = self.imp().source.borrow();
         let suffix = if self.imp().status_in_reactions.get() {
@@ -415,6 +433,7 @@ impl MessageText {
                 }
             )
         };
+        if let Some(rich)=self.imp().rich.borrow().as_ref(){rich.with_suffix(&suffix);return;}
         if let Some(body) = self.imp().body.borrow().as_ref() {
             // Inline emoji shapes can arrive asynchronously; retain them when
             // compact/status reflow rebuilds the native anchor markup.
@@ -448,7 +467,7 @@ impl MessageText {
         shape.set_start_index(self.imp().source.borrow().len() as u32 + 1);
         shape.set_end_index(u32::MAX);
         // Preserve the native anchor attributes installed by set_markup.
-        let attrs = body.layout().attributes().unwrap_or_default();
+        let attrs = if self.imp().rich.borrow().is_some(){body.attributes()}else{body.layout().attributes()}.and_then(|a|a.copy()).unwrap_or_default();
         attrs.change(shape);
         body.set_attributes(Some(&attrs));
     }
@@ -1025,3 +1044,21 @@ impl SquareCell {
         cell
     }
 }
+
+mod composer_entry_imp {
+    use super::*;
+    #[derive(Default)]
+    pub struct ComposerEntry;
+    #[glib::object_subclass]
+    impl ObjectSubclass for ComposerEntry {
+        const NAME:&'static str="MonogramComposerEntry";
+        type Type=super::ComposerEntry;
+        type ParentType=gtk::Box;
+        fn class_init(class:&mut Self::Class){class.set_css_name("entry");class.set_accessible_role(gtk::AccessibleRole::Group);}
+    }
+    impl ObjectImpl for ComposerEntry {}
+    impl WidgetImpl for ComposerEntry {}
+    impl BoxImpl for ComposerEntry {}
+}
+glib::wrapper!{pub struct ComposerEntry(ObjectSubclass<composer_entry_imp::ComposerEntry>) @extends gtk::Box,gtk::Widget,@implements gtk::Accessible,gtk::Buildable,gtk::ConstraintTarget,gtk::Orientable;}
+impl ComposerEntry {pub fn new()->Self{glib::Object::builder().property("orientation",gtk::Orientation::Vertical).property("spacing",2).build()}}

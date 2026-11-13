@@ -470,6 +470,8 @@ pub fn first_url(body: &str) -> Option<String> {
     url_match(body).map(|(_, url)| url)
 }
 pub fn candidate(message: &Message) -> Option<String> {
+    // Markdown spoiler tags are rendered locally; do not fetch their raw URLs.
+    if message.text.to_ascii_lowercase().contains("<tg-spoiler") {return None;}
     if message.id.is_empty()
         || message.retracted
         || message.unavailable

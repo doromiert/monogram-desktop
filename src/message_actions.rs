@@ -378,6 +378,7 @@ pub fn project(
         value.poll = m.poll.clone();
         value.poll_source = m.poll_source;
         value.text = m.text.clone();
+        value.formatting = m.formatting.clone();
         value.preview_spoilers = m.preview_spoilers.clone();
         value.inline_emoji = m.inline_emoji.clone();
         value.forwarded = m.forwarded.clone();

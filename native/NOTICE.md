@@ -59,3 +59,22 @@ application; system GTK is unchanged. Upstream source and attribution:
 <https://github.com/GNOME/gtk/blob/4.22.4/gsk/gpu/gskgpunodeprocessor.c>.
 GTK is LGPL-2.1-or-later; the original source retains its copyright notices.
 The patch is installed beside this notice in the application documentation.
+
+
+## Formatted math
+
+`MonogramMath.java` is a GPL-3.0-or-later desktop adapter using upstream
+[JLaTeXMath 1.0.7](https://github.com/opencollab/jlatexmath/tree/1.0.7), the same
+engine family as mobile's Android fork. The Nix package pins the unmodified core,
+Greek and Cyrillic font jars from Maven Central. JLaTeXMath is GPL-2.0-or-later
+with its independent-module linking exception; its original copyright/license,
+GPL text and bundled font notices are preserved in `LICENSES/JLaTeXMath/` and in
+the jars. The adapter does not copy the Android rendering implementation.
+The helper runs off the UI thread in a resource-limited, networkless bubblewrap
+sandbox; it cannot read account files or load arbitrary external resources.
+
+The GPL-3.0-or-later formatting parser/model and Markdown profile adapt Monogram
+mobile's `MessageMarkup`, `MessageMentions`, `MonogramFormatting`,
+`MonogramArticles` and `MarkdownParser` at source checkout
+`205f3165fed7b9279bb16f3be6c37533d4844dee`. The CommonMark tokenizer is
+[pulldown-cmark 0.13.6](https://github.com/pulldown-cmark/pulldown-cmark), MIT.

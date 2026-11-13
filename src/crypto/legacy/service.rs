@@ -181,6 +181,7 @@ fn decorate_outgoing(xml: &mut Element, clear: &Element, message: &Message) {
     if message.attachment.as_ref().is_some_and(|file| file.sticker) {
         xml.append_child(Element::builder("sticker", "urn:xmpp:stickers:0").build());
     }
+    for child in clear.children().filter(|c|c.is("spoiler",crate::formatting::SPOILER) || c.is("markup",crate::formatting::NS) || c.is("content",crate::formatting::CONTENT)){xml.append_child(child.clone());}
     crate::read_markers::decorate(xml, message);
 }
 fn split_fallback(outer: &Element, body: &str) -> Option<(String, String)> {

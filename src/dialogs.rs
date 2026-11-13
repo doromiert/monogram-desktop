@@ -1851,7 +1851,7 @@ impl Ui {
                                 continue;
                             }
                             if let Some(id) =
-                                ui.send_content_attribution(&m.text, &m.kind, attribution)
+                                ui.forward_content(&m, attribution)
                             {
                                 if let Some(sent) = ui
                                     .state

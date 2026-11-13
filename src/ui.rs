@@ -60,6 +60,7 @@ pub struct Ui {
     pub scroll: gtk::ScrolledWindow,
     pub message_scroll: RefCell<Option<crate::messages::ScrollTarget>>,
     pub composer: gtk::TextView,
+    pub composer_spoiler:gio::SimpleAction,
     pub(crate) composer_inline: Rc<crate::inline_emoji_ui::ComposerInlineEmoji>,
     composer_placeholder: gtk::Label,
     pub send_button: gtk::Button,
@@ -332,6 +333,7 @@ impl Ui {
                 .hscrollbar_policy(gtk::PolicyType::Never)
                 .build(),
             composer,
+            composer_spoiler:gio::SimpleAction::new_stateful("spoiler-all",None,&false.to_variant()),
             composer_inline,
             composer_placeholder: gtk::Label::builder()
                 .label("Message…")
@@ -585,6 +587,7 @@ impl Ui {
             }
         });
         ui.window.add_controller(typing_keys);
+        ui.install_formatting();
         ui.window.connect_close_request(move |_| {
             if let Some(u) = weak.upgrade() {
                 u.save_draft();
@@ -1242,7 +1245,7 @@ impl Ui {
             .sync_create()
             .build();
         let line = bx(false, 8);
-        let composer = bx(true, 2);
+        let composer = ComposerEntry::new();
         composer.set_hexpand(true);
         composer.set_valign(gtk::Align::Center);
         composer.add_css_class("composer");
@@ -1296,10 +1299,11 @@ impl Ui {
         self.weak_button(&self.send_button, |s| s.send());
         line.append(&self.send_button);
         shell.append(&line);
-        let conversation = adw::ToolbarView::new();
-        conversation.set_bottom_bar_style(adw::ToolbarStyle::Flat);
-        conversation.set_content(Some(&chat));
-        conversation.add_bottom_bar(&shell);
+        // Toolbars wrap their children in a WindowHandle; text drags belong to the editor.
+        let conversation = bx(true, 0);
+        chat.set_vexpand(true);
+        conversation.append(&chat);
+        conversation.append(&shell);
         self.pages.add_named(&conversation, Some("chat"));
         self.pages
             .add_named(&scroll(&self.search_page), Some("search"));
@@ -1436,9 +1440,11 @@ impl Ui {
             id.remove()
         }
         let text = self.composer_text();
+        let formatting=self.composer_formatting();
         let mut state = self.state.borrow_mut();
         let chat = state.current_mut();
         chat.draft = text;
+        chat.draft_formatting=Some(formatting);
         chat.draft_reply = self.replying.borrow().clone().unwrap_or_default();
         drop(state);
         self.persist();
@@ -1512,6 +1518,7 @@ impl Ui {
         let chat = self.state.borrow().current().clone();
         self.loading.set(true);
         self.composer.buffer().set_text(&chat.draft);
+        self.restore_composer_formatting(chat.draft_formatting.as_ref());
         self.replying
             .replace((!chat.draft_reply.is_empty()).then_some(chat.draft_reply));
         self.loading.set(false);
@@ -1701,6 +1708,7 @@ impl Ui {
         self.session.borrow().as_ref().is_some_and(|s| s.send(c))
     }
     pub fn send_content(self: &Rc<Self>, value: &str, kind: &str) -> Option<String> {
+        if kind=="article" {return self.queue_formatted_text(value,Some(crate::formatting::Markup{body:value.into(),markdown:true,unstyled:true,..Default::default()}));}
         self.send_content_attribution(value, kind, None)
     }
     pub fn send_content_attribution(
@@ -1708,6 +1716,23 @@ impl Ui {
         value: &str,
         kind: &str,
         attribution: Option<crate::forwarding::Attribution>,
+    ) -> Option<String> {
+        self.send_content_metadata(value,kind,attribution,None,None)
+    }
+    pub fn forward_content(self:&Rc<Self>,message:&Message,attribution:Option<crate::forwarding::Attribution>)->Option<String>{
+        let original=crate::formatting_ui::model(message);let displayed=original.display();
+        let inline=message.inline_emoji.as_ref().and_then(|e|e.without(&displayed.removed).ok());
+        let markup=crate::formatting::Markup{body:displayed.body,ranges:displayed.ranges,mentions:displayed.mentions,spoiler:original.spoiler,markdown:original.markdown,unstyled:true}.styled();
+        let inline=inline.and_then(|e|crate::formatting::remap_inline(&markup,&e));
+        self.send_content_metadata(&markup.body.clone(),&message.kind,attribution,Some(markup),inline)
+    }
+    fn send_content_metadata(
+        self: &Rc<Self>,
+        value: &str,
+        kind: &str,
+        attribution: Option<crate::forwarding::Attribution>,
+        formatting:Option<crate::formatting::Markup>,
+        inline:Option<crate::packs::InlineEmoji>,
     ) -> Option<String> {
         let live = !self.state.borrow().account.is_empty();
         if live && (kind != "text" || !self.online.get()) {
@@ -1742,6 +1767,8 @@ impl Ui {
                 .unwrap();
             message.text = value.into();
             message.forwarded = attribution;
+            message.preview_spoilers=formatting.as_ref().map(crate::formatting::Markup::spoiler_context);
+            message.formatting=formatting;message.inline_emoji=inline;
             if live {
                 message.set_encryption(mode, fingerprint);
             }
@@ -1829,8 +1856,9 @@ impl Ui {
         if files_sent && !self.send_files(value) {
             return;
         }
+        let authored=self.composer_formatting().trim().styled();
         if !files_sent && !value.trim().is_empty() {
-            let Some(id) = self.state.borrow_mut().send(value, "text") else {
+            let Some(id) = self.state.borrow_mut().send(&authored.body, "text") else {
                 return;
             };
             let mut state = self.state.borrow_mut();
@@ -1843,6 +1871,7 @@ impl Ui {
                 .iter_mut()
                 .find(|m| m.id == id)
                 .unwrap();
+            message.formatting=Some(authored.clone());message.preview_spoilers=Some(authored.spoiler_context());
             if live {
                 message.set_encryption(mode, fingerprint);
             }
@@ -1893,6 +1922,7 @@ impl Ui {
         }
         self.loading.set(true);
         self.composer.buffer().set_text("");
+        self.composer_spoiler.set_state(&false.to_variant());
         self.loading.set(false);
         self.attachments.borrow_mut().clear();
         clear(&self.chips);

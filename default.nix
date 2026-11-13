@@ -25,6 +25,27 @@ let
     '';
   };
   fontConfig = makeFontsConf { fontDirectories = [ adwaita-fonts ]; };
+  mathJars = map (spec: pkgs.fetchurl {
+    url = "https://repo.maven.apache.org/maven2/org/scilab/forge/${spec.name}/1.0.7/${spec.name}-1.0.7.jar";
+    inherit (spec) hash;
+  }) [
+    { name = "jlatexmath"; hash = "sha256-bQTDhD/JjS7qm6TP8L57gFQMp1xaTgs0Y/0SGcSMxl0="; }
+    { name = "jlatexmath-font-greek"; hash = "sha256-zdx+fm8+f/BDTIpIBercPp3IBFfVgtGcNpnmqu6PavI="; }
+    { name = "jlatexmath-font-cyrillic"; hash = "sha256-GgFQ5L5k24jCUN/0H1kzSfVfDJz9uOOUM/Fbpz7NIbg="; }
+  ];
+  mathClasses = stdenv.mkDerivation {
+    pname = "monogram-math-classes";
+    version = "0.2.0";
+    src = src + "/native/MonogramMath.java";
+    dontUnpack = true;
+    nativeBuildInputs = [ jdk21 ];
+    buildPhase = "javac -cp ${lib.concatStringsSep ":" mathJars} -d . $src";
+    installPhase = "install -Dm644 MonogramMath.class $out/MonogramMath.class";
+  };
+  mathRenderer = pkgs.writeShellScriptBin "monogram-math-renderer" ''
+    export FONTCONFIG_FILE=${fontConfig}
+    exec ${jdk21}/bin/java -Djava.awt.headless=true -Xmx96m -XX:MaxMetaspaceSize=64m -Xss256k -cp ${mathClasses}:${lib.concatStringsSep ":" mathJars} MonogramMath "$@"
+  '';
   commonArgs = {
     pname = "monogram-desktop";
     version = "0.2.0";
@@ -52,11 +73,12 @@ let
     cargoBuildExtraArgs = "--bin monogram-desktop";
   });
 in craneLib.buildPackage (commonArgs // {
+  MONOGRAM_MATH_HELPER = "${mathRenderer}/bin/monogram-math-renderer";
   MONOGRAM_PREBUILT_LOTTIE_HELPER = "${stickerRenderer}/bin/monogram-sticker-renderer";
   MONOGRAM_BWRAP = "${bubblewrap}/bin/bwrap";
   inherit cargoArtifacts cargoVendorDir;
   cargoBuildExtraArgs = "--bin monogram-desktop";
-  passthru = { inherit cargoArtifacts stickerRenderer gtk4Fixed; };
+  passthru = { inherit cargoArtifacts stickerRenderer gtk4Fixed mathRenderer; };
   nativeCheckInputs = [ xorg-server dbus prosody openssl python3 jdk21 gnome-keyring ];
   postCheck = ''
     export HOME=$TMPDIR/home XDG_CACHE_HOME=$TMPDIR/cache XDG_CONFIG_HOME=$TMPDIR/config XDG_STATE_HOME=$TMPDIR/state
@@ -104,6 +126,7 @@ in craneLib.buildPackage (commonArgs // {
     cp ${stickerRenderer}/bin/monogram-sticker-renderer $out/libexec/monogram-sticker-renderer
     gappsWrapperArgs+=(
       --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ gtk4Fixed ]}
+      --set MONOGRAM_MATH_HELPER ${mathRenderer}/bin/monogram-math-renderer
       --set MONOGRAM_LOTTIE_HELPER $out/libexec/monogram-sticker-renderer
       --set MONOGRAM_BWRAP ${bubblewrap}/bin/bwrap
       --set MONOGRAM_ASSET_DIR $out/share/monogram-desktop

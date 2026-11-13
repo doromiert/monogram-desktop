@@ -1,4 +1,6 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=MONOGRAM_MATH_HELPER");
+    println!("cargo:rustc-env=MONOGRAM_BUILT_MATH_HELPER={}", std::env::var("MONOGRAM_MATH_HELPER").unwrap_or_default());
     let helper = if let Some(helper) = std::env::var_os("MONOGRAM_PREBUILT_LOTTIE_HELPER") {
         let helper = std::path::PathBuf::from(helper);
         assert!(helper.is_file(), "prebuilt sticker renderer must exist");

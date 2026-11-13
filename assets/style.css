@@ -29,7 +29,7 @@
 .date-pill.action-pill { font-size: 14px; opacity: 1; font-style: italic; }
 .reaction { background: alpha(@accent_bg_color,.12); border-radius: 16px; padding: 3px 9px; font-size: 11px; min-height: 20px; }
 .composer-shell { background: @view_bg_color; border: none; box-shadow: none; padding: 12px 20px 16px; }
-.composer { background: @card_bg_color; border: none; border-radius: 12px; box-shadow: none; padding: 4px 8px; }
+.composer { padding: 4px 8px; }
 .composer scrolledwindow, .composer textview, .composer textview text { background: transparent; border: none; box-shadow: none; outline: none; }
 .composer scrolledwindow undershoot { background: none; box-shadow: none; }
 .composer textview { padding: 0; }
@@ -77,7 +77,7 @@
 .message-status-check.sent { opacity: .5; }
 .message-status-check.read { min-width: 20px; opacity: 1; }
 .composer-shell { padding: 8px; }
-.composer { padding: 4px; border-radius: 12px; }
+.composer { padding: 4px; }
 .composer textview { padding: 0; }
 .composer button, .composer menubutton button { min-height: 28px; min-width: 28px; padding: 0; }
 .send { min-height: 36px; min-width: 36px; }
@@ -236,3 +236,15 @@
 .round-video-mute:hover { background: alpha(black,.72); }
 
 .message-list row.message-row.selected-message { border-radius: 0; }
+
+.formatted-article { padding: 3px 0; }
+.article-heading { font-weight: bold; margin: 4px 0; }
+.article-heading-1 { font-size: 1.55em; }
+.article-heading-2 { font-size: 1.35em; }
+.article-heading-3 { font-size: 1.2em; }
+.article-quote { border-left: 3px solid @accent_color; padding: 3px 9px; background: alpha(@accent_color,.09); border-radius: 4px; }
+.article-code { background: alpha(@window_fg_color,.07); padding: 8px; border-radius: 8px; }
+.article-table-cell { border: 1px solid alpha(@window_fg_color,.16); padding: 6px; }
+.article-math { margin: 4px 0; }
+.article-block-list > row { padding: 4px 0; background: transparent; }
+.media-spoiler-cover { background: @popover_bg_color; color: @window_fg_color; border: none; border-radius: 10px; }

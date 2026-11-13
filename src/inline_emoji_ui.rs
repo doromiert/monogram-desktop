@@ -267,6 +267,8 @@ mod inline_overlay_imp {
         pub widget: gtk::Widget,
         pub x: std::cell::Cell<i32>,
         pub y: std::cell::Cell<i32>,
+        pub width: std::cell::Cell<i32>,
+        pub height: std::cell::Cell<i32>,
     }
 
     #[derive(Default)]
@@ -317,6 +319,8 @@ mod inline_overlay_imp {
                 let (_, natural_height, _, _) = child
                     .widget
                     .measure(gtk::Orientation::Vertical, natural_width);
+                let natural_width=if child.width.get()>=0{child.width.get()}else{natural_width};
+                let natural_height=if child.height.get()>=0{child.height.get()}else{natural_height};
                 let transform = gtk::gsk::Transform::new().translate(&gtk::graphene::Point::new(
                     child.x.get() as f32,
                     child.y.get() as f32,
@@ -342,11 +346,11 @@ glib::wrapper! {
 }
 
 impl InlineOverlay {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         glib::Object::new()
     }
 
-    fn set_child(&self, child: &impl IsA<gtk::Widget>) {
+    pub(crate) fn set_child(&self, child: &impl IsA<gtk::Widget>) {
         let child = child.clone().upcast::<gtk::Widget>();
         child.set_parent(self);
         self.imp().children.borrow_mut().insert(
@@ -355,11 +359,13 @@ impl InlineOverlay {
                 widget: child,
                 x: std::cell::Cell::new(0),
                 y: std::cell::Cell::new(0),
+                width: std::cell::Cell::new(-1),
+                height: std::cell::Cell::new(-1),
             },
         );
     }
 
-    fn add_overlay(&self, child: &impl IsA<gtk::Widget>) {
+    pub(crate) fn add_overlay(&self, child: &impl IsA<gtk::Widget>) {
         let child = child.clone().upcast::<gtk::Widget>();
         child.set_parent(self);
         self.imp()
@@ -369,10 +375,12 @@ impl InlineOverlay {
                 widget: child,
                 x: std::cell::Cell::new(0),
                 y: std::cell::Cell::new(0),
+                width: std::cell::Cell::new(-1),
+                height: std::cell::Cell::new(-1),
             });
     }
 
-    fn set_overlay_position(&self, widget: &impl IsA<gtk::Widget>, x: i32, y: i32) {
+    pub(crate) fn set_overlay_position(&self, widget: &impl IsA<gtk::Widget>, x: i32, y: i32) {
         let widget = widget.upcast_ref::<gtk::Widget>();
         if let Some(child) = self
             .imp()
@@ -385,6 +393,9 @@ impl InlineOverlay {
             child.y.set(y);
         }
     }
+    pub(crate) fn set_overlay_size(&self,widget:&impl IsA<gtk::Widget>,width:i32,height:i32){if let Some(child)=self.imp().children.borrow().iter().find(|c|c.widget==*widget.upcast_ref::<gtk::Widget>()){child.width.set(width);child.height.set(height);}self.queue_resize();}
+    pub(crate) fn on_reposition(&self, callback:impl Fn()+'static){self.imp().reposition.replace(Some(Box::new(callback)));}
+
 }
 
 /// A retained inline renderer. Cached assets can arrive independently without
@@ -396,6 +407,7 @@ pub(crate) struct InlineMessageText {
     emoji: InlineEmoji,
     textures: RefCell<HashMap<String, gdk::Texture>>,
     slots: RefCell<HashMap<String, Vec<InlineSlot>>>,
+    formatting: RefCell<Option<Rc<crate::formatting_ui::FormattedLabel>>>,
 }
 
 struct InlineSlot {
@@ -432,6 +444,7 @@ impl InlineMessageText {
             emoji: emoji.clone(),
             textures: RefCell::new(HashMap::new()),
             slots: RefCell::new(HashMap::new()),
+            formatting: RefCell::new(None),
         });
         this.refresh();
         let weak = Rc::downgrade(&this);
@@ -539,6 +552,12 @@ impl InlineMessageText {
         self.label.set_attributes(Some(&attributes));
     }
 
+    fn set_rich(self:&Rc<Self>,rich:crate::markdown::RichText) {
+        let state=if let Some(text)=self.label.ancestor(crate::widgets::MessageText::static_type()).and_downcast::<crate::widgets::MessageText>(){text.set_rich(rich);text.formatted_state().unwrap()}else{crate::formatting_ui::FormattedLabel::new(&self.label,rich)};
+        self.formatting.replace(Some(state));
+        let weak=Rc::downgrade(self);self.label.connect_notify_local(Some("label"),move|_,_|{if let Some(renderer)=weak.upgrade(){renderer.reposition();}});
+        self.reposition();
+    }
     fn reposition(&self) {
         let layout = self.label.layout();
         let (layout_x, layout_y) = self.label.layout_offsets();
@@ -550,6 +569,10 @@ impl InlineMessageText {
                 let Some(picture) = slot.picture.upgrade() else {
                     continue;
                 };
+                let at=self.body[..slot.byte_start as usize].chars().count();
+                let hidden=self.formatting.borrow().as_ref().is_some_and(|state|state.hidden_at(at));
+                picture.set_opacity(if hidden{0.}else{1.});
+                picture.update_state(&[gtk::accessible::State::Hidden(hidden)]);
                 let position = layout.index_to_pos(slot.byte_start);
                 let x = label_bounds.x() as i32 + layout_x + position.x() / gtk::pango::SCALE;
                 let y = label_bounds.y() as i32
@@ -682,14 +705,17 @@ impl Ui {
         inserted
     }
 
-    pub(crate) fn inline_message_text(
+    pub(crate) fn inline_message_text(self:&Rc<Self>,body:&str,emoji:&InlineEmoji,status:Option<&gtk::Box>,links:&[crate::link_previews::ClickableUrl])->gtk::Widget{self.inline_message_text_formatted(body,emoji,status,links,None)}
+    pub(crate) fn inline_message_text_formatted(
         self: &Rc<Self>,
         body: &str,
         emoji: &InlineEmoji,
         status: Option<&gtk::Box>,
         links: &[crate::link_previews::ClickableUrl],
+        formatting: Option<&crate::markdown::RichText>,
     ) -> gtk::Widget {
         let renderer = InlineMessageText::new(body, emoji, status, links);
+        if let Some(rich)=formatting{renderer.set_rich(rich.clone());}
         let owner = self.state.borrow().account.clone();
         let generation = self.generation.get();
         let mut seen = std::collections::HashSet::new();

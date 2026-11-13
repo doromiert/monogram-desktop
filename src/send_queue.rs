@@ -73,6 +73,7 @@ impl Ui {
             self.notice("Unblock this address before sending. Your files and caption are kept.");
             return false;
         }
+        let caption_markup=if self.composer_text()==caption{self.composer_formatting().trim().styled()}else{crate::formatting::Markup::plain(caption.trim())};
         let reply = self
             .replying
             .borrow()
@@ -93,11 +94,9 @@ impl Ui {
                 author: "You".into(),
                 own: true,
                 kind: "file".into(),
-                text: if index == 0 {
-                    caption.trim().into()
-                } else {
-                    String::new()
-                },
+                text: if index == 0 {caption_markup.body.clone()} else {String::new()},
+                formatting: Some(if index==0 {caption_markup.clone()}else{crate::formatting::Markup{spoiler:caption_markup.spoiler,..Default::default()}}),
+                preview_spoilers:Some(if index==0{caption_markup.spoiler_context()}else{crate::formatting::Markup{spoiler:caption_markup.spoiler,..Default::default()}.spoiler_context()}),
                 outbox_pending: true,
                 delivery: "queued".into(),
                 unsupported_attachment: true,
@@ -157,15 +156,19 @@ impl Ui {
         });
         true
     }
-    pub fn queue_text(self: &Rc<Self>, value: &str) {
+    pub fn queue_text(self:&Rc<Self>,value:&str){let _=self.queue_formatted_text(value,None);}
+    pub fn queue_formatted_text(self: &Rc<Self>, value: &str, formatting:Option<crate::formatting::Markup>) -> Option<String> {
         if self.peer_blocked(&self.state.borrow().current().jid) {
             self.notice("Unblock this address before sending. Your draft is kept.");
-            return;
+            return None;
         }
         if value.len() > 64 * 1024 {
             self.notice("Message is too long");
-            return;
+            return None;
         }
+        let from_composer=self.composer_text()==value;
+        let authored=formatting.unwrap_or_else(||if from_composer{self.composer_formatting()}else{crate::formatting::Markup::plain(value)}).trim().styled();
+        if authored.body.len()>64*1024 || authored.markdown && (authored.body.len()>32768 || authored.body.encode_utf16().count()>32768){self.notice("Formatted message is too long");return None;}
         let inline = self
             .composer_inline_emoji()
             .filter(|emoji| emoji.body == value)
@@ -186,8 +189,8 @@ impl Ui {
         let owner = state.account.clone();
         let peer = state.current().jid.clone();
         let group = state.current().group;
-        let Some(id) = state.send(value, "text") else {
-            return;
+        let Some(id) = state.send(&authored.body, "text") else {
+            return None;
         };
         let message = state
             .current_mut()
@@ -196,7 +199,9 @@ impl Ui {
             .find(|message| message.id == id)
             .unwrap();
         message.outbox_pending = true;
-        message.inline_emoji = inline;
+        message.inline_emoji = inline.and_then(|emoji|crate::formatting::remap_inline(&authored,&emoji));
+        message.preview_spoilers=Some(authored.spoiler_context());
+        message.formatting=Some(authored);
         message.delivery = "queued".into();
         // Encryption is unknown until the sending policy has actually completed.
         message.encrypted = false;
@@ -219,14 +224,13 @@ impl Ui {
                 .current_mut()
                 .messages
                 .retain(|message| message.id != id);
-            return;
+            return None;
         }
-        self.loading.set(true);
-        self.composer.buffer().set_text("");
-        self.loading.set(false);
-        self.clear_composer_inline_emoji();
-        self.cancel_reply();
-        self.save_draft();
+        if from_composer {
+            self.loading.set(true);self.composer.buffer().set_text("");self.loading.set(false);
+            self.composer_spoiler.set_state(&false.to_variant());
+            self.clear_composer_inline_emoji();self.cancel_reply();self.save_draft();
+        }
         self.history_window.content_changed();
         self.render_messages(true);
         self.refresh_chats(None);
@@ -236,6 +240,7 @@ impl Ui {
                 ui.flush_send_queue();
             }
         });
+        Some(id)
     }
 
     pub fn flush_send_queue(self: &Rc<Self>) {
@@ -413,6 +418,8 @@ impl Ui {
                             author: "You".into(),
                             own: true,
                             text: std::mem::take(&mut current.text),
+                            formatting:current.formatting.take(),
+                            preview_spoilers:current.preview_spoilers.take(),
                             upload_caption_for: current.id.clone(),
                             delivery: "waiting-upload".into(),
                             ..Default::default()
