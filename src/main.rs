@@ -148,18 +148,20 @@ fn main() -> gtk::glib::ExitCode {
                 started.elapsed().as_millis()
             );
             let ui = ui::Ui::new_with_window(&app, smoke, ready_window);
+            let reconnect = ui.clone();
             after_next_paint(&ui.window, move || {
                 eprintln!(
                     "Monogram interface ready: {} ms (frame gap {} ms)",
                     started.elapsed().as_millis(),
                     loading_paint.elapsed().as_millis()
                 );
+                if !reconnect.smoke {
+                    // Let the interface paint before restoring the account and transport.
+                    gtk::glib::idle_add_local_once(move || reconnect.reconnect_saved());
+                }
             });
             if std::env::args().any(|s| s == "--show-media") {
                 ui.toggle_media();
-            }
-            if !ui.smoke {
-                ui.reconnect_saved();
             }
             if std::env::args().any(|s| s == "--crypto-smoke-test") {
                 smoke::run_crypto(ui.clone());
