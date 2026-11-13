@@ -313,9 +313,7 @@ impl Completion {
                 self.list
                     .select_row(self.list.row_at_index(next as i32).as_ref());
             }
-            gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::Tab => {
-                self.activate(self.selected.get())
-            }
+            gdk::Key::Tab => self.activate(self.selected.get()),
             gdk::Key::Escape => self.hide(),
             _ => return false,
         }
@@ -444,6 +442,29 @@ mod tests {
         assert_eq!(super::emoji_id("🏴‍☠"), super::emoji_id("🏴‍☠️"));
         assert_ne!(super::emoji_id("☠"), super::emoji_id("💀"));
         assert_ne!(super::emoji_id("☠"), super::emoji_id("🏴‍☠️"));
+    }
+
+    #[test]
+    #[ignore = "requires a private native GTK display"]
+    fn colon_completion_uses_tab_and_leaves_enter_for_sending() {
+        use super::*;
+        gtk::init().unwrap();let _=catalog();
+        let view=gtk::TextView::new();let completion=attach(&view);
+        let window=gtk::Window::builder().default_width(420).default_height(220).child(&view).build();window.present();view.grab_focus();
+        glib::MainContext::default().block_on(async {
+            glib::timeout_future(std::time::Duration::from_millis(80)).await;
+            for value in [":3",":smile"] {
+                view.buffer().set_text(value);view.buffer().place_cursor(&view.buffer().end_iter());completion.update();
+                glib::timeout_future(std::time::Duration::from_millis(40)).await;
+                if value==":smile"{assert!(completion.popover.is_mapped(),"no active suggestion popup");}
+                for key in [gdk::Key::Return,gdk::Key::KP_Enter] {
+                    assert!(!completion.key(key,gdk::ModifierType::empty()),"Enter consumed by completion");
+                    assert_eq!(view.buffer().text(&view.buffer().start_iter(),&view.buffer().end_iter(),false).as_str(),value);
+                }
+            }
+            assert!(completion.key(gdk::Key::Tab,gdk::ModifierType::empty()));
+            let value=view.buffer().text(&view.buffer().start_iter(),&view.buffer().end_iter(),false);assert_ne!(value.as_str(),":smile");assert!(!value.is_empty());
+        });window.destroy();
     }
 
     #[test]
