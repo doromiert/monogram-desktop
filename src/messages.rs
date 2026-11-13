@@ -1482,6 +1482,22 @@ impl Ui {
             return;
         };
         let live = !self.state.borrow().account.is_empty();
+        // Restoring focus from the search field must not select the message.
+        let mut selections = Vec::new();
+        let mut pending = vec![parent.clone().upcast::<gtk::Widget>()];
+        while let Some(widget) = pending.pop() {
+            if let Some(label) = widget
+                .downcast_ref::<gtk::Label>()
+                .filter(|label| label.is_selectable())
+            {
+                selections.push((label.downgrade(), label.selection_bounds().unwrap_or((0, 0))));
+            }
+            let mut child = widget.first_child();
+            while let Some(widget) = child {
+                child = widget.next_sibling();
+                pending.push(widget);
+            }
+        }
         let pop = gtk::Popover::builder().has_arrow(false).build();
         pop.set_parent(parent);
         pop.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
@@ -1571,10 +1587,20 @@ impl Ui {
             content.append(&action_menu);
         }
         pop.set_child(Some(&content));
-        pop.connect_closed(|p| {
+        pop.connect_closed(move |p| {
             if p.parent().is_some() {
                 p.unparent()
             }
+            let selections = selections.clone();
+            // GTK restores focus after closed; restore the range before painting.
+            glib::idle_add_local_full(glib::Priority::HIGH_IDLE, move || {
+                for (label, (start, end)) in &selections {
+                    if let Some(label) = label.upgrade() {
+                        label.select_region(*start, *end);
+                    }
+                }
+                glib::ControlFlow::Break
+            });
         });
         pop.popup();
     }

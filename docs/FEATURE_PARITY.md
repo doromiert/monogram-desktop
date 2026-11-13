@@ -147,3 +147,9 @@ The favorite preview wrapper follows hidden content so it leaves no blank space.
 Category highlights follow the first visible section; category clicks align its
 heading to the top, including repeated clicks on the current category. Scroll
 tracking retains weak references to bound list items and preserves virtualization.
+
+Reaction morph corners use float GSK rounded clipping to preserve frame delivery
+without restyling the virtual emoji subtree. Popup dismissal restores prior text
+ranges after GTK focus restoration, preserving both unselected and partially
+selected source messages. Native frame-budget and focus-restoration regression
+checks pass; no protocol behavior changes.

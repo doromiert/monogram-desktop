@@ -470,3 +470,27 @@ DELIVERY VERIFIED — Emoji identity, sidebar layout and category navigation
   Reaction first frame49ms, settled220ms,49/1910 mapped emoji buttons.
   Startup loading feedback374ms; next interface frame gap162ms. Full broad smoke
   is not claimed; unrelated forwarding and formatter changes remain excluded.
+
+IMPLEMENTED — Smooth reaction expansion and dismissal without text select-all
+  Changing radius CSS classes restyled the virtual emoji subtree every frame.
+  Native baseline delivered6–7 height steps and36.4ms median steady frame gaps
+  (27.5fps). A float GSK rounded clip replaces per-frame CSS changes; collapsed
+  content is excluded from focus with can-focus/can-target rather than toggling
+  sensitivity across the subtree. Unused expanded CSS state is removed.
+  Native result:11–12 height steps and16.51ms median gaps (60.6fps) at60Hz.
+  A separate native Wayland/Vulkan run passes, with warm8–17ms intervals.
+  Keep the same width, moving quick buttons,200ms timing and24px->12px corners.
+  Restoring search focus on popover dismissal selected the whole source label.
+  Save pre-menu text ranges and restore after GTK completes focus restoration;
+  preserve existing partial selections and ordinary pointer text selection.
+  Actual outside-click tests pass collapsed/expanded, no-selection and existing
+  partial-selection cases. Added ignored native regression for frame budget and
+  focus restoration; run under the isolated display/data/Secret Service fixture.
+
+PERFORMANCE ATTEMPTS — Reaction expansion
+  Baseline: per-frame CSS radius classes ->36.4ms median steady gap; rejected.
+  Diagnostic: skip radius class changes ->~16.7ms steady gap; confirmed cause,
+  but skipped rendering is not shipped. Replaced with real GSK rounded clipping.
+  GSK clip alone: steady60Hz but~37ms start gap. Removing subtree sensitivity
+  toggles/unused CSS state keeps warm expansion and collapse near16–17ms/frame.
+  Frame sampling excludes synchronous screenshot/xdotool calls during animation.

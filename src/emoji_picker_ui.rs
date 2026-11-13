@@ -987,9 +987,87 @@ pub(crate) fn refresh_emoji_surfaces(ui: &Rc<Ui>) {
     }
 }
 
+mod reaction_clip_imp {
+    use super::*;
+    use gtk::subclass::prelude::*;
+
+    #[derive(Default)]
+    pub struct ReactionClip {
+        pub child: RefCell<Option<gtk::Widget>>,
+        pub radius: Cell<f32>,
+    }
+    #[glib::object_subclass]
+    impl ObjectSubclass for ReactionClip {
+        const NAME: &'static str = "MonogramReactionClip";
+        type Type = super::ReactionClip;
+        type ParentType = gtk::Widget;
+    }
+    impl ObjectImpl for ReactionClip {
+        fn dispose(&self) {
+            if let Some(child) = self.child.borrow_mut().take() {
+                child.unparent();
+            }
+        }
+    }
+    impl WidgetImpl for ReactionClip {
+        fn measure(&self, orientation: gtk::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
+            self.child
+                .borrow()
+                .as_ref()
+                .map_or((0, 0, -1, -1), |child| child.measure(orientation, for_size))
+        }
+        fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
+            if let Some(child) = self.child.borrow().as_ref() {
+                child.allocate(width, height, baseline, None);
+            }
+        }
+        fn snapshot(&self, snapshot: &gtk::Snapshot) {
+            let obj = self.obj();
+            if let Some(child) = self.child.borrow().as_ref() {
+                let bounds =
+                    gtk::graphene::Rect::new(0., 0., obj.width() as f32, obj.height() as f32);
+                snapshot.push_rounded_clip(&gtk::gsk::RoundedRect::from_rect(
+                    bounds,
+                    self.radius.get(),
+                ));
+                obj.snapshot_child(child, snapshot);
+                snapshot.pop();
+            }
+        }
+    }
+}
+glib::wrapper! {
+    pub struct ReactionClip(ObjectSubclass<reaction_clip_imp::ReactionClip>)
+        @extends gtk::Widget, @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
+}
+impl ReactionClip {
+    fn new(child: &impl IsA<gtk::Widget>) -> Self {
+        use gtk::subclass::prelude::*;
+        let clip: Self = glib::Object::new();
+        let child = child.clone().upcast::<gtk::Widget>();
+        child.set_parent(&clip);
+        clip.imp().child.replace(Some(child));
+        clip.imp().radius.set(24.);
+        clip
+    }
+    pub(crate) fn radius(&self) -> f32 {
+        use gtk::subclass::prelude::*;
+        self.imp().radius.get()
+    }
+    fn set_radius(&self, radius: f32) {
+        use gtk::subclass::prelude::*;
+        if self.radius() != radius {
+            self.imp().radius.set(radius);
+            // Drawing the clip avoids restyling every virtual emoji on each frame.
+            self.queue_draw();
+        }
+    }
+}
+
 pub(crate) struct ReactionPicker {
     pub root: gtk::Box,
     morph: gtk::Overlay,
+    clip: ReactionClip,
     base: gtk::Box,
     expanded: gtk::Box,
     quick: gtk::Box,
@@ -1006,8 +1084,6 @@ pub(crate) struct ReactionPicker {
     full_height: Cell<i32>,
     target: Cell<(f64, f64, i32)>,
     collapsed_radius: Cell<i32>,
-    radius: Cell<i32>,
-    radius_css: gtk::CssProvider,
     animation: RefCell<Option<adw::TimedAnimation>>,
 }
 impl ReactionPicker {
@@ -1033,13 +1109,6 @@ impl ReactionPicker {
         slot.append(&self.quick);
         self.canvas.set_visible(false);
     }
-    fn radius_styles(radius: i32) -> String {
-        (12..=radius.max(12))
-            .map(|radius| {
-                format!(".reaction-morph.reaction-radius-{radius} {{ border-radius: {radius}px; }}")
-            })
-            .collect()
-    }
     fn capture_collapsed_radius(&self) {
         if self.progress.get() != 0. || self.moving.get() || self.is_expanded.get() {
             return;
@@ -1048,23 +1117,12 @@ impl ReactionPicker {
         if height <= 0 {
             return;
         }
-        let radius = (height / 2).max(12);
-        if radius != self.collapsed_radius.get() {
-            self.collapsed_radius.set(radius);
-            self.radius_css
-                .load_from_string(&Self::radius_styles(radius));
-        }
+        self.collapsed_radius.set((height / 2).max(12));
     }
     fn apply_radius(&self, progress: f64) {
         let collapsed = self.collapsed_radius.get() as f64;
-        let radius = (collapsed + (12. - collapsed) * progress).round() as i32;
-        let previous = self.radius.replace(radius);
-        if previous != radius {
-            self.morph
-                .remove_css_class(&format!("reaction-radius-{previous}"));
-            self.morph
-                .add_css_class(&format!("reaction-radius-{radius}"));
-        }
+        self.clip
+            .set_radius((collapsed + (12. - collapsed) * progress) as f32);
     }
     fn frame(&self, progress: f64) {
         self.progress.set(progress);
@@ -1110,7 +1168,7 @@ impl ReactionPicker {
         self.expanded.set_can_target(expanded);
         if expanded {
             self.expanded.set_opacity(1.);
-            self.expanded.set_sensitive(true);
+            self.expanded.set_can_focus(true);
             self.expanded
                 .update_state(&[gtk::accessible::State::Hidden(false)]);
         }
@@ -1121,11 +1179,6 @@ impl ReactionPicker {
         self.arrow.set_visible(!expanded);
         self.heading.set_reveal_child(expanded);
         self.actions.set_reveal_child(!expanded);
-        if expanded {
-            self.morph.add_css_class("expanded");
-        } else {
-            self.morph.remove_css_class("expanded");
-        }
         self.full_height.set(
             self.expanded
                 .measure(gtk::Orientation::Vertical, 320)
@@ -1162,7 +1215,7 @@ impl ReactionPicker {
                 } else {
                     picker.expanded.set_can_target(false);
                     picker.expanded.set_opacity(0.);
-                    picker.expanded.set_sensitive(false);
+                    picker.expanded.set_can_focus(false);
                     picker
                         .expanded
                         .update_state(&[gtk::accessible::State::Hidden(true)]);
@@ -1319,7 +1372,7 @@ impl Ui {
         expanded.set_visible(true);
         expanded.set_can_target(false);
         expanded.set_opacity(0.);
-        expanded.set_sensitive(false);
+        expanded.set_can_focus(false);
         expanded.update_state(&[gtk::accessible::State::Hidden(true)]);
         let header = bx(false, 6);
         header.add_css_class("expanded-reaction-header");
@@ -1337,12 +1390,6 @@ impl Ui {
         base.set_size_request(320, 48);
         let morph = gtk::Overlay::new();
         morph.add_css_class("reaction-morph");
-        morph.add_css_class("reaction-radius-24");
-        let radius_css = gtk::CssProvider::new();
-        radius_css.load_from_string(&ReactionPicker::radius_styles(24));
-        morph
-            .style_context()
-            .add_provider(&radius_css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
         morph.set_overflow(gtk::Overflow::Hidden);
         morph.set_child(Some(&base));
         morph.add_overlay(&expanded);
@@ -1372,11 +1419,13 @@ impl Ui {
             .reveal_child(true)
             .build();
         let root = bx(true, 0);
-        root.append(&morph);
+        let clip = ReactionClip::new(&morph);
+        root.append(&clip);
         root.append(&actions);
         let picker = Rc::new(ReactionPicker {
             root,
             morph,
+            clip,
             base,
             expanded,
             quick,
@@ -1393,8 +1442,6 @@ impl Ui {
             full_height: Cell::new(380),
             target: Cell::new((6., 46., 308)),
             collapsed_radius: Cell::new(24),
-            radius: Cell::new(24),
-            radius_css,
             animation: RefCell::new(None),
         });
         let weak = Rc::downgrade(&picker);
@@ -1435,5 +1482,166 @@ impl Ui {
             let _ = &keep;
         });
         picker
+    }
+}
+
+#[cfg(test)]
+mod native_regressions {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn descendants(widget: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
+        let mut pending = vec![widget.clone().upcast::<gtk::Widget>()];
+        let mut result = Vec::new();
+        while let Some(widget) = pending.pop() {
+            let mut child = widget.first_child();
+            while let Some(next) = child {
+                child = next.next_sibling();
+                pending.push(next);
+            }
+            result.push(widget);
+        }
+        result
+    }
+
+    #[test]
+    #[ignore = "requires isolated native 60Hz display, data roots and Secret Service"]
+    fn reaction_motion_keeps_frame_budget_and_text_selection() {
+        let app = adw::Application::builder()
+            .application_id("com.negzero.MonogramReactionMotionTest")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gio::Cancellable>).unwrap();
+        let ui = Ui::new(&app, true);
+        let css = gtk::CssProvider::new();
+        css.load_from_path(asset("style.css"));
+        gtk::style_context_add_provider_for_display(
+            &gtk::gdk::Display::default().unwrap(),
+            &css,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        let mut state = crate::model::State::live("", vec![]);
+        let chat = state.chat_for("recipient@fixture.invalid");
+        chat.messages.push(Message {
+            id: "motion".into(),
+            text: "Selectable message text".into(),
+            kind: "text".into(),
+            ..Default::default()
+        });
+        state.active = chat.id.clone();
+        ui.state.replace(state);
+        let bubble = bx(true, 0);
+        bubble.set_valign(gtk::Align::Center);
+        bubble.set_halign(gtk::Align::Center);
+        let label = gtk::Label::new(Some("Selectable message text"));
+        label.set_selectable(true);
+        bubble.append(&label);
+        ui.window.set_content(Some(&bubble));
+        ui.window.set_default_size(1000, 1000);
+        ui.window.present();
+        glib::MainContext::default().block_on(async {
+            glib::timeout_future(Duration::from_millis(100)).await;
+            label.select_region(0, 0);
+            ui.message_menu(&bubble, "motion", 12., 12.);
+            glib::timeout_future(Duration::from_millis(70)).await;
+            let morph = descendants(&bubble)
+                .into_iter()
+                .find(|w| w.has_css_class("reaction-morph"))
+                .unwrap();
+            let button = |title: &str| {
+                descendants(&morph)
+                    .into_iter()
+                    .find_map(|w| {
+                        w.downcast::<gtk::Button>()
+                            .ok()
+                            .filter(|b| b.tooltip_text().as_deref() == Some(title))
+                    })
+                    .unwrap()
+            };
+            let expand = button("Show all reactions");
+            let collapse = button("Back to quick reactions");
+            let frames = Rc::new(RefCell::new(Vec::new()));
+            let recorded = frames.clone();
+            let moving = morph.clone();
+            let tick = ui.window.add_tick_callback(move |_, _| {
+                recorded
+                    .borrow_mut()
+                    .push((Instant::now(), moving.height()));
+                glib::ControlFlow::Continue
+            });
+            for _ in 0..3 {
+                frames.borrow_mut().clear();
+                let start = Instant::now();
+                expand.emit_clicked();
+                glib::timeout_future(Duration::from_millis(270)).await;
+                let mut gaps = frames
+                    .borrow()
+                    .windows(2)
+                    .filter(|pair| {
+                        pair[0].0.duration_since(start) >= Duration::from_millis(60)
+                            && pair[1].0.duration_since(start) <= Duration::from_millis(210)
+                    })
+                    .map(|pair| pair[1].0.duration_since(pair[0].0))
+                    .collect::<Vec<_>>();
+                gaps.sort();
+                assert!(gaps.len() >= 4, "too few delivered animation frames");
+                assert!(
+                    gaps[gaps.len() / 2] < Duration::from_millis(25),
+                    "animation median frame gap {:?}",
+                    gaps[gaps.len() / 2]
+                );
+                collapse.emit_clicked();
+                glib::timeout_future(Duration::from_millis(230)).await;
+            }
+            tick.remove();
+            let pop = morph
+                .ancestor(gtk::Popover::static_type())
+                .unwrap()
+                .downcast::<gtk::Popover>()
+                .unwrap();
+            for selection in [(0, 0), (2, 9)] {
+                label.select_region(selection.0, selection.1);
+                // Reopen so the saved range comes from before the modal menu.
+                pop.popdown();
+                glib::timeout_future(Duration::from_millis(30)).await;
+                label.select_region(selection.0, selection.1);
+                ui.message_menu(&bubble, "motion", 12., 12.);
+                glib::timeout_future(Duration::from_millis(50)).await;
+                let expand = descendants(&bubble)
+                    .into_iter()
+                    .find_map(|w| {
+                        w.downcast::<gtk::Button>()
+                            .ok()
+                            .filter(|b| b.tooltip_text().as_deref() == Some("Show all reactions"))
+                    })
+                    .unwrap();
+                expand.emit_clicked();
+                glib::timeout_future(Duration::from_millis(230)).await;
+                let pop = expand
+                    .ancestor(gtk::Popover::static_type())
+                    .unwrap()
+                    .downcast::<gtk::Popover>()
+                    .unwrap();
+                pop.popdown();
+                let expected = (selection.0 != selection.1).then_some(selection);
+                let painted = Rc::new(Cell::new(false));
+                let observed = painted.clone();
+                let painted_label = label.clone();
+                ui.window.add_tick_callback(move |_, _| {
+                    assert_eq!(
+                        painted_label.selection_bounds(),
+                        expected,
+                        "select-all flashed in a frame"
+                    );
+                    observed.set(true);
+                    glib::ControlFlow::Break
+                });
+                ui.window.queue_draw();
+                glib::timeout_future(Duration::from_millis(50)).await;
+                assert!(painted.get());
+                assert_eq!(label.selection_bounds(), expected);
+            }
+        });
+        ui.window.close();
     }
 }
