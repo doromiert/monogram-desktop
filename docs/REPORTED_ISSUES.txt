@@ -459,3 +459,14 @@ IMPLEMENTED — Category highlight follows scroll and category clicks align top
   clicked category is already active. Synchronizing a highlight does not trigger
   another navigation. Native sidebar checks pass for downward/upward jumps,
   repeated clicks and wheel-driven highlight changes, with heading y=9px.
+
+DELIVERY VERIFIED — Emoji identity, sidebar layout and category navigation
+  Running clean source44dfa5d in package rszhzqvn7fbh6m48s8xhnylyszqpnakb;
+  executable verified after service restart. Existing saved skull favorite is
+  visible in the live sidebar with Noto rendering and no blank forehead.
+  Private native checks pass favorite add/remove/reload, category top alignment
+  in both views, scrolling highlight changes, shared quick-row identity and
+  live Emoji/Sticker/GIF favorite drags with preserved media widgets.
+  Reaction first frame49ms, settled220ms,49/1910 mapped emoji buttons.
+  Startup loading feedback374ms; next interface frame gap162ms. Full broad smoke
+  is not claimed; unrelated forwarding and formatter changes remain excluded.
