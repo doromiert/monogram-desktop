@@ -567,8 +567,11 @@ impl MessageText {
                     overlay.add_overlay(&status);
                 }
             }
+            // Restore natural inline width before deciding from the new allocation.
+            self.imp().compact.set(false);
             self.render_body();
             self.refresh_shape();
+            if !share { return; }
         }
         self.set_compact(wrapped && !share);
     }

@@ -515,11 +515,11 @@ mod status_tests {
         let css=gtk::CssProvider::new();css.load_from_path(asset("style.css"));gtk::style_context_add_provider_for_display(&gtk::gdk::Display::default().unwrap(),&css,gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
         let root=bx(true,16);crate::widgets::margins(&root,20);let mut cases=vec![];
         for kind in 0..4 {
-            let bubble=bx(true,0);bubble.add_css_class("message-bubble");bubble.set_width_request(420);bubble.set_halign(gtk::Align::Start);if kind%2==1{bubble.add_css_class("own");}
+            let bubble=bx(true,0);bubble.add_css_class("message-bubble");if kind!=0{bubble.set_width_request(420);}bubble.set_halign(gtk::Align::Start);if kind%2==1{bubble.add_css_class("own");}
             let status=bx(false,4);status.add_css_class("message-meta");status.append(&text("20:49 ✓",""));
             if kind<2 {
                 if kind==1{bubble.append(&wrap("A reply preview that makes this short message wider.","message-reply"));}
-                bubble.append(&MessageText::new(&wrap(if kind==0{"A short message whose timestamp easily fits inline."}else{"Yes"},"message-text"),&status));
+                let source=if kind==0{"A short message"}else{"Yes"};bubble.append(&MessageText::with_rich(&wrap(source,"message-text"),&status,crate::markdown::RichText::plain(source)));
             }else if kind==2 {
                 bubble.add_css_class("media-bubble");let overlay=gtk::Overlay::new();let media=gtk::DrawingArea::builder().content_width(320).content_height(110).build();overlay.set_child(Some(&media));status.add_css_class("sticker-meta");status.set_halign(gtk::Align::End);status.set_valign(gtk::Align::End);overlay.add_overlay(&status);bubble.append(&overlay);
             }else{
@@ -527,11 +527,14 @@ mod status_tests {
             }
             let original=status.parent().unwrap();let previous=status.prev_sibling();
             let message=Message{id:format!("status-{kind}"),text:"Message".into(),kind:"text".into(),..Default::default()};
-            let reactions=MessageReactions::new(&ui,&message,&bubble,kind==2,&status);root.append(&bubble);cases.push((bubble,status,original,previous,reactions,message));
+            let reactions=MessageReactions::new(&ui,&message,&bubble,kind==2,&status);if kind==0{root.append(&crate::widgets::MessageBubbleLimit::new(&bubble,false));}else{root.append(&bubble);}cases.push((bubble,status,original,previous,reactions,message));
         }
         ui.window.set_content(Some(&root));ui.window.set_default_size(600,780);ui.window.present();
         glib::MainContext::default().block_on(async{
             glib::timeout_future(Duration::from_millis(120)).await;
+            let short_body=focusable_message_text(cases[0].0.upcast_ref()).unwrap().downcast::<gtk::Label>().unwrap();
+            assert_eq!(short_body.layout().line_count(),1,"short message initially wrapped");
+            let initial_short_height=cases[0].0.height();
             for(_,_,_,_,reactions,message)in &mut cases{message.reactions=vec!["🔥 1".into()];reactions.update(&ui,message);}
             glib::timeout_future(Duration::from_millis(300)).await;
             for(bubble,status,_,_,reactions,_)in &cases{MessageText::refresh_reaction_layout(bubble);assert!(status.parent().is_some_and(|p|p.has_css_class("reaction-status")),"timestamp did not join reactions");assert!(status.compute_bounds(&reactions.0.row).is_some());assert!(!status.has_css_class("sticker-meta"));}
@@ -539,6 +542,8 @@ mod status_tests {
             for(_,_,_,_,reactions,message)in &mut cases{message.reactions.clear();reactions.update(&ui,message);}
             glib::timeout_future(Duration::from_millis(300)).await;
             for(kind,(bubble,status,original,previous,_,_))in cases.iter().enumerate(){MessageText::refresh_reaction_layout(bubble);assert_eq!(status.parent().as_ref(),Some(original));assert_eq!(status.prev_sibling(),*previous);assert_eq!(status.has_css_class("sticker-meta"),kind==2);}
+            assert_eq!(short_body.layout().line_count(),1,"short message stayed split after last reaction removal");
+            assert_eq!(cases[0].0.height(),initial_short_height,"short bubble did not return to its original height");
             println!("PASS timestamp on every nonempty reaction row and original home restored for text, replies, media and articles");
         });ui.window.close();
     }
