@@ -10,6 +10,8 @@ use std::{collections::HashSet, rc::Rc};
 
 impl Ui {
     pub fn timeline_scope_changed(&self) {
+        self.send_animation.cancel();
+        self.set_composer_send_hint(false);
         self.history_window.reset(true);
         self.history_window.highlighted.borrow_mut().take();
         self.history_latest.set_visible(false);

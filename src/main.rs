@@ -60,6 +60,7 @@ mod rooms;
 mod send_policy_ui;
 mod selection_actions;
 mod send_queue;
+mod send_animation;
 mod smoke;
 mod spoilers;
 mod storage;

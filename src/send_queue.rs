@@ -227,6 +227,7 @@ impl Ui {
             return None;
         }
         if from_composer {
+            self.animate_sent_text(&id);
             self.loading.set(true);self.composer.buffer().set_text("");self.loading.set(false);
             self.composer_spoiler.set_state(&false.to_variant());
             self.clear_composer_inline_emoji();self.cancel_reply();self.save_draft();

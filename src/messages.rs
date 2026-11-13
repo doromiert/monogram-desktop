@@ -960,12 +960,13 @@ impl Ui {
                 bubble.append(&meta);
             }
             let reactions = reactions_ui::MessageReactions::new(self, &m, &bubble, media);
+            let presentation=self.send_animation.wrap(&m.id,&bubble);
             if action.is_some() {
                 outer.set_halign(gtk::Align::Center);
                 outer.set_hexpand(false);
-                outer.append(&bubble);
+                outer.append(&presentation);
             } else {
-                outer.append(&MessageBubbleLimit::new(&bubble, m.own));
+                outer.append(&MessageBubbleLimit::new(&presentation, m.own));
             }
             self.bubbles
                 .borrow_mut()

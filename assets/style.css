@@ -33,7 +33,8 @@
 .composer:focus-within { outline-color: alpha(@accent_color,.5); }
 .composer scrolledwindow, .composer textview, .composer textview text { background: transparent; border: none; box-shadow: none; outline: none; }
 .composer scrolledwindow undershoot { background: none; box-shadow: none; }
-.composer textview { padding: 0; }
+.composer textview { padding: 0; color: @window_fg_color; }
+.composer textview text { color: @window_fg_color; }
 .send { border-radius: 50%; min-width: 36px; min-height: 36px; padding: 0; }
 .utility-sidebar { background: @window_bg_color; border-left: 1px solid alpha(@borders,.6); }
 .chat-sidebar headerbar, .utility-sidebar headerbar { background: transparent; box-shadow: none; }

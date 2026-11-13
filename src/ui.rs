@@ -26,6 +26,7 @@ pub struct Ui {
     pub window: adw::ApplicationWindow,
     pub toast: adw::ToastOverlay,
     pub overlay: gtk::Overlay,
+    pub(crate) send_animation: crate::send_animation::SendAnimation,
     shell: gtk::Stack,
     welcome_status: gtk::Label,
     welcome_progress: gtk::Spinner,
@@ -174,6 +175,9 @@ impl Ui {
             .build();
         utility.set_sidebar_width_unit(adw::LengthUnit::Px);
         let overlay = gtk::Overlay::builder().child(&utility).build();
+        let send_animation=crate::send_animation::SendAnimation::new();
+        overlay.add_overlay(&send_animation);
+        overlay.set_measure_overlay(&send_animation,false);
         let shell = gtk::Stack::new();
         shell.set_hhomogeneous(false);
         shell.set_vhomogeneous(false);
@@ -256,6 +260,7 @@ impl Ui {
             window,
             toast,
             overlay,
+            send_animation,
             shell,
             welcome_status,
             welcome_progress,
@@ -1807,6 +1812,9 @@ impl Ui {
         self.refresh_chats(None);
         Some(id)
     }
+    pub(crate) fn set_composer_send_hint(&self,hidden:bool){
+        self.composer_placeholder.set_opacity(if hidden{0.}else{1.});
+    }
     pub fn send(self: &Rc<Self>) {
         let value = self.composer_text();
         if value.trim().is_empty() && self.attachments.borrow().is_empty() {
@@ -1892,6 +1900,7 @@ impl Ui {
             }
             let message = message.clone();
             drop(state);
+            if !live && self.attachments.borrow().is_empty(){self.animate_sent_text(&id);}
             if live {
                 if !self.persist() {
                     self.state
