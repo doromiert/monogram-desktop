@@ -28,6 +28,7 @@ mod formatting;
 mod formatting_ui;
 mod math_ui;
 mod renderer_sandbox;
+mod reply_preview_ui;
 mod gifs;
 mod history_window;
 mod history_window_ui;

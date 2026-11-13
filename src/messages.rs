@@ -732,7 +732,10 @@ impl Ui {
                 snippet.set_ellipsize(gtk::pango::EllipsizeMode::End);
                 contents.append(&title);
                 contents.append(&snippet);
-                reply.set_child(Some(&contents));
+                let preview_row = bx(false, 7);
+                crate::reply_preview_ui::attach(self, m, &preview_row);
+                preview_row.append(&contents);
+                reply.set_child(Some(&preview_row));
                 let weak = Rc::downgrade(self);
                 let target = m.reply_id.clone();
                 let author = m.reply_to.clone();

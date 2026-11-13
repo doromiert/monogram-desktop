@@ -624,9 +624,9 @@ mod image_imp {
         fn measure(&self, o: gtk::Orientation, size: i32) -> (i32, i32, i32, i32) {
             if self.cover.get() {
                 return match o {
-                    gtk::Orientation::Horizontal => (0, 110, -1, -1),
+                    gtk::Orientation::Horizontal => (0, self.max_width.get(), -1, -1),
                     _ => {
-                        let edge = if size < 0 { 110 } else { size };
+                        let edge = if size < 0 { self.max_width.get() } else { size };
                         (edge, edge, -1, -1)
                     }
                 };
@@ -671,10 +671,10 @@ mod image_imp {
                         w.min(h) as f32 / 2.,
                     ));
                 } else if !self.borderless.get() {
-                    let mut radii = [10.; 4];
+                    let mut radii = [if obj.has_css_class("reply-image-preview") { 4. } else { 10. }; 4];
                     let mut parent = obj.parent();
                     while let Some(widget) = parent {
-                        if widget.has_css_class("media-bubble") {
+                        if widget.has_css_class("media-bubble") && !obj.has_css_class("reply-image-preview") {
                             let own = widget.has_css_class("own");
                             radii[if own { 2 } else { 3 }] = 3.;
                             if widget.has_css_class("cluster-previous") {
@@ -730,6 +730,16 @@ impl AspectImage {
     pub fn square() -> Self {
         let image: Self = glib::Object::new();
         image.imp().cover.set(true);
+        image.imp().max_width.set(110);
+        image
+    }
+    pub fn reply_thumbnail() -> Self {
+        let image = Self::square();
+        image.imp().max_width.set(36);
+        image.set_size_request(36, 36);
+        image.set_halign(gtk::Align::Start);
+        image.set_valign(gtk::Align::Center);
+        image.add_css_class("reply-image-preview");
         image
     }
     pub fn set_circular(&self, circular: bool) {
