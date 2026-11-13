@@ -1172,11 +1172,31 @@ impl ReactionPicker {
             self.expanded
                 .update_state(&[gtk::accessible::State::Hidden(false)]);
         }
-        self.detach_quick();
+        let reparent = self.quick.parent().as_ref() != Some(self.canvas.upcast_ref());
+        if reparent {
+            self.detach_quick();
+        }
         self.quick.add_css_class("compact");
         self.canvas.set_visible(true);
-        self.canvas.append(&self.quick);
-        self.arrow.set_visible(!expanded);
+        if reparent {
+            self.canvas.append(&self.quick);
+        }
+        // Keep both input widgets alive under a stationary pointer.
+        if let Some(image) = self.arrow.child().and_downcast::<gtk::Image>() {
+            image.set_icon_name(Some(if expanded {
+                "go-up-symbolic"
+            } else {
+                "go-down-symbolic"
+            }));
+        }
+        let title = if expanded {
+            "Back to quick reactions"
+        } else {
+            "Show all reactions"
+        };
+        self.arrow.set_tooltip_text(Some(title));
+        self.arrow
+            .update_property(&[gtk::accessible::Property::Label(title)]);
         self.heading.set_reveal_child(expanded);
         self.actions.set_reveal_child(!expanded);
         self.full_height.set(
@@ -1186,6 +1206,13 @@ impl ReactionPicker {
                 .max(40),
         );
         self.frame(self.progress.get());
+        if reparent && self.morph.width() > 0 && self.morph.height() > 0 {
+            // Reparenting clears allocation; restore it before a popup paint.
+            let (width, height) = (self.morph.width(), self.morph.height());
+            self.morph.measure(gtk::Orientation::Horizontal, -1);
+            self.morph.measure(gtk::Orientation::Vertical, width);
+            self.morph.allocate(width, height, -1, None);
+        }
         let duration = (200. * (self.progress.get() - if expanded { 1. } else { 0. }).abs())
             .round()
             .max(1.) as u32;
@@ -1381,8 +1408,9 @@ impl Ui {
             .hexpand(true)
             .build();
         header.append(&search);
-        let collapse = icon_button("go-up-symbolic", "Back to quick reactions");
-        header.append(&collapse);
+        let toggle_space = bx(false, 0);
+        toggle_space.set_width_request(36);
+        header.append(&toggle_space);
         expanded.append(&header);
         surface.bind_search(&search, false);
         expanded.append(&surface.root);
@@ -1408,7 +1436,8 @@ impl Ui {
         let arrow = icon_button("go-down-symbolic", "Show all reactions");
         arrow.add_css_class("reaction-expand");
         arrow.set_halign(gtk::Align::End);
-        arrow.set_valign(gtk::Align::Center);
+        arrow.set_valign(gtk::Align::Start);
+        arrow.set_margin_top(6);
         arrow.set_size_request(36, 36);
         arrow.set_margin_end(6);
         morph.add_overlay(&arrow);
@@ -1455,13 +1484,7 @@ impl Ui {
         let weak = Rc::downgrade(&picker);
         picker.arrow.connect_clicked(move |_| {
             if let Some(picker) = weak.upgrade() {
-                picker.set_expanded(true);
-            }
-        });
-        let weak = Rc::downgrade(&picker);
-        collapse.connect_clicked(move |_| {
-            if let Some(picker) = weak.upgrade() {
-                picker.set_expanded(false);
+                picker.set_expanded(!picker.is_expanded.get());
             }
         });
         let keys = gtk::EventControllerKey::new();
@@ -1505,7 +1528,7 @@ mod native_regressions {
     }
 
     #[test]
-    #[ignore = "requires isolated native 60Hz display, data roots and Secret Service"]
+    #[ignore = "requires isolated native 60Hz X11 display, xdotool, data roots and Secret Service"]
     fn reaction_motion_keeps_frame_budget_and_text_selection() {
         let app = adw::Application::builder()
             .application_id("com.negzero.MonogramReactionMotionTest")
@@ -1559,11 +1582,33 @@ mod native_regressions {
                     .unwrap()
             };
             let expand = button("Show all reactions");
-            let collapse = button("Back to quick reactions");
+            let collapse = expand.clone();
             let frames = Rc::new(RefCell::new(Vec::new()));
             let recorded = frames.clone();
             let moving = morph.clone();
+            let quick = descendants(&morph)
+                .into_iter()
+                .find(|widget| widget.has_css_class("shared-reaction-bundle"))
+                .unwrap();
+            let arrow = expand.clone();
+            let arrow_icon = arrow.child().unwrap();
+            let arrow_bounds = arrow.compute_bounds(&morph).unwrap();
             let tick = ui.window.add_tick_callback(move |_, _| {
+                assert!(
+                    quick.width() > 0 && quick.height() > 0,
+                    "quick reactions lost allocation during handoff"
+                );
+                assert!(arrow.is_mapped(), "toggle disappeared during animation");
+                assert_eq!(
+                    arrow.child().as_ref(),
+                    Some(&arrow_icon),
+                    "toggle icon widget was replaced"
+                );
+                assert_eq!(
+                    arrow.compute_bounds(&moving).unwrap(),
+                    arrow_bounds,
+                    "toggle moved during animation"
+                );
                 recorded
                     .borrow_mut()
                     .push((Instant::now(), moving.height()));
@@ -1594,6 +1639,67 @@ mod native_regressions {
                 glib::timeout_future(Duration::from_millis(230)).await;
             }
             tick.remove();
+            let output = std::process::Command::new("xdotool")
+                .args([
+                    "search",
+                    "--all",
+                    "--onlyvisible",
+                    "--pid",
+                    &std::process::id().to_string(),
+                    "--name",
+                    "^Monogram$",
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let window_id = String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .last()
+                .unwrap()
+                .to_owned();
+            let bounds = expand.compute_bounds(&ui.window).unwrap();
+            let x = (bounds.x() + bounds.width() / 2.).round().to_string();
+            let y = (bounds.y() + bounds.height() / 2.).round().to_string();
+            gio::spawn_blocking(move || {
+                assert!(
+                    std::process::Command::new("xdotool")
+                        .args([
+                            "mousemove",
+                            "--sync",
+                            "--window",
+                            &window_id,
+                            &x,
+                            &y,
+                            "click",
+                            "1"
+                        ])
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            })
+            .await
+            .unwrap();
+            glib::timeout_future(Duration::from_millis(270)).await;
+            assert!(morph.height() > 200);
+            gio::spawn_blocking(|| {
+                assert!(
+                    std::process::Command::new("xdotool")
+                        .args(["click", "1"])
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            })
+            .await
+            .unwrap();
+            glib::timeout_future(Duration::from_millis(230)).await;
+            assert_eq!(
+                morph.height(),
+                48,
+                "stationary pointer click did not collapse"
+            );
             let pop = morph
                 .ancestor(gtk::Popover::static_type())
                 .unwrap()

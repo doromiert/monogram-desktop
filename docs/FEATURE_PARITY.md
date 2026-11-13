@@ -153,3 +153,7 @@ without restyling the virtual emoji subtree. Popup dismissal restores prior text
 ranges after GTK focus restoration, preserving both unselected and partially
 selected source messages. Native frame-budget and focus-restoration regression
 checks pass; no protocol behavior changes.
+
+Expand/collapse uses one persistent button/image at a fixed hit target. Quick
+reactions retain their parent when possible and receive allocation immediately
+when undocked, preventing missing-row frames at animation handoff.

@@ -503,3 +503,17 @@ DELIVERY VERIFIED — Reaction frame cadence and dismissal selection
   selection remains functional. Full shared-picker regression passes.
   Final startup feedback184ms, interface349ms, frame gap165ms. Native Wayland
   rendering checked; no live contact reaction sent. Broad suite not claimed.
+
+IMPLEMENTED — Reaction toggle accepts stationary-pointer clicks and no row blink
+  Expanded/collapsed arrows were separate widgets, leaving GTK's stationary
+  pointer over the removed control. Use one persistent button and image at the
+  same coordinates, changing only icon/label and toggling the current state.
+  Reserve the existing header space without adding another input control.
+  Unconditionally detaching/reparenting quick reactions reset their allocation
+  to0x0 at transition starts. Reuse the canvas parent when already floating;
+  when undocking, measure/allocate the overlay before a popup can paint.
+  Native baseline: stationary click left414px picker expanded; six0x0 row frames.
+  First fixed native trace: next click collapses to48px without mouse movement;
+  zero0x0 frames across three expand/collapse cycles and0px position jumps at
+  dock/undock boundaries. Regression now checks persistent button/image identity,
+  fixed hit bounds, positive quick-row allocation and actual stationary clicks.
