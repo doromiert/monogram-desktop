@@ -517,3 +517,23 @@ IMPLEMENTED — Reaction toggle accepts stationary-pointer clicks and no row bli
   zero0x0 frames across three expand/collapse cycles and0px position jumps at
   dock/undock boundaries. Regression now checks persistent button/image identity,
   fixed hit bounds, positive quick-row allocation and actual stationary clicks.
+
+IMPLEMENTED — Static reaction headings and minimal overflow placement
+  The remaining glitch was a Quick Reactions caption travelling across category
+  icons. Keep the heading in the virtual list and move only the shared emoji
+  row. Search/categories/heading reveal as whole controls after the row clears
+  them; grid content follows the same animation progress. Captured45/90/150ms
+  frames show no caption/category overlap or clipped toolbar glyph fragments.
+  Pin the native popup's existing origin before expanding, using vertical slide
+  constraints instead of changing its top/bottom attachment. Preserve native CSS
+  surface transforms and both intermediate presentations during reanchoring.
+  Native cases keep the top unchanged with space, shift up exactly34px for34px
+  overflow, and keep an initially above-message menu's original top. Sampled
+  frames must not overshoot, flip attachment or move horizontally.
+
+IMPLEMENTED — Quick reaction glyph size follows expansion
+  Keep the same buttons/labels and interpolate their Pango scale from the
+  compact19px size to the standard24px picker size using the morph progress.
+  Avoid ancestor CSS updates; only seven label attributes change. Native
+  regression compares actual shaped font sizes against the normal grid and
+  retains the frame budget, stationary-click and text-selection checks.

@@ -191,6 +191,9 @@ enum EmojiRow {
 }
 
 struct SharedQuickRow {
+    title: String,
+    heading: RefCell<glib::WeakRef<gtk::Label>>,
+    heading_opacity: Cell<f64>,
     emojis: Vec<String>,
     row: gtk::Box,
     buttons: Vec<(String, gtk::Button)>,
@@ -914,15 +917,24 @@ fn emoji_factory(surface: &Weak<EmojiSurface>) -> gtk::SignalListItemFactory {
         let row = data.borrow::<EmojiRow>();
         let child: gtk::Widget = match &*row {
             EmojiRow::Quick => {
+                let row = bx(true, 0);
                 let slot = bx(true, 0);
                 if let Some(quick) = surface.quick.borrow().as_ref() {
+                    let title = text(&quick.title, "picker-section-heading");
+                    title.set_xalign(0.5);
+                    title.set_margin_top(8);
+                    title.set_margin_bottom(6);
+                    title.set_opacity(quick.heading_opacity.get());
+                    quick.heading.replace(title.downgrade());
+                    row.append(&title);
                     slot.set_height_request(quick.height);
+                    row.append(&slot);
                     quick.slot.replace(slot.downgrade());
                     if let Some(bind) = quick.bind.borrow().as_ref() {
                         bind(&slot);
                     }
                 }
-                slot.upcast()
+                row.upcast()
             }
             EmojiRow::Heading(title) => {
                 let label = text(title, "picker-section-heading");
@@ -1070,8 +1082,9 @@ pub(crate) struct ReactionPicker {
     clip: ReactionClip,
     base: gtk::Box,
     expanded: gtk::Box,
+    header: gtk::Box,
+    anchor_pinned: Cell<bool>,
     quick: gtk::Box,
-    heading: gtk::Revealer,
     canvas: gtk::Box,
     arrow: gtk::Button,
     actions: gtk::Revealer,
@@ -1124,8 +1137,62 @@ impl ReactionPicker {
         self.clip
             .set_radius((collapsed + (12. - collapsed) * progress) as f32);
     }
+    fn pin_popup(&self) {
+        if self.anchor_pinned.get() {
+            return;
+        }
+        let Some(popover) = self
+            .morph
+            .ancestor(gtk::Popover::static_type())
+            .and_downcast::<gtk::Popover>()
+        else {
+            return;
+        };
+        let Some(parent) = popover.parent() else {
+            return;
+        };
+        let Some(bounds) = popover
+            .compute_bounds(&parent)
+            .filter(|bounds| bounds.width() > 0. && bounds.height() > 0.)
+        else {
+            return;
+        };
+        // Side placement uses vertical sliding rather than GTK's top/bottom flip.
+        // Account for native CSS margins to pin the existing surface origin.
+        let (nx, ny) = popover.surface_transform();
+        let (px, py) = parent
+            .native()
+            .map(|native| native.surface_transform())
+            .unwrap_or((0., 0.));
+        // Keep both immediate presentations at the same origin. The offset
+        // cancels the required 1px rectangle when switching from bottom to side.
+        popover.set_halign(gtk::Align::Start);
+        popover.set_valign(gtk::Align::Start);
+        popover.set_pointing_to(Some(&gdk::Rectangle::new(
+            (bounds.x() as f64 + nx - px).round() as i32,
+            (bounds.y() as f64 + ny - py).round() as i32 - 1,
+            1,
+            1,
+        )));
+        popover.set_offset(-1, 1);
+        popover.set_position(gtk::PositionType::Right);
+        self.anchor_pinned.set(true);
+    }
+    fn scale_quick_glyphs(&self, progress: f64) {
+        // Match standard 24px picker glyphs from the compact row's 19px font.
+        let attributes = gtk::pango::AttrList::new();
+        attributes.insert(gtk::pango::AttrFloat::new_scale(
+            1. + (24. / 19. - 1.) * progress,
+        ));
+        for (_, button) in &self.shared.buttons {
+            if let Some(label) = button.child().and_downcast::<gtk::Label>() {
+                label.set_attributes(Some(&attributes));
+            }
+        }
+    }
     fn frame(&self, progress: f64) {
         self.progress.set(progress);
+        self.scale_quick_glyphs(progress);
         self.apply_radius(progress);
         if let Some(slot) = self.shared.slot.borrow().upgrade() {
             if let Some(bounds) = slot.compute_bounds(&self.morph) {
@@ -1141,8 +1208,29 @@ impl ReactionPicker {
             .set_width_request((308. + (width as f64 - 308.) * progress).round() as i32);
         self.canvas
             .set_margin_start((6. + (x - 6.) * progress).round() as i32);
-        self.canvas
-            .set_margin_top((4. + (y - 4.) * progress).round() as i32);
+        let row_y = (4. + (y - 4.) * progress).round();
+        self.canvas.set_margin_top(row_y as i32);
+        // Reveal whole controls after the moving row clears them, not glyph slices.
+        let reveal = |widget: &gtk::Widget| {
+            let opacity = if progress >= 1. {
+                1.
+            } else {
+                widget.compute_bounds(&self.morph).map_or(0., |bounds| {
+                    let bottom = (bounds.y() + bounds.height()) as f64;
+                    ((row_y - bottom) / (y - bottom).clamp(1., 8.)).clamp(0., 1.)
+                })
+            };
+            widget.set_opacity(opacity);
+            opacity
+        };
+        reveal(self.header.upcast_ref());
+        reveal(self.surface.category_row.upcast_ref());
+        if let Some(heading) = self.shared.heading.borrow().upgrade() {
+            self.shared
+                .heading_opacity
+                .set(reveal(heading.upcast_ref()));
+        }
+        self.surface.favorite_preview.set_opacity(progress);
         self.base.set_height_request(
             (48. + (self.full_height.get() as f64 - 48.) * progress).round() as i32,
         );
@@ -1151,6 +1239,7 @@ impl ReactionPicker {
         if self.is_expanded.get() == expanded && self.animation.borrow().is_none() {
             return;
         }
+        self.pin_popup();
         if let Some(animation) = self.animation.borrow_mut().take() {
             animation.pause();
         }
@@ -1165,10 +1254,10 @@ impl ReactionPicker {
         self.moving.set(true);
         self.is_expanded.set(expanded);
         self.expanded.set_visible(true);
-        self.expanded.set_can_target(expanded);
+        self.expanded.set_can_target(false);
+        self.expanded.set_can_focus(false);
         if expanded {
             self.expanded.set_opacity(1.);
-            self.expanded.set_can_focus(true);
             self.expanded
                 .update_state(&[gtk::accessible::State::Hidden(false)]);
         }
@@ -1197,7 +1286,6 @@ impl ReactionPicker {
         self.arrow.set_tooltip_text(Some(title));
         self.arrow
             .update_property(&[gtk::accessible::Property::Label(title)]);
-        self.heading.set_reveal_child(expanded);
         self.actions.set_reveal_child(!expanded);
         self.full_height.set(
             self.expanded
@@ -1238,6 +1326,8 @@ impl ReactionPicker {
                     if let Some(slot) = picker.shared.slot.borrow().upgrade() {
                         picker.dock(&slot);
                     }
+                    picker.expanded.set_can_target(true);
+                    picker.expanded.set_can_focus(true);
                     picker.search.grab_focus();
                 } else {
                     picker.expanded.set_can_target(false);
@@ -1347,17 +1437,6 @@ impl Ui {
         } else {
             "Quick Reactions"
         };
-        let label = text(title, "picker-section-heading");
-        label.set_xalign(0.5);
-        label.set_margin_top(8);
-        label.set_margin_bottom(6);
-        let heading_height = label.measure(gtk::Orientation::Vertical, 300).1;
-        let heading = gtk::Revealer::builder()
-            .transition_type(gtk::RevealerTransitionType::SlideDown)
-            .transition_duration(200)
-            .child(&label)
-            .build();
-        quick.append(&heading);
         let choices = bx(false, 2);
         choices.set_homogeneous(true);
         choices.set_height_request(40);
@@ -1383,10 +1462,13 @@ impl Ui {
         }
         quick.append(&choices);
         let shared = Rc::new(SharedQuickRow {
+            title: title.to_owned(),
+            heading: RefCell::new(glib::WeakRef::new()),
+            heading_opacity: Cell::new(0.),
             emojis,
             row: choices.clone(),
             buttons,
-            height: 40 + heading_height,
+            height: 40,
             slot: RefCell::new(glib::WeakRef::new()),
             bind: RefCell::new(None),
         });
@@ -1457,8 +1539,9 @@ impl Ui {
             clip,
             base,
             expanded,
+            header,
+            anchor_pinned: Cell::new(false),
             quick,
-            heading,
             canvas,
             arrow,
             actions,
@@ -1536,6 +1619,7 @@ mod native_regressions {
             .build();
         app.register(None::<&gio::Cancellable>).unwrap();
         let ui = Ui::new(&app, true);
+        adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
         let css = gtk::CssProvider::new();
         css.load_from_path(asset("style.css"));
         gtk::style_context_add_provider_for_display(
@@ -1590,10 +1674,15 @@ mod native_regressions {
                 .into_iter()
                 .find(|widget| widget.has_css_class("shared-reaction-bundle"))
                 .unwrap();
+            let caption = descendants(&morph).into_iter().find_map(|widget|widget.downcast::<gtk::Label>().ok().filter(|label| label.has_css_class("picker-section-heading") && label.xalign()==0.5)).unwrap();
+            let categories = descendants(&morph).into_iter().find(|widget|widget.has_css_class("emoji-category-row")).unwrap();
             let arrow = expand.clone();
             let arrow_icon = arrow.child().unwrap();
             let arrow_bounds = arrow.compute_bounds(&morph).unwrap();
             let tick = ui.window.add_tick_callback(move |_, _| {
+                let caption_bounds = caption.compute_bounds(&moving).unwrap();
+                let category_bounds = categories.compute_bounds(&moving).unwrap();
+                assert!(caption_bounds.y() >= category_bounds.y()+category_bounds.height(), "quick caption crossed category controls");
                 assert!(
                     quick.width() > 0 && quick.height() > 0,
                     "quick reactions lost allocation during handoff"
@@ -1614,11 +1703,34 @@ mod native_regressions {
                     .push((Instant::now(), moving.height()));
                 glib::ControlFlow::Continue
             });
-            for _ in 0..3 {
+            let capture_prefix = std::env::var_os("MONOGRAM_REACTION_CAPTURE");
+            let mut captures = Vec::new();
+            for cycle in 0..3 {
                 frames.borrow_mut().clear();
                 let start = Instant::now();
                 expand.emit_clicked();
-                glib::timeout_future(Duration::from_millis(270)).await;
+                let mut elapsed = 0;
+                if cycle == 0 && let Some(prefix) = capture_prefix.as_ref() {
+                    for target in [45,90,150] {
+                        glib::timeout_future(Duration::from_millis(target-elapsed)).await;
+                        let clip = morph.parent().unwrap();
+                        let snapshot = gtk::Snapshot::new();
+                        gtk::WidgetPaintable::new(Some(&clip)).snapshot(&snapshot,clip.width() as f64,clip.height() as f64);
+                        if let Some(node) = snapshot.to_node() {
+                            captures.push((node,clip.width(),clip.height(),std::path::PathBuf::from(format!("{}-{target}.png",std::path::Path::new(prefix).display()))));
+                        }
+                        elapsed=target;
+                    }
+                }
+                glib::timeout_future(Duration::from_millis(270-elapsed)).await;
+                let size = |button: &gtk::Button| {
+                    let label=button.child().and_downcast::<gtk::Label>().unwrap();
+                    label.layout().iter().run_readonly().unwrap().item().analysis().font().describe().size()
+                };
+                let items=descendants(&morph).into_iter().filter_map(|widget|widget.downcast::<gtk::Button>().ok()).collect::<Vec<_>>();
+                let quick=items.iter().find(|button|button.has_css_class("reaction-choice")).unwrap();
+                let regular=items.iter().find(|button|button.has_css_class("emoji-picker-item") && !button.has_css_class("reaction-choice") && button.is_mapped()).unwrap();
+                assert!((size(quick)-size(regular)).abs()<=1,"expanded quick glyphs are smaller than the grid");
                 let mut gaps = frames
                     .borrow()
                     .windows(2)
@@ -1639,6 +1751,12 @@ mod native_regressions {
                 glib::timeout_future(Duration::from_millis(230)).await;
             }
             tick.remove();
+            if let Some(renderer) = ui.window.renderer() {
+                for (node,width,height,path) in captures {
+                    let texture=renderer.render_texture(&node,Some(&gtk::graphene::Rect::new(0.,0.,width as f32,height as f32)));
+                    gio::spawn_blocking(move ||texture.save_to_png(path)).await.unwrap().unwrap();
+                }
+            }
             let output = std::process::Command::new("xdotool")
                 .args([
                     "search",
@@ -1746,6 +1864,35 @@ mod native_regressions {
                 glib::timeout_future(Duration::from_millis(50)).await;
                 assert!(painted.get());
                 assert_eq!(label.selection_bounds(), expected);
+            }
+            let monitor = gtk::gdk::Display::default().unwrap().monitors().item(0).unwrap().downcast::<gdk::Monitor>().unwrap();
+            let screen_height = monitor.geometry().height();
+            bubble.set_valign(gtk::Align::Start);
+            for y in [200, screen_height-400, (screen_height-240).min(ui.window.height()-40)] {
+                bubble.set_margin_top(y.max(0));
+                glib::timeout_future(Duration::from_millis(60)).await;
+                ui.message_menu(&bubble,"motion",12.,12.);
+                glib::timeout_future(Duration::from_millis(70)).await;
+                let pop = descendants(&bubble).into_iter().find_map(|widget|widget.downcast::<gtk::Popover>().ok().filter(|pop|pop.is_mapped())).unwrap();
+                let surface = pop.surface().unwrap();
+                let popup = surface.clone().dynamic_cast::<gdk::Popup>().unwrap();
+                let origin = (popup.position_x(),popup.position_y());
+                let expand = descendants(&pop).into_iter().find_map(|widget|widget.downcast::<gtk::Button>().ok().filter(|button|button.tooltip_text().as_deref()==Some("Show all reactions"))).unwrap();
+                expand.emit_clicked();
+                let mut top = origin.1;
+                for _ in 0..27 {
+                    glib::timeout_future(Duration::from_millis(10)).await;
+                    let expected = origin.1.min(screen_height-surface.height()).max(0);
+                    assert!((popup.position_y()-expected).abs()<=1,"popup changed attachment during a frame");
+                    top=top.min(popup.position_y());
+                }
+                let expected_y = origin.1.min(screen_height-surface.height()).max(0);
+                assert!(top>=expected_y-1,"popup overshot the required upward shift");
+                println!("Popup anchor {origin:?} -> ({},{}), height{}, minimum shift{} PASS",popup.position_x(),popup.position_y(),surface.height(),origin.1-expected_y);
+                assert!((popup.position_y()-expected_y).abs()<=1,"popup flipped or overshifted: initial{origin:?}, height{}, final{}, expected{expected_y}",surface.height(),popup.position_y());
+                assert_eq!(popup.position_x(),origin.0,"expansion moved horizontally");
+                pop.popdown();
+                glib::timeout_future(Duration::from_millis(30)).await;
             }
         });
         ui.window.close();

@@ -157,3 +157,10 @@ checks pass; no protocol behavior changes.
 Expand/collapse uses one persistent button/image at a fixed hit target. Quick
 reactions retain their parent when possible and receive allocation immediately
 when undocked, preventing missing-row frames at animation handoff.
+
+Quick-reaction headings stay in the expanded list while only the shared emoji
+row moves. Toolbar controls reveal after the row clears them. Expansion keeps the
+existing popup origin and uses the native vertical slide constraint for the
+minimum upward movement when space runs out, preserving horizontal position.
+Quick glyphs interpolate from compact19px to the regular24px grid size on the
+same transition progress, preserving the existing button and label widgets.
