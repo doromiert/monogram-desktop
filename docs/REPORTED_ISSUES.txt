@@ -494,3 +494,12 @@ PERFORMANCE ATTEMPTS — Reaction expansion
   GSK clip alone: steady60Hz but~37ms start gap. Removing subtree sensitivity
   toggles/unused CSS state keeps warm expansion and collapse near16–17ms/frame.
   Frame sampling excludes synchronous screenshot/xdotool calls during animation.
+
+DELIVERY VERIFIED — Reaction frame cadence and dismissal selection
+  Running clean sourcef8f1d6f, package srh22n1nxbbdgcccybr32vacxpvbwhyb;
+  exact executable verified after desktop service restart. Native frame-budget
+  and first-painted-frame selection regression passes. Actual outside clicks
+  preserve no-selection and existing partial ranges; ordinary pointer text
+  selection remains functional. Full shared-picker regression passes.
+  Final startup feedback184ms, interface349ms, frame gap165ms. Native Wayland
+  rendering checked; no live contact reaction sent. Broad suite not claimed.
