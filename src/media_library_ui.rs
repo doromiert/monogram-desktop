@@ -961,6 +961,8 @@ pub(crate) struct PackLibraryPage {
     ui: std::rc::Weak<Ui>,
     query: RefCell<String>,
     anchors: RefCell<std::collections::HashMap<i64, u32>>,
+    section_scroll: Rc<crate::emoji_picker_ui::SectionScroll>,
+    section_buttons: RefCell<std::collections::HashMap<i64, gtk::ToggleButton>>,
     favorites: RefCell<std::collections::HashSet<i64>>,
     favorite_keys: RefCell<Vec<String>>,
     preview_active: Cell<usize>,
@@ -1095,6 +1097,7 @@ impl PackLibraryPage {
             .build();
         let favorite_preview = favorite_order::Preview::new(&scroll);
         root.append(&favorite_preview);
+        let section_scroll = crate::emoji_picker_ui::SectionScroll::new(&list, &scroll);
         let page = Rc::new(Self {
             root,
             library,
@@ -1112,6 +1115,8 @@ impl PackLibraryPage {
             ui,
             query: RefCell::new(String::new()),
             anchors: RefCell::new(Default::default()),
+            section_scroll,
+            section_buttons: RefCell::new(Default::default()),
             favorites: RefCell::new(std::collections::HashSet::new()),
             favorite_keys: RefCell::new(Vec::new()),
             preview_active: Cell::new(0),
@@ -1132,12 +1137,38 @@ impl PackLibraryPage {
                 let Some(data) = item.item().and_downcast::<glib::BoxedAnyObject>() else {
                     return;
                 };
-                item.set_child(Some(&page.row_widget(&data.borrow::<PickerRow>())));
+                let child = page.row_widget(&data.borrow::<PickerRow>());
+                item.set_child(Some(&child));
+                page.section_scroll.bind(item);
             });
-            factory.connect_unbind(|_, item| {
-                item.downcast_ref::<gtk::ListItem>()
-                    .unwrap()
-                    .set_child(gtk::Widget::NONE);
+            let weak = Rc::downgrade(&page);
+            factory.connect_unbind(move |_, item| {
+                let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+                if let Some(page) = weak.upgrade() {
+                    page.section_scroll.unbind(item);
+                }
+                item.set_child(gtk::Widget::NONE);
+            });
+            let weak = Rc::downgrade(&page);
+            page.section_scroll.watch(move |position| {
+                if let Some(page) = weak.upgrade() {
+                    let id = page
+                        .anchors
+                        .borrow()
+                        .iter()
+                        .filter(|(_, start)| **start <= position)
+                        .max_by_key(|(_, start)| **start)
+                        .map(|(id, _)| *id);
+                    if let Some(id) = id
+                        && *page.selected.borrow() != Some(id)
+                    {
+                        page.selected.replace(Some(id));
+                        if let Some(button) = page.section_buttons.borrow().get(&id) {
+                            button.set_active(true);
+                        }
+                        (page.on_view)(id);
+                    }
+                }
             });
             let weak = Rc::downgrade(&page);
             scroll.vadjustment().connect_value_changed(move |_| {
@@ -1261,6 +1292,7 @@ impl PackLibraryPage {
     }
 
     fn show_snapshot(self: &Rc<Self>, snapshot: Snapshot) {
+        self.section_buttons.borrow_mut().clear();
         while let Some(child) = self.selector.first_child() {
             self.selector.remove(&child);
         }
@@ -1335,15 +1367,15 @@ impl PackLibraryPage {
                 button.set_active(*id == selected);
                 let weak = Rc::downgrade(self);
                 let id = *id;
-                button.connect_toggled(move |button| {
-                    if button.is_active()
-                        && let Some(page) = weak.upgrade()
-                    {
+                button.connect_clicked(move |button| {
+                    button.set_active(true);
+                    if let Some(page) = weak.upgrade() {
                         page.selected.replace(Some(id));
                         page.show_section(id);
                         (page.on_view)(id);
                     }
                 });
+                self.section_buttons.borrow_mut().insert(id, button.clone());
                 self.selector.append(&button);
             }
         }
@@ -1395,11 +1427,13 @@ impl PackLibraryPage {
                     }
                 });
             }
+            self.section_buttons
+                .borrow_mut()
+                .insert(pack.id, button.clone());
             let pack = pack.clone();
-            button.connect_toggled(move |button| {
-                if button.is_active()
-                    && let Some(page) = weak.upgrade()
-                {
+            button.connect_clicked(move |button| {
+                button.set_active(true);
+                if let Some(page) = weak.upgrade() {
                     page.selected.replace(Some(pack.id));
                     page.show_pack(Some(&pack));
                     (page.on_view)(pack.id);
@@ -1422,8 +1456,7 @@ impl PackLibraryPage {
     pub(crate) fn show_section(self: &Rc<Self>, id: i64) {
         self.selected.replace(Some(id));
         if let Some(position) = self.anchors.borrow().get(&id).copied() {
-            self.list
-                .scroll_to(position, gtk::ListScrollFlags::NONE, None);
+            self.section_scroll.jump(position);
         }
     }
 
@@ -1468,12 +1501,7 @@ impl PackLibraryPage {
                 };
                 saved
                     .iter()
-                    .filter_map(|emoji| {
-                        crate::emoji_completion::catalog()
-                            .iter()
-                            .find(|entry| entry.text == *emoji)
-                            .cloned()
-                    })
+                    .filter_map(|emoji| crate::emoji_completion::catalog_entry(emoji).cloned())
                     .collect()
             } else {
                 Vec::new()
@@ -2244,10 +2272,11 @@ impl Ui {
                 Kind::Emoji,
                 crate::emoji_picker_ui::emoji_pack_hosts(&ui),
                 Box::new(move |id| {
-                    if id >= 0
-                        && let Some(ui) = emoji_ui.upgrade()
-                    {
-                        crate::emoji_picker_ui::show_custom_emoji_pack(&ui);
+                    if let Some(ui) = emoji_ui.upgrade() {
+                        crate::emoji_picker_ui::sync_emoji_section(&ui, id);
+                        if id >= 0 {
+                            crate::emoji_picker_ui::show_custom_emoji_pack(&ui);
+                        }
                     }
                 }),
             );

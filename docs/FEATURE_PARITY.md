@@ -135,3 +135,15 @@ Media-tab follow-up `73f4cf7` uses libadwaita’s native round mode control and
 exposes Emoji, Stickers and GIFs only. The unavailable Monero tab/page is removed;
 desktop still has no real wallet connection/settings, so demo wallet names never
 expose it. Native pointer and keyboard captures verify the pill control.
+
+Picker follow-up adds shared Favorites/Recent category navigation, Alt-click
+favorite toggles, edge-to-edge scroll viewports with inner content padding, and
+live favorite drag positions for Emoji/Stickers/GIFs. All can be reordered,
+hidden and restored through folder controls. Reaction expansion interpolates
+fixed pixel corners over 200ms. Stable Unicode emoji IDs resolve presentation
+variants in both reaction and main-sidebar favorites while keeping existing
+stored preferences compatible; emoji glyphs explicitly use Noto Color Emoji.
+The favorite preview wrapper follows hidden content so it leaves no blank space.
+Category highlights follow the first visible section; category clicks align its
+heading to the top, including repeated clicks on the current category. Scroll
+tracking retains weak references to bound list items and preserves virtualization.

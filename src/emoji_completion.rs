@@ -3,18 +3,21 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     rc::Rc,
     sync::OnceLock,
 };
 
 #[derive(Clone)]
 pub struct EmojiEntry {
+    pub id: String,
     pub text: String,
     pub name: String,
     pub group: u32,
     terms: Vec<String>,
 }
 static EMOJI: OnceLock<Vec<EmojiEntry>> = OnceLock::new();
+static BY_ID: OnceLock<HashMap<String, usize>> = OnceLock::new();
 
 fn normalized(value: &str) -> String {
     value.to_lowercase().replace(['_', '-'], " ")
@@ -54,6 +57,7 @@ fn index() -> &'static Vec<EmojiEntry> {
                     .map(normalized)
                     .collect();
                 Some(EmojiEntry {
+                    id: emoji_id(&text),
                     text,
                     name,
                     group,
@@ -66,6 +70,33 @@ fn index() -> &'static Vec<EmojiEntry> {
 
 pub fn catalog() -> &'static [EmojiEntry] {
     index().as_slice()
+}
+
+pub fn canonical(value: &str) -> String {
+    crate::message_actions::canonical_emoji(value).unwrap_or_else(|| value.into())
+}
+
+/// Stable picker identity, independent of font and text/emoji presentation.
+pub fn emoji_id(value: &str) -> String {
+    let points = canonical(value)
+        .chars()
+        .filter(|c| !matches!(c, '\u{fe0e}' | '\u{fe0f}'))
+        .map(|c| format!("{:x}", c as u32))
+        .collect::<Vec<_>>()
+        .join("-");
+    format!("u:{points}")
+}
+
+pub fn catalog_entry(value: &str) -> Option<&'static EmojiEntry> {
+    let key = emoji_id(value);
+    let lookup = BY_ID.get_or_init(|| {
+        index()
+            .iter()
+            .enumerate()
+            .map(|(position, entry)| (entry.id.clone(), position))
+            .collect()
+    });
+    lookup.get(&key).and_then(|position| index().get(*position))
 }
 
 pub fn search(query: &str) -> Vec<EmojiEntry> {
@@ -405,6 +436,16 @@ pub(crate) fn only_emojis(body: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stable_ids_ignore_emoji_presentation_and_keep_sequences_distinct() {
+        assert_eq!(super::emoji_id("☠"), "u:2620");
+        assert_eq!(super::emoji_id("☠"), super::emoji_id("☠️"));
+        assert_eq!(super::emoji_id("☠︎"), super::emoji_id("☠️"));
+        assert_eq!(super::emoji_id("🏴‍☠"), super::emoji_id("🏴‍☠️"));
+        assert_ne!(super::emoji_id("☠"), super::emoji_id("💀"));
+        assert_ne!(super::emoji_id("☠"), super::emoji_id("🏴‍☠️"));
+    }
+
     #[test]
     #[ignore = "requires a native GTK display for its emoji resource"]
     fn emoji_only_matches_sequences_without_matching_text() {

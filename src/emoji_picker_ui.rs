@@ -12,6 +12,125 @@ thread_local! {
     static EMOJI_SURFACES: RefCell<Vec<(Weak<Ui>, Weak<EmojiSurface>)>> = const { RefCell::new(Vec::new()) };
 }
 
+// Track only factory-bound rows; category navigation must not mount the catalog.
+pub(crate) struct SectionScroll {
+    list: gtk::ListView,
+    scroll: gtk::ScrolledWindow,
+    rows: RefCell<Vec<glib::WeakRef<gtk::ListItem>>>,
+    target: Cell<Option<(u32, u8)>>,
+    scheduled: Cell<bool>,
+    on_visible: RefCell<Option<Box<dyn Fn(u32)>>>,
+}
+impl SectionScroll {
+    pub(crate) fn new(list: &gtk::ListView, scroll: &gtk::ScrolledWindow) -> Rc<Self> {
+        let tracker = Rc::new(Self {
+            list: list.clone(),
+            scroll: scroll.clone(),
+            rows: RefCell::new(Default::default()),
+            target: Cell::new(None),
+            scheduled: Cell::new(false),
+            on_visible: RefCell::new(None),
+        });
+        for changed in [false, true] {
+            let weak = Rc::downgrade(&tracker);
+            let callback = move |_: &gtk::Adjustment| {
+                if let Some(tracker) = weak.upgrade() {
+                    tracker.schedule();
+                }
+            };
+            if changed {
+                scroll.vadjustment().connect_changed(callback);
+            } else {
+                scroll.vadjustment().connect_value_changed(callback);
+            }
+        }
+        tracker
+    }
+    pub(crate) fn watch(&self, callback: impl Fn(u32) + 'static) {
+        self.on_visible.replace(Some(Box::new(callback)));
+    }
+    pub(crate) fn bind(self: &Rc<Self>, item: &gtk::ListItem) {
+        self.rows.borrow_mut().push(item.downgrade());
+        self.schedule();
+    }
+    pub(crate) fn unbind(&self, item: &gtk::ListItem) {
+        self.rows
+            .borrow_mut()
+            .retain(|row| row.upgrade().is_some_and(|row| row != *item));
+    }
+    pub(crate) fn jump(self: &Rc<Self>, position: u32) {
+        self.target.set(Some((position, 0)));
+        self.list
+            .scroll_to(position, gtk::ListScrollFlags::NONE, None);
+        self.schedule();
+    }
+    fn bounds(&self, widget: &gtk::Widget) -> Option<gtk::graphene::Rect> {
+        widget
+            .parent()
+            .unwrap_or_else(|| widget.clone())
+            .compute_bounds(&self.scroll)
+    }
+    fn schedule(self: &Rc<Self>) {
+        if self.scheduled.replace(true) {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        self.list.add_tick_callback(move |_, _| {
+            let Some(tracker) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if let Some((position, frames)) = tracker.target.get() {
+                let bounds = tracker
+                    .rows
+                    .borrow()
+                    .iter()
+                    .filter_map(|row| row.upgrade())
+                    .find(|row| row.position() == position)
+                    .and_then(|row| row.child())
+                    .and_then(|widget| tracker.bounds(&widget));
+                if let Some(bounds) = bounds.filter(|_| frames > 0) {
+                    let adjustment = tracker.scroll.vadjustment();
+                    let before = adjustment.value();
+                    adjustment.set_value(before + f64::from(bounds.y()));
+                    if frames > 0
+                        && ((bounds.y().abs() < 1.) || (adjustment.value() - before).abs() < 0.5)
+                    {
+                        tracker.target.set(None);
+                    }
+                }
+                if tracker.target.get().is_some() {
+                    if frames < 12 {
+                        tracker.target.set(Some((position, frames + 1)));
+                        return glib::ControlFlow::Continue;
+                    }
+                    tracker.target.set(None);
+                }
+            }
+            let first = tracker
+                .rows
+                .borrow()
+                .iter()
+                .filter_map(|row| {
+                    let row = row.upgrade()?;
+                    let widget = row.child()?;
+                    let bounds = tracker.bounds(&widget)?;
+                    (widget.is_mapped()
+                        && bounds.y() + bounds.height() > 1.
+                        && bounds.y() < tracker.scroll.height() as f32)
+                        .then_some(row.position())
+                })
+                .min();
+            tracker.scheduled.set(false);
+            if let Some(position) = first
+                && let Some(callback) = tracker.on_visible.borrow().as_ref()
+            {
+                callback(position);
+            }
+            glib::ControlFlow::Break
+        });
+    }
+}
+
 type EmojiAction = dyn Fn(&Rc<Ui>, &str);
 
 struct EmojiCategory {
@@ -84,10 +203,11 @@ struct EmojiSurface {
     ui: Weak<Ui>,
     root: gtk::Box,
     categories: gtk::Box,
-    category_row: gtk::Box,
+    category_row: gtk::Overlay,
     quick: RefCell<Option<Rc<SharedQuickRow>>>,
     pack_tabs: gtk::Box,
     settings: gtk::Box,
+    _settings_children: gio::ListModel,
     group_anchor: RefCell<Option<gtk::ToggleButton>>,
     custom_page: RefCell<Option<Rc<crate::media_library_ui::PackLibraryPage>>>,
     emoji_label: gtk::Label,
@@ -99,6 +219,8 @@ struct EmojiSurface {
     favorite_keys: RefCell<Vec<String>>,
     favorite_preview: favorite_order::Preview,
     category: Cell<i32>,
+    category_buttons: RefCell<std::collections::BTreeMap<i32, gtk::ToggleButton>>,
+    section_scroll: Rc<SectionScroll>,
     query: RefCell<String>,
     activate: Rc<EmojiAction>,
 }
@@ -123,15 +245,36 @@ impl EmojiSurface {
             categories.add_css_class("emoji-category-bar");
             let pack_tabs = bx(false, 2);
             let settings = bx(false, 2);
+            settings.add_css_class("emoji-category-settings");
+            settings.set_halign(gtk::Align::End);
+            settings.set_valign(gtk::Align::Center);
+            settings.set_visible(false);
             let root = bx(true, 6);
             root.add_css_class("emoji-picker-surface");
             let category_scroll = horizontal_strip(&categories);
             category_scroll.add_css_class("emoji-category-scroll");
-            let category_row = bx(false, 2);
+            let category_row = gtk::Overlay::new();
             category_row.add_css_class("emoji-category-row");
             category_scroll.set_hexpand(true);
-            category_row.append(&category_scroll);
-            category_row.append(&settings);
+            category_row.set_child(Some(&category_scroll));
+            category_row.add_overlay(&settings);
+            let settings_children = settings.observe_children();
+            let settings_weak = settings.downgrade();
+            let categories_weak = categories.downgrade();
+            settings_children.connect_items_changed(move |_, _, _, _| {
+                if let (Some(settings), Some(categories)) =
+                    (settings_weak.upgrade(), categories_weak.upgrade())
+                {
+                    let visible = settings.first_child().is_some();
+                    settings.set_visible(visible);
+                    let width = if visible {
+                        settings.measure(gtk::Orientation::Horizontal, -1).1 + 2
+                    } else {
+                        0
+                    };
+                    categories.set_margin_end(width);
+                }
+            });
             root.append(&category_row);
             let emoji_label = text("Favorites", "caption dim-label");
             root.append(&emoji_label);
@@ -146,6 +289,7 @@ impl EmojiSurface {
                 scrolling.set_max_content_height(height);
                 scrolling.set_propagate_natural_height(true);
             }
+            let section_scroll = SectionScroll::new(&list, &scrolling);
             let favorite_preview = favorite_order::Preview::new(&scrolling);
             root.append(&favorite_preview);
             Self {
@@ -156,6 +300,7 @@ impl EmojiSurface {
                 quick: RefCell::new(None),
                 pack_tabs,
                 settings,
+                _settings_children: settings_children,
                 group_anchor: RefCell::new(None),
                 custom_page: RefCell::new(None),
                 emoji_label,
@@ -167,6 +312,8 @@ impl EmojiSurface {
                 favorite_keys: RefCell::new(Vec::new()),
                 favorite_preview,
                 category: Cell::new(-1),
+                category_buttons: RefCell::new(Default::default()),
+                section_scroll,
                 query: RefCell::new(String::new()),
                 activate: Rc::new(activate),
             }
@@ -175,6 +322,21 @@ impl EmojiSurface {
             surfaces
                 .borrow_mut()
                 .push((Rc::downgrade(ui), Rc::downgrade(&surface)));
+        });
+        let weak = Rc::downgrade(&surface);
+        surface.section_scroll.watch(move |position| {
+            if let Some(surface) = weak.upgrade() {
+                let category = surface
+                    .anchors
+                    .borrow()
+                    .iter()
+                    .filter(|(_, start)| **start <= position)
+                    .max_by_key(|(_, start)| **start)
+                    .map(|(id, _)| *id);
+                if let Some(category) = category {
+                    surface.select_category(category);
+                }
+            }
         });
         surface.populate_categories();
         surface.refresh();
@@ -196,10 +358,9 @@ impl EmojiSurface {
             }
             button.set_active(index == -1);
             let surface = Rc::downgrade(self);
-            button.connect_toggled(move |button| {
-                if button.is_active()
-                    && let Some(surface) = surface.upgrade()
-                {
+            button.connect_clicked(move |button| {
+                button.set_active(true);
+                if let Some(surface) = surface.upgrade() {
                     surface.category.set(index);
                     if let Some(page) = surface.custom_page.borrow().as_ref().cloned() {
                         page.show_section(i64::from(index));
@@ -209,6 +370,9 @@ impl EmojiSurface {
                     surface.jump_category(index);
                 }
             });
+            self.category_buttons
+                .borrow_mut()
+                .insert(index, button.clone());
             self.categories.append(&button);
             if index == -1 {
                 self.group_anchor.replace(Some(button.clone()));
@@ -225,10 +389,9 @@ impl EmojiSurface {
                 button.set_group(Some(previous));
             }
             let surface = Rc::downgrade(self);
-            button.connect_toggled(move |button| {
-                if button.is_active()
-                    && let Some(surface) = surface.upgrade()
-                {
+            button.connect_clicked(move |button| {
+                button.set_active(true);
+                if let Some(surface) = surface.upgrade() {
                     surface.category.set(index as i32);
                     if let Some(page) = surface.custom_page.borrow().as_ref().cloned() {
                         page.show_section(-10 - index as i64);
@@ -237,8 +400,19 @@ impl EmojiSurface {
                     surface.jump_category(index as i32);
                 }
             });
+            self.category_buttons
+                .borrow_mut()
+                .insert(index as i32, button.clone());
             self.categories.append(&button);
             previous = Some(button);
+        }
+    }
+
+    fn select_category(&self, category: i32) {
+        let category = if category == -4 { -1 } else { category };
+        self.category.set(category);
+        if let Some(button) = self.category_buttons.borrow().get(&category) {
+            button.set_active(true);
         }
     }
 
@@ -303,7 +477,7 @@ impl EmojiSurface {
         let favorite_entries = preferences
             .favorites
             .iter()
-            .filter_map(|emoji| catalog.iter().find(|entry| entry.text == *emoji).cloned())
+            .filter_map(|emoji| crate::emoji_completion::catalog_entry(emoji).cloned())
             .collect::<Vec<_>>();
         self.favorite_keys.replace(
             favorite_entries
@@ -317,10 +491,11 @@ impl EmojiSurface {
         if let Some(shared) = &shared {
             let mut ordered = shared.buttons.iter().collect::<Vec<_>>();
             ordered.sort_by_key(|(emoji, _)| {
+                let emoji = crate::emoji_completion::emoji_id(emoji);
                 preferences
                     .favorites
                     .iter()
-                    .position(|value| value == emoji)
+                    .position(|value| crate::emoji_completion::emoji_id(value) == emoji)
                     .unwrap_or(usize::MAX)
             });
             let mut previous = None::<gtk::Button>;
@@ -349,7 +524,7 @@ impl EmojiSurface {
                 preferences
                     .recent
                     .iter()
-                    .filter_map(|emoji| catalog.iter().find(|entry| entry.text == *emoji).cloned())
+                    .filter_map(|emoji| crate::emoji_completion::catalog_entry(emoji).cloned())
                     .collect(),
                 false,
             ));
@@ -393,15 +568,17 @@ impl EmojiSurface {
 
     fn jump_category(&self, category: i32) {
         if let Some(position) = self.anchors.borrow().get(&category) {
-            self.list
-                .scroll_to(*position, gtk::ListScrollFlags::NONE, None);
+            self.section_scroll.jump(*position);
         }
     }
 
     fn emoji_button(self: &Rc<Self>, emoji: &str, name: &str, favorite: bool) -> gtk::Button {
         let reorder_key = favorite_order::emoji_key(emoji);
+        let display = crate::emoji_completion::catalog_entry(emoji)
+            .map(|entry| entry.text.as_str())
+            .unwrap_or(emoji);
         let button = gtk::Button::builder()
-            .label(emoji)
+            .label(display)
             .tooltip_text(format!(
                 "{name} · Alt-click or right-click to favorite or pin"
             ))
@@ -409,12 +586,13 @@ impl EmojiSurface {
         button.add_css_class("flat");
         button.add_css_class("emoji-picker-item");
         button.update_property(&[gtk::accessible::Property::Label(&format!(
-            "{name}, {emoji}"
+            "{name}, {display}"
         ))]);
-        let value = emoji.to_owned();
+        let value = crate::emoji_completion::canonical(emoji);
+        let activation = display.to_owned();
         let alternate_activation = Rc::new(Cell::new(false));
         let surface = Rc::downgrade(self);
-        let emoji = value.clone();
+        let emoji = activation;
         let skip_activation = alternate_activation.clone();
         button.connect_clicked(move |_| {
             if skip_activation.replace(false) {
@@ -464,7 +642,11 @@ impl EmojiSurface {
                 return;
             };
             let preferences = ui.store.emoji_preferences().unwrap_or_default();
-            let favorite = preferences.favorites.iter().any(|value| value == &emoji);
+            let id = crate::emoji_completion::emoji_id(&emoji);
+            let favorite = preferences
+                .favorites
+                .iter()
+                .any(|value| crate::emoji_completion::emoji_id(value) == id);
             if ui.store.set_emoji_favorite(&emoji, !favorite).is_err() {
                 ui.notice("Emoji preferences could not be saved");
             } else {
@@ -540,9 +722,17 @@ impl EmojiSurface {
 
     fn emoji_options(self: &Rc<Self>, button: &gtk::Button, emoji: &str, x: f64, y: f64) {
         let Some(ui) = self.ui.upgrade() else { return };
+        let emoji = crate::emoji_completion::canonical(emoji);
+        let id = crate::emoji_completion::emoji_id(&emoji);
         let preferences = ui.store.emoji_preferences().unwrap_or_default();
-        let favorite = preferences.favorites.iter().any(|value| value == emoji);
-        let pinned = preferences.pinned.iter().any(|value| value == emoji);
+        let favorite = preferences
+            .favorites
+            .iter()
+            .any(|value| crate::emoji_completion::emoji_id(value) == id);
+        let pinned = preferences
+            .pinned
+            .iter()
+            .any(|value| crate::emoji_completion::emoji_id(value) == id);
         let popover = gtk::Popover::builder().has_arrow(false).build();
         popover.add_css_class("message-menu");
         popover.set_parent(button);
@@ -572,7 +762,7 @@ impl EmojiSurface {
             let choice = gtk::Button::with_label(label);
             choice.add_css_class("flat");
             let weak = Rc::downgrade(&ui);
-            let emoji = emoji.to_owned();
+            let emoji = emoji.clone();
             let popup = popover.downgrade();
             choice.connect_clicked(move |_| {
                 let Some(ui) = weak.upgrade() else { return };
@@ -694,6 +884,16 @@ pub(crate) fn attach_custom_emoji_page(
     }
 }
 
+pub(crate) fn sync_emoji_section(ui: &Rc<Ui>, id: i64) {
+    if let Some(surface) = sidebar_surface(ui) {
+        if id == -1 || id == -2 {
+            surface.select_category(id as i32);
+        } else if id <= -10 {
+            surface.select_category((-10 - id) as i32);
+        }
+    }
+}
+
 pub(crate) fn show_custom_emoji_pack(ui: &Rc<Ui>) {
     if let Some(surface) = sidebar_surface(ui) {
         surface.show_custom_pack();
@@ -754,11 +954,15 @@ fn emoji_factory(surface: &Weak<EmojiSurface>) -> gtk::SignalListItemFactory {
             }
         };
         item.set_child(Some(&child));
+        surface.section_scroll.bind(item);
     });
-    factory.connect_unbind(|_, item| {
-        item.downcast_ref::<gtk::ListItem>()
-            .unwrap()
-            .set_child(gtk::Widget::NONE);
+    let weak = surface.clone();
+    factory.connect_unbind(move |_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+        if let Some(surface) = weak.upgrade() {
+            surface.section_scroll.unbind(item);
+        }
+        item.set_child(gtk::Widget::NONE);
     });
     factory
 }
@@ -832,9 +1036,7 @@ impl ReactionPicker {
     fn radius_styles(radius: i32) -> String {
         (12..=radius.max(12))
             .map(|radius| {
-                format!(
-                    ".reaction-morph.reaction-radius-{radius} {{ border-radius: {radius}px; }}"
-                )
+                format!(".reaction-morph.reaction-radius-{radius} {{ border-radius: {radius}px; }}")
             })
             .collect()
     }
@@ -849,7 +1051,8 @@ impl ReactionPicker {
         let radius = (height / 2).max(12);
         if radius != self.collapsed_radius.get() {
             self.collapsed_radius.set(radius);
-            self.radius_css.load_from_string(&Self::radius_styles(radius));
+            self.radius_css
+                .load_from_string(&Self::radius_styles(radius));
         }
     }
     fn apply_radius(&self, progress: f64) {
@@ -930,12 +1133,15 @@ impl ReactionPicker {
                 .max(40),
         );
         self.frame(self.progress.get());
+        let duration = (200. * (self.progress.get() - if expanded { 1. } else { 0. }).abs())
+            .round()
+            .max(1.) as u32;
         let weak = Rc::downgrade(self);
         let animation = adw::TimedAnimation::new(
             &self.morph,
             self.progress.get(),
             if expanded { 1. } else { 0. },
-            350,
+            duration,
             adw::CallbackAnimationTarget::new(move |value| {
                 if let Some(picker) = weak.upgrade() {
                     picker.frame(value);
@@ -1050,10 +1256,13 @@ impl Ui {
         let quick = bx(true, 0);
         quick.add_css_class("shared-reaction-bundle");
         quick.add_css_class("compact");
-        let title = if emojis
-            .iter()
-            .all(|emoji| preferences.favorites.contains(emoji))
-        {
+        let title = if emojis.iter().all(|emoji| {
+            let emoji = crate::emoji_completion::emoji_id(emoji);
+            preferences
+                .favorites
+                .iter()
+                .any(|value| crate::emoji_completion::emoji_id(value) == emoji)
+        }) {
             "Favorites"
         } else {
             "Quick Reactions"
@@ -1065,7 +1274,7 @@ impl Ui {
         let heading_height = label.measure(gtk::Orientation::Vertical, 300).1;
         let heading = gtk::Revealer::builder()
             .transition_type(gtk::RevealerTransitionType::SlideDown)
-            .transition_duration(350)
+            .transition_duration(200)
             .child(&label)
             .build();
         quick.append(&heading);
@@ -1074,11 +1283,14 @@ impl Ui {
         choices.set_height_request(40);
         let mut buttons = Vec::new();
         for emoji in &emojis {
-            let name = crate::emoji_completion::catalog()
-                .iter()
-                .find(|entry| entry.text == *emoji)
+            let name = crate::emoji_completion::catalog_entry(emoji)
                 .map_or(emoji.as_str(), |entry| entry.name.as_str());
-            let button = surface.emoji_button(emoji, name, preferences.favorites.contains(emoji));
+            let key = crate::emoji_completion::emoji_id(emoji);
+            let favorite = preferences
+                .favorites
+                .iter()
+                .any(|value| crate::emoji_completion::emoji_id(value) == key);
+            let button = surface.emoji_button(emoji, name, favorite);
             button.add_css_class("reaction-choice");
             button.set_size_request(36, 36);
             button.set_halign(gtk::Align::Center);
@@ -1128,10 +1340,9 @@ impl Ui {
         morph.add_css_class("reaction-radius-24");
         let radius_css = gtk::CssProvider::new();
         radius_css.load_from_string(&ReactionPicker::radius_styles(24));
-        morph.style_context().add_provider(
-            &radius_css,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
-        );
+        morph
+            .style_context()
+            .add_provider(&radius_css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
         morph.set_overflow(gtk::Overflow::Hidden);
         morph.set_child(Some(&base));
         morph.add_overlay(&expanded);
@@ -1157,7 +1368,7 @@ impl Ui {
         morph.set_measure_overlay(&arrow, false);
         let actions = gtk::Revealer::builder()
             .transition_type(gtk::RevealerTransitionType::SlideUp)
-            .transition_duration(350)
+            .transition_duration(200)
             .reveal_child(true)
             .build();
         let root = bx(true, 0);

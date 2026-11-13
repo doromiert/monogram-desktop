@@ -109,10 +109,14 @@
 .expanded-reactions .emoji-picker-surface { padding-bottom: 0; }
 .emoji-picker-surface { padding: 0; background: transparent; }
 .emoji-sidebar { margin: 0; background: transparent; }
-.emoji-sidebar .emoji-category-row { margin: 0 12px; }
+.emoji-sidebar .emoji-category-row { margin: 0; }
+.emoji-sidebar .emoji-category-bar { padding: 0 14px; }
+.emoji-sidebar .emoji-category-settings { margin-right: 12px; background: @window_bg_color; }
 .emoji-sidebar .picker-section-list > row { padding-left: 12px; padding-right: 12px; }
-.expanded-reactions .expanded-reaction-header,
-.expanded-reactions .emoji-category-row { margin: 0 10px; }
+.expanded-reactions .expanded-reaction-header { margin: 0 10px; }
+.expanded-reactions .emoji-category-row { margin: 0; }
+.expanded-reactions .emoji-category-bar { padding: 0 12px; }
+.expanded-reactions .emoji-category-settings { margin-right: 10px; background: @popover_bg_color; }
 .expanded-reactions .picker-section-list > row { padding-left: 10px; padding-right: 10px; }
 .emoji-picker-surface > label { margin: 4px 6px 2px; }
 .emoji-category-scroll, .emoji-category-bar, .emoji-picker-surface scrolledwindow, .emoji-picker-grid { background: transparent; }
@@ -124,6 +128,7 @@
   padding: 0; background: transparent; box-shadow: none; outline: none;
 }
 .emoji-picker-item { font-size: 24px; padding: 4px; min-width: 28px; min-height: 28px; border-radius: 8px; }
+.emoji-picker-item, .reaction-emoji { font-family: "Noto Color Emoji"; }
 .message-bubble .message-author { margin-bottom: 0; }
 .media-viewer { background: transparent; color: white; }
 .media-viewer-backdrop { background: rgba(5,5,7,.66); }

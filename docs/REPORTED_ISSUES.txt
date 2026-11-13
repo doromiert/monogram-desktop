@@ -313,7 +313,8 @@ NATIVE ACCEPTANCE — Incremental reaction updates and mobile chip animation
   virtual list behavior remain intact. Chip enter/exit uses mobile250ms timing,
   its exact cubic Bezier curve, scale0.5<->1 and opacity0<->1. Reduced motion
   bypasses interpolation. Mobile document-driven TGS bursts remain unavailable
-  because desktop has no matching reaction-document source or RLottie renderer.
+  because desktop has no matching reaction-document source/metadata pipeline;
+  the existing RLottie sticker renderer does not supply those documents.
 
 NATIVE ACCEPTANCE — Text selection to brush selection handoff
   Actual pointer horizontal and multiline text selection within one message
@@ -408,3 +409,53 @@ DELIVERY VERIFIED — Pill media tabs
   use native round styling. Monero toggle and dead page are absent; desktop
   wallet connection/settings remain unimplemented. Scoped pointer/keyboard
   checks pass; no full broad-smoke pass is claimed.
+
+IMPLEMENTED — Fixed-pixel radius during reaction-picker morph
+  User screenshot shows an oval clipping the expanding picker. The collapsed
+ 999px CSS radius interpolates through huge values while the panel grows.
+  Capture half the actual collapsed bar height as a fixed pixel radius, then
+  interpolate it with geometry progress toward12px expanded corners. Preserve
+  the pill at rest, reverse continuity and existing shared quick widgets.
+
+IMPLEMENTED — Expanded reaction sections and Alt-click favorites
+  Restore horizontal category controls plus Favorites and Recent in expanded
+  reactions, keeping Quick Reactions and continuous categories. Add Alt+click to
+  toggle emoji favorites in shared picker contexts, with persistence and no
+  insertion, reaction send or picker closure.
+
+IMPLEMENTED — Full-width picker scroll shadow and live favorite dragging
+  Transfer insets onto inner content while the scroller/shadow spans panel width.
+  Favorite drags should move actual item previews continuously, like folders,
+  commit once on drop and restore on cancel. Preserve existing favorite ordering
+  across Emoji/Stickers/GIFs and keep bounded rows/media widgets.
+
+IMPLEMENTED — Move and hide All folder
+  Allow normal folder drag ordering and persistent hiding of All, with a
+  reachable restore action and safe active-folder fallback. Preserve chat data
+  and existing account folder configurations.
+
+IMPLEMENTED — Reaction speed, Noto skull and stable emoji identities
+  Measure/shorten slow expansion and remove frame stalls. Bare skull/crossbones
+  currently falls back to DejaVu; explicitly render emoji glyphs with Noto.
+  Favorites store canonical ☠ while GTK catalog uses ☠️; raw equality can hide saved
+  entries or prevent removal. Match canonical identities without changing wire
+  format and verify both forms, context menu and Alt-click with no activation.
+
+IMPLEMENTED — Edge-to-edge categories and sidebar blank-space regression
+  Category viewport spans the full panel width; existing content padding moves
+  onto the scrolling category content. Settings remains fixed at the right edge.
+  Favorite preview wrappers mirror child visibility and expansion properties so
+  the hidden built-in list leaves no empty expanding space above pack favorites.
+  Emoji catalog entries have stable Unicode IDs (for example u:2620), independent
+  of presentation selectors. Both reaction and pack-backed sidebar favorites and
+  recent lists use ID lookup. Existing stored favorites/order remain compatible.
+  Noto Color Emoji renders skull/crossbones in both glyph forms. Expansion runs
+  for 200ms and interrupted reversals scale to the remaining distance.
+
+IMPLEMENTED — Category highlight follows scroll and category clicks align top
+  Normal emoji/sticker pack pages and the expanded reaction picker track only
+  bound virtual-list items. The first visible row determines the active section.
+  Category clicks bring their heading to the viewport top, including when the
+  clicked category is already active. Synchronizing a highlight does not trigger
+  another navigation. Native sidebar checks pass for downward/upward jumps,
+  repeated clicks and wheel-driven highlight changes, with heading y=9px.

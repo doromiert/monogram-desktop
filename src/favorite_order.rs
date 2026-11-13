@@ -297,9 +297,16 @@ impl Preview {
         let preview: Self = glib::Object::new();
         let child = child.clone().upcast::<gtk::Widget>();
         child.set_parent(&preview);
-        preview.imp().child.replace(Some(child));
-        preview.set_hexpand(true);
-        preview.set_vexpand(true);
+        preview.imp().child.replace(Some(child.clone()));
+        // The wrapper must disappear with its content and preserve that child's
+        // expansion policy. Hidden built-in emoji scrolling otherwise leaves an
+        // empty expanding widget above the installed-pack page.
+        for property in ["visible", "hexpand", "vexpand"] {
+            child
+                .bind_property(property, &preview, property)
+                .sync_create()
+                .build();
+        }
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = preview.downgrade();
