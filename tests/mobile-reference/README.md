@@ -98,8 +98,8 @@ Compile the mobile class and exporter with JDK 21 against freshly compiled
 `xmpp-core/target/classes`, Smack 4.4.8 and JXMPP 1.0.3, then capture stdout from
 `com.negzero.monogram.xmpp.FormattingVectors`. The exporter reads no account data.
 
-The 17 cases compare visible bodies, exact marker removal, Unicode code-point
-ranges, explicit metadata precedence, native authored wire output, spoilers,
+The 29 cases compare visible bodies, exact marker removal, Unicode code-point
+ranges, explicit metadata precedence, native authored wire output (including empty-range `unstyled` hints), spoilers,
 quotes, fenced code and invalid/crossing ranges. Rust additionally tests protected
 SCE formatting and reply/caption projection. Markdown profile and native reveal,
 selection, draft, composer pointer drag, async math and bounded article rendering

@@ -1245,7 +1245,7 @@ impl Ui {
             .sync_create()
             .build();
         let line = bx(false, 8);
-        let composer = ComposerEntry::new();
+        let composer = bx(true, 2);
         composer.set_hexpand(true);
         composer.set_valign(gtk::Align::Center);
         composer.add_css_class("composer");

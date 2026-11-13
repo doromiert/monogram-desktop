@@ -29,7 +29,8 @@
 .date-pill.action-pill { font-size: 14px; opacity: 1; font-style: italic; }
 .reaction { background: alpha(@accent_bg_color,.12); border-radius: 16px; padding: 3px 9px; font-size: 11px; min-height: 20px; }
 .composer-shell { background: @view_bg_color; border: none; box-shadow: none; padding: 12px 20px 16px; }
-.composer { padding: 4px 8px; }
+.composer { background: @card_bg_color; border: none; border-radius: 12px; box-shadow: none; padding: 4px 8px; outline: 2px solid transparent; outline-offset: -2px; transition: outline-color 200ms ease; }
+.composer:focus-within { outline-color: alpha(@accent_color,.5); }
 .composer scrolledwindow, .composer textview, .composer textview text { background: transparent; border: none; box-shadow: none; outline: none; }
 .composer scrolledwindow undershoot { background: none; box-shadow: none; }
 .composer textview { padding: 0; }

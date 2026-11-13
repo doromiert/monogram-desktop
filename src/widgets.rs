@@ -1044,21 +1044,3 @@ impl SquareCell {
         cell
     }
 }
-
-mod composer_entry_imp {
-    use super::*;
-    #[derive(Default)]
-    pub struct ComposerEntry;
-    #[glib::object_subclass]
-    impl ObjectSubclass for ComposerEntry {
-        const NAME:&'static str="MonogramComposerEntry";
-        type Type=super::ComposerEntry;
-        type ParentType=gtk::Box;
-        fn class_init(class:&mut Self::Class){class.set_css_name("entry");class.set_accessible_role(gtk::AccessibleRole::Group);}
-    }
-    impl ObjectImpl for ComposerEntry {}
-    impl WidgetImpl for ComposerEntry {}
-    impl BoxImpl for ComposerEntry {}
-}
-glib::wrapper!{pub struct ComposerEntry(ObjectSubclass<composer_entry_imp::ComposerEntry>) @extends gtk::Box,gtk::Widget,@implements gtk::Accessible,gtk::Buildable,gtk::ConstraintTarget,gtk::Orientable;}
-impl ComposerEntry {pub fn new()->Self{glib::Object::builder().property("orientation",gtk::Orientation::Vertical).property("spacing",2).build()}}

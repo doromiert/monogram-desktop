@@ -855,8 +855,14 @@ mod tests {
 impl Markup {
     /// Use the same readable directive fallback and exact round-trip guard as mobile.
     pub fn styled(&self) -> Self {
-        if self.markdown || self.ranges.is_empty() {
+        if self.markdown {
             return self.clone();
+        }
+        if self.ranges.is_empty() {
+            return Self {
+                unstyled: true,
+                ..self.clone()
+            };
         }
         if self.ranges.iter().any(|r| {
             r.styles
@@ -1273,7 +1279,17 @@ mod mobile_vectors {
         for case in cases {
             let source = case["source"].as_str().unwrap();
             let xml: Element = case["xml"].as_str().unwrap().parse().unwrap();
-            let display = from_element(&xml).display();
+            let parsed = from_element(&xml);
+            assert_eq!(parsed.unstyled, case["unstyled"].as_bool().unwrap());
+            assert_eq!(parsed.markdown, case["markdown"].as_bool().unwrap());
+            if case["typed"].as_bool().unwrap() {
+                assert_eq!(
+                    Markup::plain(source).styled(),
+                    parsed,
+                    "mobile native authoring {source:?}"
+                );
+            }
+            let display = parsed.display();
             assert_eq!(
                 display.body,
                 case["display"].as_str().unwrap(),

@@ -1015,11 +1015,12 @@ mod native_tests {
                 .is_none(),
             "composer is inside a window-drag handle"
         );
-        let frame = ui
-            .composer
-            .ancestor(crate::widgets::ComposerEntry::static_type())
-            .unwrap();
-        assert_eq!(frame.css_name(), "entry");
+        let mut frame = ui.composer.parent();
+        while frame.as_ref().is_some_and(|w| !w.has_css_class("composer")) {
+            frame = frame.and_then(|w| w.parent());
+        }
+        let frame = frame.expect("custom composer container");
+        assert_eq!(frame.css_name(), "box");
         let value = "😀 Bold secret link";
         ui.composer.buffer().set_text(value);
         for (name, a, b) in [("bold", 2, 6), ("spoiler", 7, 13)] {
@@ -1173,5 +1174,82 @@ mod native_tests {
             let long=crate::markdown::parse(&(0..400).map(|i|format!("## Heading {i}\n\nParagraph {i}\n\n")).collect::<String>()).unwrap();let added=Instant::now();let content=virtual_blocks(&long.blocks,320);root.append(&content);glib::timeout_future(Duration::from_millis(60)).await;assert!(added.elapsed()<Duration::from_millis(400),"long article froze native rendering");let labels=descendants(&content).iter().filter(|w|w.is::<gtk::Label>()).count();assert!(labels<300,"article blocks were not virtualized: {labels}");println!("Native spoiler click, partial selection, formatting draft, loaded math and bounded long article PASS ({} labels)",labels);
         });
         ui.window.close();
+    }
+}
+
+#[cfg(test)]
+mod consistency_tests {
+    use super::*;
+    #[test]
+    fn native_typed_syntax_matches_mobile_markdown_without_reinterpreting_wire_styles() {
+        for (source, style) in [
+            ("*text*", Style::Emphasis),
+            ("_text_", Style::Emphasis),
+            ("**text**", Style::Strong),
+            ("__text__", Style::Strong),
+            ("~~text~~", Style::Deleted),
+            ("`text`", Style::Code),
+            ("``text``", Style::Code),
+        ] {
+            let formatting = Markup::plain(source).styled();
+            assert!(formatting.unstyled);
+            let message = Message {
+                text: source.into(),
+                formatting: Some(formatting),
+                ..Default::default()
+            };
+            let document = article(&message).expect(source);
+            let Block::Paragraph(text) = &document.blocks[0] else {
+                panic!("{source}")
+            };
+            assert_eq!(text.text, "text");
+            assert!(text.ranges.iter().any(|r| r.has(style)), "{source}");
+        }
+        for source in ["~text~", ">greentext", "https://example.org/a_b_c"] {
+            let message = Message {
+                text: source.into(),
+                formatting: Some(Markup::plain(source).styled()),
+                ..Default::default()
+            };
+            assert!(article(&message).is_none(), "{source}");
+            assert_eq!(display(&message).1.text, source);
+        }
+        let code = crate::markdown::parse("``~literal~``").unwrap();
+        let Block::Paragraph(code) = &code.blocks[0] else {
+            panic!()
+        };
+        assert_eq!(code.text, "~literal~");
+        let literal = crate::markdown::parse(r"\~literal\~").unwrap();
+        let Block::Paragraph(literal) = &literal.blocks[0] else {
+            panic!()
+        };
+        assert_eq!(literal.text, "~literal~");
+        assert!(literal.ranges.is_empty());
+        let raw = Message {
+            text: "*text*".into(),
+            ..Default::default()
+        };
+        assert!(article(&raw).is_none());
+        assert!(display(&raw).1.ranges.iter().any(|r| r.has(Style::Strong)));
+        let explicit = Markup {
+            body: "text".into(),
+            ranges: vec![Range::new(0, 4, Style::Strong)],
+            ..Default::default()
+        }
+        .styled();
+        let message = Message {
+            text: explicit.body.clone(),
+            formatting: Some(explicit),
+            ..Default::default()
+        };
+        assert!(article(&message).is_none());
+        assert_eq!(display(&message).1.text, "text");
+        assert!(
+            display(&message)
+                .1
+                .ranges
+                .iter()
+                .any(|r| r.has(Style::Strong))
+        );
     }
 }

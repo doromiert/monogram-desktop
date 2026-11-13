@@ -11,6 +11,8 @@ public final class FormattingVectors {
   cases.add(new MessageMarkup("😀 secret tail",Arrays.asList(new MessageMarkup.Range(2,8,EnumSet.of(MessageMarkup.Style.STRONG,MessageMarkup.Style.SPOILER),null))).styled());
   cases.add(new MessageMarkup("😀 bold italic done",Arrays.asList(new MessageMarkup.Range(2,7,EnumSet.of(MessageMarkup.Style.STRONG),null),new MessageMarkup.Range(7,13,EnumSet.of(MessageMarkup.Style.STRONG,MessageMarkup.Style.EMPHASIS),null))).styled());
   cases.add(new MessageMarkup("first\nsecond",Arrays.asList(new MessageMarkup.Range(0,12,EnumSet.of(MessageMarkup.Style.QUOTE),null))).styled());
-  StringJoiner out=new StringJoiner(",\n","[\n","\n]");for(MessageMarkup source:cases){Message wire=new Message();wire.setBody(source.body);source.addTo(wire);MessageMarkup display=source.display();out.add("{\"xml\":"+quote(wire.toXML().toString())+",\"source\":"+quote(source.body)+",\"display\":"+quote(display.body)+",\"ranges\":"+ranges(display.ranges)+"}");}System.out.println(out);
+  Set<MessageMarkup> typed=new HashSet<>();
+  for(String value:Arrays.asList("*text*","**text**","_text_","__text__","~text~","~~text~~","`text`","😀 *italic* and **bold**","<tg-spoiler>hidden</tg-spoiler>",">greentext","https://example.org/a_b_c","\\*literal\\*")){MessageMarkup markup=MessageMarkup.body(value).styled();cases.add(markup);typed.add(markup);}
+  StringJoiner out=new StringJoiner(",\n","[\n","\n]");for(MessageMarkup source:cases){Message wire=new Message();wire.setBody(source.body);source.addTo(wire);MessageMarkup display=source.display();out.add("{\"xml\":"+quote(wire.toXML().toString())+",\"source\":"+quote(source.body)+",\"display\":"+quote(display.body)+",\"typed\":"+typed.contains(source)+",\"unstyled\":"+wire.hasExtension("unstyled","urn:xmpp:styling:0")+",\"markdown\":"+source.markdown+",\"ranges\":"+ranges(display.ranges)+"}");}System.out.println(out);
  }
 }

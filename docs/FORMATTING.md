@@ -20,10 +20,16 @@ state. Media and caption reveal together. Hidden URLs never trigger previews.
 The native multiline composer exposes formatting in its selection context menu,
 with Ctrl+B/I/U/K shortcuts. Formatting survives drafts, direct/room sends,
 corrections, text forwarding, caption projection and Legacy caption companions.
-The composer uses GTK's themed `entry` node around a native `GtkTextView`, which
-supports multiline input and tagged ranges. It lives in normal content rather
-than an AdwToolbarView bottom bar: the latter installs a GtkWindowHandle and
+The custom composer wraps a native `GtkTextView` for multiline input and tagged
+ranges, with its original layout and a Nautilus-style two-pixel focus outline.
+It lives in normal content rather than an AdwToolbarView bottom bar: the latter installs a GtkWindowHandle and
 turns text drags into window moves.
+
+Native typed text with no explicit entity ranges carries mobile's `unstyled`
+hint. This bypasses XEP-0393 marker inference and permits mobile's CommonMark
+fallback: `*text*` / `_text_` are italic, `**text**` / `__text__` bold and
+`~~text~~` strike; a single `~` stays literal. Unhinted incoming wire text still follows XEP-0393, where
+`*text*` means bold. Explicit entity ranges and Markdown hints keep precedence.
 
 Wire formats are XEP-0393/0394, XEP-0372 mention references and XEP-0481's empty
 Markdown content selector. Modern encrypted metadata is inside authenticated SCE;
@@ -39,7 +45,7 @@ preparation on workers. Math uses pinned JLaTeXMath 1.0.7 in a networkless sandb
 two concurrent workers, size/time/memory bounds, immediate loading feedback and
 a bounded texture cache. Unsupported formulas remain readable as source.
 
-Verification: 17 outputs generated from actual mobile MessageMarkup; Unicode,
+Verification: 29 outputs generated from actual mobile MessageMarkup; Unicode,
 protected metadata and reply/media projection tests; Markdown profile tests; a
 private native GTK fixture checks pointer text selection, spoiler reveal, draft
 restoration, loaded math and bounded long-article realization with feedback under

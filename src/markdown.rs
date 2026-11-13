@@ -215,14 +215,29 @@ fn prepare(source: &str) -> String {
         });
         let line = quoted_line.as_deref().unwrap_or(line);
         let mut cursor = 0;
-        let mut ticks = false;
+        let mut ticks = None;
         let bytes = line.as_bytes();
         while cursor < line.len() {
             let tail = &line[cursor..];
-            if tail.starts_with('`') {
-                ticks = !ticks;
+            let escaped = line[..cursor]
+                .bytes()
+                .rev()
+                .take_while(|c| *c == b'\\')
+                .count()
+                % 2
+                == 1;
+            if tail.starts_with('`') && !escaped {
+                let count = tail.bytes().take_while(|c| *c == b'`').count();
+                if ticks == Some(count) {
+                    ticks = None;
+                } else if ticks.is_none() {
+                    ticks = Some(count);
+                }
+                out.push_str(&tail[..count]);
+                cursor += count;
+                continue;
             }
-            let url = !ticks
+            let url = ticks.is_none()
                 && (tail.starts_with("https://")
                     || tail.starts_with("http://")
                     || tail.starts_with("www."))
@@ -267,6 +282,15 @@ fn prepare(source: &str) -> String {
                 }
             }
             let c = tail.chars().next().unwrap();
+            // CommonMark Java's strike extension requires a pair; pulldown also accepts singles.
+            if c == '~'
+                && ticks.is_none()
+                && !escaped
+                && !tail.starts_with("~~")
+                && (cursor == 0 || bytes[cursor - 1] != b'~')
+            {
+                out.push('\\');
+            }
             out.push(c);
             cursor += c.len_utf8();
         }
