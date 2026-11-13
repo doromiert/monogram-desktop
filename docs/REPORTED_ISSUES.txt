@@ -537,3 +537,24 @@ IMPLEMENTED — Quick reaction glyph size follows expansion
   Avoid ancestor CSS updates; only seven label attributes change. Native
   regression compares actual shaped font sizes against the normal grid and
   retains the frame budget, stationary-click and text-selection checks.
+
+DELIVERY VERIFIED — Coordinated reaction reveal, placement and glyph size
+  Clean source15fa311 is running after shutdown in package
+  8iwjf8f20lv3xw0vqmwsmjdg7xfb6paw-monogram-desktop-0.2.0;
+  exact /proc/5278/exe and active monogram-desktop-current.service verified.
+  Recreated the transient desktop service after reboot; no system activation.
+  Native production regression passes in6.22s: fixed stationary-pointer toggle,
+  positive row allocations, frame budget, first-paint text ranges, heading bounds,
+  actual Pango quick/grid font equality, and three native placement cases.
+  Popup origins: (279,218)->(279,218), (279,818)->(279,784),
+  (279,709)->(279,709); no horizontal movement or upward overshoot.
+  Shared-picker regression passes categories/search/scroll, favorites and radius.
+  Private45/90/150ms captures reviewed; live restored interface also viewed.
+  No live-contact reaction sent. Full broad suite remains unverified.
+  Cold reboot startup feedback279ms, interface685ms, logged milestone gap405ms.
+  The405ms cold-start gap remains a separate responsiveness observation; do not
+  claim it meets the400ms target or conflate it with passing picker frame checks.
+  Evidence: .state/reaction-reveal-durable-test.log,
+  .state/reaction-reveal-shared-regression.log,
+  .state/reaction-reveal-frames-{45,90,150}.png,
+  .state/reaction-reveal-release-build.log.
