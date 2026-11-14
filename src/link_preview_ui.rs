@@ -32,6 +32,20 @@ fn preview_picture(thumbnail: &Thumbnail, large: bool, video: bool) -> gtk::Widg
         picture.set_size_request(LARGE_THUMBNAIL_WIDTH, height);
     } else {
         picture.set_size_request(ARTICLE_THUMBNAIL, ARTICLE_THUMBNAIL);
+        // A picture's natural width is its pixel width, and GTK boxes hand out spare room by
+        // natural size, so a wide thumbnail would starve the text beside it. Cap it, and keep
+        // it from stretching to the height of a long text column.
+        let clamp = adw::Clamp::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .maximum_size(ARTICLE_THUMBNAIL)
+            .tightening_threshold(ARTICLE_THUMBNAIL)
+            .halign(gtk::Align::Start)
+            .valign(gtk::Align::Start)
+            .child(&picture)
+            .build();
+        if !video {
+            return clamp.upcast();
+        }
     }
     if !video {
         return picture.upcast();
@@ -536,6 +550,42 @@ mod tests {
         let painted=body.layout().pixel_size().0.max(card.allocated_width());
         eprintln!("Link-only bubble content={}, text={}, preview={}, natural={}",bubble.width(),body.layout().pixel_size().0,card.width(),bubble.measure(gtk::Orientation::Horizontal,-1).1);
         assert!(bubble.width()<=painted+2,"Unused trailing bubble space: {}px",bubble.width()-painted);
+        window.close();
+    }
+
+    /// Regression for the clipped link-preview bubble: a long link with an article card and a
+    /// wide thumbnail in a narrow chat must stay inside its bubble with a usable text column.
+    #[test]
+    #[ignore = "requires private GTK display"]
+    fn long_link_with_thumbnail_stays_inside_its_bubble() {
+        gtk::init().unwrap();
+        let css=gtk::CssProvider::new();css.load_from_path(asset("style.css"));
+        gtk::style_context_add_provider_for_display(&gtk::gdk::Display::default().unwrap(),&css,gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        let path=std::env::temp_dir().join(format!("monogram-preview-{}.png",std::process::id()));
+        let pixels=vec![160u8;600*400*4];
+        gtk::gdk::MemoryTexture::new(600,400,gtk::gdk::MemoryFormat::R8g8b8a8,&glib::Bytes::from_owned(pixels),600*4).save_to_png(&path).unwrap();
+        let source="https://x.com/stonetoss/status/2121649346471219227?a=OryBhoQnfblv81EkuT0&s=19";
+        let body=wrap(source,"message-text");
+        linkify_message_label(&body,source,&crate::link_previews::clickable_urls(source,None));
+        let preview=Preview{url:source.into(),display_url:"x.com/stonetoss/status/2121649346471219227".into(),site_name:"X (formerly Twitter)".into(),title:"Stoneto-ss Comics (@stonetoss)".into(),description:"Stoneto-ss Comics (@stonetoss) on X".into(),kind:Kind::Article,thumbnail:Some(Thumbnail{path:path.clone(),width:600,height:400}),media:None};
+        let card=link_preview_card(&preview);
+        let bubble=bx(true,0);bubble.add_css_class("message-bubble");bubble.append(&body);bubble.append(&card);
+        let meta=label("14:25","message-meta");meta.set_halign(gtk::Align::End);bubble.append(&meta);
+        let clamp=MessageBubbleLimit::new(&bubble,false);
+        let window=gtk::Window::builder().default_width(600).default_height(320).child(&clamp).build();window.present();
+        let context=glib::MainContext::default();let deadline=std::time::Instant::now()+std::time::Duration::from_millis(300);while std::time::Instant::now()<deadline {context.iteration(false);std::thread::sleep(std::time::Duration::from_millis(1));}
+        let (body_text,card_width,bubble_width)=(body.layout().pixel_size().0,card.width(),bubble.width());
+        let mut found=Vec::new();labels(card.upcast_ref(),&mut found);
+        let column=found.iter().map(|l|l.width()).max().unwrap_or(0);
+        eprintln!("bubble={bubble_width} body.width={} body.text={body_text} card={card_width} text-column={column} natural={}",body.width(),bubble.measure(gtk::Orientation::Horizontal,-1).1);
+        if let Some(out)=std::env::var_os("MONOGRAM_LINK_CAPTURE") {
+            let snapshot=gtk::Snapshot::new();
+            gtk::WidgetPaintable::new(Some(&window)).snapshot(&snapshot,window.width() as f64,window.height() as f64);
+            window.renderer().unwrap().render_texture(&snapshot.to_node().unwrap(),None).save_to_png(&out).unwrap();
+        }
+        let _=std::fs::remove_file(&path);
+        assert!(body_text<=bubble_width,"link text ({body_text}px) is wider than its bubble ({bubble_width}px)");
+        assert!(column>=110,"preview text column is crushed to {column}px");
         window.close();
     }
 

@@ -173,8 +173,12 @@ mod message_bubble_limit_imp {
             let child_width = if for_size < 0 {
                 natural.max(minimum).max(1)
             } else {
+                // Never narrower than the child's own minimum (for example an unbreakable link),
+                // but never wider than the row itself.
                 natural
                     .min(for_size.saturating_mul(2) / 5)
+                    .max(minimum)
+                    .min(for_size)
                     .max(1)
             };
             let (minimum,natural,base,natural_base)=child.measure(gtk::Orientation::Vertical, child_width);
@@ -194,8 +198,10 @@ mod message_bubble_limit_imp {
                 }
             }
             let cap = width.max(0).saturating_mul(2) / 5;
-            let (_, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
-            let child_width = natural.min(cap).max(1);
+            let (minimum, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
+            // The 40% cap must not squeeze a child below its minimum width: an unbreakable link
+            // would otherwise overflow its bubble. The row width is the only hard limit.
+            let child_width = natural.min(cap).max(minimum).min(width).max(1);
             let x = if self.own.get() {
                 width.saturating_sub(child_width)
             } else {
