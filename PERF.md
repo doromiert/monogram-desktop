@@ -32,3 +32,9 @@ whole fitting URLs, compact file rows, and actual asynchronous inline-emoji
 texture loading plus renderer disposal. The earlier inline visual probe kept an
 Rc renderer in the test itself and therefore could not catch production's
 premature renderer disposal; the new test uses the production widget-only API.
+
+A link-only preview regression reproduced 26 px of unused trailing space beyond
+the preview's outer edge (48 px if counting only its content). The bubble clamp
+now uses the actual allocated preview edge; its content width is 366 px in the
+same fixture, matching the card rather than its 392 px width request. Ordinary
+bubble padding is unchanged. The regression runs in the native GTK fixture.

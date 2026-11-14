@@ -129,6 +129,11 @@ mod message_bubble_limit_imp {
         None
     }
 
+    fn preview_body(widget:&gtk::Widget)->Option<gtk::Label> {
+        if let Some(label)=widget.downcast_ref::<gtk::Label>().filter(|label|label.has_css_class("message-text")){return Some(label.clone());}
+        let mut child=widget.first_child();while let Some(widget)=child {child=widget.next_sibling();if let Some(label)=preview_body(&widget){return Some(label);}}None
+    }
+
     #[derive(Default)]
     pub struct MessageBubbleLimit {
         pub child: RefCell<Option<gtk::Widget>>,
@@ -220,6 +225,27 @@ mod message_bubble_limit_imp {
                         let transform = gtk::gsk::Transform::new()
                             .translate(&gtk::graphene::Point::new(x as f32, 0.));
                         child.allocate(tight, height, baseline, Some(transform));
+                    }
+                }
+            }
+            if text.is_none() {
+                if let Some(body)=preview_body(&child) {
+                    if let Some(bubble)=body.parent().and_downcast::<gtk::Box>().filter(|b|b.has_css_class("message-bubble")) {
+                        let mut needed=body.layout().pixel_size().0+1;
+                        let mut sibling=bubble.first_child();
+                        while let Some(widget)=sibling {
+                            sibling=widget.next_sibling();
+                            if widget.is_visible() && widget!=body {
+                                // Wrapped preview labels request more natural width than
+                                // the card actually uses. Preserve its allocated outer edge.
+                                needed=needed.max(if widget.has_css_class("link-preview"){widget.allocated_width()}else{widget.measure(gtk::Orientation::Horizontal,-1).1});
+                            }
+                        }
+                        let tight=(needed+(child_width-bubble.width()).max(0)).clamp(1,child_width);
+                        if tight<child_width {
+                            let x=if self.own.get(){width.saturating_sub(tight)}else{0};
+                            child.allocate(tight,height,baseline,Some(gtk::gsk::Transform::new().translate(&gtk::graphene::Point::new(x as f32,0.))));
+                        }
                     }
                 }
             }

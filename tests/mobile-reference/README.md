@@ -1,9 +1,17 @@
+The Java/JNI comparison sources and fixture builder live in
+[the mobile repository](https://github.com/doromiert/monogram/tree/feature/pq-omemo/tests/desktop-reference).
+Desktop builds, checks and development shells do not depend on a JVM. Run the
+optional live cross-client comparison by building that external fixture and
+setting `MONOGRAM_MOBILE_CRYPTO_FIXTURE` before the ignored
+`crypto::tests::native_mobile_interoperability` Rust test. The generated JSON
+vectors below remain directly runnable in desktop's Java-free test suite.
+
 # Mobile cryptographic reference fixtures
 
 These files exercise the actual mobile boundary, separately from the Rust FFI.
 All identities, keys, accounts and plaintexts are disposable fictional test data.
 The cryptographic fixtures do not start a JVM in the installed application;
-formatted math uses a separate, sandboxed JLaTeXMath helper.
+formatted math uses a separate, sandboxed native MicroTeX helper.
 
 Copied unchanged from Monogram Android commit
 `be6876c045163e32fe07a84416621770b0964b30`, GPL-3.0-or-later:

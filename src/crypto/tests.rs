@@ -323,21 +323,16 @@ fn complete_stanzas_pending_journal_and_heartbeats() {
     );
 }
 #[test]
-#[ignore = "requires compiled mobile Java/JNI fixture"]
-fn native_mobile_jvm_interoperability() {
+#[ignore = "requires external mobile interoperability fixture"]
+fn native_mobile_interoperability() {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use std::{
         io::{BufRead, BufReader, Write},
         process::{Command, Stdio},
     };
     let dir = std::env::var("MONOGRAM_MOBILE_CRYPTO_FIXTURE")
-        .expect("Build tests/mobile-reference first");
-    let java = std::env::var("JAVA_HOME").unwrap() + "/bin/java";
-    let mut peer = Command::new(java)
-        .arg(format!("-Djava.library.path={dir}"))
-        .arg("-cp")
-        .arg(format!("{dir}/classes"))
-        .arg("com.negzero.monogram.xmpp.Bridge")
+        .expect("Build mobile/tests/desktop-reference first");
+    let mut peer = Command::new(std::path::Path::new(&dir).join("peer"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

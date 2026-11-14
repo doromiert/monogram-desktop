@@ -1,4 +1,4 @@
-{ pkgs, lib, stdenv, pkg-config, protobuf, libomemo-c, openssl, gtk4, libadwaita, libepoxy, libglycin-gtk4, glycin-loaders, sqlite, wrapGAppsHook4, xorg-server, dbus, makeFontsConf, adwaita-fonts, gsettings-desktop-schemas, mesa, librsvg, prosody, cacert, python3, jdk21, gnome-keyring, gst_all_1, clapper-unwrapped, rlottie, zlib, bubblewrap, monogramSrc ? lib.cleanSource ./., craneLib ? import (builtins.fetchTarball {
+{ pkgs, lib, stdenv, pkg-config, protobuf, libomemo-c, openssl, gtk4, libadwaita, libepoxy, libglycin-gtk4, glycin-loaders, sqlite, wrapGAppsHook4, xorg-server, dbus, makeFontsConf, adwaita-fonts, gsettings-desktop-schemas, mesa, librsvg, prosody, cacert, python3, gnome-keyring, gst_all_1, clapper-unwrapped, rlottie, zlib, bubblewrap, monogramSrc ? lib.cleanSource ./., craneLib ? import (builtins.fetchTarball {
   url = "https://github.com/ipetkov/crane/archive/79fd63528501446749c09f08cad486a58c7d173e.tar.gz";
   sha256 = "sha256-TREenflwEjxOSq292FYwbc3kEm7TDRtXCZRNWEdjBmg=";
 }) { inherit pkgs; } }:
@@ -25,27 +25,7 @@ let
     '';
   };
   fontConfig = makeFontsConf { fontDirectories = [ adwaita-fonts ]; };
-  mathJars = map (spec: pkgs.fetchurl {
-    url = "https://repo.maven.apache.org/maven2/org/scilab/forge/${spec.name}/1.0.7/${spec.name}-1.0.7.jar";
-    inherit (spec) hash;
-  }) [
-    { name = "jlatexmath"; hash = "sha256-bQTDhD/JjS7qm6TP8L57gFQMp1xaTgs0Y/0SGcSMxl0="; }
-    { name = "jlatexmath-font-greek"; hash = "sha256-zdx+fm8+f/BDTIpIBercPp3IBFfVgtGcNpnmqu6PavI="; }
-    { name = "jlatexmath-font-cyrillic"; hash = "sha256-GgFQ5L5k24jCUN/0H1kzSfVfDJz9uOOUM/Fbpz7NIbg="; }
-  ];
-  mathClasses = stdenv.mkDerivation {
-    pname = "monogram-math-classes";
-    version = "0.2.0";
-    src = src + "/native/MonogramMath.java";
-    dontUnpack = true;
-    nativeBuildInputs = [ jdk21 ];
-    buildPhase = "javac -cp ${lib.concatStringsSep ":" mathJars} -d . $src";
-    installPhase = "install -Dm644 MonogramMath.class $out/MonogramMath.class";
-  };
-  mathRenderer = pkgs.writeShellScriptBin "monogram-math-renderer" ''
-    export FONTCONFIG_FILE=${fontConfig}
-    exec ${jdk21}/bin/java -Djava.awt.headless=true -Xmx96m -XX:MaxMetaspaceSize=64m -Xss256k -cp ${mathClasses}:${lib.concatStringsSep ":" mathJars} MonogramMath "$@"
-  '';
+  mathRenderer = pkgs.callPackage ./native/math { };
   commonArgs = {
     pname = "monogram-desktop";
     version = "0.2.0";
@@ -79,7 +59,7 @@ in craneLib.buildPackage (commonArgs // {
   inherit cargoArtifacts cargoVendorDir;
   cargoBuildExtraArgs = "--bin monogram-desktop";
   passthru = { inherit cargoArtifacts stickerRenderer gtk4Fixed mathRenderer; };
-  nativeCheckInputs = [ xorg-server dbus prosody openssl python3 jdk21 gnome-keyring ];
+  nativeCheckInputs = [ xorg-server dbus prosody openssl python3 gnome-keyring ];
   postCheck = ''
     export HOME=$TMPDIR/home XDG_CACHE_HOME=$TMPDIR/cache XDG_CONFIG_HOME=$TMPDIR/config XDG_STATE_HOME=$TMPDIR/state
     mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
@@ -94,17 +74,14 @@ in craneLib.buildPackage (commonArgs // {
     export FONTCONFIG_FILE=${fontConfig}
     export GSETTINGS_SCHEMA_DIR=${gsettings-desktop-schemas}/share/gsettings-schemas/${gsettings-desktop-schemas.name}/glib-2.0/schemas
     export XDG_DATA_DIRS=${gtk4}/share/gsettings-schemas/${gtk4.name}:''${XDG_DATA_DIRS:-}
-    export JAVA_HOME=${jdk21}/lib/openjdk
-    bash tests/mobile-reference/build.sh "$TMPDIR/mobile-crypto"
     crypto_test=
     for candidate in target/${stdenv.hostPlatform.rust.rustcTarget}/release/deps/monogram_desktop-*; do
-      if [ -f "$candidate" ] && [ -x "$candidate" ] && "$candidate" --list 2>/dev/null | grep -Fqx 'crypto::tests::native_mobile_jvm_interoperability: test'; then
+      if [ -f "$candidate" ] && [ -x "$candidate" ] && "$candidate" --list 2>/dev/null | grep -Fqx 'crypto::lifecycle::tests::isolated_identity_lifecycle: test'; then
         crypto_test=$candidate
         break
       fi
     done
     test -n "$crypto_test"
-    MONOGRAM_MOBILE_CRYPTO_FIXTURE="$TMPDIR/mobile-crypto" "$crypto_test" --ignored --exact crypto::tests::native_mobile_jvm_interoperability
     bash tests/keyring_fixture.sh "$crypto_test" ${dbus}/share/dbus-1/session.conf
     bash tests/keyring_fixture.sh "$crypto_test" ${dbus}/share/dbus-1/session.conf crypto::lifecycle::tests::isolated_identity_lifecycle
     bash tests/keyring_fixture.sh "$crypto_test" ${dbus}/share/dbus-1/session.conf history_window_ui::tests::live_viewport_keeps_archive_reply_and_incoming_updates

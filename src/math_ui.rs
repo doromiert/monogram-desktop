@@ -1,4 +1,4 @@
-//! The same JLaTeXMath typesetting family as mobile, isolated from the UI thread.
+//! Native MicroTeX typesetting, isolated from the UI thread and network.
 use crate::{
     inline_emoji_ui::InlineOverlay,
     markdown::{Formula, RichText},
@@ -376,11 +376,18 @@ pub fn display_math(source: &str) -> gtk::Widget {
 mod tests {
     use super::*;
     #[test]
-    #[ignore = "requires packaged JLaTeXMath helper and bubblewrap"]
+    #[ignore = "requires packaged native math helper and bubblewrap"]
     fn typeset_fraction_and_reject_resource_import() {
         let (bytes, depth) = render("\\frac{1}{2}+\\sqrt{x^2}", true, 0xffffffff).unwrap();
         assert!(bytes.starts_with(b"\x89PNG"));
         assert!(depth > 0);
         assert!(render("\\includegraphics{/etc/passwd}", true, 0xffffffff).is_err());
+        for formula in [r"\sum_{i=1}^{n} i^2",r"\begin{pmatrix}1&2\\3&4\end{pmatrix}",r"\text{hello}+\alpha",r"\begin{cases}x^2&x>0\\-x&x<0\end{cases}"] {
+            let (bytes,depth)=render(formula,true,0xffffffff).unwrap();
+            assert!(bytes.starts_with(b"\x89PNG"));assert!(depth>=0);
+        }
+        assert!(render(&"x".repeat(8193),true,0xffffffff).is_err());
+        assert!(render(r"\newcommand{\a}{\a}\a",true,0xffffffff).is_err());
+
     }
 }
