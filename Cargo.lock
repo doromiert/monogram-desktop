@@ -2501,6 +2501,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "get_if_addrs",
+ "libc",
  "rcgen",
  "ring",
  "rustls",
