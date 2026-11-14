@@ -503,7 +503,7 @@ impl Ui {
                 let kind = std::mem::discriminant(&e);
                 let started = Instant::now();
                 ui.backend_event(g, &a, e);
-                if started.elapsed() >= Duration::from_millis(50) {
+                if started.elapsed() >= Duration::from_millis(250) {
                     eprintln!(
                         "Monogram slow backend event {kind:?}: {} ms",
                         started.elapsed().as_millis()
