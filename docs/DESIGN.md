@@ -8,6 +8,9 @@ revision `20fc816d6f1e148e1ba7639865a893a39540f281`. Its outer
 `Adw.OverlaySplitView`, with separate `Adw.ToolbarView` and header bars on either
 side, is the structural reference. No Nautilus source code or assets were copied.
 
+Per-screen widget rules and the review checklist are in
+[GNOME_UI_GUIDELINES.md](GNOME_UI_GUIDELINES.md).
+
 ## Structure
 
 - **Left navigation sidebar:** app header, requests, search,
