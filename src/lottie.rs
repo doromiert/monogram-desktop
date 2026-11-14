@@ -1,4 +1,4 @@
-//! On-demand TGS frames from a pure-Rust (rasterlottie) helper process confined by bubblewrap.
+//! On-demand TGS frames from a pure-Rust (tlottie) helper process confined by bubblewrap.
 //! Open and frame calls belong on workers; no JSON/native parsing occurs in GTK.
 use crate::downloads::VerifiedFile;
 use gtk::{gdk, gio, glib, prelude::*};

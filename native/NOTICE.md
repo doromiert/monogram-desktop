@@ -32,7 +32,7 @@ It reuses `ClapperGtk.Video` and `SimpleControls`, the same upstream widgets use
 by Galeria's `video_ui.py`, while adapting their paintable for Monogram's shared
 inline/focus rendering. No Clapper implementation is vendored here.
 
-`src/bin/monogram-sticker-renderer.rs` renders TGS stickers with the pure-Rust [rasterlottie](https://github.com/neodyland/rasterlottie) crate (MIT OR Apache-2.0, built on tiny-skia); no native animation library is linked. The GPL-3.0-or-later helper parses TGS only inside bubblewrap and renders one requested premultiplied RGBA frame at a time.
+`src/bin/monogram-sticker-renderer.rs` renders TGS stickers with [tlottie](https://github.com/dkaraush/tlottie) 1.0.6 (MIT; pinned git revision `92df98dc209bc39b1e567ec74a8c86a0af5239de`, no required dependencies, licence in `LICENSES/tlottie/`), the pure-Rust Lottie engine that Telegram Desktop uses. tlottie performs no I/O and never resolves external references; it treats the JSON as untrusted and bounds parsing and rendering. An earlier backend (rasterlottie) was replaced after a comparison against Telegram Desktop's renderer found compound-path fills and trim paths drawn incorrectly. The GPL-3.0-or-later helper parses TGS only inside bubblewrap and renders one requested premultiplied RGBA frame at a time.
 
 ## Monocles PQ OMEMO
 

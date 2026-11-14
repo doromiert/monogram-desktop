@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Private bounded frame-pull helper for TGS stickers. Launched only inside bwrap.
+//! Private bounded frame-pull helper for TGS stickers, rendered with tlottie (the engine
+//! Telegram Desktop uses). It never resolves external references. Launched only inside bwrap.
 //! Protocol: `MGT1`,len,edge + gzip TGS in; `MGF1` header out; then per u32 frame
 //! request one `index,len,RGBA(premultiplied)` reply.
-use rasterlottie::{Animation, RenderConfig, Renderer, Rgba8, SupportProfile};
+use tlottie::{Composition, Limits, RenderOptions};
 use std::io::{Read, Write};
 
 #[path = "../renderer_hardening.rs"]
@@ -36,25 +37,17 @@ fn run() -> Result<(), i32> {
         return Err(4);
     }
     drop(gzip);
-    let animation = Animation::from_json_str(&json).map_err(|_| 5)?;
+    // tlottie treats the JSON as untrusted: bounded parsing, no I/O, no external references.
+    let animation = Composition::parse(json.as_bytes(), &Limits::default()).map_err(|_| 5)?;
     drop(json);
-    let (fps, span) = (animation.frame_rate, animation.out_point - animation.in_point);
-    let frames = span.round();
-    if animation.width != 512 || animation.height != 512 || !(1.0..=180.0).contains(&frames)
-        || !fps.is_finite() || fps <= 0.0 || fps > 60.0 || (frames / fps) > 3.001
+    let (fps, frames) = (animation.frame_rate, animation.frame_count());
+    if animation.width != 512 || animation.height != 512 || !(1..=180).contains(&frames)
+        || !fps.is_finite() || fps <= 0.0 || fps > 60.0 || (frames as f32 / fps) > 3.001
     {
         return Err(5);
     }
-    // Telegram stickers are shape-only: no images, text or expressions.
-    let mut profile = SupportProfile::target_corpus();
-    profile.allow_effects = true;
-    profile.allow_text_layers = false;
-    profile.allow_image_layers = false;
-    profile.allow_image_assets = false;
-    profile.allow_unknown_shape_items = true;
-    let prepared = Renderer::new(profile).prepare(&animation).map_err(|_| 5)?;
-    let config = RenderConfig::new(Rgba8::TRANSPARENT, edge as f32 / 512.0);
-    let frames = frames as u32;
+    let mut renderer = tlottie::CPURenderer::new(animation);
+    let mut canvas = vec![0u32; (edge * edge) as usize];
     let mut meta = Vec::with_capacity(20);
     meta.extend_from_slice(b"MGF1");
     for value in [edge, edge, frames, (f64::from(fps) * 1000.0).round() as u32] {
@@ -68,14 +61,17 @@ fn run() -> Result<(), i32> {
             return Err(8);
         }
         unsafe { libc::alarm(2) };
-        let frame = prepared.render_frame(animation.in_point + index as f32, config).map_err(|_| 7)?;
-        if frame.width != edge || frame.height != edge || frame.pixels.len() != (edge * edge * 4) as usize {
-            return Err(7);
+        // The frame argument is relative to the in-point (0-based), unlike the former backend.
+        renderer.render(index as f32, &mut canvas, edge, edge, RenderOptions::default()).map_err(|_| 7)?;
+        // Premultiplied RGBA, 0xAABBGGRR words: [R, G, B, A] bytes in little-endian memory.
+        let mut pixels = Vec::with_capacity(canvas.len() * 4);
+        for word in &canvas {
+            pixels.extend_from_slice(&word.to_le_bytes());
         }
         let mut reply = Vec::with_capacity(8);
         reply.extend_from_slice(&index.to_le_bytes());
-        reply.extend_from_slice(&(frame.pixels.len() as u32).to_le_bytes());
-        if output.write_all(&reply).and_then(|_| output.write_all(&frame.pixels)).and_then(|_| output.flush()).is_err() {
+        reply.extend_from_slice(&(pixels.len() as u32).to_le_bytes());
+        if output.write_all(&reply).and_then(|_| output.write_all(&pixels)).and_then(|_| output.flush()).is_err() {
             break;
         }
         unsafe { libc::alarm(0) };

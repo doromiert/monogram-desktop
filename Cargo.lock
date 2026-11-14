@@ -2166,7 +2166,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cee2a4a64c5ae2859fcb398ea21e23d3865ad7d2dbeb477ce179208eb45be317"
 dependencies = [
  "skrifa",
- "tiny-skia 0.11.4",
+ "tiny-skia",
 ]
 
 [[package]]
@@ -2557,7 +2557,6 @@ dependencies = [
  "qrcode",
  "quircs",
  "rand 0.9.4",
- "rasterlottie",
  "reqwest",
  "rusqlite",
  "sasl",
@@ -2565,7 +2564,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tiny-keccak",
- "tiny-skia 0.11.4",
+ "tiny-skia",
+ "tlottie",
  "tokio",
  "tokio-xmpp",
  "uuid",
@@ -2942,19 +2942,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "png"
-version = "0.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60769b8b31b2a9f263dae2776c37b1b28ae246943cf719eb6946a1db05128a61"
-dependencies = [
- "bitflags 2.13.2",
- "crc32fast",
- "fdeflate",
- "flate2",
- "miniz_oxide 0.8.9",
-]
-
-[[package]]
 name = "poly1305"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3232,19 +3219,6 @@ name = "rand_core"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
-
-[[package]]
-name = "rasterlottie"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dec0be5cbb669d6a8685a7175f7c45b0beb9d704c6ac9b0c2322ea5cc64c28da"
-dependencies = [
- "rustc-hash",
- "serde",
- "serde_json",
- "thiserror",
- "tiny-skia 0.12.0",
-]
 
 [[package]]
 name = "rayon"
@@ -4164,23 +4138,8 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "log",
- "png 0.17.16",
- "tiny-skia-path 0.11.4",
-]
-
-[[package]]
-name = "tiny-skia"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47ffee5eaaf5527f630fb0e356b90ebdec84d5d18d937c5e440350f88c5a91ea"
-dependencies = [
- "arrayref",
- "arrayvec",
- "bytemuck",
- "cfg-if",
- "log",
- "png 0.18.1",
- "tiny-skia-path 0.12.0",
+ "png",
+ "tiny-skia-path",
 ]
 
 [[package]]
@@ -4188,17 +4147,6 @@ name = "tiny-skia-path"
 version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c9e7fc0c2e86a30b117d0462aa261b72b7a99b7ebd7deb3a14ceda95c5bdc93"
-dependencies = [
- "arrayref",
- "bytemuck",
- "strict-num",
-]
-
-[[package]]
-name = "tiny-skia-path"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edca365c3faccca67d06593c5980fa6c57687de727a03131735bb85f01fdeeb9"
 dependencies = [
  "arrayref",
  "bytemuck",
@@ -4220,6 +4168,11 @@ name = "tinyvec"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
+
+[[package]]
+name = "tlottie"
+version = "1.0.6"
+source = "git+https://github.com/dkaraush/tlottie?rev=92df98dc209bc39b1e567ec74a8c86a0af5239de#92df98dc209bc39b1e567ec74a8c86a0af5239de"
 
 [[package]]
 name = "tls_codec"
