@@ -1,0 +1,8 @@
+# Sourced by the generated AppRun (quick-sharun). Mirrors packaging/monogram-desktop.
+export MONOGRAM_ASSET_DIR="$APPDIR/share/monogram-desktop"
+# Raw (unpatched) binary: it runs inside bwrap against the host's /usr, so it must
+# not be rewritten to use the bundled loader.
+export MONOGRAM_LOTTIE_HELPER="$APPDIR/libexec/monogram-sticker-renderer"
+export MONOGRAM_BWRAP="$APPDIR/bin/bwrap"
+export MONOGRAM_EPOXY_LIBRARY=libepoxy.so.0
+export GTK_USE_PORTAL=1
