@@ -175,10 +175,12 @@ mod message_bubble_limit_imp {
             } else {
                 natural
                     .min(for_size.saturating_mul(2) / 5)
-                    .max(minimum)
                     .max(1)
             };
-            child.measure(gtk::Orientation::Vertical, child_width)
+            let (minimum,natural,base,natural_base)=child.measure(gtk::Orientation::Vertical, child_width);
+            // With no width, an aspect-ratio child has no fixed minimum height.
+            // GTK otherwise carries its wide natural height into narrow rows.
+            (if for_size<0 {0}else{minimum},natural.max(minimum),base,natural_base)
         }
 
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
@@ -659,7 +661,7 @@ mod image_imp {
                     gtk::Orientation::Horizontal => (0, self.max_width.get(), -1, -1),
                     _ => {
                         let edge = if size < 0 { self.max_width.get() } else { size };
-                        (edge, edge, -1, -1)
+                        (if size<0 {0}else{edge}, edge, -1, -1)
                     }
                 };
             }
@@ -678,7 +680,7 @@ mod image_imp {
                 } else {
                     height
                 };
-                (height, height, -1, -1)
+                (if size<0 {0}else{height}, height, -1, -1)
             }
         }
         fn snapshot(&self, snapshot: &gtk::Snapshot) {

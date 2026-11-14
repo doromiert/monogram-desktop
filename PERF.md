@@ -38,3 +38,25 @@ the preview's outer edge (48 px if counting only its content). The bubble clamp
 now uses the actual allocated preview edge; its content width is 366 px in the
 same fixture, matching the card rather than its 392 px width request. Ordinary
 bubble padding is unchanged. The regression runs in the native GTK fixture.
+
+Full native smoke also reproduced a 65 px gap after a photo at a narrower
+allocation. Aspect images and the bubble clamp now report no fixed vertical
+minimum without a width and use the same width cap for height measurement and
+allocation. The unchanged 30 px adjacency assertion passes at 1920/960/460 px.
+Opening the requested media sidebar after the first conversation paint reduced
+the same startup fixture's maximum heartbeat gap from 448 ms to 193 ms; the
+complete multi-step native smoke measured 288 ms. Its 4 ms heartbeat is enabled
+only by `--smoke-test` and asserts the 400 ms limit.
+
+Reply quotes fill the available card width and elide at a whole-word boundary
+with `...`, falling back to a mid-word cut only when that word exceeds the line.
+A stable source layout keeps truncation from shrinking and re-expanding the
+parent bubble. Preview shaping is bounded to 4096 Unicode scalars. The native
+regression exercises the production reply row, ordinary words and one over-wide
+word rather than estimating width from a character count.
+
+Like mobile ChatMessageCell's `AndroidUtilities.replaceNewLines`, desktop reply
+previews fold source line breaks into spaces. The message itself and stored
+reply target/fallback stay intact. The native fixture includes the screenshot's
+line break after the parenthetical phrase and verifies it does not force a
+short line in the card.

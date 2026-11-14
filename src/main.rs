@@ -84,7 +84,12 @@ mod uploads;
 mod video_ui;
 mod wallet;
 mod widgets;
+thread_local! {static SMOKE_TICK: std::cell::Cell<std::time::Instant> = std::cell::Cell::new(std::time::Instant::now()); static SMOKE_MAX_GAP: std::cell::Cell<u128> = const{std::cell::Cell::new(0)};}
 fn main() -> gtk::glib::ExitCode {
+    if std::env::args().any(|a|a=="--smoke-test") {
+    gtk::glib::timeout_add_local(std::time::Duration::from_millis(4),||{let now=std::time::Instant::now();let gap=SMOKE_TICK.with(|t|now.duration_since(t.replace(now)).as_millis());SMOKE_MAX_GAP.with(|m|m.set(m.get().max(gap)));gtk::glib::ControlFlow::Continue});
+    }
+
     let started = std::time::Instant::now();
     let mut monitor = None;
     let mut args = vec![];
@@ -169,14 +174,16 @@ fn main() -> gtk::glib::ExitCode {
                     started.elapsed().as_millis(),
                     loading_paint.elapsed().as_millis()
                 );
+
+                if std::env::args().any(|s|s=="--show-media") {
+                    let ui=reconnect.clone();
+                    gtk::glib::idle_add_local_once(move || ui.toggle_media());
+                }
                 if !reconnect.smoke {
                     // Let the interface paint before restoring the account and transport.
                     gtk::glib::idle_add_local_once(move || reconnect.reconnect_saved());
                 }
             });
-            if std::env::args().any(|s| s == "--show-media") {
-                ui.toggle_media();
-            }
             if std::env::args().any(|s| s == "--crypto-smoke-test") {
                 smoke::run_crypto(ui.clone());
             } else if std::env::args().any(|s| s == "--live-smoke-test") {

@@ -4,6 +4,85 @@ use adw::prelude::*;
 use gtk::glib;
 use std::{rc::Rc, time::Duration};
 
+fn elide(label: &gtk::Label, source: &str, width: i32) -> String {
+    let layout = label.layout().copy();
+    layout.set_width(width.max(1) * gtk::pango::SCALE);
+    layout.set_wrap(gtk::pango::WrapMode::WordChar);
+    layout.set_ellipsize(gtk::pango::EllipsizeMode::None);
+    layout.set_height(-1);
+    layout.set_text(source);
+    if layout.line_count() <= 2 { return source.into(); }
+    let boundaries: Vec<_> = source.char_indices().map(|(i,_)|i).chain([source.len()]).collect();
+    let (mut low, mut high) = (0, boundaries.len()-1);
+    while low < high {
+        let middle=(low+high+1)/2;
+        layout.set_text(&format!("{}...",source[..boundaries[middle]].trim_end()));
+        if layout.line_count() <= 2 { low=middle; } else { high=middle-1; }
+    }
+    let mut end=boundaries[low];
+    if source[..end].chars().last().is_some_and(|c|!c.is_whitespace()) && source[end..].chars().next().is_some_and(|c|!c.is_whitespace()) {
+        let start=source[..end].char_indices().rev().find(|(_,c)|c.is_whitespace()).map_or(0,|(i,c)|i+c.len_utf8());
+        let word_end=source[start..].char_indices().find(|(_,c)|c.is_whitespace()).map_or(source.len(),|(i,_)|start+i);
+        let word=label.create_pango_layout(Some(&source[start..word_end]));
+        // Keep ordinary words whole; an over-wide word can use the available line.
+        if word.pixel_size().0 <= width { end=start; }
+    }
+    format!("{}...",source[..end].trim_end())
+}
+
+mod snippet_imp {
+    use super::*;
+    use gtk::subclass::prelude::*;
+    #[derive(Default)]
+    pub struct Snippet {
+        pub label: std::cell::RefCell<Option<gtk::Label>>,
+        pub source: std::cell::RefCell<String>,
+        pub width: std::cell::Cell<i32>,
+    }
+    #[glib::object_subclass]
+    impl ObjectSubclass for Snippet {
+        const NAME: &'static str = "MonogramReplySnippet";
+        type Type = super::Snippet;
+        type ParentType = gtk::Widget;
+    }
+    impl ObjectImpl for Snippet {
+        fn dispose(&self) { if let Some(label)=self.label.borrow_mut().take(){label.unparent();} }
+    }
+    impl WidgetImpl for Snippet {
+        fn request_mode(&self)->gtk::SizeRequestMode { gtk::SizeRequestMode::HeightForWidth }
+        fn measure(&self, orientation:gtk::Orientation, width:i32)->(i32,i32,i32,i32) {
+            let label=self.label.borrow();let Some(label)=label.as_ref() else{return (0,0,-1,-1);};
+            let layout=label.layout().copy();layout.set_text(&self.source.borrow());
+            layout.set_width(if orientation==gtk::Orientation::Horizontal || width<0 {-1}else{width*gtk::pango::SCALE});
+            layout.set_wrap(gtk::pango::WrapMode::WordChar);
+            layout.set_ellipsize(gtk::pango::EllipsizeMode::End);layout.set_height(-2);
+            let (w,h)=layout.pixel_size();
+            if orientation==gtk::Orientation::Horizontal {(0,w,-1,-1)}else{(if width<0{0}else{h},h,-1,-1)}
+        }
+        fn size_allocate(&self,width:i32,height:i32,baseline:i32) {
+            if let Some(label)=self.label.borrow().as_ref() {
+                if self.width.replace(width)!=width { label.set_text(&elide(label,&self.source.borrow(),width)); }
+                label.measure(gtk::Orientation::Horizontal,-1);
+                label.measure(gtk::Orientation::Vertical,width);
+                label.allocate(width,height,baseline,None);
+            }
+        }
+        fn snapshot(&self,snapshot:&gtk::Snapshot) { if let Some(label)=self.label.borrow().as_ref(){self.obj().snapshot_child(label,snapshot);} }
+    }
+}
+glib::wrapper! {pub struct Snippet(ObjectSubclass<snippet_imp::Snippet>) @extends gtk::Widget,@implements gtk::Accessible,gtk::Buildable,gtk::ConstraintTarget;}
+impl Snippet {
+    pub fn new(source:&str)->Self {
+        use gtk::subclass::prelude::*;
+        let widget:Self=glib::Object::new();
+        // Two visible lines never need an unbounded quoted body to be shaped.
+        let mut preview:String=source.chars().take(4096).collect();if preview.len()<source.len(){preview.push_str("...");}
+        let label=crate::widgets::wrap(&preview,"reply-preview");
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);label.set_lines(2);label.set_yalign(0.);
+        label.set_parent(&widget);widget.imp().source.replace(preview);widget.imp().label.replace(Some(label));widget
+    }
+}
+
 fn image(message: &Message) -> Option<Attachment> {
     if message.retracted || message.unavailable || crate::formatting_ui::model(message).spoiler {
         return None;
@@ -178,6 +257,30 @@ mod tests {
         }
         None
     }
+    #[test]
+    #[ignore = "private native GTK display and keyring"]
+    fn reply_quote_uses_the_full_card_width() {
+        adw::init().unwrap();
+        let app=adw::Application::builder().application_id("com.negzero.MonogramQuoteWidth").flags(gio::ApplicationFlags::NON_UNIQUE).build();app.register(None::<&gio::Cancellable>).unwrap();
+        let css=gtk::CssProvider::new();css.load_from_path(crate::widgets::asset("style.css"));gtk::style_context_add_provider_for_display(&gdk::Display::default().unwrap(),&css,gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        let ui=Ui::new(&app,true);
+        let message=Message{id:"wide-reply".into(),text:"i did".into(),own:true,reply:"ralu · btw install github-cli (as known as gh)\nand let your GPT talk to claude in PR and describe the changes".into(),..Default::default()};
+        ui.state.borrow_mut().current_mut().group=false;ui.state.borrow_mut().current_mut().messages=vec![message];
+        ui.window.set_default_size(1400,800);ui.window.present();ui.render_messages(true);
+        let context=glib::MainContext::default();let deadline=Instant::now()+Duration::from_millis(350);while Instant::now()<deadline{context.iteration(false);std::thread::sleep(Duration::from_millis(1));}
+        fn quote(widget:&gtk::Widget)->Option<gtk::Label>{if let Some(label)=widget.downcast_ref::<gtk::Label>().filter(|w|w.has_css_class("reply-preview")){return Some(label.clone());}let mut c=widget.first_child();while let Some(w)=c{c=w.next_sibling();if let Some(found)=quote(&w){return Some(found);}}None}
+        let bubble=ui.bubbles.borrow().get("wide-reply").unwrap().clone();let snippet=quote(&bubble).unwrap();let contents=snippet.parent().unwrap().parent().unwrap();let row=contents.parent().unwrap();
+        eprintln!("Reply quote: text={}px, content={}px, row={}px",snippet.width(),contents.width(),row.width());
+        assert!(snippet.width()>=row.width()-2,"Quote left {}px unused",row.width()-snippet.width());
+        assert!(snippet.layout().line_count()<=2);
+        assert!(!snippet.text().contains('\n'),"Reply previews should flow across original line breaks, like mobile");
+        let ordinary="hello world some fairly ordinary words that should be cut at a whole word instead of halfway through one";
+        let clipped=elide(&snippet,ordinary,140);assert!(clipped.ends_with("..."));let prefix=clipped.strip_suffix("...").unwrap();assert!(ordinary[prefix.len()..].starts_with(char::is_whitespace),"Mid-word cut: {clipped}");
+        let long="pneumonoultramicroscopicsilicovolcanoconiosis".repeat(5);let clipped=elide(&snippet,&long,140);assert!(clipped.ends_with("...")&&clipped.len()>3&&clipped.len()<long.len());
+        assert_eq!(elide(&snippet,"a short quote",300),"a short quote");
+        ui.window.close();
+    }
+
     #[test]
     #[ignore = "private native display, keyring and media cache"]
     fn archived_reply_image_loads_as_a_cropped_square() {
