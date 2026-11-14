@@ -26,8 +26,6 @@ qrcode = { version = "0.14", default-features = false }
 flate2 = "1"
 libc = "0.2"
 tlottie = { git = "https://github.com/dkaraush/tlottie", rev = "92df98dc209bc39b1e567ec74a8c86a0af5239de", default-features = false, features = ["cpu", "std"] }
-latex-rust = { version = "3", features = ["png"] }
-tiny-skia = { version = "0.11", default-features = false, features = ["std", "png-format"] }
 zip = { version = "=9.5.1", default-features = false }
 openssl = "0.10"
 zeroize = { version = "1", features = ["derive"] }
