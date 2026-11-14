@@ -10,6 +10,7 @@ use std::{collections::HashSet, rc::Rc};
 
 impl Ui {
     pub fn timeline_scope_changed(&self) {
+        self.cancel_reply_scroll();
         self.send_animation.cancel();
         self.set_composer_send_hint(false);
         self.history_window.reset(true);
@@ -63,7 +64,7 @@ impl Ui {
     }
 
     fn maintain_history_window(self: &Rc<Self>) {
-        if self.rendering_messages() {
+        if self.rendering_messages() || self.history_window.moving.get() {
             return;
         }
         self.mark_visible_chat_read();

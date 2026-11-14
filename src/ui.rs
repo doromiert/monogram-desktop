@@ -39,6 +39,7 @@ pub struct Ui {
     pub utility: adw::OverlaySplitView,
     pub pages: gtk::Stack,
     pub state: RefCell<State>,
+    pub(crate) folder_snapshot: RefCell<String>,
     pub demo: RefCell<State>,
     pub store: Store,
     pub folder_bar: FolderBar,
@@ -77,6 +78,7 @@ pub struct Ui {
     pub anchor: RefCell<Option<String>>,
     pub bubbles: RefCell<HashMap<String, gtk::Widget>>,
     pub(crate) rendered_rows: RefCell<crate::messages::RenderedRows>,
+    pub(crate) reply_scroll: RefCell<Option<adw::TimedAnimation>>,
     chat_refresh_pending: Cell<bool>,
     pub media_stack: gtk::Stack,
     pub(crate) media_search: gtk::SearchEntry,
@@ -187,6 +189,7 @@ impl Ui {
         welcome_view.add_top_bar(&adw::HeaderBar::new());
         let welcome_sign_in = gtk::Button::with_label("Sign In");
         welcome_sign_in.add_css_class("suggested-action");
+        let welcome_sync=gtk::Button::with_label("Sync from Another Device");
         let welcome_cancel = gtk::Button::with_label("Cancel");
         welcome_cancel.set_visible(false);
         let welcome_register = gtk::LinkButton::with_label(
@@ -202,6 +205,7 @@ impl Ui {
         let controls = bx(true, 12);
         controls.set_halign(gtk::Align::Center);
         controls.append(&welcome_sign_in);
+        controls.append(&welcome_sync);
         controls.append(&welcome_progress);
         controls.append(&welcome_status);
         controls.append(&welcome_cancel);
@@ -277,6 +281,7 @@ impl Ui {
                 .transition_type(gtk::StackTransitionType::Crossfade)
                 .transition_duration(160)
                 .build(),
+            folder_snapshot:RefCell::new(crate::lan_sync_ui::folder_signature(&state)),
             state: RefCell::new(state),
             demo: RefCell::new(demo),
             store,
@@ -367,6 +372,7 @@ impl Ui {
             anchor: RefCell::new(None),
             bubbles: RefCell::new(HashMap::new()),
             rendered_rows: RefCell::new(Default::default()),
+            reply_scroll: RefCell::new(None),
             chat_refresh_pending: Cell::new(false),
             media_stack: gtk::Stack::builder()
                 .hhomogeneous(false)
@@ -443,6 +449,7 @@ impl Ui {
         ui.make_content();
         ui.make_media();
         ui.load_favorite_orders();
+        let weak=Rc::downgrade(&ui);welcome_sync.connect_clicked(move|_|{if let Some(ui)=weak.upgrade(){crate::lan_sync_ui::show(&ui);}});
         ui.actions();
         ui.rebuild_folders();
         ui.refresh_chats(None);
@@ -637,10 +644,14 @@ impl Ui {
         });
     }
     pub fn persist(&self) -> bool {
-        if let Err(_) = self.store.save(&self.state.borrow()) {
+        let signature=crate::lan_sync_ui::folder_signature(&self.state.borrow());
+        let changed=*self.folder_snapshot.borrow()!=signature;
+        let result=if changed{self.store.save(&self.state.borrow())}else{self.store.save_chat_state(&self.state.borrow())};
+        if result.is_err() {
             self.notice("Local history could not be saved. Check free space and permissions.");
             false
         } else {
+            if changed{self.folder_snapshot.replace(signature);}
             true
         }
     }
@@ -655,6 +666,8 @@ impl Ui {
         self.window.add_action(&action);
     }
     fn actions(self: &Rc<Self>) {
+        self.install_reply_scroll_input();
+        crate::lan_sync_ui::install(self);
         self.action("search", |s| {
             s.search_toggle.set_active(!s.search_toggle.is_active())
         });
@@ -663,6 +676,8 @@ impl Ui {
         self.action("new-chat", |s| s.new_chat());
         self.action("accounts", |s| s.accounts_dialog());
         self.action("preferences", |s| s.preferences());
+        self.action("about", |s| s.about());
+        self.action("device-sync", |s| crate::lan_sync_ui::show(s));
         self.action("shortcuts", |s| s.shortcuts());
         self.action("security", |s| s.security());
         self.action("info", |s| s.show_info());
@@ -754,6 +769,7 @@ impl Ui {
             ("Accounts", "accounts"),
             ("Preferences", "preferences"),
             ("Keyboard Shortcuts", "shortcuts"),
+            ("About Monogram", "about"),
             ("Developer Tools", "developer"),
         ] {
             section.append(Some(title), Some(&format!("win.{action}")))
@@ -871,7 +887,8 @@ impl Ui {
         let mut first: Option<gtk::ToggleButton> = None;
         for name in &visible_names {
             let b = gtk::ToggleButton::with_label(name);
-            b.add_css_class("flat");
+            b.add_css_class("flat");b.set_widget_name(name);
+            if let Some(rule)=state.folders.get(name){if let Some(glyph)=crate::folders::icon(&rule.icon){let child=bx(false,6);child.append(&label(glyph,""));child.append(&label(name,""));b.set_child(Some(&child));}}
             if let Some(ref first) = first {
                 b.set_group(Some(first))
             } else {

@@ -102,7 +102,7 @@ impl FolderBar {
                 if !drag.active {
                     drag.button.set_active(true);
                 } else if drag.from != drag.to {
-                    reorder(drag.button.label().as_deref().unwrap_or(""), drag.to);
+                    reorder(drag.button.label().as_deref().unwrap_or(&drag.button.widget_name()), drag.to);
                 }
             }
         });
@@ -253,3 +253,5 @@ impl FolderBar {
         snapshot.restore();
     }
 }
+
+pub fn icon(name:&str)->Option<&'static str>{Some(match name{"cat"=>"🐱","book"=>"📖","money"=>"💰","game"=>"🎮","light"=>"💡","like"=>"👍","note"=>"📝","palette"=>"🎨","travel"=>"🧳","sport"=>"⚽","favorite"=>"⭐","study"=>"🎓","airplane"=>"✈️","private"=>"🔒","group"=>"👥","all"=>"💬","unread"=>"📩","bots"=>"🤖","crown"=>"👑","flower"=>"🌸","home"=>"🏠","love"=>"❤️","mask"=>"🎭","party"=>"🎉","trade"=>"🤝","work"=>"💼","unmuted"=>"🔔","channels"=>"📣","custom"=>"📁","setup"=>"⚙️",_=>return None})}

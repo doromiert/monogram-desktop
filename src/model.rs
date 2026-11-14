@@ -356,6 +356,8 @@ impl Chat {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Folder {
+    pub icon:String,
+    pub pinned:Vec<String>,
     pub types: BTreeSet<String>,
     pub exclude_muted: bool,
     pub exclude_read: bool,
@@ -511,13 +513,15 @@ impl State {
             })
             .cloned()
             .collect();
+        let folder_pins=self.folders.get(&self.folder).map(|f|f.pinned.as_slice()).unwrap_or(&[]);
         out.sort_by(|a, b| {
-            b.pinned.cmp(&a.pinned).then_with(|| {
+            let ap=folder_pins.iter().position(|id|id==&a.id).unwrap_or(usize::MAX);let bp=folder_pins.iter().position(|id|id==&b.id).unwrap_or(usize::MAX);
+            ap.cmp(&bp).then_with(||b.pinned.cmp(&a.pinned).then_with(|| {
                 if self.account.is_empty() || a.pinned {
                     return std::cmp::Ordering::Equal;
                 }
                 b.latest_key().cmp(&a.latest_key())
-            })
+            }))
         });
         out
     }

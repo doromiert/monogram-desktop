@@ -49,6 +49,7 @@ pub enum Kind {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Item {
+    #[serde(default)] pub sync_id: String,
     pub id: i64,
     pub name: String,
     pub emoji: String,
@@ -61,6 +62,7 @@ pub struct Item {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Pack {
+    #[serde(default)] pub sync_id: String,
     pub id: i64,
     pub name: String,
     pub source: String,
@@ -319,6 +321,11 @@ impl Library {
         }
         result
     }
+    pub async fn sync_tag(&self,id:i64)->Result<Pack>{
+        let this=self.clone();worker(move||{let _gate=this.owner.gate.lock().unwrap();let mut snapshot=this.read()?;let pack=snapshot.packs.iter_mut().find(|p|p.id==id).ok_or(Error("Pack unavailable."))?;
+        let mut changed=false;if pack.sync_id.is_empty(){pack.sync_id=uuid::Uuid::new_v4().to_string();changed=true;}for item in &mut pack.items{if item.sync_id.is_empty(){item.sync_id=uuid::Uuid::new_v4().to_string();changed=true;}}
+        let result=pack.clone();if changed{this.write(&snapshot)?;}Ok(result)}).await
+    }
     pub async fn snapshot(&self) -> Result<Snapshot> {
         let this = self.clone();
         worker(move || {
@@ -542,6 +549,7 @@ impl Library {
                 let file = format!("{}{}", uuid::Uuid::new_v4(), extension(&mime)?);
                 stage.save(&file, &data)?;
                 items.push(Item {
+            sync_id: String::new(),
                     id: new_id(),
                     name: valid_name(&input.name)?,
                     emoji: tag(&input.emoji)?,
@@ -582,6 +590,7 @@ impl Library {
                 pack
             } else {
                 let pack = Pack {
+            sync_id: String::new(),
                     id: new_id(),
                     name: valid_name(&name)?,
                     source: format!("local:{}", uuid::Uuid::new_v4()),
@@ -608,7 +617,9 @@ impl Library {
         done.finish(&result);
         result
     }
-    pub async fn import_xmsp(&self, path: PathBuf, job: Job) -> Result<Pack> {
+    pub async fn import_xmsp(&self, path: PathBuf, job: Job) -> Result<Pack> {self.import_paired_archive(path,job,None).await}
+    pub async fn import_sync_xmsp(&self,path:PathBuf,job:Job,id:String)->Result<Pack>{self.import_paired_archive(path,job,Some(id)).await}
+    async fn import_paired_archive(&self, path: PathBuf, job: Job, sync_id:Option<String>) -> Result<Pack> {
         let this = self.clone();
         let done = job.clone();
         let result = worker(move || {
@@ -618,11 +629,14 @@ impl Library {
             let _guard = this.owner.gate.lock().unwrap();
             this.check(&job)?;
             let mut s = this.read()?;
-            pack.id = new_id();
-            for item in &mut pack.items {
-                item.id = new_id();
-            }
-            s.packs.insert(0, pack.clone());
+            let existing=if let Some(id)=sync_id.as_ref(){
+                if uuid::Uuid::parse_str(id).is_err() || pack.sync_id!=*id {return Err(Error("Invalid paired pack identity."));}
+                s.packs.iter().find(|p|p.sync_id==*id).cloned()
+            }else{pack.sync_id.clear();pack.source=format!("local:{}",uuid::Uuid::new_v4());pack.installed=true;pack.private_pack=true;pack.connected=false;pack.auto_sync=false;for item in &mut pack.items{item.sync_id.clear();}None};
+            pack.id=existing.as_ref().map(|p|p.id).unwrap_or_else(new_id);
+            for item in &mut pack.items{item.id=existing.as_ref().and_then(|p|p.items.iter().find(|old|!item.sync_id.is_empty()&&old.sync_id==item.sync_id)).map(|old|old.id).unwrap_or_else(new_id);}
+            if let Some(old)=existing{let removed=old.items.into_iter().filter(|old|!pack.items.iter().any(|i|i.id==old.id)).collect();s.packs.retain(|p|p.id!=old.id);archive_items(&mut s,old.id,removed);}
+            s.packs.insert(0,pack.clone());
             stage.publish(&this.owner.path)?;
             this.check(&job)?;
             this.write(&s)?;
@@ -633,7 +647,9 @@ impl Library {
         done.finish(&result);
         result
     }
-    pub async fn export_xmsp(&self, id: i64, job: Job) -> Result<PathBuf> {
+    pub async fn export_xmsp(&self,id:i64,job:Job)->Result<PathBuf>{self.export_archive(id,job,false).await}
+    pub async fn export_sync_xmsp(&self,id:i64,job:Job)->Result<PathBuf>{self.export_archive(id,job,true).await}
+    async fn export_archive(&self, id: i64, job: Job,sync:bool) -> Result<PathBuf> {
         let this = self.clone();
         let done = job.clone();
         let result = worker(move || {
@@ -649,7 +665,8 @@ impl Library {
                 .owner
                 .path
                 .join(format!("{}.xmsp", uuid::Uuid::new_v4()));
-            let result = write_archive(pack, &this.owner.path, &output, &job);
+            let mut pack=pack.clone();if !sync{pack.sync_id.clear();for item in &mut pack.items{item.sync_id.clear();}}
+            let result = write_archive(&pack, &this.owner.path, &output, &job);
             if result.is_err() {
                 let _ = fs::remove_file(&output);
             }
@@ -715,6 +732,7 @@ fn archive_items(s: &mut Snapshot, parent: i64, items: Vec<Item>) {
             .map(|p| p.kind)
             .unwrap_or(Kind::Stickers);
         s.packs.push(Pack {
+            sync_id: String::new(),
             id: new_id(),
             name: "Retained artwork".into(),
             source,
@@ -1039,8 +1057,11 @@ fn prepare_media(bytes: Vec<u8>, job: &Job) -> Result<(Vec<u8>, String, u32, u32
         texture.height() as u32,
     ))
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone,Serialize,Deserialize)]
+struct PackSync {id:String,source:String,installed:bool,private_pack:bool,connected:bool,auto_sync:bool}
+#[derive(Serialize,Deserialize)]
 struct Manifest {
+    #[serde(default)] sync: Option<PackSync>,
     format: String,
     version: u32,
     name: String,
@@ -1168,6 +1189,7 @@ fn read_archive(path: &Path, stage: &mut Staging, job: &Job) -> Result<Pack> {
             file
         };
         items.push(Item {
+            sync_id: item.id.clone(),
             id: new_id(),
             name: valid_name(&item.name)?,
             emoji: tag(&item.emoji)?,
@@ -1179,14 +1201,15 @@ fn read_archive(path: &Path, stage: &mut Staging, job: &Job) -> Result<Pack> {
         });
     }
     Ok(Pack {
+            sync_id: manifest.sync.as_ref().map(|s|s.id.clone()).unwrap_or_default(),
         id: new_id(),
         name: valid_name(&manifest.name)?,
-        source: format!("local:{}", uuid::Uuid::new_v4()),
+        source: manifest.sync.as_ref().map(|s|s.source.clone()).unwrap_or_else(||format!("local:{}", uuid::Uuid::new_v4())),
         kind: manifest.kind,
-        installed: true,
-        private_pack: true,
-        connected: false,
-        auto_sync: false,
+        installed: manifest.sync.as_ref().is_none_or(|s|s.installed),
+        private_pack: manifest.sync.as_ref().is_none_or(|s|s.private_pack),
+        connected: manifest.sync.as_ref().is_some_and(|s|s.connected),
+        auto_sync: manifest.sync.as_ref().is_some_and(|s|s.auto_sync),
         last_sync: 0,
         last_attempt: 0,
         sync_error: String::new(),
@@ -1198,6 +1221,7 @@ fn write_archive(pack: &Pack, root: &Path, output: &Path, job: &Job) -> Result<(
         return Err(Error("Packs must contain at least one item."));
     }
     let mut manifest = Manifest {
+        sync: (!pack.sync_id.is_empty()).then(||PackSync{id:pack.sync_id.clone(),source:pack.source.clone(),installed:pack.installed,private_pack:pack.private_pack,connected:pack.connected,auto_sync:pack.auto_sync}),
         format: "xmsp".into(),
         version: 1,
         name: valid_name(&pack.name)?,
@@ -1222,7 +1246,7 @@ fn write_archive(pack: &Pack, root: &Path, output: &Path, job: &Job) -> Result<(
             assets.push((path.clone(), item.file.clone()));
         }
         manifest.items.push(ManifestItem {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: if item.sync_id.is_empty(){uuid::Uuid::new_v4().to_string()}else{item.sync_id.clone()},
             name: item.name.clone(),
             emoji: item.emoji.clone(),
             mime: item.mime.clone(),
@@ -1975,6 +1999,7 @@ impl Library {
                     Ok::<_, Error>((
                         index,
                         Item {
+                            sync_id: String::new(),
                             id: new_id(),
                             name: format!("Item {}", index + 1),
                             emoji: tag(sticker["emoji"].as_str().unwrap_or("🙂"))?,
@@ -2014,6 +2039,7 @@ impl Library {
         }
         let now = chrono::Utc::now().timestamp();
         Ok(Pack {
+            sync_id: String::new(),
             id: previous.map(|p| p.id).unwrap_or_else(new_id),
             name,
             source: link.url.clone(),
@@ -2377,6 +2403,13 @@ impl Library {
 mod tests {
     use super::*;
     #[test]
+    fn mobile_sync_archive_keeps_stable_ids_and_policy(){
+        let root=std::env::temp_dir().join(format!("mobile-sync-pack-{}",uuid::Uuid::new_v4()));private_dir(&root).unwrap();let mut stage=Staging::new(&root).unwrap();
+        let pack=read_archive(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/device-sync/mobile.xmsp"),&mut stage,&Job::new()).unwrap();
+        assert_eq!(pack.sync_id,"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");assert_eq!(pack.items[0].sync_id,"11111111-1111-4111-8111-111111111111");assert!(!pack.installed);assert!(!pack.private_pack);assert!(pack.connected);assert!(pack.auto_sync);
+        assert_eq!(pack.items[0].emoji,"😂");drop(stage);let _=fs::remove_dir_all(root);
+    }
+    #[test]
     fn private_archive_and_inline_emoji_preserve_mobile_contract() {
         let root =
             std::env::temp_dir().join(format!("monogram-pack-check-{}", uuid::Uuid::new_v4()));
@@ -2387,6 +2420,7 @@ mod tests {
         f.write_all(&data).unwrap();
         drop(f);
         let pack = Pack {
+            sync_id: String::new(),
             id: new_id(),
             name: "Local pack".into(),
             source: "local:test".into(),
@@ -2399,6 +2433,7 @@ mod tests {
             last_attempt: 0,
             sync_error: String::new(),
             items: vec![Item {
+                sync_id:String::new(),
                 id: new_id(),
                 name: "Wave".into(),
                 emoji: "👋".into(),

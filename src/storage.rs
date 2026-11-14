@@ -105,7 +105,14 @@ impl Store {
             .filter_map(|r| r.ok().and_then(|v| serde_json::from_str(&v).ok()))
             .collect()
     }
+    pub fn import_synced_account(&self,a:&Account)->rusqlite::Result<()>{
+        let tx=rusqlite::Transaction::new_unchecked(&self.db,rusqlite::TransactionBehavior::Immediate)?;
+        let excluded:String=tx.query_row("SELECT COALESCE((SELECT value FROM preferences WHERE key=?),'')",[format!("lan-sync-excluded:{}",a.jid)],|r|r.get(0))?;
+        if excluded=="true"{return Err(rusqlite::Error::InvalidQuery);}
+        tx.execute("INSERT INTO accounts VALUES (?,?) ON CONFLICT(jid) DO UPDATE SET config=excluded.config",rusqlite::params![a.jid,serde_json::to_string(a).unwrap()])?;tx.commit()
+    }
     pub fn save_account(&self, a: &Account) -> rusqlite::Result<()> {
+        self.db.execute("DELETE FROM preferences WHERE key=?",[format!("lan-sync-excluded:{}",a.jid)])?;
         self.db.execute("INSERT INTO accounts VALUES (?,?) ON CONFLICT(jid) DO UPDATE SET config=excluded.config",params![a.jid,serde_json::to_string(a).unwrap()])?;
         Ok(())
     }
@@ -157,7 +164,9 @@ impl Store {
             if enabled { "true" } else { "false" },
         )
     }
-    pub fn save(&self, s: &State) -> rusqlite::Result<()> {
+    pub fn save(&self,s:&State)->rusqlite::Result<()>{self.save_state(s,true)}
+    pub(crate)fn save_chat_state(&self,s:&State)->rusqlite::Result<()>{self.save_state(s,false)}
+    fn save_state(&self, s: &State,folders_changed:bool) -> rusqlite::Result<()> {
         if s.account.is_empty() {
             return Ok(());
         }
@@ -174,11 +183,16 @@ impl Store {
             "INSERT OR REPLACE INTO preferences VALUES (?,?)",
             params![format!("active-chat:{}", s.account), s.active],
         )?;
-        let folders = serde_json::json!({"rules":s.folders,"order":s.folder_order,"all_hidden":s.all_folder_hidden});
+        if folders_changed {
+        let previous:serde_json::Value=serde_json::from_str(&self.pref(&format!("folders:{}",s.account),"{}")).unwrap_or_default();
+        let mut rooms=std::collections::BTreeSet::<String>::new();for value in previous["rooms"].as_array().into_iter().flatten(){if let Some(jid)=value.as_str(){rooms.insert(jid.into());}}
+        rooms.extend(s.chats.iter().filter(|c|c.group).map(|c|c.id.clone()));
+        let folders = serde_json::json!({"rules":s.folders,"order":s.folder_order,"all_hidden":s.all_folder_hidden,"rooms":rooms});
         tx.execute(
             "INSERT OR REPLACE INTO preferences VALUES (?,?)",
             params![format!("folders:{}", s.account), folders.to_string()],
         )?;
+        }
         tx.commit()
     }
     pub fn save_chat_message(
@@ -744,6 +758,8 @@ impl Store {
         tx.commit()
     }
     pub fn forget(&self, a: &str) -> rusqlite::Result<()> {
+        self.set_pref(&format!("lan-sync-excluded:{a}"),"true")?;
+        crate::lan_sync::exclude(a);
         let tx = self.db.unchecked_transaction()?;
         tx.execute("DELETE FROM accounts WHERE jid=?", [a])?;
         tx.execute("DELETE FROM aliases WHERE account=?", [a])?;

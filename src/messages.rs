@@ -1136,7 +1136,12 @@ impl Ui {
                 if let Some(ui) = weak.upgrade() {
                     if let Some(target) = ui.message_scroll.take() {
                         let adjustment = ui.scroll.vadjustment();
+                        ui.cancel_reply_scroll();
                         ui.history_window.moving.set(true);
+                        if let ScrollTarget::Message(id)=target {
+                            if let Some(value)=ui.highlight_position(id){ui.animate_reply_scroll(value);}
+                            return None;
+                        }
                         adjustment.set_value(match target {
                             ScrollTarget::Bottom => adjustment.upper() - adjustment.page_size(),
                             ScrollTarget::Message(id) => ui
@@ -1196,7 +1201,8 @@ impl Ui {
                 }
             }
         });
-        Some((f64::from(bounds.y()) - 16.0).max(0.0))
+        let adjustment=self.scroll.vadjustment();
+        Some(crate::navigation_ui::destination(f64::from(bounds.y()),f64::from(bounds.height()),adjustment.value(),adjustment.page_size()))
     }
     pub fn highlight(self: &Rc<Self>, id: &str) {
         if self.bubbles.borrow().contains_key(id) && !self.history_window.busy() {

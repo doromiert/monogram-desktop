@@ -254,3 +254,8 @@
 .article-math { margin: 4px 0; }
 .article-block-list > row { padding: 4px 0; background: transparent; }
 .media-spoiler-cover { background: @popover_bg_color; color: @window_fg_color; border: none; border-radius: 10px; }
+
+/* Keep native button hover, pressed and keyboard-focus feedback on custom pills. */
+.message-reply:hover, .reaction:hover { background-color: alpha(@window_fg_color,.16); }
+.message-reply:active, .reaction:active { background-color: alpha(@accent_bg_color,.28); }
+.message-reply:focus-visible, .reaction:focus-visible { outline: 2px solid @accent_color; outline-offset: 1px; }

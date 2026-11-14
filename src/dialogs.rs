@@ -811,7 +811,9 @@ impl Ui {
                 if new.is_empty() {
                     return;
                 }
+                let previous=ui.state.borrow().folders.get(&old).cloned().unwrap_or_default();
                 let rule = Folder {
+                    icon:previous.icon,pinned:previous.pinned,
                     types: types
                         .iter()
                         .filter(|(_, r)| r.is_active())
@@ -1645,6 +1647,8 @@ impl Ui {
         }
         account.add(&g);
         dialog.add(&account);
+        crate::monero_settings_ui::add(self, &dialog);
+        crate::lan_sync_ui::add_preferences(self,&dialog);
         if owner.is_empty() {
             for (title, icon, groups) in [
                 (
