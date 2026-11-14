@@ -1620,6 +1620,44 @@ impl Ui {
             general.add(&gifs);
         }
         dialog.add(&general);
+        let behavior = adw::PreferencesPage::builder()
+            .title("Behavior")
+            .icon_name("input-keyboard-symbolic")
+            .build();
+        let completion = adw::PreferencesGroup::builder()
+            .title("Emoji completion")
+            .description("How :name suggestions appear and are accepted")
+            .build();
+        let basic = gtk::CheckButton::new();
+        let discord = gtk::CheckButton::new();
+        discord.set_group(Some(&basic));
+        let discord_style = crate::emoji_completion::discord_style();
+        basic.set_active(!discord_style);
+        discord.set_active(discord_style);
+        for (check, title, subtitle) in [
+            (&basic, "Basic", "Suggest from the first character; Tab accepts and Enter always sends"),
+            (&discord, "Discord", "Suggest after two characters; Tab or Enter accepts. Move the cursor before the last letter and press Enter to send as typed"),
+        ] {
+            let row = adw::ActionRow::builder()
+                .title(title)
+                .subtitle(subtitle)
+                .activatable_widget(check)
+                .build();
+            row.add_prefix(check);
+            completion.add(&row);
+        }
+        let weak = Rc::downgrade(self);
+        discord.connect_active_notify(move |r| {
+            if let Some(ui) = weak.upgrade() {
+                crate::emoji_completion::set_discord_style(r.is_active());
+                let _ = ui.store.set_pref(
+                    "discord_emoji_completion",
+                    if r.is_active() { "true" } else { "false" },
+                );
+            }
+        });
+        behavior.add(&completion);
+        dialog.add(&behavior);
         let account = adw::PreferencesPage::builder()
             .title("Account")
             .icon_name("avatar-default-symbolic")

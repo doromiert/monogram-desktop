@@ -113,6 +113,19 @@ pub fn search(query: &str) -> Vec<EmojiEntry> {
         .collect()
 }
 
+/// Discord-style completion: two characters before suggesting, Enter accepts, and a
+/// cursor inside a word suppresses suggestions so Enter sends the text as typed.
+static DISCORD_STYLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn set_discord_style(enabled: bool) {
+    DISCORD_STYLE.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn discord_style() -> bool {
+    DISCORD_STYLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+fn emoji_name_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '-' | '+')
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct Token {
     start: i32,
@@ -144,12 +157,14 @@ fn token(view: &gtk::TextView) -> Option<Token> {
         return None;
     }
     let query = &text[colon + 1..];
-    if query.is_empty()
-        || !query
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '+'))
-    {
+    if query.is_empty() || !query.chars().all(emoji_name_char) {
         return None;
+    }
+    if discord_style() {
+        // `:3` and `:P` stay plain text, and a cursor before the last letter bypasses.
+        if query.chars().count() < 2 || emoji_name_char(buffer.iter_at_offset(end).char()) {
+            return None;
+        }
     }
     Some(Token {
         start: first + before.chars().count() as i32,
@@ -314,6 +329,11 @@ impl Completion {
                     .select_row(self.list.row_at_index(next as i32).as_ref());
             }
             gdk::Key::Tab => self.activate(self.selected.get()),
+            gdk::Key::Return | gdk::Key::KP_Enter
+                if discord_style() && !modifiers.contains(gdk::ModifierType::SHIFT_MASK) =>
+            {
+                self.activate(self.selected.get())
+            }
             gdk::Key::Escape => self.hide(),
             _ => return false,
         }
