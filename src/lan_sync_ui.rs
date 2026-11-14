@@ -399,6 +399,7 @@ fn pair_qr(task:Rc<PairTask>,mesh:Arc<monogram_sync::Mesh>,value:&str,peers:usiz
     let width = qr.width();
     let pixels = qr.to_colors();
     let drawing = gtk::DrawingArea::builder()
+        .halign(gtk::Align::Center)
         .content_width(360)
         .content_height(360)
         .build();
