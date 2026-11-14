@@ -328,6 +328,13 @@ impl Library {
         let mut changed=false;if pack.sync_id.is_empty(){pack.sync_id=uuid::Uuid::new_v4().to_string();changed=true;}for item in &mut pack.items{if item.sync_id.is_empty(){item.sync_id=uuid::Uuid::new_v4().to_string();changed=true;}}
         let result=pack.clone();if changed{this.write(&snapshot)?;}Ok(result)}).await
     }
+    pub async fn apply_sync_order(&self, order: serde_json::Value) -> Result<bool> {
+        let this=self.clone();worker(move||{
+            let _gate=this.owner.gate.lock().unwrap();let mut snapshot=this.read()?;
+            if !reorder_synced_packs(&mut snapshot.packs,&order){return Ok(false);}
+            this.write(&snapshot)?;Ok(true)
+        }).await
+    }
     pub async fn snapshot(&self) -> Result<Snapshot> {
         let this = self.clone();
         worker(move || {
@@ -2402,9 +2409,33 @@ impl Library {
     }
 }
 
+fn reorder_synced_packs(packs: &mut [Pack], order: &serde_json::Value) -> bool {
+    for (field,kind) in [("stickers",Kind::Stickers),("emojis",Kind::Emoji)] {
+        let Some(ids)=order[field].as_array() else{return false;};
+        if ids.iter().any(|id| !packs.iter().any(|p|p.kind==kind&&Some(p.sync_id.as_str())==id.as_str())) {return false;}
+    }
+    for (field,kind) in [("stickers",Kind::Stickers),("emojis",Kind::Emoji)] {
+        let ids=order[field].as_array().unwrap();
+        let slots:Vec<_>=packs.iter().enumerate().filter(|(_,p)|p.kind==kind&&p.installed).map(|(i,_)|i).collect();
+        let mut selected:Vec<_>=slots.iter().map(|i|packs[*i].clone()).collect();
+        selected.sort_by_key(|p|ids.iter().position(|id|id.as_str()==Some(&p.sync_id)).unwrap_or(usize::MAX));
+        for(i,pack)in slots.into_iter().zip(selected){packs[i]=pack;}
+    }
+    true
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn synced_pack_order_uses_shared_ids_and_waits_without_partial_changes() {
+        let make=|id,kind,installed|Pack{sync_id:uuid::Uuid::new_v4().to_string(),id,name:format!("Pack {id}"),source:"local:fixture".into(),kind,installed,private_pack:true,connected:false,auto_sync:false,last_sync:0,last_attempt:0,sync_error:String::new(),items:vec![]};
+        let mut packs=vec![make(100,Kind::Stickers,true),make(200,Kind::Emoji,true),make(300,Kind::Stickers,true),make(400,Kind::Stickers,false),make(500,Kind::Emoji,true)];
+        let order=serde_json::json!({"stickers":[packs[2].sync_id,packs[0].sync_id],"emojis":[packs[4].sync_id,packs[1].sync_id]});
+        assert!(reorder_synced_packs(&mut packs,&order));assert_eq!(packs.iter().map(|p|p.id).collect::<Vec<_>>(),vec![300,500,100,400,200]);
+        let previous=packs.clone();let mut pending=order.clone();pending["stickers"].as_array_mut().unwrap().push(serde_json::json!(uuid::Uuid::new_v4().to_string()));
+        assert!(!reorder_synced_packs(&mut packs,&pending));assert_eq!(packs,previous);
+        assert!(reorder_synced_packs(&mut packs,&order));assert_eq!(packs,previous);
+    }
     #[test]
     fn mobile_sync_archive_keeps_stable_ids_and_policy(){
         let root=std::env::temp_dir().join(format!("mobile-sync-pack-{}",uuid::Uuid::new_v4()));private_dir(&root).unwrap();let mut stage=Staging::new(&root).unwrap();

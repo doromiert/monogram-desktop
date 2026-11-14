@@ -9,6 +9,24 @@ use std::{
     path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
+// Rust's File::try_lock is unsupported on Android; use the same OS lock on Unix.
+#[cfg(unix)]
+fn try_store_lock(file: &File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // The descriptor is owned by file and remains open for the store's lifetime.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+#[cfg(not(unix))]
+fn try_store_lock(file: &File) -> std::io::Result<()> {
+    file.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => std::io::ErrorKind::WouldBlock.into(),
+        std::fs::TryLockError::Error(error) => error,
+    })
+}
 const CHUNK: usize = 64 * 1024;
 pub const MAX_RECORD: u64 = 128 * 1024 * 1024;
 pub const MAX_RECORDS: usize = 4096;
@@ -29,7 +47,7 @@ impl Meta {
     pub fn valid(&self) -> bool {
         matches!(
             self.kind.as_str(),
-            "account" | "pack" | "wallet" | "fingerprint" | "token" | "monero-settings" | "folders"
+            "account" | "pack" | "pack-order" | "wallet" | "fingerprint" | "token" | "monero-settings" | "folders"
         ) && !self.owner.is_empty()
             && self.owner.len() <= 1024
             && self.owner.contains('@')
@@ -142,8 +160,18 @@ impl Store {
             .write(true)
             .open(root.join("lock"))
             .map_err(failure)?;
-        lock.try_lock()
-            .map_err(|_| "Device sync is already open in another process.".to_string())?;
+        // Stopped network workers can still own the old store while their sockets unwind.
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(5);
+        loop {
+            match try_store_lock(&lock) {
+                Ok(())=>break,
+                Err(error) if error.kind()==std::io::ErrorKind::Interrupted=>continue,
+                Err(error) if error.kind()==std::io::ErrorKind::WouldBlock && std::time::Instant::now()<deadline=>
+                    std::thread::sleep(std::time::Duration::from_millis(25)),
+                Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>return Err("The previous sync session is still closing. Try again to reconnect.".into()),
+                Err(error)=>return Err(format!("Could not lock sync storage ({error}). Restart Monogram and try again.")),
+            }
+        }
         for entry in fs::read_dir(&root).map_err(failure)?.flatten() {
             if entry.file_name().to_string_lossy().starts_with(".export-")
                 || entry.file_name().to_string_lossy().starts_with(".json-")
@@ -499,6 +527,26 @@ impl Drop for State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn store_lock_excludes_a_second_owner_and_releases_on_close() {
+        let root=std::env::temp_dir().join(format!("monogram-lock-{}",uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let first=File::create(root.join("lock")).unwrap();
+        let second=OpenOptions::new().read(true).write(true).open(root.join("lock")).unwrap();
+        try_store_lock(&first).unwrap();
+        assert_eq!(try_store_lock(&second).unwrap_err().kind(),std::io::ErrorKind::WouldBlock);
+        drop(first);try_store_lock(&second).unwrap();drop(second);fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn reopening_waits_for_the_previous_worker_to_release_its_store() {
+        let root=std::env::temp_dir().join(format!("monogram-restart-{}",uuid::Uuid::new_v4()));
+        let key=random();let old=Store::open(root.clone(),key,"Fixture".into()).unwrap();let identity=old.state.id.clone();
+        let worker=std::thread::spawn(move||{std::thread::sleep(std::time::Duration::from_millis(150));drop(old);});
+        let started=std::time::Instant::now();let reopened=Store::open(root.clone(),key,"Fixture".into());worker.join().unwrap();
+        let reopened=reopened.expect("Restart must wait for its previous worker instead of requiring process management");
+        assert_eq!(reopened.state.id,identity);assert!(started.elapsed()<std::time::Duration::from_secs(2));
+        drop(reopened);let _=fs::remove_dir_all(root);
+    }
     #[test]
     fn private_records_authenticate_content_and_master_key() {
         let root =
