@@ -459,15 +459,14 @@ mod tests {
         fixture.active = fixture.chat_for("other@fixture.invalid").id.clone();
         let chat = fixture.chat_for(peer);
         chat.unread = 140;
-        for n in 0..180 {
+        for n in 0..720 {
             chat.messages.push(Message {
                 id: format!("busy-{n:03}"),
                 wire_id: format!("busy-{n:03}"),
                 sender: peer.into(),
-                text: format!(
-                    "Unread message {n}{}",
-                    "\nContent in this message".repeat(n % 5)
-                ),
+                text: if n % 9 == 8 {
+                    "- **Long archived list item** with a link https://example.invalid/\n".repeat(350)
+                } else { format!("Unread message {n}{}", "\nContent in this message".repeat(n % 5)) },
                 timestamp: format!("2026-11-12T{:02}:{:02}:00Z", 10 + n / 60, n % 60),
                 ..Default::default()
             });
@@ -493,7 +492,7 @@ mod tests {
             ui.at_message_end()
                 && !ui.history_window.busy()
                 && ui.message_scroll.borrow().is_none()
-                && ui.bubbles.borrow().contains_key("busy-179")
+                && ui.bubbles.borrow().contains_key("busy-719")
         });
         // Allow post-allocation pruning to settle before checking retained rows.
         let settle = Instant::now() + Duration::from_millis(100);
@@ -504,6 +503,21 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(2));
         }
+        // Repeated wheel bursts while older pages are being prepared and allocated.
+        let scroll_start = Instant::now();
+        let mut frames = 0;
+        while scroll_start.elapsed() < Duration::from_secs(3) {
+            let adjustment = ui.scroll.vadjustment();
+            adjustment.set_value((adjustment.value() - 180.).max(0.));
+            let frame_end = Instant::now() + Duration::from_millis(8);
+            while Instant::now() < frame_end {
+                main.iteration(false);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            frames += 1;
+        }
+        wait(&ui, || !ui.history_window.busy() && ui.message_scroll.borrow().is_none());
+        eprintln!("Rapid upward scroll: {frames} bursts, max GTK gap={:?}", gap.get());
         timer.remove();
         assert!(
             gap.get() < Duration::from_millis(400),
@@ -523,7 +537,7 @@ mod tests {
         }
         assert_eq!(retained(&rows, top..top + height), 0..rows.len());
         assert!(ui.state.borrow().current().messages.len() < 36);
-        assert_eq!(ui.store.history(owner, peer, None, 200).len(), 180);
+        assert_eq!(ui.store.history(owner, peer, None, 800).len(), 720);
         eprintln!(
             "140-unread chat: settled={:?}, max GTK gap={:?}, retained={} rows across viewport+two screens each side",
             start.elapsed(),

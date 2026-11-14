@@ -6,3 +6,4 @@ Exec=monogram-desktop
 Icon=com.negzero.MonogramDesktop
 Categories=Network;InstantMessaging;GTK;
 StartupNotify=true
+StartupWMClass=com.negzero.MonogramDesktop

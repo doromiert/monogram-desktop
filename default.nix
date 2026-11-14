@@ -9,6 +9,7 @@ let
     patches = (old.patches or []) ++ [ ./native/gtk-gpu-clip-restore.patch ];
   });
   fontConfig = makeFontsConf { fontDirectories = [ adwaita-fonts ]; };
+  mathRenderer = pkgs.callPackage ./native/math { };
   commonArgs = {
     pname = "monogram-desktop";
     version = "0.2.0";
@@ -32,14 +33,15 @@ let
   cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
   cargoArtifacts = craneLib.buildDepsOnly ((builtins.removeAttrs commonArgs [ "src" ]) // {
     inherit dummySrc cargoVendorDir;
-    cargoCheckExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-math-renderer";
-    cargoBuildExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-math-renderer";
+    cargoCheckExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer";
+    cargoBuildExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer";
   });
 in craneLib.buildPackage (commonArgs // {
+  MONOGRAM_MATH_HELPER = "${mathRenderer}/bin/monogram-math-renderer";
   MONOGRAM_BWRAP = "${bubblewrap}/bin/bwrap";
   inherit cargoArtifacts cargoVendorDir;
-  cargoBuildExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-math-renderer";
-  passthru = { inherit cargoArtifacts gtk4Fixed; };
+  cargoBuildExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer";
+  passthru = { inherit cargoArtifacts gtk4Fixed mathRenderer; };
   nativeCheckInputs = [ xorg-server dbus prosody openssl python3 gnome-keyring ];
   postCheck = ''
     export HOME=$TMPDIR/home XDG_CACHE_HOME=$TMPDIR/cache XDG_CONFIG_HOME=$TMPDIR/config XDG_STATE_HOME=$TMPDIR/state
@@ -55,16 +57,14 @@ in craneLib.buildPackage (commonArgs // {
     export FONTCONFIG_FILE=${fontConfig}
     export GSETTINGS_SCHEMA_DIR=${gsettings-desktop-schemas}/share/gsettings-schemas/${gsettings-desktop-schemas.name}/glib-2.0/schemas
     export XDG_DATA_DIRS=${gtk4}/share/gsettings-schemas/${gtk4.name}:''${XDG_DATA_DIRS:-}
-    bash tests/mobile-reference/build.sh "$TMPDIR/mobile-crypto"
     crypto_test=
     for candidate in target/${stdenv.hostPlatform.rust.rustcTarget}/release/deps/monogram_desktop-*; do
-      if [ -f "$candidate" ] && [ -x "$candidate" ] && "$candidate" --list 2>/dev/null | grep -Fqx 'crypto::tests::native_mobile_jvm_interoperability: test'; then
+      if [ -f "$candidate" ] && [ -x "$candidate" ] && "$candidate" --list 2>/dev/null | grep -Fqx 'crypto::lifecycle::tests::isolated_identity_lifecycle: test'; then
         crypto_test=$candidate
         break
       fi
     done
     test -n "$crypto_test"
-    MONOGRAM_MOBILE_CRYPTO_FIXTURE="$TMPDIR/mobile-crypto" "$crypto_test" --ignored --exact crypto::tests::native_mobile_jvm_interoperability
     bash tests/keyring_fixture.sh "$crypto_test" ${dbus}/share/dbus-1/session.conf
     bash tests/keyring_fixture.sh "$crypto_test" ${dbus}/share/dbus-1/session.conf crypto::lifecycle::tests::isolated_identity_lifecycle
     bash tests/keyring_fixture.sh "$crypto_test" ${dbus}/share/dbus-1/session.conf history_window_ui::tests::live_viewport_keeps_archive_reply_and_incoming_updates
@@ -84,12 +84,12 @@ in craneLib.buildPackage (commonArgs // {
     cp native/gtk-gpu-clip-restore.patch $out/share/doc/monogram-desktop/
     mkdir -p $out/libexec
     mv $out/bin/monogram-sticker-renderer $out/libexec/monogram-sticker-renderer
-    mv $out/bin/monogram-math-renderer $out/libexec/monogram-math-renderer
     gappsWrapperArgs+=(
       --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ gtk4Fixed ]}
-      --set MONOGRAM_MATH_HELPER $out/libexec/monogram-math-renderer
+      --set MONOGRAM_MATH_HELPER ${mathRenderer}/bin/monogram-math-renderer
       --set MONOGRAM_LOTTIE_HELPER $out/libexec/monogram-sticker-renderer
       --set MONOGRAM_BWRAP ${bubblewrap}/bin/bwrap
+      --prefix XDG_DATA_DIRS : $out/share
       --set MONOGRAM_ASSET_DIR $out/share/monogram-desktop
       --set MONOGRAM_EPOXY_LIBRARY ${libepoxy}/lib/libepoxy.so.0
       --set GTK_USE_PORTAL 1

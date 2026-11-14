@@ -667,6 +667,7 @@ impl Ui {
             } else if media {
                 bubble.add_css_class("media-bubble");
             }
+            if m.attachment.is_some() && !media { bubble.add_css_class("document-bubble"); }
             let heading = bx(false, 6);
             heading.set_margin_bottom(6);
             let author = text(&m.author, "message-author");
@@ -705,6 +706,7 @@ impl Ui {
                 let reply = gtk::Button::new();
                 reply.add_css_class("message-reply");
                 let contents = bx(true, 2);
+                contents.set_hexpand(true);
                 let (reply_author, quote) = m.reply.split_once(" · ").unwrap_or((
                     if m.reply_to == self.state.borrow().account {
                         "You"
@@ -719,17 +721,8 @@ impl Ui {
                     .lines()
                     .map(|line| line.strip_prefix("> ").unwrap_or(line))
                     .collect::<Vec<_>>()
-                    .join("\n");
-                let snippet = wrap(
-                    if preview.is_empty() {
-                        "Original message"
-                    } else {
-                        &preview
-                    },
-                    "reply-preview",
-                );
-                snippet.set_lines(2);
-                snippet.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                    .join(" ");
+                let snippet = crate::reply_preview_ui::Snippet::new(if preview.is_empty(){"Original message"}else{&preview});
                 contents.append(&title);
                 contents.append(&snippet);
                 let preview_row = bx(false, 7);

@@ -447,3 +447,12 @@ fn live_legacy_service_and_independent_send_preference() {
         |e| matches!(e, BackendEvent::CryptoAliases { peer, aliases, .. } if peer == SENDER && aliases.iter().any(|id| id.starts_with("archive:"))),
     );
 }
+
+#[test]fn legacy_inline_artwork_is_inside_authenticated_ciphertext(){
+ let (mut a,_,ab)=fixture(A,101);let (mut b,bj,bb)=fixture(B,202);approve(&mut a,B,202,&bb);approve(&mut b,A,101,&ab);
+ let body="🙂";let bytes=STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=").unwrap();
+ let asset=crate::packs::InlineAsset::new("image/png".into(),bytes).unwrap();let inline=crate::packs::InlineEmoji::new(body.into(),vec![crate::packs::InlineRange{start:0,end:1,asset}]).unwrap();
+ let mut clear=Element::builder("message",payload::CLIENT).append(Element::builder("body",payload::CLIENT).append(body).build()).build();inline.add_to(&mut clear).unwrap();let encoded=crate::legacy_inline::encode(&clear).unwrap();
+ let wire=encrypt_for(&mut a,B,&encoded,"inline-wire",&[(device(B,202,&bb),bb)]).unwrap();assert!(wire.get_child("html","http://jabber.org/protocol/xhtml-im").is_none());assert!(wire.get_child("data","urn:xmpp:bob").is_none());
+ let env=Envelope::parse(&wire,B,202).unwrap();let received=receive_for(&mut b,&bj,&wire,&env,1,None).unwrap();let content=received.content.unwrap();assert_eq!(crate::packs::InlineEmoji::from_message(&content,body),Some(inline));
+}

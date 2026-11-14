@@ -10,6 +10,12 @@ pub fn asset(name: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"))
         .join(name)
 }
+pub fn install_icons() {
+    gtk::Window::set_default_icon_name("com.negzero.MonogramDesktop");
+    if let Some(display) = gdk::Display::default() {
+        gtk::IconTheme::for_display(&display).add_search_path(asset("icons"));
+    }
+}
 pub fn bx(vertical: bool, spacing: i32) -> gtk::Box {
     gtk::Box::new(
         if vertical {
@@ -123,6 +129,11 @@ mod message_bubble_limit_imp {
         None
     }
 
+    fn preview_body(widget:&gtk::Widget)->Option<gtk::Label> {
+        if let Some(label)=widget.downcast_ref::<gtk::Label>().filter(|label|label.has_css_class("message-text")){return Some(label.clone());}
+        let mut child=widget.first_child();while let Some(widget)=child {child=widget.next_sibling();if let Some(label)=preview_body(&widget){return Some(label);}}None
+    }
+
     #[derive(Default)]
     pub struct MessageBubbleLimit {
         pub child: RefCell<Option<gtk::Widget>>,
@@ -164,10 +175,12 @@ mod message_bubble_limit_imp {
             } else {
                 natural
                     .min(for_size.saturating_mul(2) / 5)
-                    .max(minimum)
                     .max(1)
             };
-            child.measure(gtk::Orientation::Vertical, child_width)
+            let (minimum,natural,base,natural_base)=child.measure(gtk::Orientation::Vertical, child_width);
+            // With no width, an aspect-ratio child has no fixed minimum height.
+            // GTK otherwise carries its wide natural height into narrow rows.
+            (if for_size<0 {0}else{minimum},natural.max(minimum),base,natural_base)
         }
 
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
@@ -214,6 +227,27 @@ mod message_bubble_limit_imp {
                         let transform = gtk::gsk::Transform::new()
                             .translate(&gtk::graphene::Point::new(x as f32, 0.));
                         child.allocate(tight, height, baseline, Some(transform));
+                    }
+                }
+            }
+            if text.is_none() {
+                if let Some(body)=preview_body(&child) {
+                    if let Some(bubble)=body.parent().and_downcast::<gtk::Box>().filter(|b|b.has_css_class("message-bubble")) {
+                        let mut needed=body.layout().pixel_size().0+1;
+                        let mut sibling=bubble.first_child();
+                        while let Some(widget)=sibling {
+                            sibling=widget.next_sibling();
+                            if widget.is_visible() && widget!=body {
+                                // Wrapped preview labels request more natural width than
+                                // the card actually uses. Preserve its allocated outer edge.
+                                needed=needed.max(if widget.has_css_class("link-preview"){widget.allocated_width()}else{widget.measure(gtk::Orientation::Horizontal,-1).1});
+                            }
+                        }
+                        let tight=(needed+(child_width-bubble.width()).max(0)).clamp(1,child_width);
+                        if tight<child_width {
+                            let x=if self.own.get(){width.saturating_sub(tight)}else{0};
+                            child.allocate(tight,height,baseline,Some(gtk::gsk::Transform::new().translate(&gtk::graphene::Point::new(x as f32,0.))));
+                        }
                     }
                 }
             }
@@ -293,9 +327,9 @@ fn link_markup(source: &str, suffix: &str, links: &[crate::link_previews::Clicka
         markup.push_str(&glib::markup_escape_text(&source[cursor..link.range.start]));
         markup.push_str("<a href=\"");
         markup.push_str(&glib::markup_escape_text(&link.uri));
-        markup.push_str("\">");
+        markup.push_str("\"><span allow_breaks=\"false\">");
         markup.push_str(&glib::markup_escape_text(&source[link.range.clone()]));
-        markup.push_str("</a>");
+        markup.push_str("</span></a>");
         cursor = link.range.end;
     }
     markup.push_str(&glib::markup_escape_text(&source[cursor..]));
@@ -627,7 +661,7 @@ mod image_imp {
                     gtk::Orientation::Horizontal => (0, self.max_width.get(), -1, -1),
                     _ => {
                         let edge = if size < 0 { self.max_width.get() } else { size };
-                        (edge, edge, -1, -1)
+                        (if size<0 {0}else{edge}, edge, -1, -1)
                     }
                 };
             }
@@ -646,7 +680,7 @@ mod image_imp {
                 } else {
                     height
                 };
-                (height, height, -1, -1)
+                (if size<0 {0}else{height}, height, -1, -1)
             }
         }
         fn snapshot(&self, snapshot: &gtk::Snapshot) {

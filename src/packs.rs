@@ -2203,8 +2203,7 @@ pub fn normalized_inline(
     (model.body == visible && !model.ranges.is_empty()).then_some(model)
 }
 pub fn decorate_inline(root: &mut tokio_xmpp::minidom::Element, message: &crate::model::Message) {
-    if message.mode() == crate::encryption_policy::Mode::Legacy
-        || message.attachment.is_some()
+    if message.attachment.is_some()
         || message.poll.is_some()
         || matches!(
             message.action,

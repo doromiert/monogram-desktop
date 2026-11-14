@@ -1,3 +1,14 @@
+LOCAL VERIFIED UPDATE — 2026-11-14
+  Source tests now cover inline sync/native settings, All-folder validation,
+  .nzsp export naming/MIME, scan-sheet completion and credential retry,
+  bundled icons, whole-link wrapping, compact document rows, read/typing,
+  one-time default migration and independent custom emoji names/search.
+  Custom emoji rows retain their asynchronous renderer; five production slots
+  decode/paint and release on row disposal. Negotiated direct Legacy artwork
+  stays inside authenticated ciphertext. See PROPOSED_XEP_LEGACY_INLINE.md.
+  Fast upward-scroll stress and limitations: ../PERF.md. Phone/live-user
+  acceptance remains separate. APK 0.2.205 retains the existing signing cert.
+
 Monogram — current user-reported issues
 Updated: 2026-11-12
 Verified running desktop source: edd7156 (smooth circular-progress follow-up).

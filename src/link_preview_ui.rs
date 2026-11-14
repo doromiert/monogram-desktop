@@ -464,16 +464,15 @@ mod tests {
             gtk::gdk::MemoryTexture::new(20, 20, gtk::gdk::MemoryFormat::R8g8b8a8, &bytes, 20 * 4);
         let inline_status = bx(false, 2);
         inline_status.append(&label("12:34", "message-meta"));
-        let linked_inline = InlineMessageText::new(source, &emoji, Some(&inline_status), &links);
+        let (linked_root, linked_inline) = InlineMessageText::new(source, &emoji, Some(&inline_status), &links);
         linked_inline.set_texture(&asset.cid, texture.clone().upcast());
-        let inline_message = linked_inline
-            .root
+        let inline_message = linked_root
             .first_child()
             .and_downcast::<MessageText>()
             .unwrap();
         inline_message.set_compact(true);
         let mut inline_labels = Vec::new();
-        labels(linked_inline.root.upcast_ref(), &mut inline_labels);
+        labels(linked_root.upcast_ref(), &mut inline_labels);
         assert!(inline_labels[0].label().contains("<a href="));
         assert!(
             inline_labels[0]
@@ -481,16 +480,16 @@ mod tests {
                 .is_some_and(|attrs| attrs.attributes().len() >= 4)
         );
         let mut inline_pictures = Vec::new();
-        pictures(linked_inline.root.upcast_ref(), &mut inline_pictures);
+        pictures(linked_root.upcast_ref(), &mut inline_pictures);
         assert!(inline_pictures.iter().any(gtk::Picture::is_visible));
 
-        let preview_inline = InlineMessageText::new(source, &emoji, None, &links);
+        let (preview_root, preview_inline) = InlineMessageText::new(source, &emoji, None, &links);
         preview_inline.set_texture(&asset.cid, texture.upcast());
         let mut preview_labels = Vec::new();
-        labels(preview_inline.root.upcast_ref(), &mut preview_labels);
+        labels(preview_root.upcast_ref(), &mut preview_labels);
         assert!(preview_labels[0].label().contains("<a href="));
         let mut preview_pictures = Vec::new();
-        pictures(preview_inline.root.upcast_ref(), &mut preview_pictures);
+        pictures(preview_root.upcast_ref(), &mut preview_pictures);
         assert!(preview_pictures.iter().any(gtk::Picture::is_visible));
 
         let preview = Preview {
@@ -518,4 +517,26 @@ mod tests {
                 .any(|label| label.text() == preview.description && label.lines() == 4)
         );
     }
+    #[test]
+    #[ignore = "requires private GTK display"]
+    fn link_only_bubble_fits_painted_content() {
+        gtk::init().unwrap();
+        let css=gtk::CssProvider::new();css.load_from_path(asset("style.css"));
+        gtk::style_context_add_provider_for_display(&gtk::gdk::Display::default().unwrap(),&css,gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        let source="https://github.com/doromiert/monogram-desktop/pull/1";
+        let body=wrap(source,"message-text");
+        linkify_message_label(&body,source,&crate::link_previews::clickable_urls(source,None));
+        let preview=Preview{url:source.into(),display_url:source.into(),site_name:"GitHub".into(),title:"Pure-Rust sticker renderer, no Java in the Arch package, opt-in Discord emoji completion by raluvy95 · Pull Request #1 · doromiert/monogram-desktop".into(),description:"What changed Sticker renderer Replaces the rlottie C helper with src/bin/monogram-sticker-renderer.rs, which uses the pure-Rust rasterlottie crate. Protocol, size/frame limits, ...".into(),kind:Kind::Article,thumbnail:None,media:None};
+        let card=link_preview_card(&preview);
+        let bubble=bx(true,0);bubble.add_css_class("message-bubble");bubble.append(&body);bubble.append(&card);
+        let meta=label("14:25","message-meta");meta.set_halign(gtk::Align::End);bubble.append(&meta);
+        let clamp=MessageBubbleLimit::new(&bubble,false);
+        let window=gtk::Window::builder().default_width(1400).default_height(300).child(&clamp).build();window.present();
+        let context=glib::MainContext::default();let deadline=std::time::Instant::now()+std::time::Duration::from_millis(200);while std::time::Instant::now()<deadline {context.iteration(false);std::thread::sleep(std::time::Duration::from_millis(1));}
+        let painted=body.layout().pixel_size().0.max(card.allocated_width());
+        eprintln!("Link-only bubble content={}, text={}, preview={}, natural={}",bubble.width(),body.layout().pixel_size().0,card.width(),bubble.measure(gtk::Orientation::Horizontal,-1).1);
+        assert!(bubble.width()<=painted+2,"Unused trailing bubble space: {}px",bubble.width()-painted);
+        window.close();
+    }
+
 }

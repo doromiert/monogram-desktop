@@ -1,4 +1,6 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=MONOGRAM_MATH_HELPER");
+    println!("cargo:rustc-env=MONOGRAM_BUILT_MATH_HELPER={}", std::env::var("MONOGRAM_MATH_HELPER").unwrap_or_default());
     println!("cargo:rerun-if-env-changed=MONOGRAM_BWRAP");
     let bwrap = std::env::var_os("MONOGRAM_BWRAP").map(std::path::PathBuf::from).or_else(|| std::env::var_os("PATH").and_then(|paths|std::env::split_paths(&paths).map(|path|path.join("bwrap")).find(|path|path.is_file()))).expect("bubblewrap");
     println!("cargo:rustc-env=MONOGRAM_BUILT_BWRAP={}", bwrap.display());

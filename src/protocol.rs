@@ -423,6 +423,7 @@ pub fn outgoing(peer: &str, message: &Message, quote: &str) -> Element {
     let mut root = outgoing_content(peer, message, quote);
     crate::formatting::decorate(message, &mut root);
     crate::read_markers::decorate(&mut root, message);
+    crate::chat_states::decorate(&mut root);
     root
 }
 fn outgoing_content(peer: &str, message: &Message, quote: &str) -> Element {
@@ -1295,7 +1296,7 @@ impl Session {
                         Some(Command::Wire{xml,reply})=>{let ok=online && !blocking.blocked(xml.attr("to").unwrap_or("")) && send(&mut client,xml).await;let _=reply.send(ok);},
                         Some(Command::Iq{to,kind,payload,reply})=>{
                             if !online{let _=reply.send(Err(crate::iq::Error::Closed));continue}
-                            if let Some(root)=iq.start(to,kind,payload,reply){let id=root.attr("id").unwrap().to_string();if !send(&mut client,root).await{iq.fail(&id)}}
+                            let to=if payload.is("query","http://jabber.org/protocol/disco#info") {contacts.available_resource(&to).unwrap_or(to)} else {to};if let Some(root)=iq.start(to,kind,payload,reply){let id=root.attr("id").unwrap().to_string();if !send(&mut client,root).await{iq.fail(&id)}}
                         },
                         Some(Command::Send{peer,message,quote})=>{
                             if blocking.blocked(&peer){emit(BackendEvent::ContactAccessError("Unblock this address before sending messages".into()));emit(BackendEvent::Failed{peer,id:message.wire_id});continue}
@@ -1489,7 +1490,7 @@ impl Session {
                                     }continue
                                 }
                                 if let Some((_peer,message,historical))=normalize(&root,&owner,None){let receipt_to=(!historical&&!message.own&&!message.wire_id.is_empty()&&root.get_child("request","urn:xmpp:receipts").is_some()).then(||from.to_string());deliver(&crypto,&legacy,&pq,&emit,&root,&owner,None,historical,receipt_to);}
-                                if root.get_child("delay","urn:xmpp:delay").is_none(){for name in ["composing","paused","active","inactive","gone"]{if root.get_child(name,"http://jabber.org/protocol/chatstates").is_some(){emit(BackendEvent::Typing{peer:bare_of(from),composing:name=="composing"})}}}
+                                if let Some(composing)=crate::chat_states::incoming(&root){emit(BackendEvent::Typing{peer:bare_of(from),composing});}
                             }else if root.is("presence",NS){
                                 let room_presence=rooms.presence(&root);
                                 room_jobs.changed(&rooms,&bare_of(from));
@@ -1541,7 +1542,7 @@ impl Session {
                                     }
                                     continue;
                                 }
-                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in ["urn:xmpp:receipts",crate::read_markers::NS,REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT,crate::polls::NS,crate::forwarding::NS,crate::file_share::NS,crate::rooms::invitations::DIRECT]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if legacy_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),legacy::NS).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}if pq_ready {for suffix in ["",":devices+notify",":bundles+notify",":pqxdh",":spqr",":bundle-v4",":kex-auth"]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),format!("{}{suffix}",crate::crypto::pq::NS)).build());}}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
+                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in [crate::legacy_inline::NS,"urn:xmpp:receipts",crate::read_markers::NS,REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT,crate::polls::NS,crate::forwarding::NS,crate::file_share::NS,crate::rooms::invitations::DIRECT]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if legacy_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),legacy::NS).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}if pq_ready {for suffix in ["",":devices+notify",":bundles+notify",":pqxdh",":spqr",":bundle-v4",":kex-auth"]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),format!("{}{suffix}",crate::crypto::pq::NS)).build());}}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
                             }
                         }
                     }},

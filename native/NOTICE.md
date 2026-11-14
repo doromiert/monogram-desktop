@@ -63,20 +63,16 @@ The patch is installed beside this notice in the application documentation.
 
 ## Formatted math
 
-`src/bin/monogram-math-renderer.rs` is a GPL-3.0-or-later helper that typesets LaTeX
-math with the pure-Rust [latex-rust](https://crates.io/crates/latex-rust) 3.0.3
-crate (MIT OR Apache-2.0; TeX Appendix G layout, rasterized with tiny-skia). It
-replaced the earlier JLaTeXMath/Java helper, so no JVM is required. latex-rust bundles
-the STIX Two Math font (SIL Open Font License 1.1; see `LICENSES/STIX-Two-Math/OFL.txt`).
-Layout follows TeX rules but is a different engine from mobile's JLaTeXMath fork, so
-spacing or coverage of rare constructs can differ from mobile; unsupported formulas
-stay readable as source.
-The helper runs off the UI thread in a resource-limited, networkless bubblewrap
-sandbox with its own rlimits and seccomp filter; it cannot read account files or
-load arbitrary external resources.
+The native math adapter in `native/math/renderer.cpp` uses
+[MicroTeX](https://github.com/NanoMichael/MicroTeX/tree/0e3707f6dafebb121d98b53c64364d16fefe481d),
+pinned at `0e3707f6dafebb121d98b53c64364d16fefe481d` (MIT, Nano Michael).
+MicroTeX is a native TeX typesetting engine descended from the JLaTeXMath family.
+The adapter is GPL-3.0-or-later and preserves the networkless worker boundary.
+The build adapts only Cairo/Pango C++ enum names and an explicit FreeType header
+for the current native ABIs; no upstream engine behavior is changed.
+MicroTeX's license and its bundled font/resource notices are installed alongside
+its resources. Font-specific notices remain in `res/fonts/licences`,
+`res/greek/LICENSE` and `res/cyrillic/LICENSE`. No JVM or Java math jars are used.
 
-The GPL-3.0-or-later formatting parser/model and Markdown profile adapt Monogram
-mobile's `MessageMarkup`, `MessageMentions`, `MonogramFormatting`,
-`MonogramArticles` and `MarkdownParser` at source checkout
-`205f3165fed7b9279bb16f3be6c37533d4844dee`. The CommonMark tokenizer is
-[pulldown-cmark 0.13.6](https://github.com/pulldown-cmark/pulldown-cmark), MIT.
+The test-only Java/JNI comparison sources were moved to the mobile repository's
+`tests/desktop-reference`; generated JSON reference vectors stay here.

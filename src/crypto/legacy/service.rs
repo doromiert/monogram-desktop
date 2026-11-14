@@ -183,6 +183,7 @@ fn decorate_outgoing(xml: &mut Element, clear: &Element, message: &Message) {
     }
     for child in clear.children().filter(|c|c.is("spoiler",crate::formatting::SPOILER) || c.is("markup",crate::formatting::NS) || c.is("content",crate::formatting::CONTENT)){xml.append_child(child.clone());}
     crate::read_markers::decorate(xml, message);
+    crate::chat_states::decorate(xml);
 }
 fn split_fallback(outer: &Element, body: &str) -> Option<(String, String)> {
     // Legacy OMEMO authenticates the body, not the fallback range. Only move the
@@ -626,10 +627,12 @@ impl Worker {
                 "The local Legacy OMEMO identity changed. Review it before retrying.",
             ));
         }
-        let body = clear
-            .get_child("body", payload::CLIENT)
-            .ok_or(Error::Invalid("legacy body"))?
-            .text();
+        let mut body = clear.get_child("body",payload::CLIENT).ok_or(Error::Invalid("legacy body"))?.text();
+        if let Some(encoded)=crate::legacy_inline::encode(&clear) {
+            let requests=iq::Client::new(self.network.clone());
+            let query=Element::builder("query","http://jabber.org/protocol/disco#info").build();
+            if requests.request(peer,iq::Kind::Get,query).await.ok().flatten().is_some_and(|q|q.children().any(|f|f.is("feature","http://jabber.org/protocol/disco#info") && f.attr("var")==Some(crate::legacy_inline::NS))) {body=encoded;}
+        }
         let mut xml = local.encrypt(peer, &body, &message.wire_id).await?;
         decorate_outgoing(&mut xml, &clear, message);
         xml.append_child(protocol::el("request", "urn:xmpp:receipts"));

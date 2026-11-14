@@ -91,6 +91,7 @@ impl Store {
         store.init_requests()?;
         store.init_read_markers()?;
         store.init_link_previews()?;
+        for account in store.accounts(){store.migrate_chat_defaults(&account.jid)?;}
         store.db.execute_batch("CREATE INDEX IF NOT EXISTS queued_outbox ON messages(account,timestamp,id) WHERE json_extract(body,'$.outbox_pending')=1;")?;
         store.db.execute_batch("CREATE TABLE IF NOT EXISTS upload_captions(account TEXT NOT NULL,peer TEXT NOT NULL,id TEXT NOT NULL,parent TEXT NOT NULL,PRIMARY KEY(account,peer,id),FOREIGN KEY(account,peer,id) REFERENCES messages(account,peer,id) ON DELETE CASCADE);CREATE INDEX IF NOT EXISTS upload_caption_parent ON upload_captions(account,peer,parent);")?;
         Ok(store)
@@ -141,7 +142,12 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()
-            .map(|value| value.unwrap_or(false))
+            .map(|value| value.unwrap_or_else(|| {
+                // Direct conversations default to blind trust; rooms retain their
+                // separate opt-in, and explicit contact choices remain authoritative.
+                !owner.is_empty() && crate::protocol::bare(peer).is_ok()
+                    && !self.db.query_row("SELECT COALESCE(json_extract(body,'$.group'),0) FROM chats WHERE account=? AND peer=?",params![owner,peer],|r|r.get::<_,bool>(0)).unwrap_or(false)
+            }))
     }
     pub(crate) fn blind_trust_for(
         &self,
@@ -874,6 +880,8 @@ mod tests {
             "member@example.org",
             "room@conference.example.org",
         );
+        assert!(store.blind_trust(owner,peer).unwrap(),"Direct contacts default to blind trust");
+        for (account,target) in [(owner,peer),(owner,room),(owner,"other@conference.example.org"),("other@example.org",peer),("other@example.org",room)] {store.set_blind_trust(account,target,false).unwrap();}
         assert!(!store.blind_trust_for(owner, peer, Some(room)).unwrap());
         store.set_blind_trust(owner, room, true).unwrap();
         assert!(store.blind_trust_for(owner, peer, Some(room)).unwrap());

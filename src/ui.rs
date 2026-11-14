@@ -117,6 +117,7 @@ pub struct Ui {
     pub big_emoji: Cell<bool>,
     pub typing: RefCell<HashMap<String, Instant>>,
     pub last_typing: Cell<Option<Instant>>,
+    pub typing_input: RefCell<Option<(String, Instant, bool)>>,
     pub history_pages: RefCell<HashMap<String, (String, bool)>>,
     pub history_pending: RefCell<HashSet<String>>,
     pub cards: RefCell<Vec<Rc<crate::wallet::WalletCard>>>,
@@ -419,6 +420,7 @@ impl Ui {
             big_emoji: Cell::new(true),
             typing: RefCell::new(HashMap::new()),
             last_typing: Cell::new(None),
+            typing_input: RefCell::new(None),
             history_pages: RefCell::new(HashMap::new()),
             history_pending: RefCell::new(HashSet::new()),
             cards: RefCell::new(vec![]),
@@ -517,6 +519,11 @@ impl Ui {
             let Some(ui) = typing_ui.upgrade() else {
                 return glib::ControlFlow::Break;
             };
+            let paused=ui.typing_input.borrow().as_ref().filter(|(_,at,composing)|*composing && at.elapsed()>=Duration::from_secs(5)).map(|(peer,_,_)|peer.clone());
+            if let Some(peer)=paused {
+                ui.typing_input.borrow_mut().as_mut().unwrap().2=false;
+                ui.command(Command::Typing{peer,composing:false});
+            }
             let before = ui.typing.borrow().len();
             ui.sync_room_bookmarks();
             ui.retry_request_cleanup();
@@ -1442,21 +1449,19 @@ impl Ui {
                 }
             },
         )));
-        if self.online.get()
-            && self.preference("typing", true)
-            && self
-                .last_typing
-                .get()
-                .is_none_or(|t| t.elapsed() > Duration::from_secs(5))
-        {
+        self.notify_typing(!composer_text.is_empty());
+    }
+    pub fn notify_typing(&self, composing:bool) {
+        if !self.online.get() || !self.preference("typing",true) { return; }
+        let peer=self.state.borrow().current().jid.clone();
+        let changed=self.typing_input.borrow().as_ref().is_none_or(|(p,_,c)|p!=&peer || *c!=composing);
+        self.typing_input.replace(Some((peer.clone(),Instant::now(),composing)));
+        if changed || self.last_typing.get().is_none_or(|t|t.elapsed()>Duration::from_secs(5)) {
             self.last_typing.set(Some(Instant::now()));
-            let peer = self.state.borrow().current().jid.clone();
-            self.command(Command::Typing {
-                peer,
-                composing: !composer_text.is_empty(),
-            });
+            self.command(Command::Typing{peer,composing});
         }
     }
+
     pub fn save_draft(&self) {
         if self.loading.get() || self.on_welcome() {
             return;
@@ -1497,13 +1502,6 @@ impl Ui {
                 previous.messages.clear();
             }
             state.active = id.into();
-            let c = state.current_mut();
-            c.unread = 0;
-            c.unread_mark = false;
-            for m in &mut c.messages {
-                m.unread = false;
-            }
-            let _ = self.store.mark_read(&state.account, &state.current().jid);
         }
         self.clear_selection();
         self.attachments.borrow_mut().clear();
@@ -2984,6 +2982,7 @@ impl Ui {
         } else if active {
             self.schedule_history_maintenance();
         }
+        if saved && active { self.mark_visible_chat_read(); }
         saved
     }
     pub fn delivery(self: &Rc<Self>, peer: &str, id: &str, status: &str) {

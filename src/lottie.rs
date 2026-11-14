@@ -19,7 +19,7 @@ pub struct Frame {
     pub delay: Duration,
 }
 pub struct Decoder {
-    child: Child,
+    child: Option<Child>,
     input: ChildStdin,
     output: ChildStdout,
     cancel: gio::Cancellable,
@@ -206,7 +206,7 @@ impl Decoder {
             return Err("Sticker renderer unavailable");
         };
         let mut decoder = Self {
-            child,
+            child: Some(child),
             input: writer,
             output: reader,
             cancel: cancel.clone(),
@@ -291,16 +291,19 @@ impl Decoder {
         })();
         if result.is_err() {
             self.failed = true;
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            if let Some(child)=self.child.as_mut(){let _=child.kill();let _=child.wait();}
         }
         result
     }
 }
 impl Drop for Decoder {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(mut child)=self.child.take(){
+            let _=child.kill();
+            // Timeline eviction can happen on GTK. Reaping a sandbox must never
+            // make scrolling wait for a child process to finish exiting.
+            gio::spawn_blocking(move || {let _=child.wait();});
+        }
     }
 }
 

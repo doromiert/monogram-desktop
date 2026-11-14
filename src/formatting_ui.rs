@@ -304,7 +304,7 @@ fn markup(rich: &RichText, revealed: &BTreeSet<usize>, suffix: &str) -> String {
             out.push_str(&format!("<a href=\"monogram-spoiler:{index}\"><span foreground=\"#77777700\" background=\"#777777\" underline=\"none\">"));
         } else if let Some(link) = link {
             out.push_str(&format!(
-                "<a href=\"{}\">",
+                "<a href=\"{}\"><span allow_breaks=\"false\">",
                 glib::markup_escape_text(&link.uri)
             ));
         }
@@ -337,7 +337,7 @@ fn markup(rich: &RichText, revealed: &BTreeSet<usize>, suffix: &str) -> String {
         if hidden.is_some() {
             out.push_str("</span></a>");
         } else if link.is_some() {
-            out.push_str("</a>");
+            out.push_str("</span></a>");
         }
     }
     out.push_str(&glib::markup_escape_text(suffix));
@@ -466,6 +466,14 @@ fn block_widget(block: &Block) -> gtk::Widget {
             root.upcast()
         }
         Block::List(start, items) => {
+            // A single list is one top-level block, but may contain thousands of
+            // native labels. Recycle its rows just like a long article.
+            if items.len() > 16 {
+                let rows: Vec<_> = items.iter().enumerate().map(|(i, item)|
+                    Block::List(start.as_ref().map(|n| vec![n.get(i).cloned().unwrap_or_default()]), vec![item.clone()])
+                ).collect();
+                return virtual_blocks(&rows, 520);
+            }
             let root = bx(true, 4);
             for (i, item) in items.iter().enumerate() {
                 let row = bx(false, 8);

@@ -145,6 +145,8 @@ impl Ui {
         }
         self.cancel_reply();
         self.save_draft();
+        self.notify_typing(false);
+        self.mark_current_chat_read();
         self.history_window.content_changed();
         self.render_messages(true);
         self.refresh_chats(None);
@@ -232,6 +234,8 @@ impl Ui {
             self.composer_spoiler.set_state(&false.to_variant());
             self.clear_composer_inline_emoji();self.cancel_reply();self.save_draft();
         }
+        self.notify_typing(false);
+        self.mark_current_chat_read();
         self.history_window.content_changed();
         self.render_messages(true);
         self.refresh_chats(None);

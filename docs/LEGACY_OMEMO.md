@@ -12,7 +12,7 @@ OMEMO second. The checks discard their ciphertext. A failed connection, timeout
 or storage operation does not select plaintext. The per-conversation result
 expires after 24 hours or when its trust or sending policy changes.
 
-Each protocol has its own fingerprint review. Opt-in blind trust applies to
+Each protocol has its own fingerprint review. Direct-contact blind trust is on by default after the one-time upgrade; room blind trust stays opt-in. Blind trust applies to
 both standard versions for the selected contact. It keeps explicit blocks and
 never approves other devices on your own account. Compare and approve those
 fingerprints on each device to read encrypted copies of sent messages.
@@ -55,3 +55,5 @@ Legacy upload requests retain the sanitized filename/MIME used by Android;
 OMEMO 2 retains opaque upload metadata. Outer SFS/OOB descriptions remain
 untrusted and cannot supply Legacy URLs, keys, sizes or hashes. A small isolated
 TLS/HTTPS check verified direct and room upload/download bytes and caption order.
+
+Negotiated direct inline emoji carry their XHTML/BoB inside the authenticated Legacy body; see [the local proposal](PROPOSED_XEP_LEGACY_INLINE.md). Old clients keep the ordinary Unicode fallback.

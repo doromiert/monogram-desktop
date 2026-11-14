@@ -1,4 +1,4 @@
-//! Pure-Rust LaTeX typesetting (latex-rust) in a sandboxed helper, isolated from the UI thread.
+//! Native MicroTeX typesetting, isolated from the UI thread and network.
 use crate::{
     inline_emoji_ui::InlineOverlay,
     markdown::{Formula, RichText},
@@ -44,24 +44,15 @@ fn cache_put(key: String, image: Image) {
     });
 }
 static WORKERS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
-/// The renderer is built beside this executable (or one level up for test binaries).
-fn helper() -> Option<std::path::PathBuf> {
-    const NAME: &str = "monogram-math-renderer";
-    if let Some(path) = std::env::var_os("MONOGRAM_MATH_HELPER") {
-        return Some(path.into());
-    }
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    [dir.join(NAME), dir.parent()?.join(NAME)].into_iter().find(|p| p.is_file())
-}
 fn render(source: &str, display: bool, color: u32) -> Result<(Vec<u8>, i32), String> {
     if source.is_empty() || source.encode_utf16().count() > 8192 || source.len() > 32768 {
         return Err("Formula is too large".into());
     }
-    let helper = helper().ok_or("Math renderer is unavailable")?;
+    let helper = std::env::var("MONOGRAM_MATH_HELPER")
+        .unwrap_or_else(|_| env!("MONOGRAM_BUILT_MATH_HELPER").into());
     let bwrap =
         std::env::var("MONOGRAM_BWRAP").unwrap_or_else(|_| env!("MONOGRAM_BUILT_BWRAP").into());
-    if !helper.is_absolute() || !helper.is_file() {
+    if !std::path::Path::new(&helper).is_absolute() || !std::path::Path::new(&helper).is_file() {
         return Err("Math renderer is unavailable".into());
     }
     let mut command = Command::new(bwrap);
@@ -385,11 +376,18 @@ pub fn display_math(source: &str) -> gtk::Widget {
 mod tests {
     use super::*;
     #[test]
-    #[ignore = "requires the built monogram-math-renderer and bubblewrap"]
+    #[ignore = "requires packaged native math helper and bubblewrap"]
     fn typeset_fraction_and_reject_resource_import() {
         let (bytes, depth) = render("\\frac{1}{2}+\\sqrt{x^2}", true, 0xffffffff).unwrap();
         assert!(bytes.starts_with(b"\x89PNG"));
         assert!(depth > 0);
         assert!(render("\\includegraphics{/etc/passwd}", true, 0xffffffff).is_err());
+        for formula in [r"\sum_{i=1}^{n} i^2",r"\begin{pmatrix}1&2\\3&4\end{pmatrix}",r"\text{hello}+\alpha",r"\begin{cases}x^2&x>0\\-x&x<0\end{cases}"] {
+            let (bytes,depth)=render(formula,true,0xffffffff).unwrap();
+            assert!(bytes.starts_with(b"\x89PNG"));assert!(depth>=0);
+        }
+        assert!(render(&"x".repeat(8193),true,0xffffffff).is_err());
+        assert!(render(r"\newcommand{\a}{\a}\a",true,0xffffffff).is_err());
+
     }
 }

@@ -41,7 +41,7 @@ in mobile `protocols/NON_STANDARD_XMPP.md` and `docs/SPOILERS.md`.
 
 Markdown input is bounded to 32768 UTF-16 units, parser depth to 24 and blocks to
 2048. Long articles use a native virtual list; parsing occurs with message
-preparation on workers. Math uses the pure-Rust latex-rust 3.0.3 typesetter in a networkless sandbox,
+preparation on workers. Math uses pinned native MicroTeX in a networkless sandbox,
 two concurrent workers, size/time/memory bounds, immediate loading feedback and
 a bounded texture cache. Unsupported formulas remain readable as source.
 
@@ -57,3 +57,11 @@ References: [XEP-0393](https://xmpp.org/extensions/xep-0393.html),
 [XEP-0394](https://xmpp.org/extensions/xep-0394.html),
 [XEP-0382](https://xmpp.org/extensions/xep-0382.html),
 [XEP-0481](https://xmpp.org/extensions/xep-0481.html).
+
+Desktop has no Java runtime, jars or JDK build/development dependency. The native
+MicroTeX adapter uses the same bounded PNG/depth worker protocol and preserves
+inline/display formula modes, baseline depth, colors, and source fallback for
+unsupported syntax. Positive tests cover fractions, roots, sums, matrices,
+cases and text/Greek symbols; resource imports, definitions and oversized input
+are rejected. The optional mobile JVM interoperability peer is built separately
+in the mobile repository, never by desktop packaging.

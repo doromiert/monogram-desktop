@@ -289,6 +289,7 @@ impl Manager {
         }
         epoch
     }
+    pub fn available_resource(&self,peer:&str)->Option<String>{self.data.lock().unwrap().resources.get(peer)?.iter().next().cloned()}
     pub fn disconnect(&self) {
         let peers = {
             let mut data = self.data.lock().unwrap();

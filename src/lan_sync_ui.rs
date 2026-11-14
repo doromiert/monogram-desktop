@@ -37,34 +37,23 @@ pub fn install(ui: &Rc<Ui>) {
     });
 }
 pub fn add_preferences(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
-    let page = adw::PreferencesPage::builder()
-        .title("Devices")
-        .icon_name("network-workgroup-symbolic")
-        .build();
-    let group=adw::PreferencesGroup::builder().title("Device Sync").description("Sync sticker and emoji packs, accounts, wallets, fingerprints and API keys directly between your devices over the local network.").build();
-    let row = adw::ActionRow::builder()
-        .title("Manage Paired Devices")
-        .subtitle("Encrypted LAN sync · pair by QR code")
-        .activatable(true)
-        .build();
-    row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-    let weak = Rc::downgrade(ui);
-    row.connect_activated(move |_| {
-        if let Some(ui) = weak.upgrade() {
-            show(&ui);
-        }
-    });
-    group.add(&row);
-    page.add(&group);
-    dialog.add(&page);
+    build_page(ui, dialog);
 }
 pub fn show(ui: &Rc<Ui>) {
-    let dialog = adw::PreferencesDialog::builder()
-        .title("Device Sync")
-        .search_enabled(false)
-        .build();
-    let page = adw::PreferencesPage::new();
-    let group=adw::PreferencesGroup::builder().title("Encrypted Local-Network Sync").description("Pair any combination of phones and computers. Each device keeps its own active OMEMO identity. Pair only devices you own: accounts, wallet recovery data and saved API credentials are shared.").build();
+    let dialog = adw::PreferencesDialog::builder().title("Device Sync").search_enabled(false).build();
+    build_page(ui, &dialog);
+    ui.dialogs.borrow_mut().push(dialog.clone().upcast());
+    dialog.present(Some(&ui.window));
+}
+fn pairing_row(title: &str, icon: &str) -> adw::ActionRow {
+    let row = adw::ActionRow::builder().title(title).activatable(true).build();
+    row.add_prefix(&gtk::Image::from_icon_name(icon));
+    row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+    row
+}
+fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
+    let page = adw::PreferencesPage::builder().title("Devices").icon_name("network-workgroup-symbolic").build();
+    let group=adw::PreferencesGroup::builder().title("Device Sync").description("Keep your accounts, packs, folders and wallets in sync. Connect your devices to the same local network. Only pair devices you own.").build();
     let enabled = adw::SwitchRow::builder()
         .title("Enable device sync")
         .active(
@@ -72,24 +61,26 @@ pub fn show(ui: &Rc<Ui>) {
         )
         .build();
     group.add(&enabled);
-    let status = gtk::Label::new(Some("Ready"));
-    status.set_wrap(true);
-    status.set_xalign(0.);
+    let status = adw::ActionRow::builder()
+        .title(if enabled.is_active(){"Starting…"}else{"Device sync is off"})
+        .title_lines(0).use_markup(false).build();
     group.add(&status);
     let spinner = gtk::Spinner::new();
-    group.add(&spinner);
+    status.add_prefix(&spinner);
+    spinner.set_valign(gtk::Align::Center);
+    spinner.bind_property("spinning", &spinner, "visible").sync_create().build();
     page.add(&group);
     let actions = adw::PreferencesGroup::builder()
         .title("Pair Another Device")
         .build();
-    let display = gtk::Button::with_label("Show Pairing QR Code");
-    let scan = gtk::Button::with_label("Scan QR from Image…");
+    let display = pairing_row("Show Pairing QR Code", "view-grid-symbolic");
+    let scan = pairing_row("Scan QR from Image…", "camera-photo-symbolic");
     let code = adw::EntryRow::builder()
         .title("Or paste a pairing code")
         .show_apply_button(true)
         .build();
-    let typed = gtk::Button::with_label("Show Rotating Pairing Code");
-    let enter = gtk::Button::with_label("Pair with an Eight-Digit Code…");
+    let typed = pairing_row("Show Rotating Pairing Code", "dialog-password-symbolic");
+    let enter = pairing_row("Enter an Eight-Digit Code…", "input-keyboard-symbolic");
     actions.add(&display);
     actions.add(&scan);
     actions.add(&typed);
@@ -98,7 +89,7 @@ pub fn show(ui: &Rc<Ui>) {
     let weak = Rc::downgrade(ui);
     let active = enabled.clone();
     let s = status.clone();
-    typed.connect_clicked(move |_| {
+    typed.connect_activated(move |_| {
         if let Some(ui) = weak.upgrade() {
             active.set_active(true);
             numeric_show(&ui, &s);
@@ -107,20 +98,12 @@ pub fn show(ui: &Rc<Ui>) {
     let weak = Rc::downgrade(ui);
     let active = enabled.clone();
     let s = status.clone();
-    enter.connect_clicked(move |_| {
+    enter.connect_activated(move |_| {
         if let Some(ui) = weak.upgrade() {
             active.set_active(true);
             numeric_join(&ui, &s);
         }
     });
-    let accounts = gtk::Button::with_label("Open Accounts");
-    let weak = Rc::downgrade(ui);
-    accounts.connect_clicked(move |_| {
-        if let Some(ui) = weak.upgrade() {
-            ui.accounts_dialog();
-        }
-    });
-    actions.add(&accounts);
     page.add(&actions);
     let peers = adw::PreferencesGroup::builder()
         .title("Paired Devices")
@@ -128,10 +111,13 @@ pub fn show(ui: &Rc<Ui>) {
             "Pairings are direct links. Devices can also sync through your other paired devices.",
         )
         .build();
+    peers.set_visible(false);
     page.add(&peers);
-    let fingerprints=adw::PreferencesGroup::builder().title("Synced Fingerprints").description("Public device fingerprints shared by your paired devices. Active encryption sessions remain separate.").build();
+    let fingerprints=adw::PreferencesGroup::builder().title("Synced Fingerprints").description("Compare these with your other devices to verify their encryption identities.").build();
     let owner = ui.state.borrow().account.clone();
-    for value in lan_sync::public_records(&ui.store, &format!("synced-fingerprint:{owner}:")) {
+    let records=lan_sync::public_records(&ui.store, &format!("synced-fingerprint:{owner}:"));
+    fingerprints.set_visible(!records.is_empty());
+    for value in records {
         let row = adw::ActionRow::builder()
             .title(format!(
                 "{} · device {}",
@@ -159,29 +145,29 @@ pub fn show(ui: &Rc<Ui>) {
         );
         if !row.is_active() {
             lan_sync::stop();
-            s.set_text("Device sync is off.");
+            s.set_title("Device sync is off.");
             return;
         }
-        s.set_text("Starting encrypted sync…");
+        s.set_title("Starting encrypted sync…");
         progress.start();
         let s = s.clone();
         let progress = progress.clone();
         glib::MainContext::default().spawn_local(async move {
             let result = lan_sync::start().await;
             progress.stop();
-            s.set_text(result.err().as_deref().unwrap_or("Ready to pair."));
+            s.set_title(result.err().as_deref().unwrap_or("Ready to pair."));
         });
     });
     let weak = Rc::downgrade(ui);
     let status_copy = status.clone();
     let enabled_copy = enabled.clone();
     let progress = spinner.clone();
-    display.connect_clicked(move |_| {
+    display.connect_activated(move |_| {
         let Some(ui) = weak.upgrade() else {
             return;
         };
         enabled_copy.set_active(true);
-        status_copy.set_text("Preparing a one-time pairing code…");
+        status_copy.set_title("Preparing a one-time pairing code…");
         progress.start();
         let s = status_copy.clone();
         let p = progress.clone();
@@ -196,10 +182,10 @@ pub fn show(ui: &Rc<Ui>) {
                     let m = mesh.clone();
                     match gio::spawn_blocking(move || m.invite()).await {
                         Ok(Ok(code)) => pair_qr(&ui, mesh, &code),
-                        _ => s.set_text("Connect both devices to the same local network."),
+                        _ => s.set_title("Connect both devices to the same local network."),
                     }
                 }
-                Err(error) => s.set_text(&error),
+                Err(error) => s.set_title(&error),
             }
             p.stop();
         });
@@ -221,7 +207,7 @@ pub fn show(ui: &Rc<Ui>) {
     let s = status.clone();
     let e = enabled.clone();
     let p = spinner.clone();
-    scan.connect_clicked(move |_| {
+    scan.connect_activated(move |_| {
         let Some(ui) = weak.upgrade() else {
             return;
         };
@@ -243,10 +229,10 @@ pub fn show(ui: &Rc<Ui>) {
                 return;
             };
             let Some(path) = file.path() else {
-                s.set_text("Choose a local image containing the pairing QR.");
+                s.set_title("Choose a local image containing the pairing QR.");
                 return;
             };
-            s.set_text("Scanning pairing QR…");
+            s.set_title("Scanning pairing QR…");
             p.start();
             let decoded = gio::spawn_blocking(move || decode_qr(path)).await;
             let Some(ui) = weak.upgrade() else {
@@ -259,7 +245,7 @@ pub fn show(ui: &Rc<Ui>) {
                 }
                 _ => {
                     p.stop();
-                    s.set_text("No Monogram pairing QR was found in the image.");
+                    s.set_title("No Monogram pairing QR was found in the image.");
                 }
             }
         });
@@ -284,9 +270,9 @@ pub fn show(ui: &Rc<Ui>) {
         glib::MainContext::default().spawn_local(async move {
             if let Some(mesh) = lan_sync::current() {
                 let summary = lan_sync::summary(mesh).await;
-                status.set_text(summary["status"].as_str().unwrap_or("Syncing…"));
+                status.set_title(summary["status"].as_str().unwrap_or("Syncing…"));
             } else if !enabled.is_active() {
-                status.set_text("Device sync is off.");
+                status.set_title("Device sync is off.");
             }
             polling.set(false);
         });
@@ -317,6 +303,7 @@ pub fn show(ui: &Rc<Ui>) {
             } else {
                 serde_json::json!({"peers":[]})
             };
+            group.set_visible(summary["peers"].as_array().is_some_and(|p|!p.is_empty()));
             let peers = summary["peers"].to_string();
             if *fingerprint.borrow() != peers {
                 fingerprint.replace(peers);
@@ -349,11 +336,9 @@ pub fn show(ui: &Rc<Ui>) {
         });
         glib::ControlFlow::Continue
     });
-    ui.dialogs.borrow_mut().push(dialog.clone().upcast());
-    dialog.present(Some(&ui.window));
 }
-fn join(ui: &Rc<Ui>, code: String, status: &gtk::Label, spinner: &gtk::Spinner) {
-    status.set_text("Connecting to the paired device…");
+fn join(ui: &Rc<Ui>, code: String, status: &adw::ActionRow, spinner: &gtk::Spinner) {
+    status.set_title("Connecting to the paired device…");
     spinner.start();
     let s = status.clone();
     let p = spinner.clone();
@@ -370,7 +355,7 @@ fn join(ui: &Rc<Ui>, code: String, status: &gtk::Label, spinner: &gtk::Spinner) 
             return;
         }
         p.stop();
-        s.set_text(match &result {
+        s.set_title(match &result {
             Ok(_) => "Paired. Your settings are syncing.",
             Err(error) => error,
         });
@@ -478,21 +463,21 @@ fn refresh_folders(ui: &Rc<Ui>) {
     ui.rebuild_folders();
     ui.refresh_chats(None);
 }
-fn numeric_show(ui: &Rc<Ui>, status: &gtk::Label) {
+fn numeric_show(ui: &Rc<Ui>, status: &adw::ActionRow) {
     numeric_dialog(ui, status, true);
 }
-fn numeric_join(ui: &Rc<Ui>, status: &gtk::Label) {
+fn numeric_join(ui: &Rc<Ui>, status: &adw::ActionRow) {
     numeric_dialog(ui, status, false);
 }
-fn numeric_dialog(ui: &Rc<Ui>, status: &gtk::Label, display: bool) {
-    status.set_text("Starting code pairing…");
+fn numeric_dialog(ui: &Rc<Ui>, status: &adw::ActionRow, display: bool) {
+    status.set_title("Starting code pairing…");
     let weak = Rc::downgrade(ui);
     let status = status.clone();
     glib::MainContext::default().spawn_local(async move {
         let mesh = match lan_sync::start().await {
             Ok(m) => m,
             Err(e) => {
-                status.set_text(&e);
+                status.set_title(&e);
                 return;
             }
         };
@@ -658,3 +643,55 @@ fn numeric_dialog(ui: &Rc<Ui>, status: &gtk::Label, display: bool) {
 }
 
 pub(crate)fn folder_signature(state:&crate::model::State)->String{serde_json::to_string(&(&state.account,&state.folders,&state.folder_order,state.all_folder_hidden)).unwrap()}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use crate::{model::Message, widgets::*};
+    fn descendants(root: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
+        let mut all=vec![];let mut pending=vec![root.clone().upcast::<gtk::Widget>()];
+        while let Some(w)=pending.pop(){let mut c=w.first_child();while let Some(v)=c{c=v.next_sibling();pending.push(v);}all.push(w);}all
+    }
+    fn pump() { let main=glib::MainContext::default();let until=std::time::Instant::now()+Duration::from_millis(500);while std::time::Instant::now()<until{main.iteration(false);std::thread::sleep(Duration::from_millis(1));} }
+    #[test]
+    #[ignore="requires private GTK display and D-Bus"]
+    fn preferences_icons_links_and_documents() {
+        let app=adw::Application::builder().application_id("com.negzero.MonogramReviewTest").flags(gio::ApplicationFlags::NON_UNIQUE).build();
+        app.register(None::<&gio::Cancellable>).unwrap();
+        install_icons();let theme=gtk::IconTheme::for_display(&gtk::gdk::Display::default().unwrap());
+        assert!(theme.has_icon("com.negzero.MonogramDesktop"));assert!(theme.has_icon("monogram-monero-symbolic"));
+        adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
+        let ui=Ui::new(&app,true);adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);ui.window.set_default_size(900,800);ui.window.present();
+        let css=gtk::CssProvider::new();css.load_from_path(asset("style.css"));gtk::style_context_add_provider_for_display(&gtk::gdk::Display::default().unwrap(),&css,gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        let dialog=adw::PreferencesDialog::new();add_preferences(&ui,&dialog);crate::monero_settings_ui::add(&ui,&dialog);dialog.present(Some(&ui.window));pump();
+        let all=descendants(&dialog);
+        let status=all.iter().filter_map(|w|w.downcast_ref::<gtk::Label>()).find(|label|label.text()=="Device sync is off").unwrap();
+        assert_eq!(status.layout().line_count(),1,"Short sync status should use the row width");
+        for title in ["Show Pairing QR Code","Scan QR from Image…","Show Rotating Pairing Code","Enter an Eight-Digit Code…"] {
+            assert!(all.iter().filter_map(|w|w.downcast_ref::<adw::ActionRow>()).any(|row|row.title()==title && row.is_activatable()));
+        }
+        for title in ["Devices","Monero"] { assert_eq!(all.iter().filter_map(|w|w.downcast_ref::<adw::PreferencesPage>()).filter(|p|p.title()==title).count(),1); }
+        assert!(!all.iter().filter_map(|w|w.downcast_ref::<adw::ActionRow>()).any(|r|r.title()=="Manage Paired Devices"));
+        assert!(all.iter().filter_map(|w|w.downcast_ref::<adw::ComboRow>()).any(|row|row.title()=="Node"));
+        if let Some(path)=std::env::var_os("MONOGRAM_REVIEW_CAPTURE") {
+            fn capture(window:&impl IsA<gtk::Window>,path:std::path::PathBuf){let w=window.upcast_ref::<gtk::Window>();let shot=gtk::Snapshot::new();gtk::WidgetPaintable::new(Some(w)).snapshot(&shot,w.width() as f64,w.height() as f64);if let Some(node)=shot.to_node(){w.renderer().unwrap().render_texture(&node,None).save_to_png(path).unwrap();}}
+            capture(&ui.window,std::path::Path::new(&path).with_extension("devices.png"));
+            let page=all.iter().filter_map(|w|w.downcast_ref::<adw::PreferencesPage>()).find(|p|p.title()=="Monero").unwrap();dialog.set_visible_page(page);pump();
+            capture(&ui.window,std::path::Path::new(&path).with_extension("monero.png"));
+        }
+        dialog.close();pump();
+        let root=bx(true,12);
+        let source="A short message with https://litterbox.catbox.moe/";
+        let body=wrap(source,"message-text");let status=bx(false,0);status.append(&text("13:31","message-meta"));
+        let rich=crate::formatting_ui::display(&Message{text:source.into(),..Default::default()}).1;
+        let message=MessageText::with_rich(&body,&status,rich);root.append(&message);
+        let file:crate::file_share::Attachment=serde_json::from_value(serde_json::json!({"wire_url":"https://example.invalid/log.zip","name":"logs (1).zip","mime":"application/zip","size":2048,"hashes":{},"manual":true,"sticker":false})).unwrap();
+        let attachment=ui.attachment_content(&Message{id:"file-review".into(),kind:"file".into(),attachment:Some(file),..Default::default()});root.append(&attachment);
+        let window=gtk::Window::builder().default_width(330).child(&root).build();window.present();pump();
+        let layout=body.layout();let link=source.find("https://").unwrap();
+        assert_eq!(layout.index_to_line_x(link as i32,false).0,layout.index_to_line_x((source.len()-1)as i32,false).0,"A fitting URL must move together to the next line");
+        assert!(attachment.height()<80,"Document row grew to {}",attachment.height());
+        eprintln!("Native review: icons resolve, Devices is inline, four activatable rows, mobile node chooser, intact fitting link, document height={}px",attachment.height());
+        window.close();ui.window.close();
+    }
+}

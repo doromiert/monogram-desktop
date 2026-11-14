@@ -8,6 +8,7 @@ fn layout(ui: &Ui) {
     let s = ui.state.borrow();
     let bubbles = ui.bubbles.borrow();
     let mut previous_bottom = None;
+    let mut previous_id = String::new();
     for message in &s.current().messages {
         let widget = &bubbles[&message.id];
         let bounds = widget.compute_bounds(&ui.timeline).expect("mapped bubble");
@@ -15,7 +16,7 @@ fn layout(ui: &Ui) {
             let gap = bounds.y() - bottom;
             assert!(
                 (0. ..=30.).contains(&gap),
-                "unexpected message gap: {gap}px"
+                "unexpected message gap: {gap}px between {previous_id} and {} ({})",message.id,message.kind
             );
         }
         if message.kind == "photo" {
@@ -26,6 +27,7 @@ fn layout(ui: &Ui) {
             );
         }
         previous_bottom = Some(bounds.y() + bounds.height());
+        previous_id=message.id.clone();
     }
     let (_, natural, _, _) = ui
         .timeline
@@ -1240,6 +1242,9 @@ pub fn run(ui: Rc<Ui>) {
                 println!(
                     "Native Rust smoke passed: compact photo rows at 1920/960/460px, breakpoints, folder transition, 3×3 media grid → viewer → close, native dialogs, GL wallets and stories"
                 );
+                let gap=crate::SMOKE_MAX_GAP.with(|m|m.get());
+                eprintln!("Complete smoke heartbeat gap: {gap}ms");
+                assert!(gap<400,"Native smoke stalled the UI for {gap}ms");
                 ui.window.close();
                 return glib::ControlFlow::Break;
             }
