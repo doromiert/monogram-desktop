@@ -588,5 +588,25 @@ mod tests {
         assert!(column>=110,"preview text column is crushed to {column}px");
         window.close();
     }
+    /// The timeline scrolls with a horizontal policy of Never, so GTK hands its widest child's
+    /// minimum width to the whole chat pane. A single unbreakable link must not do that: it made
+    /// the window request more width than its breakpoint bin had (a libadwaita warning on every
+    /// layout pass).
+    #[test]
+    #[ignore = "requires private GTK display"]
+    fn long_link_does_not_raise_the_timelines_minimum_width() {
+        gtk::init().unwrap();
+        let css=gtk::CssProvider::new();css.load_from_path(asset("style.css"));
+        gtk::style_context_add_provider_for_display(&gtk::gdk::Display::default().unwrap(),&css,gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        let source="https://x.com/stonetoss/status/2121649346471219227?a=OryBhoQnfblv81EkuT0&s=19";
+        let body=wrap(source,"message-text");
+        linkify_message_label(&body,source,&crate::link_previews::clickable_urls(source,None));
+        assert!(body.measure(gtk::Orientation::Horizontal,-1).0>400,"the link is expected to be unbreakable");
+        let bubble=bx(true,0);bubble.add_css_class("message-bubble");bubble.append(&body);
+        let column=bx(true,0);column.append(&MessageBubbleLimit::new(&bubble,false));
+        let scroller=scroll(&column);
+        let minimum=scroller.measure(gtk::Orientation::Horizontal,-1).0;
+        assert!(minimum<=360,"a long link raised the timeline's minimum width to {minimum}px");
+    }
 
 }

@@ -167,7 +167,12 @@ mod message_bubble_limit_imp {
             };
             if orientation == gtk::Orientation::Horizontal {
                 let (minimum, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
-                return (minimum, natural.max(minimum), -1, -1);
+                // Report only a modest minimum. The timeline scrolls with a horizontal policy of
+                // Never, which makes GTK propagate the widest child's minimum to the whole chat
+                // pane: one unbreakable link would otherwise make the window ask for more width
+                // than the breakpoint bin has (libadwaita then warns on every layout pass).
+                // size_allocate still gives the child its real minimum whenever the row has room.
+                return (minimum.min(BUBBLE_SOFT_MIN_WIDTH), natural.max(minimum), -1, -1);
             }
             let (minimum, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
             let child_width = if for_size < 0 {
@@ -274,6 +279,9 @@ mod message_bubble_limit_imp {
         }
     }
 }
+
+/// Widest minimum a message bubble reports to its parents (see `MessageBubbleLimit::measure`).
+const BUBBLE_SOFT_MIN_WIDTH: i32 = 320;
 
 glib::wrapper! {
     pub struct MessageBubbleLimit(ObjectSubclass<message_bubble_limit_imp::MessageBubbleLimit>)
