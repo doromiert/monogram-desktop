@@ -1128,6 +1128,7 @@ mod tests {
             name: "file.txt".into(),
             error: None,
             sticker: false,
+                    local_sticker: None,
         };
         let target = directory.0.join("account/uploads/snapshot.input");
         let prepared = prepare(target.clone(), &draft, 100, &Job::default()).unwrap();

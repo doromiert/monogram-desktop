@@ -1657,6 +1657,7 @@ impl Ui {
             }
         });
         behavior.add(&completion);
+        self.add_double_click_preferences(&behavior);
         dialog.add(&behavior);
         let account = adw::PreferencesPage::builder()
             .title("Account")

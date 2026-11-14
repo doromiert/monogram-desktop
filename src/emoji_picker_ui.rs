@@ -628,7 +628,7 @@ impl EmojiSurface {
         alternate.set_propagation_phase(gtk::PropagationPhase::Capture);
         let surface = Rc::downgrade(self);
         let emoji = value.clone();
-        let skip_activation = alternate_activation;
+        let skip_activation = alternate_activation.clone();
         alternate.connect_pressed(move |gesture, _, _, _| {
             if !gesture
                 .current_event_state()
@@ -669,16 +669,8 @@ impl EmojiSurface {
             }
         });
         button.add_controller(secondary);
-        let long_press = gtk::GestureLongPress::new();
-        let surface = Rc::downgrade(self);
-        let target = button.downgrade();
-        let emoji = value.clone();
-        long_press.connect_pressed(move |_, x, y| {
-            if let (Some(surface), Some(button)) = (surface.upgrade(), target.upgrade()) {
-                surface.emoji_options(&button, &emoji, x, y);
-            }
-        });
-        button.add_controller(long_press);
+        if let Some(ui)=self.ui.upgrade(){crate::picker_zoom::attach(&ui,&button,alternate_activation);}
+
         let keys = gtk::EventControllerKey::new();
         let surface = Rc::downgrade(self);
         let target = button.downgrade();

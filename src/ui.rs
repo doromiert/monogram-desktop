@@ -26,6 +26,7 @@ pub struct Ui {
     pub window: adw::ApplicationWindow,
     pub toast: adw::ToastOverlay,
     pub overlay: gtk::Overlay,
+    pub(crate) picker_zoom: Rc<crate::picker_zoom::PickerZoom>,
     pub(crate) send_animation: crate::send_animation::SendAnimation,
     shell: gtk::Stack,
     welcome_status: gtk::Label,
@@ -181,6 +182,7 @@ impl Ui {
         let send_animation=crate::send_animation::SendAnimation::new();
         overlay.add_overlay(&send_animation);
         overlay.set_measure_overlay(&send_animation,false);
+        let picker_zoom=crate::picker_zoom::PickerZoom::new();overlay.add_overlay(&picker_zoom.root);overlay.set_measure_overlay(&picker_zoom.root,false);
         let shell = gtk::Stack::new();
         shell.set_hhomogeneous(false);
         shell.set_vhomogeneous(false);
@@ -266,6 +268,7 @@ impl Ui {
             toast,
             overlay,
             send_animation,
+            picker_zoom,
             shell,
             welcome_status,
             welcome_progress,
@@ -610,6 +613,7 @@ impl Ui {
         });
         ui.window.add_controller(typing_keys);
         ui.install_formatting();
+        ui.picker_zoom.install(&ui);
         ui.window.connect_close_request(move |_| {
             if let Some(u) = weak.upgrade() {
                 u.save_draft();
@@ -1353,6 +1357,10 @@ impl Ui {
             let Some(s) = weak.upgrade() else {
                 return glib::Propagation::Proceed;
             };
+            if key==gdk::Key::Up && state.is_empty() && s.composer_text().is_empty() {
+                let id=s.state.borrow().current().messages.iter().rev().find(|m|m.own&&!m.retracted&&!m.unavailable&&!m.text.is_empty()).map(|m|m.id.clone());
+                if let Some(id)=id{s.edit_message(&id);return glib::Propagation::Stop;}
+            }
             if matches!(key, gdk::Key::Return | gdk::Key::KP_Enter)
                 && !state.contains(gdk::ModifierType::SHIFT_MASK)
             {
@@ -2723,6 +2731,7 @@ impl Ui {
                     .map(|m| m.id.clone())
             });
         let follow = self.at_message_end();
+        let animate_incoming=known.is_none()&&!historical&&!message.own&&visible&&follow;
         let mut s = self.state.borrow_mut();
         let active = s.current().jid == peer;
         let c = s.chat_for(&peer);
@@ -2924,6 +2933,7 @@ impl Ui {
             }
         }
         if active && (!outside || inserted.is_none()) {
+            if saved&&animate_incoming { self.animate_received_message(&incoming_id); }
             self.render_messages(follow)
         } else if active {
             self.schedule_history_maintenance();

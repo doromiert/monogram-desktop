@@ -133,7 +133,9 @@ fn ast(source: &str) -> Option<Vec<Node>> {
     let mut count = 0;
     for (mut event, range) in Parser::new_ext(source, options).into_offset_iter() {
         if let Event::InlineMath(value) = &event {
-            if value.trim() != value.as_ref()
+            let numeric_prose=value.starts_with(|c:char|c.is_ascii_digit())
+                && !value.chars().any(|c|"\\+-*/=^_<>".contains(c));
+            if value.trim() != value.as_ref() || value.contains(['\n','\r']) || numeric_prose
                 || source[range.end..].starts_with(|c: char| c.is_ascii_digit())
             {
                 event = Event::Text(format!("${value}$").into());
@@ -927,5 +929,19 @@ mod profile_tests {
         };
         assert_eq!(text.text.trim_end(), "# literal heading\nsecond line");
         assert!(matches!(&doc.blocks[1],Block::Paragraph(t)if t.text=="normal"));
+    }
+}
+
+#[cfg(test)]
+mod currency_tests {
+    use super::*;
+    #[test]
+    fn currency_does_not_open_inline_math_but_explicit_formulas_do() {
+        for source in ["She said $100 then later $20", "Costs $100 and yours is $20.", "$100 mine's 20$", "$100\nthen later $20"] {
+            let document=parse(source).unwrap();
+            for block in &document.blocks {match block {Block::Paragraph(rich)=>{assert!(rich.math.is_empty(),"Currency rendered as math: {source}");if !source.contains('\n'){assert_eq!(rich.text,source);}},Block::Math(_)=>panic!("Currency became display math"),_=>{}}}
+        }
+        let document=parse("A formula $2+2=4$ and $x^2$.").unwrap();
+        assert!(matches!(&document.blocks[0],Block::Paragraph(rich) if rich.math.len()==2));
     }
 }

@@ -35,7 +35,7 @@ fn wait_lottie_visible(
     picture: glib::WeakRef<gtk::Picture>,
     spinner: glib::WeakRef<gtk::Spinner>,
     scroll: glib::WeakRef<gtk::ScrolledWindow>,
-    source: Arc<crate::downloads::VerifiedFile>,
+    source: LottieSource,
     serial: Rc<Cell<u64>>,
     expected: u64,
 ) {
@@ -67,7 +67,7 @@ fn schedule_lottie_frame(
     picture: glib::WeakRef<gtk::Picture>,
     spinner: glib::WeakRef<gtk::Spinner>,
     scroll: glib::WeakRef<gtk::ScrolledWindow>,
-    source: Arc<crate::downloads::VerifiedFile>,
+    source: LottieSource,
     serial: Rc<Cell<u64>>,
     expected: u64,
     cancel: gio::Cancellable,
@@ -131,7 +131,7 @@ fn start_lottie(
     picture: &gtk::Picture,
     spinner: &gtk::Spinner,
     scroll: &gtk::ScrolledWindow,
-    source: Arc<crate::downloads::VerifiedFile>,
+    source: LottieSource,
     serial: Rc<Cell<u64>>,
 ) {
     let expected = serial.get().wrapping_add(1);
@@ -145,7 +145,7 @@ fn start_lottie(
         let permit = lottie_permit().await;
         let worker_cancel = cancel.clone();
         let result = gio::spawn_blocking(move || {
-            let input = source.reopen()?;
+            let input = source()?;
             let mut decoder = crate::lottie::Decoder::open(input, 192, &worker_cancel)?;
             let frame = decoder.frame()?;
             Ok::<_, &'static str>((decoder, frame))
@@ -177,13 +177,18 @@ fn start_lottie(
     });
 }
 
+type LottieSource=Arc<dyn Fn()->Result<crate::downloads::VerifiedFile,&'static str>+Send+Sync>;
+
 fn install_lottie(
     picture: &gtk::Picture,
     spinner: &gtk::Spinner,
     scroll: &gtk::ScrolledWindow,
     verified: crate::downloads::VerifiedFile,
 ) {
-    let source = Arc::new(verified);
+    install_lottie_reopenable(picture,spinner,scroll,move||verified.reopen());
+}
+fn install_lottie_reopenable(picture:&gtk::Picture,spinner:&gtk::Spinner,scroll:&gtk::ScrolledWindow,open:impl Fn()->Result<crate::downloads::VerifiedFile,&'static str>+Send+Sync+'static) {
+    let source:LottieSource=Arc::new(open);
     let serial = Rc::new(Cell::new(0));
     let picture_weak = picture.downgrade();
     let spinner_weak = spinner.downgrade();
@@ -901,11 +906,12 @@ pub(crate) enum PackSelection {
 
 #[derive(Clone)]
 enum PickerRow {
-    Heading(String),
+    Heading(i64, String),
     Empty(String),
     Emoji(Vec<crate::emoji_completion::EmojiEntry>),
     Pack(Vec<crate::packs::Item>),
     Favorites(Vec<FavoriteEntry>),
+    Recent(Vec<FavoriteEntry>),
 }
 
 #[derive(Clone)]
@@ -927,6 +933,7 @@ struct PackPreviewCell {
     picture: gtk::Picture,
     spinner: gtk::Spinner,
     item_id: i64,
+    skip_activation: Rc<Cell<bool>>,
 }
 
 fn pack_selector_button(icon: &str, title: &str) -> gtk::ToggleButton {
@@ -969,6 +976,7 @@ pub(crate) struct PackLibraryPage {
     preview_epoch: Cell<u64>,
     preview_queue: RefCell<Vec<PackPreviewCell>>,
     hovered_video: Cell<Option<i64>>,
+    pending_items: RefCell<std::collections::HashSet<i64>>,
     video_preview: RefCell<Option<(glib::WeakRef<gtk::Picture>, gtk::gdk::Texture, Rc<crate::video_ui::Playback>)>>,
     selected: RefCell<Option<i64>>,
     sections: RefCell<Vec<(i64, String, Vec<crate::packs::Item>)>>,
@@ -1125,6 +1133,7 @@ impl PackLibraryPage {
             preview_epoch: Cell::new(0),
             preview_queue: RefCell::new(Vec::new()),
             hovered_video: Cell::new(None),
+            pending_items: RefCell::new(Default::default()),
             video_preview: RefCell::new(None),
             selected: RefCell::new(None),
             sections: RefCell::new(Default::default()),
@@ -1297,6 +1306,7 @@ impl PackLibraryPage {
     }
 
     fn show_snapshot(self: &Rc<Self>, snapshot: Snapshot) {
+        self.pending_items.replace(snapshot.packs.iter().filter(|p|p.sync_pending).flat_map(|p|p.items.iter().map(|i|i.id)).collect());
         self.section_buttons.borrow_mut().clear();
         while let Some(child) = self.selector.first_child() {
             self.selector.remove(&child);
@@ -1401,7 +1411,9 @@ impl PackLibraryPage {
             let weak = Rc::downgrade(self);
             let preview = button.downgrade();
             let library = self.library.clone();
-            if let Some(item) = pack.items.first() {
+            if pack.sync_pending {
+                let downloading=gtk::Spinner::new();downloading.start();downloading.set_size_request(22,22);button.set_child(Some(&downloading));button.set_tooltip_text(Some(&format!("{} · Downloading…",pack.name)));
+            } else if let Some(item) = pack.items.first() {
                 let item = item.id;
                 glib::spawn_future_local(async move {
                     let Ok((asset, verified)) = library.verified_asset(item, Job::new()).await
@@ -1516,6 +1528,7 @@ impl PackLibraryPage {
                 continue;
             }
             self.push_heading(&mut rows, id, &title);
+            if query.is_empty() && matches!(id,-1|-2) && self.section_collapsed(id) { continue; }
             if id == -1 {
                 let owner = self.library.account();
                 let mut entries: Vec<_> = builtin
@@ -1542,6 +1555,12 @@ impl PackLibraryPage {
                     Self::push_row(&mut rows, PickerRow::Empty("No favorites yet".into()));
                 }
                 continue;
+            }
+            if id == -2 && self.kind==Kind::Emoji {
+                let owner=self.library.account();let mut entries=builtin.into_iter().map(FavoriteEntry::Emoji).chain(items.into_iter().map(FavoriteEntry::Pack)).collect::<Vec<_>>();
+                let saved=ui.as_ref().map(|ui|ui.store.pref("picker:recent:emoji","[]")).unwrap_or_else(||"[]".into());let order:Vec<String>=serde_json::from_str(&saved).unwrap_or_default();entries.sort_by_key(|entry|order.iter().position(|key|key==&entry.key(owner)).unwrap_or(usize::MAX));
+                for row in entries.chunks(8){Self::push_row(&mut rows,PickerRow::Recent(row.to_vec()));}
+                if entries.is_empty(){Self::push_row(&mut rows,PickerRow::Empty("No recent yet".into()));}continue;
             }
             for row in builtin.chunks(8) {
                 Self::push_row(&mut rows, PickerRow::Emoji(row.to_vec()));
@@ -1583,9 +1602,11 @@ impl PackLibraryPage {
         self.model.splice(0, self.model.n_items(), &rows);
     }
 
+    fn collapsed_key(&self,id:i64)->String {format!("picker:collapsed:{}:{id}",if self.kind==Kind::Emoji{"emoji"}else{"stickers"})}
+    fn section_collapsed(&self,id:i64)->bool {self.ui.upgrade().is_some_and(|ui|ui.store.pref(&self.collapsed_key(id),"false")=="true")}
     fn push_heading(&self, rows: &mut Vec<glib::BoxedAnyObject>, id: i64, title: &str) {
         self.anchors.borrow_mut().insert(id, rows.len() as u32);
-        Self::push_row(rows, PickerRow::Heading(title.into()));
+        Self::push_row(rows, PickerRow::Heading(id,title.into()));
     }
     fn push_row(rows: &mut Vec<glib::BoxedAnyObject>, row: PickerRow) {
         rows.push(glib::BoxedAnyObject::new(row));
@@ -1593,7 +1614,8 @@ impl PackLibraryPage {
 
     fn row_widget(self: &Rc<Self>, row: &PickerRow) -> gtk::Widget {
         match row {
-            PickerRow::Favorites(entries) => {
+            PickerRow::Favorites(entries) | PickerRow::Recent(entries) => {
+                let row_kind=row;
                 let row = gtk::Box::new(
                     gtk::Orientation::Horizontal,
                     if self.kind == Kind::Emoji { 2 } else { 6 },
@@ -1613,6 +1635,8 @@ impl PackLibraryPage {
                             }
                             FavoriteEntry::Pack(item) => self.pack_cell(item).upcast(),
                         };
+                        let preview_cell = crate::widgets::SquareCell::new(&cell);
+                        if matches!(row_kind,PickerRow::Favorites(_)) {
                         let weak = Rc::downgrade(self);
                         favorite_order::attach(
                             &ui,
@@ -1630,9 +1654,9 @@ impl PackLibraryPage {
                                     .unwrap_or_default()
                             },
                         );
-                        let preview_cell = crate::widgets::SquareCell::new(&cell);
                         self.favorite_preview
                             .register(entry.key(self.library.account()), &preview_cell);
+                        }
                         row.append(&preview_cell);
                     }
                 }
@@ -1641,10 +1665,17 @@ impl PackLibraryPage {
                 }
                 row.upcast()
             }
-            PickerRow::Heading(title) | PickerRow::Empty(title) => {
+            PickerRow::Heading(id,title) if matches!(id,-1|-2) => {
+                let button=gtk::Button::new();button.add_css_class("flat");button.add_css_class("picker-section-toggle");
+                let body=gtk::Box::new(gtk::Orientation::Horizontal,6);let label=crate::widgets::text(title,"picker-section-heading");label.set_hexpand(true);body.append(&label);
+                let collapsed=self.section_collapsed(*id);body.append(&gtk::Image::from_icon_name(if collapsed{"pan-end-symbolic"}else{"pan-down-symbolic"}));button.set_child(Some(&body));
+                button.update_state(&[gtk::accessible::State::Expanded(Some(!collapsed))]);
+                let weak=Rc::downgrade(self);let id=*id;button.connect_clicked(move|_|{if let Some(page)=weak.upgrade(){if let Some(ui)=page.ui.upgrade(){let _=ui.store.set_pref(&page.collapsed_key(id),if page.section_collapsed(id){"false"}else{"true"});page.rebuild_rows();}}});button.upcast()
+            }
+            PickerRow::Heading(_,title) | PickerRow::Empty(title) => {
                 let label = crate::widgets::text(
                     title,
-                    if matches!(row, PickerRow::Heading(_)) {
+                    if matches!(row, PickerRow::Heading(..)) {
                         "picker-section-heading"
                     } else {
                         "dim-label"
@@ -1721,38 +1752,31 @@ impl PackLibraryPage {
             .child(&overlay)
             .build();
         button.set_child(Some(&frame));
-        let favorite = gtk::GestureClick::new();
-        favorite.set_button(3);
-        let weak_favorite = Rc::downgrade(self);
-        let favorite_library = self.library.clone();
-        let favorite_id = item.id;
-        favorite.connect_released(move |_, _, _, _| {
-            let Some(page) = weak_favorite.upgrade() else {
-                return;
-            };
-            let enabled = !page.favorites.borrow().contains(&favorite_id);
-            let library = favorite_library.clone();
-            let weak = Rc::downgrade(&page);
-            glib::spawn_future_local(async move {
-                if library
-                    .mutate(crate::packs::Mutation::Favorite {
-                        item: favorite_id,
-                        value: enabled,
-                    })
-                    .await
-                    .is_ok()
-                    && let Some(page) = weak.upgrade()
-                {
-                    page.refresh();
-                }
-            });
-        });
-        button.add_controller(favorite);
+        if self.pending_items.borrow().contains(&item.id){
+            button.set_tooltip_text(Some(&format!("{} · Downloading…",item.name)));button.set_sensitive(false);return button;
+        }
+        let skip_activation=Rc::new(Cell::new(false));
+        if let Some(ui)=self.ui.upgrade(){crate::picker_zoom::attach(&ui,&button,skip_activation.clone());}
+        let alternate=gtk::GestureClick::new();alternate.set_button(1);alternate.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak=Rc::downgrade(self);let id=item.id;let skip=skip_activation.clone();
+        alternate.connect_pressed(move|gesture,_,_,_|{let alt=gesture.current_event_state().contains(gtk::gdk::ModifierType::ALT_MASK);skip.set(alt);if alt{gesture.set_state(gtk::EventSequenceState::Claimed);if let Some(page)=weak.upgrade(){page.toggle_item_favorite(id);}}});button.add_controller(alternate);
+        let secondary=gtk::GestureClick::new();secondary.set_button(3);let weak=Rc::downgrade(self);let target=button.downgrade();let skip=skip_activation.clone();
+        secondary.connect_pressed(move|gesture,_,x,y|{
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            let(Some(page),Some(button))=(weak.upgrade(),target.upgrade())else{return;};
+            let menu=gtk::Popover::builder().has_arrow(false).autohide(true).build();menu.add_css_class("message-menu");menu.set_parent(&button);menu.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32,y as i32,1,1)));
+            let body=gtk::Box::new(gtk::Orientation::Vertical,0);body.add_css_class("message-menu-panel");
+            let favorite=gtk::Button::with_label(if page.favorites.borrow().contains(&id){"Remove from Favorites"}else{"Add to Favorites"});favorite.add_css_class("flat");favorite.add_css_class("context-menu-row");
+            let weak=Rc::downgrade(&page);let pop=menu.downgrade();favorite.connect_clicked(move|_|{if let Some(pop)=pop.upgrade(){pop.popdown();}if let Some(page)=weak.upgrade(){page.toggle_item_favorite(id);}});body.append(&favorite);
+            let send=gtk::Button::with_label(if page.kind==Kind::Emoji{"Insert Emoji"}else{"Send Sticker"});send.add_css_class("flat");send.add_css_class("context-menu-row");let target=button.downgrade();let pop=menu.downgrade();let skip=skip.clone();send.connect_clicked(move|_|{if let Some(pop)=pop.upgrade(){pop.popdown();}skip.set(false);if let Some(button)=target.upgrade(){button.emit_clicked();}});body.append(&send);
+            menu.set_child(Some(&body));menu.connect_closed(|pop|{if pop.parent().is_some(){pop.unparent();}});menu.popup();
+        });button.add_controller(secondary);
         self.preview_queue.borrow_mut().push(PackPreviewCell {
             button: button.downgrade(),
             picture,
             spinner,
             item_id: item.id,
+            skip_activation,
         });
         let weak = Rc::downgrade(self);
         button.connect_map(move |_| {
@@ -1766,6 +1790,10 @@ impl PackLibraryPage {
         button
     }
 
+    fn toggle_item_favorite(self:&Rc<Self>,id:i64) {
+        let enabled=!self.favorites.borrow().contains(&id);let library=self.library.clone();let weak=Rc::downgrade(self);
+        glib::spawn_future_local(async move{if library.mutate(crate::packs::Mutation::Favorite{item:id,value:enabled}).await.is_ok(){if let Some(page)=weak.upgrade(){page.refresh();}}});
+    }
     fn stop_video_preview(&self) {
         self.hovered_video.set(None);
         if let Some((image,poster,player))=self.video_preview.borrow_mut().take(){
@@ -1827,7 +1855,7 @@ impl PackLibraryPage {
                 if page.preview_epoch.get() == epoch
                     && let Some(button) = cell.button.upgrade()
                 {
-                    page.finish_pack_preview(button, cell.picture, cell.spinner, result);
+                    page.finish_pack_preview(button, cell.picture, cell.spinner, cell.skip_activation, result);
                 }
                 page.pump_pack_previews();
             });
@@ -1839,6 +1867,7 @@ impl PackLibraryPage {
         button: gtk::Button,
         picture: gtk::Picture,
         spinner: gtk::Spinner,
+        skip_activation: Rc<Cell<bool>>,
         result: crate::packs::Result<(Asset, crate::downloads::VerifiedFile, Option<crate::image_loader::EncodedPreview>)>,
     ) {
         let (asset, verified, poster) = match result {
@@ -1854,14 +1883,14 @@ impl PackLibraryPage {
         let weak = Rc::downgrade(self);
         let recent_library = self.library.clone();
         let selection_asset = asset.clone();
-        button.connect_clicked(move |_| {
+        button.connect_clicked(move |button| {
+            if skip_activation.replace(false){return;}
             if let Some(page) = weak.upgrade() {
-                let library = recent_library.clone();
+                let library = recent_library.clone();let owner=library.account().to_string();let weak_ui=page.ui.clone();let kind=page.kind;
                 let item = selection_asset.item.id;
                 glib::spawn_future_local(async move {
-                    let _ = library
-                        .mutate(crate::packs::Mutation::Recent { item })
-                        .await;
+                    let _ = library.mutate(crate::packs::Mutation::Recent { item }).await;
+                    if kind==Kind::Emoji {if let Some(ui)=weak_ui.upgrade(){let key=favorite_order::pack_key(&owner,item);let _=ui.store.write_snapshot(move|store|store.record_picker_recent(&key)).await;}}
                 });
                 let selection = match page.kind {
                     Kind::Stickers => PackSelection::Sticker(selection_asset.clone()),
@@ -1870,6 +1899,7 @@ impl PackLibraryPage {
                         fallback: selection_asset.item.emoji.clone(),
                     },
                 };
+                if page.kind==Kind::Stickers {if let Some(ui)=page.ui.upgrade(){ui.send_animation.remember_sticker_source(button);}}
                 (page.on_select)(selection);
             }
         });
@@ -1883,13 +1913,14 @@ impl PackLibraryPage {
                 let weak=Rc::downgrade(self);picture.connect_unmap(move |_|{if let Some(page)=weak.upgrade(){if page.hovered_video.get()==Some(id){page.stop_video_preview();}}});
             } else {spinner.stop();spinner.set_visible(false);button.set_icon_name("image-missing-symbolic");}
         } else if asset.item.mime == "application/x-tgsticker" {
-            install_lottie(&picture, &spinner, &self.scroll, verified);
+            let library=self.library.clone();drop(verified);
+            install_lottie_reopenable(&picture,&spinner,&self.scroll,move||library.reopen_preview(&asset));
         } else if asset.item.mime.starts_with("image/") {
+            drop(verified);let library=self.library.clone();let preview_asset=asset.clone();
             let spinner = spinner.downgrade();
             let scroll = self.scroll.downgrade();
-            crate::image_loader::play_opened(
+            crate::image_loader::play_input(
                 &picture,
-                verified,
                 192,
                 move |picture| {
                     scroll.upgrade().is_some_and(|scroll| {
@@ -1906,6 +1937,8 @@ impl PackLibraryPage {
                         spinner.set_visible(false);
                     }
                 },
+                true,
+                move||library.reopen_preview(&preview_asset),
             );
         } else {
             spinner.stop();
@@ -2095,37 +2128,7 @@ impl Ui {
                     self.notice("Select a pack first");
                     return;
                 };
-                let dialog = adw::AlertDialog::builder()
-                    .heading("Manage Pack")
-                    .body("Choose what to do with this pack.")
-                    .build();
-                dialog.add_responses(&[("cancel", "Cancel"), ("uninstall", "Uninstall")]);
-                dialog.set_default_response(Some("cancel"));
-                dialog.set_close_response("cancel");
-                dialog.set_response_appearance("uninstall", adw::ResponseAppearance::Destructive);
-                let weak = Rc::downgrade(self);
-                let page = Rc::downgrade(page);
-                dialog.connect_response(Some("uninstall"), move |_, _| {
-                    let Some(ui) = weak.upgrade().filter(|ui| {
-                        ui.generation.get() == generation && ui.state.borrow().account == owner
-                    }) else {
-                        return;
-                    };
-                    let Some(page) = page.upgrade() else {
-                        return;
-                    };
-                    let library = library.clone();
-                    glib::spawn_future_local(async move {
-                        match library
-                            .mutate(crate::packs::Mutation::Installed { pack, value: false })
-                            .await
-                        {
-                            Ok(_) => page.refresh(),
-                            Err(error) => ui.notice(&error.to_string()),
-                        }
-                    });
-                });
-                dialog.present(Some(&self.window));
+                crate::pack_editor::open(self,page,library,pack);
             }
         }
     }
@@ -2264,7 +2267,7 @@ impl Ui {
                         };
                         match selection {
                             PackSelection::Sticker(asset) => {
-                                ui.send_library_file(&asset.path, true);
+                                ui.send_pack_sticker(&asset);
                             }
                             PackSelection::CustomEmoji { item_id, fallback } => {
                                 let weak = Rc::downgrade(&ui);
@@ -2362,6 +2365,43 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         false
+    }
+
+    #[test]
+    #[ignore = "requires isolated native display, xdotool and Secret Service"]
+    fn secondary_click_opens_menu_and_alt_click_favorites_without_sending() {
+        fn find<T:IsA<gtk::Widget>+glib::object::IsClass+Clone+'static>(root:&gtk::Widget,predicate:&impl Fn(&T)->bool)->Option<T>{if let Ok(widget)=root.clone().downcast::<T>(){if predicate(&widget){return Some(widget);}}let mut child=root.first_child();while let Some(widget)=child{child=widget.next_sibling();if let Some(found)=find(&widget,predicate){return Some(found);}}None}
+        fn click(window:&gtk::Window,button:&gtk::Button,number:&str,alt:bool){
+            let out=std::process::Command::new("xdotool").args(["search","--onlyvisible","--pid",&std::process::id().to_string(),"--name","Monogram Menu Fixture"]).output().unwrap();let id=String::from_utf8(out.stdout).unwrap().lines().next().unwrap().to_owned();let rect=button.compute_bounds(window).unwrap();let x=(rect.x()+rect.width()/2.)as i32;let y=(rect.y()+rect.height()/2.)as i32;let number=number.to_string();let task=std::thread::spawn(move||{let mut command=std::process::Command::new("xdotool");command.args(["mousemove","--window",&id,&x.to_string(),&y.to_string()]);if alt{command.args(["keydown","Alt_L"]);}command.args(["click",&number]);if alt{command.args(["keyup","Alt_L"]);}assert!(command.status().unwrap().success());});assert!(until(Duration::from_secs(3),||task.is_finished()));task.join().unwrap();
+        }
+        gtk::init().unwrap();let context=glib::MainContext::default();let path=std::env::temp_dir().join(format!("menu-fixture-{}.png",uuid::Uuid::new_v4()));let bytes=base64::Engine::decode(&base64::engine::general_purpose::STANDARD,"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=").unwrap();std::fs::write(&path,bytes).unwrap();
+        let library=context.block_on(Library::open("menu@fixture.invalid")).unwrap();let pack=context.block_on(library.create("Menu pack".into(),Kind::Stickers,vec![crate::packs::Input{path:path.clone(),name:"Menu fixture".into(),emoji:"🙂".into()}],Job::new())).unwrap();let _=std::fs::remove_file(path);
+        let selected=Rc::new(Cell::new(0));let count=selected.clone();let page=PackLibraryPage::new(library,Kind::Stickers,std::rc::Weak::new(),None,move |_|count.set(count.get()+1),|_|{},|_,_,_|{});let window=gtk::Window::builder().title("Monogram Menu Fixture").child(&page.root).default_width(420).default_height(600).build();window.present();page.refresh();
+        let tile=||find::<gtk::Button>(&window.clone().upcast(),&|b|b.tooltip_text().as_deref()==Some("Menu fixture"));assert!(until(Duration::from_secs(6),||tile().is_some_and(|tile|tile.is_mapped()&&tile.width()>0&&tile.height()>0)&&page.preview_active.get()==0));
+        click(&window,&tile().unwrap(),"3",false);assert!(until(Duration::from_secs(3),||find::<gtk::Popover>(&window.clone().upcast(),&|p|p.is_mapped()).is_some()));assert!(find::<gtk::Popover>(&window.clone().upcast(),&|p|p.is_mapped()).unwrap().has_css_class("message-menu"),"nested popover backdrop returned");assert!(page.favorites.borrow().is_empty());assert_eq!(selected.get(),0);
+        find::<gtk::Popover>(&window.clone().upcast(),&|p|p.is_mapped()).unwrap().popdown();assert!(until(Duration::from_secs(3),||find::<gtk::Popover>(&window.clone().upcast(),&|p|p.is_mapped()).is_none()));click(&window,&tile().unwrap(),"1",true);assert!(until(Duration::from_secs(4),||page.favorites.borrow().contains(&pack.items[0].id)));assert_eq!(selected.get(),0);
+        assert!(until(Duration::from_secs(4),||tile().is_some_and(|tile|tile.is_mapped()&&tile.width()>0&&tile.height()>0)&&page.preview_active.get()==0));click(&window,&tile().unwrap(),"3",false);assert!(until(Duration::from_secs(3),||find::<gtk::Button>(&window.clone().upcast(),&|b|b.label().as_deref()==Some("Remove from Favorites")).is_some()));assert!(page.favorites.borrow().contains(&pack.items[0].id));find::<gtk::Button>(&window.clone().upcast(),&|b|b.label().as_deref()==Some("Remove from Favorites")).unwrap().emit_clicked();assert!(until(Duration::from_secs(4),||!page.favorites.borrow().contains(&pack.items[0].id)));assert_eq!(selected.get(),0);window.close();
+    }
+
+    #[test]
+    #[ignore = "requires isolated native display and Secret Service"]
+    fn large_image_pack_does_not_retain_offscreen_file_descriptors() {
+        gtk::init().unwrap();let context=glib::MainContext::default();
+        let bytes=base64::Engine::decode(&base64::engine::general_purpose::STANDARD,"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=").unwrap();
+        let path=std::env::temp_dir().join(format!("picker-image-{}.png",uuid::Uuid::new_v4()));std::fs::write(&path,bytes).unwrap();
+        let library=context.block_on(Library::open("image-grid@fixture.invalid")).unwrap();
+        let inputs=(0..700).map(|i|crate::packs::Input{path:path.clone(),name:format!("Image {i}"),emoji:"🙂".into()}).collect();
+        context.block_on(library.create("Images".into(),Kind::Stickers,inputs,Job::new())).unwrap();let _=std::fs::remove_file(path);
+        let page=PackLibraryPage::new(library,Kind::Stickers,std::rc::Weak::new(),None,|_|{},|_|{},|_,_,_|{});
+        let window=gtk::Window::builder().child(&page.root).default_width(420).default_height(600).build();
+        let descriptors=||std::fs::read_dir("/proc/self/fd").unwrap().count();let baseline=descriptors();let peak=Rc::new(Cell::new(baseline));let(p,last,gap)=(peak.clone(),Rc::new(Cell::new(std::time::Instant::now())),Rc::new(Cell::new(Duration::ZERO)));let g=gap.clone();
+        let heartbeat=glib::timeout_add_local(Duration::from_millis(16),move||{p.set(p.get().max(descriptors()));g.set(g.get().max(last.replace(std::time::Instant::now()).elapsed()));glib::ControlFlow::Continue});
+        window.present();page.refresh();assert!(until(Duration::from_secs(12),||page.model.n_items()>100&&page.preview_active.get()==0));
+        for _ in 0..3 {let a=page.scroll.vadjustment();a.set_value((a.upper()-a.page_size()).max(0.));let _=until(Duration::from_millis(350),||false);a.set_value(0.);let _=until(Duration::from_millis(350),||false);}
+        window.close();let _=until(Duration::from_millis(200),||false);heartbeat.remove();
+        assert!(peak.get()<baseline+128,"Offscreen images pinned files: base {baseline}, peak {}",peak.get());
+        assert!(gap.get()<Duration::from_millis(400),"Image pack blocked GTK for {:?}",gap.get());
+        println!("Image grid700, scroll6: descriptor baseline {baseline}, peak {}, UI gap {:?}",peak.get(),gap.get());
     }
 
     #[test]

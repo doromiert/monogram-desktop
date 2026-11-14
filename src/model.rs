@@ -684,6 +684,8 @@ pub struct UploadDraft {
     pub error: Option<String>,
     #[serde(default)]
     pub sticker: bool,
+    #[serde(default)]
+    pub local_sticker: Option<i64>,
 }
 impl std::fmt::Debug for UploadDraft {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

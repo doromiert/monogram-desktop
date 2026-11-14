@@ -62,6 +62,19 @@ impl Ui {
         sticker: bool,
         clear_composer: bool,
     ) -> bool {
+        self.queue_local_files_with_preview(files,caption,sticker,clear_composer,None)
+    }
+    pub(crate) fn send_pack_sticker(self:&Rc<Self>,asset:&crate::packs::Asset)->bool {
+        self.queue_local_files_with_preview(vec![gtk::gio::File::for_path(&asset.path)],"",true,false,Some(asset.item.id))
+    }
+    fn queue_local_files_with_preview(
+        self: &Rc<Self>,
+        files: Vec<gtk::gio::File>,
+        caption: &str,
+        sticker: bool,
+        clear_composer: bool,
+        local_sticker: Option<i64>,
+    ) -> bool {
         if files.is_empty()
             || files.len() > 64
             || caption.len() > 64 * 1024
@@ -108,6 +121,7 @@ impl Ui {
                         .unwrap_or_else(|| "attachment".into()),
                     error: None,
                     sticker,
+                    local_sticker,
                 }),
                 ..Default::default()
             };
@@ -148,6 +162,7 @@ impl Ui {
         self.notify_typing(false);
         self.mark_current_chat_read();
         self.history_window.content_changed();
+        if sticker { if let Some(id)=ids.first(){self.animate_sent_sticker(id);} }
         self.render_messages(true);
         self.refresh_chats(None);
         let weak = Rc::downgrade(self);
