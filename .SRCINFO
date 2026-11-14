@@ -46,11 +46,9 @@ pkgbase = monogram-desktop-git
 	options = !lto
 	source = monogram-desktop::git+https://github.com/doromiert/monogram-desktop.git
 	source = libomemo-c-1f0b37fee3ebefc46c32f882623481899a1ba568.tar.gz::https://codeload.github.com/dino/libomemo-c/tar.gz/1f0b37fee3ebefc46c32f882623481899a1ba568
-	source = rlottie-ea06d2f29ba01b8d06c00a838d107f5e484ae59b.tar.gz::https://codeload.github.com/Samsung/rlottie/tar.gz/ea06d2f29ba01b8d06c00a838d107f5e484ae59b
 	source = MicroTeX-0e3707f6dafebb121d98b53c64364d16fefe481d.tar.gz::https://codeload.github.com/NanoMichael/MicroTeX/tar.gz/0e3707f6dafebb121d98b53c64364d16fefe481d
 	sha256sums = SKIP
 	sha256sums = f5a2b8751b3ad2a40a367e4ed45a671338b5d3ed09e36d9f86e06fd96d7da11b
-	sha256sums = a89e071a3455ccbf8f61af67aad0657259ae9aabdf3afe3a0670954370cdd37a
 	sha256sums = 47476269d29c41df322bce6bdd2daa7017cc50b9eda841b2bec1767dba28daa6
 
 pkgname = monogram-desktop-git

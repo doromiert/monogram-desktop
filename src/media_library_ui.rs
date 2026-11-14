@@ -2332,7 +2332,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a native display, bubblewrap and rlottie"]
+    #[ignore = "requires a native display, bubblewrap"]
     fn offscreen_tgs_drops_and_lazily_reopens_its_decoder() {
         gtk::init().unwrap();
         let path = std::path::PathBuf::from(

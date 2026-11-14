@@ -472,6 +472,9 @@ impl Ui {
         });
         ui.big_emoji
             .set(ui.store.pref("big_emoji", "true") == "true");
+        crate::emoji_completion::set_discord_style(
+            ui.store.pref("discord_emoji_completion", "false") == "true",
+        );
         adw::StyleManager::default().set_color_scheme(
             match ui.store.pref("style", "system").as_str() {
                 "dark" => adw::ColorScheme::ForceDark,

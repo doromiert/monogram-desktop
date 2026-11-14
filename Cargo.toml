@@ -1,6 +1,6 @@
 [package]
 name = "monogram-desktop"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "Native GTK/libadwaita Monogram client"
@@ -24,6 +24,8 @@ libloading = "0.8"
 glam = "0.32"
 qrcode = { version = "0.14", default-features = false }
 flate2 = "1"
+libc = "0.2"
+tlottie = { git = "https://github.com/dkaraush/tlottie", rev = "92df98dc209bc39b1e567ec74a8c86a0af5239de", default-features = false, features = ["cpu", "std"] }
 zip = { version = "=9.5.1", default-features = false }
 openssl = "0.10"
 zeroize = { version = "1", features = ["derive"] }

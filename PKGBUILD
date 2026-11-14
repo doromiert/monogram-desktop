@@ -25,14 +25,11 @@ conflicts=('monogram-desktop')
 options=('!lto')
 _omemo_rev=1f0b37fee3ebefc46c32f882623481899a1ba568
 _microtex_rev=0e3707f6dafebb121d98b53c64364d16fefe481d
-_rlottie_rev=ea06d2f29ba01b8d06c00a838d107f5e484ae59b
 source=("monogram-desktop::git+$url.git"
         "libomemo-c-$_omemo_rev.tar.gz::https://codeload.github.com/dino/libomemo-c/tar.gz/$_omemo_rev"
-        "rlottie-$_rlottie_rev.tar.gz::https://codeload.github.com/Samsung/rlottie/tar.gz/$_rlottie_rev"
         "MicroTeX-$_microtex_rev.tar.gz::https://codeload.github.com/NanoMichael/MicroTeX/tar.gz/$_microtex_rev")
 sha256sums=('SKIP'
             'f5a2b8751b3ad2a40a367e4ed45a671338b5d3ed09e36d9f86e06fd96d7da11b'
-            'a89e071a3455ccbf8f61af67aad0657259ae9aabdf3afe3a0670954370cdd37a'
             '47476269d29c41df322bce6bdd2daa7017cc50b9eda841b2bec1767dba28daa6')
 
 pkgver() {
@@ -53,29 +50,19 @@ build() {
         -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF
     cmake --build "$srcdir/omemo-build"
     cmake --install "$srcdir/omemo-build"
-    cmake -S "$srcdir/rlottie-$_rlottie_rev" -B "$srcdir/rlottie-build" -G Ninja \
-        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX="$srcdir/native" -DLIB_INSTALL_DIR="$srcdir/native/lib" -DBUILD_SHARED_LIBS=OFF \
-        -DLOTTIE_THREAD=OFF -DLOTTIE_MODULE=OFF -DLOTTIE_TEST=OFF
-    cmake --build "$srcdir/rlottie-build"
-    cmake --install "$srcdir/rlottie-build"
     cd "$srcdir/monogram-desktop"
-    cc $CFLAGS -std=c11 -I"$srcdir/native/include" -c native/lottie_renderer.c -o "$srcdir/lottie-renderer.o"
-    c++ $LDFLAGS "$srcdir/lottie-renderer.o" "$srcdir/native/lib/librlottie.a" -lz -lm -pthread -o "$srcdir/monogram-sticker-renderer"
     cmake -S native/math -B "$srcdir/math-build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DMICROTEX_SOURCE_DIR="$srcdir/MicroTeX-$_microtex_rev" \
         -DMONOGRAM_MATH_RESOURCE_DIR=/usr/share/monogram-math
     cmake --build "$srcdir/math-build"
     export PKG_CONFIG_PATH="$srcdir/native/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-    export MONOGRAM_PREBUILT_LOTTIE_HELPER="$srcdir/monogram-sticker-renderer"
     export MONOGRAM_BWRAP=/usr/bin/bwrap MONOGRAM_MATH_HELPER=/usr/lib/monogram-desktop/monogram-math-renderer
-    cargo build --release --frozen
+    cargo build --release --frozen --bin monogram-desktop --bin monogram-sticker-renderer
 }
 
 check() {
     cd "$srcdir/monogram-desktop"
     export PKG_CONFIG_PATH="$srcdir/native/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-    export MONOGRAM_PREBUILT_LOTTIE_HELPER="$srcdir/monogram-sticker-renderer"
     export MONOGRAM_BWRAP=/usr/bin/bwrap MONOGRAM_MATH_HELPER=/usr/lib/monogram-desktop/monogram-math-renderer
     cargo test --release --frozen --bin monogram-desktop keepassxc::tests
 }
@@ -83,7 +70,7 @@ check() {
 package() {
     cd "$srcdir/monogram-desktop"
     install -Dm755 target/release/monogram-desktop "$pkgdir/usr/lib/monogram-desktop/monogram-desktop"
-    install -Dm755 "$srcdir/monogram-sticker-renderer" "$pkgdir/usr/lib/monogram-desktop/monogram-sticker-renderer"
+    install -Dm755 target/release/monogram-sticker-renderer "$pkgdir/usr/lib/monogram-desktop/monogram-sticker-renderer"
     install -Dm755 "$srcdir/math-build/monogram-math-renderer" "$pkgdir/usr/lib/monogram-desktop/monogram-math-renderer"
     install -d "$pkgdir/usr/share/monogram-math"
     cp -a "$srcdir/MicroTeX-$_microtex_rev/res/." "$pkgdir/usr/share/monogram-math/"
@@ -96,5 +83,4 @@ package() {
     install -m644 native/NOTICE.md "$pkgdir/usr/share/licenses/$pkgname/native-NOTICE.md"
     install -m644 "$srcdir/libomemo-c-$_omemo_rev/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/libomemo-c-LICENSE"
     install -m644 "$srcdir/MicroTeX-$_microtex_rev/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/MicroTeX-MIT.txt"
-    install -m644 "$srcdir/rlottie-$_rlottie_rev/COPYING" "$pkgdir/usr/share/licenses/$pkgname/rlottie-COPYING"
 }

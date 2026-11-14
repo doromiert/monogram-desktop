@@ -113,6 +113,19 @@ pub fn search(query: &str) -> Vec<EmojiEntry> {
         .collect()
 }
 
+/// Discord-style completion: two characters before suggesting, Enter accepts, and a
+/// cursor inside a word suppresses suggestions so Enter sends the text as typed.
+static DISCORD_STYLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn set_discord_style(enabled: bool) {
+    DISCORD_STYLE.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn discord_style() -> bool {
+    DISCORD_STYLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+fn emoji_name_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '-' | '+')
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct Token {
     start: i32,
@@ -144,12 +157,14 @@ fn token(view: &gtk::TextView) -> Option<Token> {
         return None;
     }
     let query = &text[colon + 1..];
-    if query.is_empty()
-        || !query
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '+'))
-    {
+    if query.is_empty() || !query.chars().all(emoji_name_char) {
         return None;
+    }
+    if discord_style() {
+        // `:3` and `:P` stay plain text, and a cursor before the last letter bypasses.
+        if query.chars().count() < 2 || emoji_name_char(buffer.iter_at_offset(end).char()) {
+            return None;
+        }
     }
     Some(Token {
         start: first + before.chars().count() as i32,
@@ -314,6 +329,11 @@ impl Completion {
                     .select_row(self.list.row_at_index(next as i32).as_ref());
             }
             gdk::Key::Tab => self.activate(self.selected.get()),
+            gdk::Key::Return | gdk::Key::KP_Enter
+                if discord_style() && !modifiers.contains(gdk::ModifierType::SHIFT_MASK) =>
+            {
+                self.activate(self.selected.get())
+            }
             gdk::Key::Escape => self.hide(),
             _ => return false,
         }
@@ -465,6 +485,56 @@ mod tests {
             }
             assert!(completion.key(gdk::Key::Tab,gdk::ModifierType::empty()));
             let value=view.buffer().text(&view.buffer().start_iter(),&view.buffer().end_iter(),false);assert_ne!(value.as_str(),":smile");assert!(!value.is_empty());
+        });window.destroy();
+    }
+
+    #[test]
+    #[ignore = "requires a private native GTK display"]
+    fn discord_style_needs_two_characters_accepts_with_enter_and_bypasses_inside_words() {
+        use super::*;
+        /// The mode is process-global; always restore it, even when an assertion fails.
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                set_discord_style(false);
+            }
+        }
+        gtk::init().unwrap();let _=catalog();
+        let _restore=Restore;set_discord_style(true);
+        let view=gtk::TextView::new();let completion=attach(&view);
+        let window=gtk::Window::builder().default_width(420).default_height(220).child(&view).build();window.present();view.grab_focus();
+        let text=|| view.buffer().text(&view.buffer().start_iter(),&view.buffer().end_iter(),false).to_string();
+        glib::MainContext::default().block_on(async {
+            glib::timeout_future(std::time::Duration::from_millis(80)).await;
+            // One character (`:3`, `:s`) stays plain text and Enter is left for sending.
+            for value in [":3",":s"] {
+                view.buffer().set_text(value);view.buffer().place_cursor(&view.buffer().end_iter());completion.update();
+                glib::timeout_future(std::time::Duration::from_millis(40)).await;
+                assert!(!completion.popover.is_mapped(),"{value}: suggestion shown before two characters");
+                assert!(!completion.key(gdk::Key::Return,gdk::ModifierType::empty()),"{value}: Enter consumed");
+                assert_eq!(text(),value);
+            }
+            // With the cursor before the last letter, Enter sends the text as typed.
+            view.buffer().set_text(":smile");
+            view.buffer().place_cursor(&view.buffer().iter_at_offset(5));completion.update();
+            glib::timeout_future(std::time::Duration::from_millis(40)).await;
+            assert!(!completion.popover.is_mapped(),"suggestion shown while the cursor is inside a word");
+            assert!(!completion.key(gdk::Key::Return,gdk::ModifierType::empty()),"Enter consumed inside a word");
+            assert_eq!(text(),":smile");
+            // Two characters at the end of a word: suggest. Shift+Enter is still left alone.
+            view.buffer().set_text(":sm");view.buffer().place_cursor(&view.buffer().end_iter());completion.update();
+            glib::timeout_future(std::time::Duration::from_millis(40)).await;
+            assert!(completion.popover.is_mapped(),"no suggestion after two characters");
+            assert!(!completion.key(gdk::Key::Return,gdk::ModifierType::SHIFT_MASK),"Shift+Enter consumed");
+            assert_eq!(text(),":sm");
+            // Enter accepts the selected suggestion and replaces the token.
+            assert!(completion.key(gdk::Key::Return,gdk::ModifierType::empty()),"Enter did not accept");
+            let value=text();assert_ne!(value,":sm");assert!(!value.is_empty());assert!(!value.starts_with(':'),"token not replaced: {value:?}");
+            // Tab still accepts in this mode too.
+            view.buffer().set_text(":smi");view.buffer().place_cursor(&view.buffer().end_iter());completion.update();
+            glib::timeout_future(std::time::Duration::from_millis(40)).await;
+            assert!(completion.key(gdk::Key::Tab,gdk::ModifierType::empty()),"Tab did not accept");
+            assert!(!text().starts_with(':'));
         });window.destroy();
     }
 

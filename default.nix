@@ -1,4 +1,4 @@
-{ pkgs, lib, stdenv, pkg-config, protobuf, libomemo-c, openssl, gtk4, libadwaita, libepoxy, libglycin-gtk4, glycin-loaders, sqlite, wrapGAppsHook4, xorg-server, dbus, makeFontsConf, adwaita-fonts, gsettings-desktop-schemas, mesa, librsvg, prosody, cacert, python3, gnome-keyring, gst_all_1, clapper-unwrapped, rlottie, zlib, bubblewrap, monogramSrc ? lib.cleanSource ./., craneLib ? import (builtins.fetchTarball {
+{ pkgs, lib, stdenv, pkg-config, protobuf, libomemo-c, openssl, gtk4, libadwaita, libepoxy, libglycin-gtk4, glycin-loaders, sqlite, wrapGAppsHook4, xorg-server, dbus, makeFontsConf, adwaita-fonts, gsettings-desktop-schemas, mesa, librsvg, prosody, cacert, python3, gnome-keyring, gst_all_1, clapper-unwrapped, bubblewrap, monogramSrc ? lib.cleanSource ./., craneLib ? import (builtins.fetchTarball {
   url = "https://github.com/ipetkov/crane/archive/79fd63528501446749c09f08cad486a58c7d173e.tar.gz";
   sha256 = "sha256-TREenflwEjxOSq292FYwbc3kEm7TDRtXCZRNWEdjBmg=";
 }) { inherit pkgs; } }:
@@ -8,22 +8,6 @@ let
   gtk4Fixed = gtk4.overrideAttrs (old: {
     patches = (old.patches or []) ++ [ ./native/gtk-gpu-clip-restore.patch ];
   });
-  stickerRlottie = rlottie.overrideAttrs (old: { mesonFlags = (old.mesonFlags or []) ++ [ "-Dthread=false" ]; });
-  stickerRenderer = stdenv.mkDerivation {
-    pname = "monogram-sticker-renderer";
-    version = "0.2.0";
-    src = builtins.path { path = src + "/native/lottie_renderer.c"; name = "monogram-lottie-renderer.c"; };
-    dontUnpack = true;
-    strictDeps = true;
-    nativeBuildInputs = [ pkg-config ];
-    buildInputs = [ stickerRlottie zlib ];
-    buildPhase = ''
-      $CC -O2 -std=c11 "$src" -o monogram-sticker-renderer $(pkg-config --cflags --libs rlottie zlib) -lm
-    '';
-    installPhase = ''
-      install -Dm755 monogram-sticker-renderer $out/bin/monogram-sticker-renderer
-    '';
-  };
   fontConfig = makeFontsConf { fontDirectories = [ adwaita-fonts ]; };
   mathRenderer = pkgs.callPackage ./native/math { };
   commonArgs = {
@@ -49,16 +33,15 @@ let
   cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
   cargoArtifacts = craneLib.buildDepsOnly ((builtins.removeAttrs commonArgs [ "src" ]) // {
     inherit dummySrc cargoVendorDir;
-    cargoCheckExtraArgs = "--bin monogram-desktop";
-    cargoBuildExtraArgs = "--bin monogram-desktop";
+    cargoCheckExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer";
+    cargoBuildExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer";
   });
 in craneLib.buildPackage (commonArgs // {
   MONOGRAM_MATH_HELPER = "${mathRenderer}/bin/monogram-math-renderer";
-  MONOGRAM_PREBUILT_LOTTIE_HELPER = "${stickerRenderer}/bin/monogram-sticker-renderer";
   MONOGRAM_BWRAP = "${bubblewrap}/bin/bwrap";
   inherit cargoArtifacts cargoVendorDir;
-  cargoBuildExtraArgs = "--bin monogram-desktop";
-  passthru = { inherit cargoArtifacts stickerRenderer gtk4Fixed mathRenderer; };
+  cargoBuildExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer";
+  passthru = { inherit cargoArtifacts gtk4Fixed mathRenderer; };
   nativeCheckInputs = [ xorg-server dbus prosody openssl python3 gnome-keyring ];
   postCheck = ''
     export HOME=$TMPDIR/home XDG_CACHE_HOME=$TMPDIR/cache XDG_CONFIG_HOME=$TMPDIR/config XDG_STATE_HOME=$TMPDIR/state
@@ -100,7 +83,7 @@ in craneLib.buildPackage (commonArgs // {
     cp native/NOTICE.md $out/share/doc/monogram-desktop/native-NOTICE.md
     cp native/gtk-gpu-clip-restore.patch $out/share/doc/monogram-desktop/
     mkdir -p $out/libexec
-    cp ${stickerRenderer}/bin/monogram-sticker-renderer $out/libexec/monogram-sticker-renderer
+    mv $out/bin/monogram-sticker-renderer $out/libexec/monogram-sticker-renderer
     gappsWrapperArgs+=(
       --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ gtk4Fixed ]}
       --set MONOGRAM_MATH_HELPER ${mathRenderer}/bin/monogram-math-renderer
