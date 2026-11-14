@@ -204,11 +204,13 @@ async fn cycle(mesh: &Arc<Mesh>, store: &Store) -> Result<()> {
         }
         export_fingerprints(mesh, owner)?;
         let library = Library::open(owner).await.map_err(error)?;
+        let mut pack_order=json!({"stickers":[],"emojis":[]});
         for pack in library.snapshot().await.map_err(error)?.packs {
             if pack.items.is_empty() || pack.source.starts_with("local:replaced:") {
                 continue;
             }
             let pack = library.sync_tag(pack.id).await.map_err(error)?;
+            if pack.installed {pack_order[if pack.kind==crate::packs::Kind::Emoji{"emojis"}else{"stickers"}].as_array_mut().unwrap().push(json!(pack.sync_id));}
             let mut value = serde_json::to_value(&pack).map_err(error)?;
             for field in ["last_sync", "last_attempt", "sync_error"] {
                 value.as_object_mut().unwrap().remove(field);
@@ -244,6 +246,7 @@ async fn cycle(mesh: &Arc<Mesh>, store: &Store) -> Result<()> {
             result?;
             mesh.store.lock().unwrap().set_signature(&k, sig)?;
         }
+        publish_json(mesh,"pack-order",owner,"order",pack_order)?;
     }
     let pending = mesh.store.lock().unwrap().pending();
     for meta in pending {
@@ -258,18 +261,19 @@ async fn cycle(mesh: &Arc<Mesh>, store: &Store) -> Result<()> {
         let applied = apply(store, &meta, &path).await;
         let _ = std::fs::remove_file(path);
         match applied {
-            Ok(signature) => {
+            Ok(Some(signature)) => {
                 let mut sync = mesh.store.lock().unwrap();
                 sync.mark_applied(&meta.key(), &meta.digest)?;
                 sync.set_signature(&meta.key(), signature)?;
                 REVISION.fetch_add(1, Ordering::Relaxed);
             }
+            Ok(None) => continue,
             Err(reason) => return Err(reason),
         }
     }
     Ok(())
 }
-async fn apply(store: &Store, meta: &Meta, path: &std::path::Path) -> Result<String> {
+async fn apply(store: &Store, meta: &Meta, path: &std::path::Path) -> Result<Option<String>> {
     if meta.kind == "pack" {
         if !store.accounts().iter().any(|a| a.jid == meta.owner) {
             return Err("Waiting for the pack’s account to sync.".into());
@@ -283,7 +287,7 @@ async fn apply(store: &Store, meta: &Meta, path: &std::path::Path) -> Result<Str
         for field in ["last_sync", "last_attempt", "sync_error"] {
             value.as_object_mut().unwrap().remove(field);
         }
-        return Ok(digest(&serde_json::to_vec(&value).map_err(error)?));
+        return Ok(Some(digest(&serde_json::to_vec(&value).map_err(error)?)));
     }
     let data = Zeroizing::new(std::fs::read(path).map_err(error)?);
     let value: Value = serde_json::from_slice(&data).map_err(error)?;
@@ -339,6 +343,10 @@ async fn apply(store: &Store, meta: &Meta, path: &std::path::Path) -> Result<Str
                 )
                 .map_err(error)?;
         }
+        "pack-order" => {
+            let library=Library::open(&meta.owner).await.map_err(error)?;
+            if !library.apply_sync_order(value.clone()).await.map_err(error)? {return Ok(None);}
+        }
         "folders" => {
             store
                 .set_pref(&format!("folders:{}", meta.owner), &value.to_string())
@@ -364,7 +372,7 @@ async fn apply(store: &Store, meta: &Meta, path: &std::path::Path) -> Result<Str
         }
         _ => return Err("Unsupported synchronized setting.".into()),
     }
-    Ok(digest(&serde_json::to_vec(&value).map_err(error)?))
+    Ok(Some(digest(&serde_json::to_vec(&value).map_err(error)?)))
 }
 fn export_fingerprints(mesh: &Mesh, owner: &str) -> Result<()> {
     let root = crate::crypto::lifecycle::root()

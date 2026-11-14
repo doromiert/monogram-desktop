@@ -545,14 +545,14 @@ fn numeric_dialog(ui: &Rc<Ui>, status: &adw::ActionRow, display: bool,spinner:&g
             if display {
                 "Type this rotating code on your other device."
             } else {
-                "Looking for nearby devices…"
+                "Looking for nearby devices… If none appear, check that your firewall allows TCP 45950 and UDP 45950."
             },
             "",
         );
         body.append(&feedback);
         body.reorder_child_after(&task.cancel,Some(&feedback));
         let Some(dialog)=task.dialog.upgrade()else{return;};
-        task.message(if display{"Preparing rotating pairing code…"}else{"Looking for nearby devices…"});
+        task.message(if display{"Preparing rotating pairing code…"}else{"Looking for nearby devices… If none appear, check that your firewall allows TCP 45950 and UDP 45950."});
         let baseline=gio::spawn_blocking({let mesh=mesh.clone();move||mesh.store.lock().unwrap().state.peers.len()}).await.unwrap_or(0);
         if display {
         let m = mesh.clone();
