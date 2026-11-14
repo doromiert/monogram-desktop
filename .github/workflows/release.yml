@@ -4,38 +4,48 @@ on:
   push:
     branches: [main]
 
+# Read-only by default. Each job below asks for exactly what it needs, so the job that
+# runs third-party build tooling never holds a write-scoped token.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
       release_created: ${{ steps.rp.outputs.release_created }}
       tag_name: ${{ steps.rp.outputs.tag_name }}
       version: ${{ steps.rp.outputs.version }}
     steps:
       - id: rp
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
   # Runs only when release-please reports that its release PR was merged and a
   # release was created. Ordinary pushes to main never reach this job.
+  # Read-only: it builds the AppImage and hands it on as an artifact.
   appimage:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     container:
       image: archlinux:latest
-      # bwrap/strace used by the bundler need these inside the container
-      options: --privileged
+      # strace-based library detection in the bundler needs ptrace, which the default
+      # container seccomp profile blocks. Narrower than --privileged.
+      options: --cap-add SYS_PTRACE --security-opt seccomp=unconfined
     env:
       TAG: ${{ needs.release-please.outputs.tag_name }}
       VERSION: ${{ needs.release-please.outputs.version }}
       OMEMO_REV: 1f0b37fee3ebefc46c32f882623481899a1ba568
+      # Same checksum the PKGBUILD verifies for this tarball.
+      OMEMO_SHA256: f5a2b8751b3ad2a40a367e4ed45a671338b5d3ed09e36d9f86e06fd96d7da11b
     steps:
       - name: Install build and bundling dependencies
         run: |
@@ -44,15 +54,19 @@ jobs:
             gtk4 libadwaita glycin glycin-gtk4 libclapper-gtk \
             gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav \
             libepoxy openssl sqlite protobuf-c bubblewrap fontconfig ttf-dejavu noto-fonts-emoji \
-            wget xorg-server-xvfb strace patchelf binutils file zsync desktop-file-utils github-cli
+            wget xorg-server-xvfb strace patchelf binutils file zsync desktop-file-utils
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.TAG }}
+          # Do not leave a token in the workspace for the build tooling below.
+          persist-credentials: false
 
       - name: Build libomemo-c (same revision as the Arch package)
         run: |
-          curl -fsSL "https://codeload.github.com/dino/libomemo-c/tar.gz/$OMEMO_REV" | tar xz -C "$RUNNER_TEMP"
+          curl -fsSL -o "$RUNNER_TEMP/libomemo-c.tar.gz" "https://codeload.github.com/dino/libomemo-c/tar.gz/$OMEMO_REV"
+          echo "$OMEMO_SHA256  $RUNNER_TEMP/libomemo-c.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/libomemo-c.tar.gz" -C "$RUNNER_TEMP"
           cmake -S "$RUNNER_TEMP/libomemo-c-$OMEMO_REV" -B "$RUNNER_TEMP/omemo-build" -G Ninja \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
@@ -81,6 +95,9 @@ jobs:
           install -Dm644 data/com.negzero.MonogramDesktop.desktop /usr/share/applications/com.negzero.MonogramDesktop.desktop
           install -Dm644 data/icons/com.negzero.MonogramDesktop.svg /usr/share/icons/hicolor/scalable/apps/com.negzero.MonogramDesktop.svg
 
+      # No ADD_HOOKS on purpose: the optional fix-namespaces hook would offer to disable Ubuntu's
+      # unprivileged-userns restriction system-wide (via pkexec + /etc/sysctl.d). If bubblewrap
+      # cannot start, the app fails closed and shows its renderers as unavailable.
       - name: Bundle AppImage (Arch libs + bundled glibc, upstream type-2 runtime)
         env:
           ARCH: x86_64
@@ -95,7 +112,6 @@ jobs:
           DEPLOY_GLYCIN: "1"
           DEPLOY_GSTREAMER: "1"
           DEPLOY_GSTREAMER_ALL: "1"
-          ADD_HOOKS: fix-namespaces.hook
         run: |
           mkdir -p dist
           curl -fsSL -o quick-sharun \
@@ -111,9 +127,38 @@ jobs:
           install -m644 packaging/appimage/10-monogram.hook AppDir/bin/
           ./quick-sharun --make-appimage
 
-      - name: Upload to the release
+      - name: Checksum
+        run: |
+          cd dist
+          sha256sum -- *.AppImage > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: appimage
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # The only job with write access. It runs no build tooling: it just attaches the
+  # finished artifact to the release that release-please created.
+  upload:
+    needs: [release-please, appimage]
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.release-please.outputs.tag_name }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: appimage
+          path: dist
+
+      - name: Attach to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          gh release upload "$TAG" dist/*.AppImage --clobber --repo "$GITHUB_REPOSITORY"
+          (cd dist && sha256sum -c SHA256SUMS)
+          gh release upload "$TAG" dist/*.AppImage dist/SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"
