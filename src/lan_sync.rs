@@ -75,11 +75,12 @@ pub async fn start() -> Result<Arc<Mesh>> {
         key
     };
     let mesh = gio::spawn_blocking(move || {
-        Mesh::start(monogram_sync::Store::open(
-            root(),
-            key,
-            gtk::glib::host_name().to_string(),
-        )?)
+        let mut sync=monogram_sync::Store::open(root(),key,gtk::glib::host_name().to_string())?;
+        let native=Store::open(false).map_err(error)?;
+        let mut query=native.db.prepare("SELECT substr(key,19) FROM preferences WHERE key LIKE 'lan-sync-excluded:%' AND value='true'").map_err(error)?;
+        let owners=query.query_map([],|r|r.get::<_,String>(0)).map_err(error)?;
+        for owner in owners{sync.exclude(&owner.map_err(error)?)?;}
+        Mesh::start(sync)
     })
     .await
     .map_err(error)??;
@@ -99,7 +100,6 @@ pub async fn start() -> Result<Arc<Mesh>> {
   let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
   runtime.block_on(async move{
    let Ok(store)=Store::open(false)else{return;};
-   if let Ok(mut query)=store.db.prepare("SELECT substr(key,19) FROM preferences WHERE key LIKE 'lan-sync-excluded:%' AND value='true'"){if let Ok(rows)=query.query_map([],|r|r.get::<_,String>(0)){for owner in rows.flatten(){let _=node.exclude(&owner);}}}
    while !node.is_stopped(){
     let result=cycle(&node,&store).await;*ADAPTER_STATUS.lock().unwrap()=result.err().unwrap_or_default();
     for _ in 0..20{if node.is_stopped(){return;}tokio::time::sleep(Duration::from_millis(500)).await;}
