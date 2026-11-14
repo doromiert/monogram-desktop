@@ -78,6 +78,8 @@ impl Target {
 
 struct Flight {
     id: String,
+    incoming: bool,
+    sticker: bool,
     scope: (String, String, u64),
     source: gsk::RenderNode,
     from: graphene::Rect,
@@ -103,6 +105,7 @@ mod layer_imp {
     pub struct Layer {
         pub(super) flights: RefCell<Vec<Flight>>,
         pub ticking: Cell<bool>,
+        pub(super) sticker_source: RefCell<Option<(gsk::RenderNode,graphene::Rect,Instant)>>,
     }
     #[glib::object_subclass]
     impl ObjectSubclass for Layer {
@@ -134,7 +137,13 @@ impl SendAnimation {
         layer.update_state(&[gtk::accessible::State::Hidden(true)]);
         layer
     }
+    pub(crate) fn remember_sticker_source(&self,widget:&impl IsA<gtk::Widget>){
+        let widget=widget.upcast_ref::<gtk::Widget>();let content=widget.first_child().unwrap_or_else(||widget.clone());let Some(bounds)=content.compute_bounds(self)else{return;};
+        let snapshot=gtk::Snapshot::new();gtk::WidgetPaintable::new(Some(&content)).snapshot(&snapshot,content.width() as f64,content.height() as f64);
+        if let Some(node)=snapshot.to_node(){self.imp().sticker_source.replace(Some((node,bounds,Instant::now())));}
+    }
     pub fn cancel(&self) {
+        self.imp().sticker_source.borrow_mut().take();
         self.imp().flights.borrow_mut().clear();
         self.queue_draw();
     }
@@ -152,13 +161,18 @@ impl SendAnimation {
         flight.settle = 2;
         target.upcast()
     }
-    fn enqueue(&self, ui: &Rc<Ui>, id: &str) {
+    fn enqueue(&self, ui: &Rc<Ui>, id: &str) { self.enqueue_origin(ui,id,false,false); }
+    fn enqueue_origin(&self, ui: &Rc<Ui>, id: &str, incoming: bool, sticker: bool) {
         if !animations_enabled(self) || !ui.composer.is_mapped() || !self.is_mapped() {
             return;
         }
-        let Some((source, from)) = composer_snapshot(&ui.composer, self) else {
-            return;
-        };
+        let (source,from)=if sticker {
+            let Some((node,bounds,_))=self.imp().sticker_source.borrow_mut().take().filter(|(_,_,time)|time.elapsed()<Duration::from_millis(400))else{return;};(node,bounds)
+        } else if incoming {
+            let Some(bounds)=ui.composer.compute_bounds(self) else{return;};
+            let rect=graphene::Rect::new(0.,0.,1.,1.);
+            (gsk::ColorNode::new(&gtk::gdk::RGBA::TRANSPARENT,&rect).upcast(),graphene::Rect::new(bounds.x(),bounds.y()+bounds.height()+16.,1.,1.))
+        } else { let Some(snapshot)=composer_snapshot(&ui.composer,self) else{return;};snapshot };
         let state = ui.state.borrow();
         let scope = (
             state.account.clone(),
@@ -172,6 +186,8 @@ impl SendAnimation {
         }
         flights.push(Flight {
             id: id.into(),
+            incoming,
+            sticker,
             scope,
             source,
             from,
@@ -184,7 +200,7 @@ impl SendAnimation {
             viewport: (self.width(), self.height()),
         });
         drop(flights);
-        ui.set_composer_send_hint(true);
+        if !incoming && !sticker { ui.set_composer_send_hint(true); }
         self.queue_draw();
         if self.imp().ticking.replace(true) {
             return;
@@ -249,6 +265,10 @@ impl SendAnimation {
                 let Some(node) = target.node() else {
                     return true;
                 };
+                if f.incoming {
+                    f.source=node.clone();
+                    f.from=graphene::Rect::new(viewport.x()+12.,f.from.y(),bounds.width(),bounds.height());
+                }
                 f.to = Some((node, bounds));
             }
             if let Some((_, to)) = f.to.as_mut() {
@@ -258,7 +278,7 @@ impl SendAnimation {
             f.progress = ((now - start) as f64 / DURATION).clamp(0., 1.);
             f.progress < 1.
         });
-        ui.set_composer_send_hint(self.imp().flights.borrow().iter().any(|f| f.progress < 0.4));
+        ui.set_composer_send_hint(self.imp().flights.borrow().iter().any(|f| !f.incoming && !f.sticker && f.progress < 0.4));
         self.queue_draw();
     }
 }
@@ -329,14 +349,19 @@ fn draw(snapshot: &gtk::Snapshot, f: &Flight) {
         return;
     };
     let p = f.progress;
+    if f.incoming {
+        let ease=adw::Easing::EaseOutCubic.ease(p) as f32;
+        snapshot.save();snapshot.translate(&graphene::Point::new(f.from.x()+(to.x()-f.from.x())*ease,f.from.y()+(to.y()-f.from.y())*ease));
+        snapshot.append_node(node);snapshot.restore();return;
+    }
     let y = adw::Easing::EaseOutCubic.ease(p) as f32;
     let x = adw::Easing::EaseOutQuint.ease(p) as f32;
     let mix = |a: f32, b: f32, t: f32| a + (b - a) * t;
     let rect = graphene::Rect::new(
-        mix(f.from.x() - 12., to.x(), x),
-        mix(f.from.y() - 8., to.y(), y),
-        mix(f.from.width() + 24., to.width(), x),
-        mix(f.from.height() + 16., to.height(), y),
+        mix(f.from.x() - if f.sticker{0.}else{12.}, to.x(), x),
+        mix(f.from.y() - if f.sticker{0.}else{8.}, to.y(), y),
+        mix(f.from.width() + if f.sticker{0.}else{24.}, to.width(), x),
+        mix(f.from.height() + if f.sticker{0.}else{16.}, to.height(), y),
     );
     snapshot.save();
     snapshot.translate(&graphene::Point::new(rect.x(), rect.y()));
@@ -356,7 +381,8 @@ fn draw(snapshot: &gtk::Snapshot, f: &Flight) {
     if alpha < 1. {
         snapshot.push_opacity(1. - alpha);
         snapshot.save();
-        snapshot.translate(&graphene::Point::new(12., 8.));
+        if f.sticker {snapshot.scale(rect.width()/f.from.width().max(1.),rect.height()/f.from.height().max(1.));}
+        else {snapshot.translate(&graphene::Point::new(12., 8.));}
         snapshot.append_node(&f.source);
         snapshot.restore();
         snapshot.pop();
@@ -365,6 +391,10 @@ fn draw(snapshot: &gtk::Snapshot, f: &Flight) {
     snapshot.restore();
 }
 impl Ui {
+    pub(crate) fn animate_sent_sticker(self:&Rc<Self>,id:&str){self.send_animation.enqueue_origin(self,id,false,true);}
+    pub(crate) fn animate_received_message(self: &Rc<Self>, id: &str) {
+        self.send_animation.enqueue_origin(self,id,true,false);
+    }
     pub(crate) fn animate_sent_text(self: &Rc<Self>, id: &str) {
         self.send_animation.enqueue(self, id);
     }
@@ -425,6 +455,12 @@ mod tests {
             let frames=samples.borrow();assert!(frames.len()>=5,"too few animation frames: {}",frames.len());let max_gap=frames.windows(2).map(|w|(w[1].0-w[0].0)/1000).max().unwrap();assert!(max_gap<100,"send animation stalled {max_gap}ms");assert!(frames.windows(2).all(|w|w[1].1>=w[0].1));drop(frames);
             assert!(!target.borrow().as_ref().and_then(|t|t.upgrade()).unwrap().imp().hidden.get(),"finished target stayed hidden");
             if let Some(prefix)=std::env::var_os("MONOGRAM_SEND_CAPTURE"){assert!(textures.borrow().len()>=4,"missing recorded animation frames");for(i,image)in textures.borrow().iter().enumerate(){image.save_to_png(format!("{}-{i}.png",prefix.to_string_lossy())).unwrap();}}
+            ui.animate_received_message("incoming-flight");
+            ui.state.borrow_mut().current_mut().messages.push(Message{id:"incoming-flight".into(),text:"Incoming message transition".into(),kind:"text".into(),time:"12:31".into(),..Default::default()});
+            ui.render_messages(true);
+            glib::timeout_future(Duration::from_millis(110)).await;
+            {let flights=ui.send_animation.imp().flights.borrow();let flight=flights.iter().find(|f|f.id=="incoming-flight").expect("incoming flight missing");let(_,to)=flight.to.as_ref().expect("incoming target not ready");assert!(flight.incoming&&flight.from.y()>to.y());assert!(flight.from.x()<=to.x()+12.);assert!(flight.progress>0.&&flight.progress<1.);}
+            glib::timeout_future(Duration::from_millis(250)).await;assert!(ui.send_animation.imp().flights.borrow().is_empty());
             for i in 0..5{let text=format!("Rapid message {i}");ui.composer.buffer().set_text(&text);glib::timeout_future(Duration::from_millis(20)).await;ui.queue_text(&text);assert!(ui.send_animation.imp().flights.borrow().len()<=MAX_FLIGHTS);}
             let draining=Instant::now();while !ui.send_animation.imp().flights.borrow().is_empty() && draining.elapsed()<Duration::from_millis(700){glib::timeout_future(Duration::from_millis(20)).await;}assert!(ui.send_animation.imp().flights.borrow().is_empty(),"rapid-send flights did not finish");
             ui.composer.settings().set_gtk_enable_animations(false);ui.composer.buffer().set_text("Reduced motion send");glib::timeout_future(Duration::from_millis(20)).await;ui.queue_text("Reduced motion send");assert!(ui.send_animation.imp().flights.borrow().is_empty());ui.composer.settings().set_gtk_enable_animations(true);

@@ -540,6 +540,7 @@ pub(crate) fn attach(
     let armed_key = drag_key.clone();
     source.connect_prepare(move |source, x, y| {
         let ui = weak.upgrade()?;
+        if ui.picker_zoom.is_active(){source.set_state(gtk::EventSequenceState::Denied);return None;}
         if ui.generation.get() != generation || ui.state.borrow().account != source_owner {
             source.set_state(gtk::EventSequenceState::Claimed);
             return None;

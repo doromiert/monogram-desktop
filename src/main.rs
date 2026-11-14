@@ -73,6 +73,9 @@ mod send_policy_ui;
 mod selection_actions;
 mod send_queue;
 mod send_animation;
+mod message_gestures;
+mod pack_editor;
+mod picker_zoom;
 mod smoke;
 mod spoilers;
 mod storage;
@@ -433,3 +436,7 @@ fn present_window(
     window.present();
 }
 thread_local! {static ROOT:std::cell::RefCell<Option<std::rc::Rc<ui::Ui>>>=const{std::cell::RefCell::new(None)};}
+
+#[cfg(test)]
+#[path = "../tests/picker_actions_native.rs"]
+mod picker_actions_native;

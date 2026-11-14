@@ -517,6 +517,7 @@ impl Ui {
                     name: filename,
                     error: None,
                     sticker: false,
+                    local_sticker: None,
                 }),
                 ..Default::default()
             };
@@ -566,6 +567,30 @@ impl Ui {
             self.start_upload(&peer, &id);
         }
         true
+    }
+    pub(crate) fn pending_sticker_content(self:&Rc<Self>,message:&Message)->gtk::Box {
+        let content=bx(true,0);let picture=AspectImage::thumbnail(168,true);content.append(&picture);
+        let Some(item)=message.upload.as_ref().and_then(|draft|draft.local_sticker)else{return content;};
+        let owner=self.state.borrow().account.clone();let generation=self.generation.get();let weak=Rc::downgrade(self);let image=picture.downgrade();
+        glib::spawn_future_local(async move {
+            let result=async {
+                let library=crate::packs::Library::open(&owner).await.map_err(|e|e.to_string())?;
+                let (asset,input)=library.verified_asset(item,crate::packs::Job::new()).await.map_err(|e|e.to_string())?;
+                let _permit=crate::media_library_ui::lottie_permit().await;
+                gtk::gio::spawn_blocking(move||{
+                    let cancel=gtk::gio::Cancellable::new();
+                    if asset.item.mime=="video/webm" {
+                        use std::os::fd::AsRawFd;
+                        let path=std::path::PathBuf::from(format!("/proc/self/fd/{}",input.0.as_raw_fd()));
+                        let preview=crate::image_loader::encode_video_preview(&path,&cancel,1500)?;
+                        gtk::gdk::Texture::from_bytes(&glib::Bytes::from_owned(preview.bytes)).map_err(|_|"Sticker preview unavailable")
+                    } else {crate::image_loader::Decoder::open_sticker(input,&cancel)?.frame(336).map(|frame|frame.texture)}
+                }).await.map_err(|_|"Preview worker stopped".to_string())?.map_err(str::to_string)
+            }.await;
+            let(Some(ui),Some(picture))=(weak.upgrade(),image.upgrade())else{return;};
+            if ui.generation.get()!=generation||ui.state.borrow().account!=owner{return;}
+            match result {Ok(texture)=>picture.set_paintable(Some(texture.upcast())),Err(error)=>picture.set_tooltip_text(Some(&error))}
+        });content
     }
     pub fn upload_content(self: &Rc<Self>, message: &Message) -> gtk::Box {
         let draft = message.upload.as_ref().unwrap();
@@ -695,6 +720,7 @@ mod tests {
                 name: "input.txt".into(),
                 error: None,
                 sticker: false,
+                    local_sticker: None,
             }),
             unsupported_attachment: true,
             ..Default::default()

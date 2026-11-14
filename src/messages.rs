@@ -632,7 +632,7 @@ impl Ui {
                 outer.append(&slot);
                 avatar = Some(a);
             }
-            let sticker = m.attachment.as_ref().is_some_and(|file| file.sticker);
+            let sticker = m.attachment.as_ref().is_some_and(|file| file.sticker)||m.upload.as_ref().is_some_and(|draft|draft.sticker&&draft.local_sticker.is_some());
             let media = m
                 .attachment
                 .as_ref()
@@ -842,6 +842,10 @@ impl Ui {
                     l.set_margin_top(6);
                     bubble.append(&l)
                 }
+                "file" if sticker && m.upload.is_some() => {
+                    let overlay=gtk::Overlay::new();overlay.set_child(Some(&self.pending_sticker_content(&m)));
+                    meta.add_css_class("sticker-meta");meta.set_halign(gtk::Align::End);meta.set_valign(gtk::Align::End);meta.set_can_target(false);overlay.add_overlay(&meta);bubble.append(&overlay);
+                }
                 "file" if m.upload.is_some() => {
                     bubble.append(&self.upload_content(&m));
                     if !m.text.is_empty() {
@@ -987,9 +991,13 @@ impl Ui {
                 click.set_propagation_phase(gtk::PropagationPhase::Capture);
                 let id = m.id.clone();
                 let weak = Rc::downgrade(self);
-                click.connect_pressed(move |g, _, _, _| {
+                click.connect_pressed(move |g, presses, x, y| {
                     if let Some(ui) = weak.upgrade() {
                         let flags = g.current_event_state();
+                        if presses==2 && !flags.intersects(gdk::ModifierType::CONTROL_MASK|gdk::ModifierType::SHIFT_MASK|gdk::ModifierType::ALT_MASK) {
+                            let interactive=g.widget().and_then(|row|row.pick(x,y,gtk::PickFlags::DEFAULT)).is_some_and(|mut widget|{loop{if widget.is::<gtk::Button>()||widget.is::<gtk::TextView>()||widget.is::<gtk::Scale>(){return true;}let Some(parent)=widget.parent()else{return false;};if parent.has_css_class("message-row"){return false;}widget=parent;}});
+                            if !interactive && ui.double_click_message(&id) {g.set_state(gtk::EventSequenceState::Claimed);return;}
+                        }
                         if flags.intersects(
                             gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK,
                         ) || !ui.selected.borrow().is_empty()

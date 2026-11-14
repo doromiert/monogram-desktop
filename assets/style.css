@@ -270,3 +270,9 @@
 
 .message-editing textview, .message-editing textview text, .message-editing scrolledwindow { background: transparent; color: inherit; box-shadow: none; border: none; }
 .message-editing textview { padding: 2px; }
+
+.picker-section-toggle { padding: 6px 2px; margin-top: 6px; border-radius: 6px; }
+.double-click-preview { padding: 20px; }
+.double-click-preview-bubble { border-radius: 20px; background: alpha(@view_bg_color, .7); border: 1px solid alpha(@view_fg_color,.1); }
+
+.picker-zoom { padding: 16px; border-radius: 20px; background: @popover_bg_color; box-shadow: 0 6px 24px alpha(black,.3); }

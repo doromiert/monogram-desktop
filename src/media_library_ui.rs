@@ -906,7 +906,7 @@ pub(crate) enum PackSelection {
 
 #[derive(Clone)]
 enum PickerRow {
-    Heading(String),
+    Heading(i64, String),
     Empty(String),
     Emoji(Vec<crate::emoji_completion::EmojiEntry>),
     Pack(Vec<crate::packs::Item>),
@@ -1528,6 +1528,7 @@ impl PackLibraryPage {
                 continue;
             }
             self.push_heading(&mut rows, id, &title);
+            if query.is_empty() && matches!(id,-1|-2) && self.section_collapsed(id) { continue; }
             if id == -1 {
                 let owner = self.library.account();
                 let mut entries: Vec<_> = builtin
@@ -1601,9 +1602,11 @@ impl PackLibraryPage {
         self.model.splice(0, self.model.n_items(), &rows);
     }
 
+    fn collapsed_key(&self,id:i64)->String {format!("picker:collapsed:{}:{id}",if self.kind==Kind::Emoji{"emoji"}else{"stickers"})}
+    fn section_collapsed(&self,id:i64)->bool {self.ui.upgrade().is_some_and(|ui|ui.store.pref(&self.collapsed_key(id),"false")=="true")}
     fn push_heading(&self, rows: &mut Vec<glib::BoxedAnyObject>, id: i64, title: &str) {
         self.anchors.borrow_mut().insert(id, rows.len() as u32);
-        Self::push_row(rows, PickerRow::Heading(title.into()));
+        Self::push_row(rows, PickerRow::Heading(id,title.into()));
     }
     fn push_row(rows: &mut Vec<glib::BoxedAnyObject>, row: PickerRow) {
         rows.push(glib::BoxedAnyObject::new(row));
@@ -1662,10 +1665,17 @@ impl PackLibraryPage {
                 }
                 row.upcast()
             }
-            PickerRow::Heading(title) | PickerRow::Empty(title) => {
+            PickerRow::Heading(id,title) if matches!(id,-1|-2) => {
+                let button=gtk::Button::new();button.add_css_class("flat");button.add_css_class("picker-section-toggle");
+                let body=gtk::Box::new(gtk::Orientation::Horizontal,6);let label=crate::widgets::text(title,"picker-section-heading");label.set_hexpand(true);body.append(&label);
+                let collapsed=self.section_collapsed(*id);body.append(&gtk::Image::from_icon_name(if collapsed{"pan-end-symbolic"}else{"pan-down-symbolic"}));button.set_child(Some(&body));
+                button.update_state(&[gtk::accessible::State::Expanded(Some(!collapsed))]);
+                let weak=Rc::downgrade(self);let id=*id;button.connect_clicked(move|_|{if let Some(page)=weak.upgrade(){if let Some(ui)=page.ui.upgrade(){let _=ui.store.set_pref(&page.collapsed_key(id),if page.section_collapsed(id){"false"}else{"true"});page.rebuild_rows();}}});button.upcast()
+            }
+            PickerRow::Heading(_,title) | PickerRow::Empty(title) => {
                 let label = crate::widgets::text(
                     title,
-                    if matches!(row, PickerRow::Heading(_)) {
+                    if matches!(row, PickerRow::Heading(..)) {
                         "picker-section-heading"
                     } else {
                         "dim-label"
@@ -1746,6 +1756,7 @@ impl PackLibraryPage {
             button.set_tooltip_text(Some(&format!("{} · Downloading…",item.name)));button.set_sensitive(false);return button;
         }
         let skip_activation=Rc::new(Cell::new(false));
+        if let Some(ui)=self.ui.upgrade(){crate::picker_zoom::attach(&ui,&button,skip_activation.clone());}
         let alternate=gtk::GestureClick::new();alternate.set_button(1);alternate.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak=Rc::downgrade(self);let id=item.id;let skip=skip_activation.clone();
         alternate.connect_pressed(move|gesture,_,_,_|{let alt=gesture.current_event_state().contains(gtk::gdk::ModifierType::ALT_MASK);skip.set(alt);if alt{gesture.set_state(gtk::EventSequenceState::Claimed);if let Some(page)=weak.upgrade(){page.toggle_item_favorite(id);}}});button.add_controller(alternate);
@@ -1753,7 +1764,7 @@ impl PackLibraryPage {
         secondary.connect_pressed(move|gesture,_,x,y|{
             gesture.set_state(gtk::EventSequenceState::Claimed);
             let(Some(page),Some(button))=(weak.upgrade(),target.upgrade())else{return;};
-            let menu=gtk::Popover::builder().has_arrow(false).autohide(true).build();menu.set_parent(&button);menu.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32,y as i32,1,1)));
+            let menu=gtk::Popover::builder().has_arrow(false).autohide(true).build();menu.add_css_class("message-menu");menu.set_parent(&button);menu.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32,y as i32,1,1)));
             let body=gtk::Box::new(gtk::Orientation::Vertical,0);body.add_css_class("message-menu-panel");
             let favorite=gtk::Button::with_label(if page.favorites.borrow().contains(&id){"Remove from Favorites"}else{"Add to Favorites"});favorite.add_css_class("flat");favorite.add_css_class("context-menu-row");
             let weak=Rc::downgrade(&page);let pop=menu.downgrade();favorite.connect_clicked(move|_|{if let Some(pop)=pop.upgrade(){pop.popdown();}if let Some(page)=weak.upgrade(){page.toggle_item_favorite(id);}});body.append(&favorite);
@@ -1872,7 +1883,7 @@ impl PackLibraryPage {
         let weak = Rc::downgrade(self);
         let recent_library = self.library.clone();
         let selection_asset = asset.clone();
-        button.connect_clicked(move |_| {
+        button.connect_clicked(move |button| {
             if skip_activation.replace(false){return;}
             if let Some(page) = weak.upgrade() {
                 let library = recent_library.clone();let owner=library.account().to_string();let weak_ui=page.ui.clone();let kind=page.kind;
@@ -1888,6 +1899,7 @@ impl PackLibraryPage {
                         fallback: selection_asset.item.emoji.clone(),
                     },
                 };
+                if page.kind==Kind::Stickers {if let Some(ui)=page.ui.upgrade(){ui.send_animation.remember_sticker_source(button);}}
                 (page.on_select)(selection);
             }
         });
@@ -2116,37 +2128,7 @@ impl Ui {
                     self.notice("Select a pack first");
                     return;
                 };
-                let dialog = adw::AlertDialog::builder()
-                    .heading("Manage Pack")
-                    .body("Choose what to do with this pack.")
-                    .build();
-                dialog.add_responses(&[("cancel", "Cancel"), ("uninstall", "Uninstall")]);
-                dialog.set_default_response(Some("cancel"));
-                dialog.set_close_response("cancel");
-                dialog.set_response_appearance("uninstall", adw::ResponseAppearance::Destructive);
-                let weak = Rc::downgrade(self);
-                let page = Rc::downgrade(page);
-                dialog.connect_response(Some("uninstall"), move |_, _| {
-                    let Some(ui) = weak.upgrade().filter(|ui| {
-                        ui.generation.get() == generation && ui.state.borrow().account == owner
-                    }) else {
-                        return;
-                    };
-                    let Some(page) = page.upgrade() else {
-                        return;
-                    };
-                    let library = library.clone();
-                    glib::spawn_future_local(async move {
-                        match library
-                            .mutate(crate::packs::Mutation::Installed { pack, value: false })
-                            .await
-                        {
-                            Ok(_) => page.refresh(),
-                            Err(error) => ui.notice(&error.to_string()),
-                        }
-                    });
-                });
-                dialog.present(Some(&self.window));
+                crate::pack_editor::open(self,page,library,pack);
             }
         }
     }
@@ -2285,7 +2267,7 @@ impl Ui {
                         };
                         match selection {
                             PackSelection::Sticker(asset) => {
-                                ui.send_library_file(&asset.path, true);
+                                ui.send_pack_sticker(&asset);
                             }
                             PackSelection::CustomEmoji { item_id, fallback } => {
                                 let weak = Rc::downgrade(&ui);
@@ -2396,7 +2378,7 @@ mod tests {
         let library=context.block_on(Library::open("menu@fixture.invalid")).unwrap();let pack=context.block_on(library.create("Menu pack".into(),Kind::Stickers,vec![crate::packs::Input{path:path.clone(),name:"Menu fixture".into(),emoji:"🙂".into()}],Job::new())).unwrap();let _=std::fs::remove_file(path);
         let selected=Rc::new(Cell::new(0));let count=selected.clone();let page=PackLibraryPage::new(library,Kind::Stickers,std::rc::Weak::new(),None,move |_|count.set(count.get()+1),|_|{},|_,_,_|{});let window=gtk::Window::builder().title("Monogram Menu Fixture").child(&page.root).default_width(420).default_height(600).build();window.present();page.refresh();
         let tile=||find::<gtk::Button>(&window.clone().upcast(),&|b|b.tooltip_text().as_deref()==Some("Menu fixture"));assert!(until(Duration::from_secs(6),||tile().is_some_and(|tile|tile.is_mapped()&&tile.width()>0&&tile.height()>0)&&page.preview_active.get()==0));
-        click(&window,&tile().unwrap(),"3",false);assert!(until(Duration::from_secs(3),||find::<gtk::Popover>(&window.clone().upcast(),&|p|p.is_mapped()).is_some()));assert!(page.favorites.borrow().is_empty());assert_eq!(selected.get(),0);
+        click(&window,&tile().unwrap(),"3",false);assert!(until(Duration::from_secs(3),||find::<gtk::Popover>(&window.clone().upcast(),&|p|p.is_mapped()).is_some()));assert!(find::<gtk::Popover>(&window.clone().upcast(),&|p|p.is_mapped()).unwrap().has_css_class("message-menu"),"nested popover backdrop returned");assert!(page.favorites.borrow().is_empty());assert_eq!(selected.get(),0);
         find::<gtk::Popover>(&window.clone().upcast(),&|p|p.is_mapped()).unwrap().popdown();assert!(until(Duration::from_secs(3),||find::<gtk::Popover>(&window.clone().upcast(),&|p|p.is_mapped()).is_none()));click(&window,&tile().unwrap(),"1",true);assert!(until(Duration::from_secs(4),||page.favorites.borrow().contains(&pack.items[0].id)));assert_eq!(selected.get(),0);
         assert!(until(Duration::from_secs(4),||tile().is_some_and(|tile|tile.is_mapped()&&tile.width()>0&&tile.height()>0)&&page.preview_active.get()==0));click(&window,&tile().unwrap(),"3",false);assert!(until(Duration::from_secs(3),||find::<gtk::Button>(&window.clone().upcast(),&|b|b.label().as_deref()==Some("Remove from Favorites")).is_some()));assert!(page.favorites.borrow().contains(&pack.items[0].id));find::<gtk::Button>(&window.clone().upcast(),&|b|b.label().as_deref()==Some("Remove from Favorites")).unwrap().emit_clicked();assert!(until(Duration::from_secs(4),||!page.favorites.borrow().contains(&pack.items[0].id)));assert_eq!(selected.get(),0);window.close();
     }
