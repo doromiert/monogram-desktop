@@ -82,6 +82,7 @@ pub struct Pack {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(default)] pub picker_revision:u64,
     pub packs: Vec<Pack>,
     #[serde(default)]
     pub favorites: Vec<i64>,
@@ -360,14 +361,17 @@ impl Library {
             snapshot.packs.insert(position.min(snapshot.packs.len()),pack);this.write(&snapshot)
         }).await
     }
-    pub async fn apply_sync_order(&self, order: serde_json::Value) -> Result<bool> {
+    pub async fn apply_sync_order(&self,order:serde_json::Value)->Result<bool>{self.apply_sync_order_at(order,None).await}
+    pub async fn apply_sync_order_at(&self, order: serde_json::Value,stamp:Option<u64>) -> Result<bool> {
         let this=self.clone();worker(move||{
             let _gate=this.owner.gate.lock().unwrap();let mut snapshot=this.read()?;
+            if stamp.is_some_and(|stamp|snapshot.picker_revision>stamp){return Ok(false);}
             let map_ids=|field:&str|->Option<Vec<i64>>{order.get(field)?.as_array()?.iter().map(|id|snapshot.packs.iter().flat_map(|p|p.items.iter()).find(|i|Some(i.sync_id.as_str())==id.as_str()).map(|i|i.id)).collect()};
             let favorites=map_ids("favorites");let recent=map_ids("recent");
             if order.get("favorites").is_some()&&favorites.is_none() || order.get("recent").is_some()&&recent.is_none(){return Ok(false);}
             if !reorder_synced_packs(&mut snapshot.packs,&order){return Ok(false);}
             if let Some(ids)=favorites{snapshot.favorites=ids;}if let Some(ids)=recent{snapshot.recent=ids;}
+            if let Some(stamp)=stamp{snapshot.picker_revision=snapshot.picker_revision.max(stamp);}
             this.write(&snapshot)?;Ok(true)
         }).await
     }
@@ -408,6 +412,7 @@ impl Library {
         worker(move || {
             let _guard = this.owner.gate.lock().unwrap();
             let mut s = this.read()?;
+            let picker_changed=matches!(&mutation,Mutation::Favorite{..}|Mutation::Recent{..}|Mutation::Reorder{..}|Mutation::Installed{..});
             match mutation {
                 Mutation::Favorite { item, value } => {
                     find_item(&s, item)?;
@@ -530,10 +535,14 @@ impl Library {
                     }
                 }
             }
+            if picker_changed {s.picker_revision=(chrono::Utc::now().timestamp_millis().max(1) as u64).max(s.picker_revision.saturating_add(1));}
             this.write(&s)?;
             Ok(s)
         })
         .await
+    }
+    pub async fn observe_picker_revision(&self,stamp:u64)->Result<()> {
+        let this=self.clone();worker(move||{let _guard=this.owner.gate.lock().unwrap();let mut s=this.read()?;s.picker_revision=s.picker_revision.max(stamp);this.write(&s)}).await
     }
     pub async fn create(
         &self,
@@ -654,6 +663,7 @@ impl Library {
             };
             stage.publish(&this.owner.path)?;
             this.check(&job)?;
+            if target.is_none(){s.picker_revision=(chrono::Utc::now().timestamp_millis().max(1) as u64).max(s.picker_revision.saturating_add(1));}
             this.write(&s)?;
             stage.committed = true;
             Ok(pack)
@@ -685,6 +695,7 @@ impl Library {
             s.packs.insert(position.min(s.packs.len()),pack.clone());
             stage.publish(&this.owner.path)?;
             this.check(&job)?;
+            if sync_id.is_none(){s.picker_revision=(chrono::Utc::now().timestamp_millis().max(1) as u64).max(s.picker_revision.saturating_add(1));}
             this.write(&s)?;
             stage.committed = true;
             Ok(pack)

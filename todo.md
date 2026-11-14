@@ -21,3 +21,10 @@
 - [x] Animate incoming messages from below the input box on the left.
 
 - [x] Remove the duplicate outer background from sticker/custom emoji context menus.
+
+## Current follow-up
+
+- [x] Replace pack editor list with mobile-style virtual thumbnails and native pack/item menus; verify keyboard actions, resizing, loading/error states and screenshots.
+- [x] Remove preview card padding and display artwork directly.
+- [x] Add drag-to-reorder pack-bar items.
+- [x] Track actual picker edits with durable revisions; imports and exports retain versions, latest user change wins across clients.

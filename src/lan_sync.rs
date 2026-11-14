@@ -151,6 +151,14 @@ fn publish_json(mesh: &Mesh, kind: &str, owner: &str, id: &str, value: Value) ->
     store.set_signature(&key, sig)?;
     Ok(())
 }
+fn publish_picker_state(sync:&mut monogram_sync::Store,owner:&str,value:&Value,revision:u64)->Result<()> {
+    let k=key("pack-order",owner,"order");let tracker=format!("picker-user-revision:{owner}");
+    if sync.signature(&tracker).and_then(|s|s.parse::<u64>().ok()).is_some_and(|ack|revision<=ack){return Ok(());}
+    if revision>0||(!sync.state.objects.contains_key(&k)&&!sync.pending().iter().any(|m|m.key()==k)){
+        sync.put_json_at("pack-order",owner,"order",&value.to_string(),revision.max(1))?;
+    }
+    sync.set_signature(&tracker,revision.to_string())?;Ok(())
+}
 async fn cycle(mesh: &Arc<Mesh>, store: &Store) -> Result<()> {
     // Existing local edits publish first; fresh defaults never overwrite a pending import.
     for account in store.accounts() {
@@ -246,7 +254,10 @@ async fn cycle(mesh: &Arc<Mesh>, store: &Store) -> Result<()> {
         if store.pref("emoji:favorites","").is_empty(){for field in ["emoji_favorites","emoji_favorite_order"]{pack_order.as_object_mut().unwrap().remove(field);}}
         if store.pref("emoji:pinned","").is_empty(){pack_order.as_object_mut().unwrap().remove("emoji_pinned");}
         if store.pref("emoji:usage","").is_empty(){for field in ["emoji_recent","emoji_recent_order"]{pack_order.as_object_mut().unwrap().remove(field);}}
-        if !snapshot.packs.iter().any(|p|p.sync_pending){publish_json(mesh,"pack-order",owner,"order",pack_order)?;}
+        if !snapshot.packs.iter().any(|p|p.sync_pending){
+            let revision=snapshot.picker_revision.max(store.pref("picker:user-revision","0").parse().unwrap_or(0));
+            publish_picker_state(&mut mesh.store.lock().unwrap(),owner,&pack_order,revision)?;
+        }
         for pack in ready {
             let mut value = serde_json::to_value(&pack).map_err(error)?;
             for field in ["last_sync", "last_attempt", "sync_error", "sync_pending"] {
@@ -299,9 +310,11 @@ async fn cycle(mesh: &Arc<Mesh>, store: &Store) -> Result<()> {
         let _ = std::fs::remove_file(path);
         match applied {
             Ok(Some(signature)) => {
+                let picker_revision=if meta.kind=="pack-order" {Some(Library::open(&meta.owner).await.map_err(error)?.snapshot().await.map_err(error)?.picker_revision.max(store.pref("picker:user-revision","0").parse().unwrap_or(0)))}else{None};
                 let mut sync = mesh.store.lock().unwrap();
-                sync.mark_applied(&meta.key(), &meta.digest)?;
+                if meta.kind=="pack-order" {if !sync.mark_applied_meta(&meta)?{continue;}}else{sync.mark_applied(&meta.key(), &meta.digest)?;}
                 sync.set_signature(&meta.key(), signature)?;
+                if let Some(revision)=picker_revision.filter(|revision|*revision<=meta.stamp){sync.set_signature(&format!("picker-user-revision:{}",meta.owner),revision.to_string())?;}
                 REVISION.fetch_add(1, Ordering::Relaxed);
             }
             Ok(None) => continue,
@@ -386,14 +399,21 @@ async fn apply(store: &Store, meta: &Meta, path: &std::path::Path) -> Result<Opt
         }
         "pack-order" => {
             let library=Library::open(&meta.owner).await.map_err(error)?;
-            if !library.apply_sync_order(value.clone()).await.map_err(error)? {return Ok(None);}
+            let local_revision=library.snapshot().await.map_err(error)?.picker_revision.max(store.pref("picker:user-revision","0").parse().unwrap_or(0));
+            if local_revision>meta.stamp{return Ok(Some(digest(&serde_json::to_vec(&value).map_err(error)?)));}
+            let observed=store.pref("picker:observed-revision","0").parse::<u64>().unwrap_or(0).max(meta.stamp);store.set_pref("picker:observed-revision",&observed.to_string()).map_err(error)?;
+            if !library.apply_sync_order_at(value.clone(),Some(meta.stamp)).await.map_err(error)? {return Ok(None);}
             let snapshot=library.snapshot().await.map_err(error)?;
             let local_keys=|field:&str|->Option<Vec<String>>{value.get(field)?.as_array()?.iter().map(|key|{let key=key.as_str()?;if let Some(emoji)=key.strip_prefix("unicode:"){Some(crate::ui::favorite_order::emoji_key(emoji))}else{let id=key.strip_prefix("item:")?;snapshot.packs.iter().flat_map(|p|p.items.iter()).find(|item|item.sync_id==id).map(|item|crate::ui::favorite_order::pack_key(&meta.owner,item.id))}}).collect()};
             for field in ["emoji_favorite_order","emoji_recent_order"]{if value.get(field).is_some()&&local_keys(field).is_none(){return Ok(None);}}
-            store.import_synced_emoji_preferences(&value).map_err(error)?;
-            if let Some(keys)=local_keys("emoji_favorite_order"){crate::ui::favorite_order::import_synced_order(&store.db,crate::ui::favorite_order::Kind::Emoji,&meta.owner,keys).map_err(error)?;}
-            if let Some(keys)=local_keys("emoji_recent_order"){store.set_pref("picker:recent:emoji",&serde_json::to_string(&keys).map_err(error)?).map_err(error)?;}
-            if value.get("favorites").is_some(){let keys=snapshot.favorites.iter().filter(|id|snapshot.packs.iter().any(|p|p.kind==crate::packs::Kind::Stickers&&p.items.iter().any(|i|i.id==**id))).map(|id|crate::ui::favorite_order::pack_key(&meta.owner,*id)).collect();crate::ui::favorite_order::import_synced_order(&store.db,crate::ui::favorite_order::Kind::Stickers,&meta.owner,keys).map_err(error)?;}
+            if !store.import_synced_emoji_preferences_at(&value,Some(meta.stamp)).map_err(error)?{return Ok(None);}
+            if let Some(keys)=local_keys("emoji_favorite_order"){if !crate::ui::favorite_order::import_synced_order_at(&store.db,crate::ui::favorite_order::Kind::Emoji,&meta.owner,keys,Some(meta.stamp)).map_err(error)?{return Ok(None);}}
+            if let Some(keys)=local_keys("emoji_recent_order"){if !store.import_picker_recent_order(&keys,meta.stamp).map_err(error)?{return Ok(None);}}
+            if value.get("favorites").is_some(){let keys=snapshot.favorites.iter().filter(|id|snapshot.packs.iter().any(|p|p.kind==crate::packs::Kind::Stickers&&p.items.iter().any(|i|i.id==**id))).map(|id|crate::ui::favorite_order::pack_key(&meta.owner,*id)).collect();if !crate::ui::favorite_order::import_synced_order_at(&store.db,crate::ui::favorite_order::Kind::Stickers,&meta.owner,keys,Some(meta.stamp)).map_err(error)?{return Ok(None);}}
+            library.observe_picker_revision(meta.stamp).await.map_err(error)?;
+            let observed=store.pref("picker:observed-revision","0").parse::<u64>().unwrap_or(0).max(meta.stamp);store.set_pref("picker:observed-revision",&observed.to_string()).map_err(error)?;
+
+
         }
         "folders" => {
             store
@@ -488,6 +508,18 @@ pub fn public_records(store: &Store, prefix: &str) -> Vec<Value> {
 #[cfg(test)]
 mod native_tests {
     use super::*;
+    #[test]
+    fn picker_export_uses_user_revision_not_export_time_or_payload_drift(){
+        let path=std::env::temp_dir().join(format!("picker-revision-{}",uuid::Uuid::new_v4()));let owner="version@fixture.invalid";
+        let mut sync=monogram_sync::Store::open(path.clone(),[42;32],"Fixture".into()).unwrap();
+        let mobile=json!({"stickers":[],"emojis":[],"emoji_favorites":["🔥"]});let stale=json!({"stickers":[],"emojis":[],"emoji_favorites":["❤️"]});let k=key("pack-order",owner,"order");
+        let first=sync.put_json_at("pack-order",owner,"order",&mobile.to_string(),200).unwrap();
+        publish_picker_state(&mut sync,owner,&stale,0).unwrap();assert_eq!(sync.state.objects[&k],first,"startup overwrote remote state");
+        sync.set_signature(&format!("picker-user-revision:{owner}"),"200".into()).unwrap();publish_picker_state(&mut sync,owner,&stale,200).unwrap();assert_eq!(sync.state.objects[&k],first,"import normalization re-published state");
+        publish_picker_state(&mut sync,owner,&stale,150).unwrap();assert_eq!(sync.state.objects[&k],first,"late export overrode newer user change");
+        publish_picker_state(&mut sync,owner,&stale,201).unwrap();assert_eq!(sync.state.objects[&k].stamp,201);assert_ne!(sync.state.objects[&k].digest,first.digest);
+        drop(sync);let mut sync=monogram_sync::Store::open(path.clone(),[42;32],"Restart".into()).unwrap();let final_meta=sync.state.objects[&k].clone();publish_picker_state(&mut sync,owner,&mobile,201).unwrap();assert_eq!(sync.state.objects[&k],final_meta,"restart treated local drift as edit");drop(sync);std::fs::remove_dir_all(path).unwrap();
+    }
     #[test]
     #[ignore = "requires isolated Secret Service"]
     fn native_stores_and_restart_keep_credentials_and_folder_updates() {

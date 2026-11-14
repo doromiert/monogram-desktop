@@ -82,12 +82,15 @@ fn read(db: &Connection, kind: Kind) -> rusqlite::Result<Order> {
 pub(crate) fn sort_saved<T>(db:&Connection,kind:Kind,items:&mut [T],key:impl Fn(&T)->String)->rusqlite::Result<()> {
     read(db,kind)?.sort(items,key);Ok(())
 }
-pub(crate) fn import_synced_order(db:&Connection,kind:Kind,owner:&str,keys:Vec<String>)->rusqlite::Result<()> {
-    let old=read(db,kind)?;let prefix=format!("pack:{owner}:");let mut incoming=keys.into_iter();
+pub(crate) fn import_synced_order(db:&Connection,kind:Kind,owner:&str,keys:Vec<String>)->rusqlite::Result<()> {import_synced_order_at(db,kind,owner,keys,None).map(|_|())}
+pub(crate) fn import_synced_order_at(db:&Connection,kind:Kind,owner:&str,keys:Vec<String>,stamp:Option<u64>)->rusqlite::Result<bool> {
+    let tx=rusqlite::Transaction::new_unchecked(db,rusqlite::TransactionBehavior::Immediate)?;
+    if !crate::emoji_preferences::picker_import_allowed(&tx,stamp)?{return Ok(false);}
+    let old=read(&tx,kind)?;let prefix=format!("pack:{owner}:");let mut incoming=keys.into_iter();
     let mut merged=old.keys.into_iter().filter_map(|key|if key.starts_with("emoji:")||key.starts_with(&prefix){incoming.next()}else{Some(key)}).collect::<Vec<_>>();merged.extend(incoming);
     let mut seen=HashSet::new();merged.retain(|key|seen.insert(key.clone()));
     let json=serde_json::to_string(&merged).map_err(|_|rusqlite::Error::InvalidQuery)?;
-    db.execute("INSERT INTO preferences(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![kind.preference(),json])?;Ok(())
+    tx.execute("INSERT INTO preferences(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![kind.preference(),json])?;tx.commit()?;Ok(true)
 }
 fn load(db: &Connection) -> rusqlite::Result<HashMap<Kind, Order>> {
     [Kind::Emoji, Kind::Stickers, Kind::Gifs]
@@ -136,6 +139,7 @@ fn save_move(
         return Err(rusqlite::Error::InvalidQuery);
     }
     transaction.execute("INSERT INTO preferences(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![kind.preference(),value])?;
+    crate::emoji_preferences::touch_picker(&transaction)?;
     transaction.commit()?;
     Ok(Order::new(keys))
 }
