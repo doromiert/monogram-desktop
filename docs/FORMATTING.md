@@ -41,7 +41,7 @@ in mobile `protocols/NON_STANDARD_XMPP.md` and `docs/SPOILERS.md`.
 
 Markdown input is bounded to 32768 UTF-16 units, parser depth to 24 and blocks to
 2048. Long articles use a native virtual list; parsing occurs with message
-preparation on workers. Math uses pinned JLaTeXMath 1.0.7 in a networkless sandbox,
+preparation on workers. Math uses the pure-Rust latex-rust 3.0.3 typesetter in a networkless sandbox,
 two concurrent workers, size/time/memory bounds, immediate loading feedback and
 a bounded texture cache. Unsupported formulas remain readable as source.
 

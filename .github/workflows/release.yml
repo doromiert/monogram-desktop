@@ -76,6 +76,7 @@ jobs:
         run: |
           install -Dm755 target/release/monogram-desktop /usr/bin/monogram-desktop
           install -Dm755 target/release/monogram-sticker-renderer /opt/monogram/monogram-sticker-renderer
+          install -Dm755 target/release/monogram-math-renderer /opt/monogram/monogram-math-renderer
           install -d /usr/share/monogram-desktop
           cp -a assets/. /usr/share/monogram-desktop/
           install -Dm644 data/com.negzero.MonogramDesktop.desktop /usr/share/applications/com.negzero.MonogramDesktop.desktop
@@ -105,7 +106,7 @@ jobs:
           # Assets, the sandboxed renderer (kept unpatched) and our env hook.
           mkdir -p AppDir/share AppDir/libexec
           cp -a /usr/share/monogram-desktop AppDir/share/
-          install -m755 /opt/monogram/monogram-sticker-renderer AppDir/libexec/
+          install -m755 /opt/monogram/monogram-sticker-renderer /opt/monogram/monogram-math-renderer AppDir/libexec/
           install -m644 packaging/appimage/10-monogram.hook AppDir/bin/
           ./quick-sharun --make-appimage
 

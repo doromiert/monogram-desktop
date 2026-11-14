@@ -13,7 +13,7 @@ pkgrel=1
 pkgdesc='Native GTK/libadwaita Monogram XMPP client'
 arch=('x86_64' 'aarch64')
 url='https://github.com/doromiert/monogram-desktop'
-license=('GPL-3.0-or-later' 'GPL-3.0-only' 'AGPL-3.0-only' 'LGPL-2.1-or-later' 'NAPL-1.1')
+license=('GPL-3.0-or-later' 'GPL-3.0-only' 'AGPL-3.0-only' 'LGPL-2.1-or-later' 'NAPL-1.1' 'OFL-1.1')
 depends=('gtk4>=1:4.20' 'libadwaita>=1:1.9' 'glycin-gtk4>=2.1' 'glycin'
          'libclapper-gtk>=0.10' 'gst-plugins-base' 'gst-plugins-good' 'gst-plugins-bad'
          'gst-plugins-ugly' 'gst-libav' 'libepoxy' 'openssl' 'sqlite' 'protobuf-c'
@@ -64,6 +64,7 @@ package() {
     cd "$srcdir/monogram-desktop"
     install -Dm755 target/release/monogram-desktop "$pkgdir/usr/lib/monogram-desktop/monogram-desktop"
     install -Dm755 target/release/monogram-sticker-renderer "$pkgdir/usr/lib/monogram-desktop/monogram-sticker-renderer"
+    install -Dm755 target/release/monogram-math-renderer "$pkgdir/usr/lib/monogram-desktop/monogram-math-renderer"
     install -Dm755 packaging/monogram-desktop "$pkgdir/usr/bin/monogram-desktop"
     install -d "$pkgdir/usr/share/monogram-desktop" "$pkgdir/usr/share/licenses/$pkgname"
     cp -a assets/. "$pkgdir/usr/share/monogram-desktop/"

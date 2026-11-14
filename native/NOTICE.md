@@ -63,15 +63,17 @@ The patch is installed beside this notice in the application documentation.
 
 ## Formatted math
 
-`MonogramMath.java` is a GPL-3.0-or-later desktop adapter using upstream
-[JLaTeXMath 1.0.7](https://github.com/opencollab/jlatexmath/tree/1.0.7), the same
-engine family as mobile's Android fork. The Nix package pins the unmodified core,
-Greek and Cyrillic font jars from Maven Central. JLaTeXMath is GPL-2.0-or-later
-with its independent-module linking exception; its original copyright/license,
-GPL text and bundled font notices are preserved in `LICENSES/JLaTeXMath/` and in
-the jars. The adapter does not copy the Android rendering implementation.
+`src/bin/monogram-math-renderer.rs` is a GPL-3.0-or-later helper that typesets LaTeX
+math with the pure-Rust [latex-rust](https://crates.io/crates/latex-rust) 3.0.3
+crate (MIT OR Apache-2.0; TeX Appendix G layout, rasterized with tiny-skia). It
+replaced the earlier JLaTeXMath/Java helper, so no JVM is required. latex-rust bundles
+the STIX Two Math font (SIL Open Font License 1.1; see `LICENSES/STIX-Two-Math/OFL.txt`).
+Layout follows TeX rules but is a different engine from mobile's JLaTeXMath fork, so
+spacing or coverage of rare constructs can differ from mobile; unsupported formulas
+stay readable as source.
 The helper runs off the UI thread in a resource-limited, networkless bubblewrap
-sandbox; it cannot read account files or load arbitrary external resources.
+sandbox with its own rlimits and seccomp filter; it cannot read account files or
+load arbitrary external resources.
 
 The GPL-3.0-or-later formatting parser/model and Markdown profile adapt Monogram
 mobile's `MessageMarkup`, `MessageMentions`, `MonogramFormatting`,

@@ -3,7 +3,7 @@
 These files exercise the actual mobile boundary, separately from the Rust FFI.
 All identities, keys, accounts and plaintexts are disposable fictional test data.
 The cryptographic fixtures do not start a JVM in the installed application;
-formatted math uses a separate, sandboxed JLaTeXMath helper.
+formatted math uses a separate, sandboxed pure-Rust helper.
 
 Copied unchanged from Monogram Android commit
 `be6876c045163e32fe07a84416621770b0964b30`, GPL-3.0-or-later:

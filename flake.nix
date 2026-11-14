@@ -16,14 +16,12 @@
         let pkgs = import nixpkgs { inherit system; };
         in { default = pkgs.mkShell {
           inputsFrom = [ self.packages.${system}.default ];
-          MONOGRAM_MATH_HELPER = "${self.packages.${system}.default.mathRenderer}/bin/monogram-math-renderer";
           MONOGRAM_BWRAP = "${pkgs.bubblewrap}/bin/bwrap";
           PROTOC = "${pkgs.protobuf}/bin/protoc";
-          JAVA_HOME = "${pkgs.jdk21}/lib/openjdk";
           shellHook = ''
             export XDG_DATA_DIRS="${pkgs.gtk4}/share/gsettings-schemas/${pkgs.gtk4.name}:${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:''${NIX_GLYCIN_LOADER_PATHS}:''${XDG_DATA_DIRS:-}"
           '';
-          packages = with pkgs; [ cargo rustc rustfmt clippy pkg-config protobuf sqlite libepoxy python3 jdk21 gnome-keyring gtk4 libadwaita gobject-introspection xorg-server xdotool imagemagick prosody openssl ];
+          packages = with pkgs; [ cargo rustc rustfmt clippy pkg-config protobuf sqlite libepoxy python3 gnome-keyring gtk4 libadwaita gobject-introspection xorg-server xdotool imagemagick prosody openssl ];
         }; });
       checks = eachSystem (system: {
         prototype = self.packages.${system}.default.overrideAttrs (_: { doCheck = true; });

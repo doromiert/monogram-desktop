@@ -42,7 +42,7 @@ checks were run on x86_64-linux.
 ## Arch Linux
 
 The root `PKGBUILD` builds the Git version, including the supplied temporary icon,
-pinned encryption backend, sandboxed sticker renderer and JLaTeXMath helper:
+pinned encryption backend, sandboxed sticker and LaTeX math renderers:
 
 ```sh
 git clone https://github.com/doromiert/monogram-desktop.git
