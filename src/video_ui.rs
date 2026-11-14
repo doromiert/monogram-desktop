@@ -21,6 +21,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+static PLAYBACK_READY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+// Call on a worker: Clapper scans plugins before the first player can exist.
+pub(crate) fn initialize() -> bool {
+    *PLAYBACK_READY.get_or_init(|| unsafe {monogram_playback_init()!=0})
+}
+
 fn round_seek_fraction(widget: &gtk::Widget, x: f64, y: f64) -> Option<f64> {
     let radius = f64::from(widget.width().min(widget.height())) / 2.;
     let dx = x - f64::from(widget.width()) / 2.;
@@ -152,6 +158,7 @@ pub(crate) struct Playback {
 }
 impl Playback {
     pub(crate) fn new(input: VerifiedFile) -> Option<Rc<Self>> {
+        if PLAYBACK_READY.get()!=Some(&true) {return None;}
         let file = gio::File::for_path(format!("/proc/self/fd/{}", input.0.as_raw_fd()));
         let uri = CString::new(file.uri().as_str()).ok()?;
         let mut controls = std::ptr::null_mut();
@@ -267,7 +274,7 @@ impl Ui {
             let verified = gio::spawn_blocking(move || {
                 let input = crate::downloads::verified_input(&path, &source, &worker_cancel)?;
                 // Plugin scanning and Clapper initialization must never block GTK input.
-                if unsafe { monogram_playback_init() } == 0 {
+                if !initialize() {
                     return Err("Video playback initialization failed");
                 }
                 Ok(input)
@@ -732,5 +739,24 @@ impl Ui {
         if load() == glib::ControlFlow::Continue {
             glib::timeout_add_local(Duration::from_millis(150), load);
         }
+    }
+}
+
+#[cfg(test)]
+mod cold_playback_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires isolated native display and media plugins"]
+    fn first_pack_video_initializes_before_constructing_a_player() {
+        gtk::init().unwrap();assert!(PLAYBACK_READY.get().is_none());
+        let path=std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reaction-video.mp4");
+        let input=||VerifiedFile(std::fs::File::open(&path).unwrap());
+        assert!(Playback::new(input()).is_none(),"Cold callers must not enter uninitialized Clapper");
+        glib::MainContext::default().block_on(async {
+            assert!(gio::spawn_blocking(initialize).await.unwrap());
+            let player=Playback::new(input()).expect("First sticker/video player must construct after worker initialization");
+            player.media.play();glib::timeout_future(Duration::from_millis(300)).await;player.media.pause();
+            assert!(player.media.error().is_none(),"Native media pipeline failed: {:?}",player.media.error());
+        });
     }
 }

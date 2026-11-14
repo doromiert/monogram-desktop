@@ -1782,7 +1782,11 @@ impl PackLibraryPage {
             let weak = Rc::downgrade(self);
             let library = self.library.clone();
             glib::spawn_future_local(async move {
-                let result = library.verified_asset(cell.item_id, Job::new()).await;
+                let mut result = library.verified_asset(cell.item_id, Job::new()).await;
+                if matches!(&result,Ok((asset,_)) if asset.item.mime=="video/webm")
+                    && !gio::spawn_blocking(crate::video_ui::initialize).await.unwrap_or(false) {
+                    result=Err(crate::packs::Error("Video playback initialization failed"));
+                }
                 let Some(page) = weak.upgrade() else {
                     return;
                 };
