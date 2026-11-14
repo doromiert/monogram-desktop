@@ -968,6 +968,8 @@ pub(crate) struct PackLibraryPage {
     preview_active: Cell<usize>,
     preview_epoch: Cell<u64>,
     preview_queue: RefCell<Vec<PackPreviewCell>>,
+    hovered_video: Cell<Option<i64>>,
+    video_preview: RefCell<Option<(glib::WeakRef<gtk::Picture>, gtk::gdk::Texture, Rc<crate::video_ui::Playback>)>>,
     selected: RefCell<Option<i64>>,
     sections: RefCell<Vec<(i64, String, Vec<crate::packs::Item>)>>,
     job: RefCell<Option<Job>>,
@@ -1122,6 +1124,8 @@ impl PackLibraryPage {
             preview_active: Cell::new(0),
             preview_epoch: Cell::new(0),
             preview_queue: RefCell::new(Vec::new()),
+            hovered_video: Cell::new(None),
+            video_preview: RefCell::new(None),
             selected: RefCell::new(None),
             sections: RefCell::new(Default::default()),
             job: RefCell::new(None),
@@ -1173,6 +1177,7 @@ impl PackLibraryPage {
             let weak = Rc::downgrade(&page);
             scroll.vadjustment().connect_value_changed(move |_| {
                 if let Some(page) = weak.upgrade() {
+                    page.stop_video_preview();
                     page.pump_pack_previews();
                 }
             });
@@ -1466,6 +1471,7 @@ impl PackLibraryPage {
     }
 
     pub(crate) fn rebuild_rows(self: &Rc<Self>) {
+        self.stop_video_preview();
         self.preview_epoch
             .set(self.preview_epoch.get().wrapping_add(1));
         self.preview_queue.borrow_mut().clear();
@@ -1760,6 +1766,26 @@ impl PackLibraryPage {
         button
     }
 
+    fn stop_video_preview(&self) {
+        self.hovered_video.set(None);
+        if let Some((image,poster,player))=self.video_preview.borrow_mut().take(){
+            if let Some(image)=image.upgrade(){image.set_paintable(Some(&poster));}
+            player.media.pause();
+        }
+    }
+    fn start_video_preview(self:&Rc<Self>,id:i64,picture:&gtk::Picture,poster:&gtk::gdk::Texture) {
+        self.stop_video_preview();self.hovered_video.set(Some(id));
+        let weak=Rc::downgrade(self);let image=picture.downgrade();let poster=poster.clone();let library=self.library.clone();let epoch=self.preview_epoch.get();
+        glib::spawn_future_local(async move{
+            let result=library.verified_asset(id,Job::new()).await;
+            if !gio::spawn_blocking(crate::video_ui::initialize).await.unwrap_or(false){return;}
+            let (Some(page),Some(image),Ok((_,verified)))=(weak.upgrade(),image.upgrade(),result)else{return;};
+            if page.hovered_video.get()!=Some(id)||page.preview_epoch.get()!=epoch||!image.is_mapped(){return;}
+            if let Some(player)=crate::video_ui::Playback::new(verified){
+                image.set_paintable(Some(&player.media));player.media.play();page.video_preview.replace(Some((image.downgrade(),poster,player)));
+            }
+        });
+    }
     fn pump_pack_previews(self: &Rc<Self>) {
         self.preview_queue
             .borrow_mut()
@@ -1782,11 +1808,17 @@ impl PackLibraryPage {
             let weak = Rc::downgrade(self);
             let library = self.library.clone();
             glib::spawn_future_local(async move {
-                let mut result = library.verified_asset(cell.item_id, Job::new()).await;
-                if matches!(&result,Ok((asset,_)) if asset.item.mime=="video/webm")
-                    && !gio::spawn_blocking(crate::video_ui::initialize).await.unwrap_or(false) {
-                    result=Err(crate::packs::Error("Video playback initialization failed"));
-                }
+                let result = match library.verified_asset(cell.item_id, Job::new()).await {
+                    Ok((asset,verified)) if asset.item.mime=="video/webm" => gio::spawn_blocking(move||{
+                        use std::os::fd::AsRawFd;
+                        let path=std::path::PathBuf::from(format!("/proc/self/fd/{}",verified.0.as_raw_fd()));
+                        let poster=crate::image_loader::encode_video_preview(&path,&gio::Cancellable::new(),1500)
+                            .map_err(crate::packs::Error)?;
+                        Ok((asset,verified,Some(poster)))
+                    }).await.unwrap_or(Err(crate::packs::Error("Video preview failed"))),
+                    Ok((asset,verified))=>Ok((asset,verified,None)),
+                    Err(error)=>Err(error),
+                };
                 let Some(page) = weak.upgrade() else {
                     return;
                 };
@@ -1807,9 +1839,9 @@ impl PackLibraryPage {
         button: gtk::Button,
         picture: gtk::Picture,
         spinner: gtk::Spinner,
-        result: crate::packs::Result<(Asset, crate::downloads::VerifiedFile)>,
+        result: crate::packs::Result<(Asset, crate::downloads::VerifiedFile, Option<crate::image_loader::EncodedPreview>)>,
     ) {
-        let (asset, verified) = match result {
+        let (asset, verified, poster) = match result {
             Ok(asset) => asset,
             Err(error) => {
                 spinner.stop();
@@ -1842,17 +1874,14 @@ impl PackLibraryPage {
             }
         });
         if asset.item.mime == "video/webm" {
-            if let Some(player) = crate::video_ui::Playback::new(verified) {
-                picture.set_paintable(Some(&player.media));
-                spinner.stop();
-                spinner.set_visible(false);
-                let playback = player.clone();
-                picture.connect_map(move |_| playback.media.play());
-                picture.connect_unmap(move |_| player.media.pause());
-            } else {
-                button.set_icon_name("image-missing-symbolic");
-                button.set_tooltip_text(Some("Animated sticker preview unavailable"));
-            }
+            drop(verified);
+            if let Some(poster)=poster.and_then(|p|gtk::gdk::Texture::from_bytes(&glib::Bytes::from_owned(p.bytes)).ok()) {
+                picture.set_paintable(Some(&poster));spinner.stop();spinner.set_visible(false);
+                let motion=gtk::EventControllerMotion::new();let weak=Rc::downgrade(self);let image=picture.downgrade();let id=asset.item.id;
+                motion.connect_enter(move|_,_,_|{if let(Some(page),Some(image))=(weak.upgrade(),image.upgrade()){page.start_video_preview(id,&image,&poster);}});
+                let weak=Rc::downgrade(self);motion.connect_leave(move |_|{if let Some(page)=weak.upgrade(){if page.hovered_video.get()==Some(id){page.stop_video_preview();}}});button.add_controller(motion);
+                let weak=Rc::downgrade(self);picture.connect_unmap(move |_|{if let Some(page)=weak.upgrade(){if page.hovered_video.get()==Some(id){page.stop_video_preview();}}});
+            } else {spinner.stop();spinner.set_visible(false);button.set_icon_name("image-missing-symbolic");}
         } else if asset.item.mime == "application/x-tgsticker" {
             install_lottie(&picture, &spinner, &self.scroll, verified);
         } else if asset.item.mime.starts_with("image/") {
@@ -2333,6 +2362,30 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         false
+    }
+
+    #[test]
+    #[ignore = "requires isolated native display, Secret Service and media plugins"]
+    fn video_sticker_grid_bounds_descriptors_and_keeps_input_responsive() {
+        gtk::init().unwrap();let context=glib::MainContext::default();
+        let path=std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/picker-video.webm");
+        let library=context.block_on(Library::open("video-grid@fixture.invalid")).unwrap();
+        let inputs=(0..48).map(|i|crate::packs::Input{path:path.clone(),name:format!("Video {i}"),emoji:"🙂".into()}).collect();
+        let pack=context.block_on(library.create("Videos".into(),Kind::Stickers,inputs,Job::new())).unwrap();
+        let page=PackLibraryPage::new(library,Kind::Stickers,std::rc::Weak::new(),None,|_|{},|_|{},|_,_,_|{});
+        let image=gtk::Picture::new();image.set_size_request(24,24);page.root.append(&image);
+        let window=gtk::Window::builder().child(&page.root).default_width(420).default_height(600).build();
+        let descriptors=||std::fs::read_dir("/proc/self/fd").unwrap().count();let baseline=descriptors();let peak=Rc::new(Cell::new(baseline));let gap=Rc::new(Cell::new(Duration::ZERO));let last=Rc::new(Cell::new(std::time::Instant::now()));
+        let(p,g,l)=(peak.clone(),gap.clone(),last.clone());let heartbeat=glib::timeout_add_local(Duration::from_millis(16),move||{p.set(p.get().max(descriptors()));g.set(g.get().max(l.replace(std::time::Instant::now()).elapsed()));glib::ControlFlow::Continue});
+        window.present();page.refresh();
+        assert!(until(Duration::from_secs(12),||page.model.n_items()>0&&page.preview_active.get()==0&&page.preview_queue.borrow().len()<48));
+        assert!(page.video_preview.borrow().is_none(),"A tile must not keep a full video player alive");
+        let poster=gtk::gdk::MemoryTexture::new(1,1,gtk::gdk::MemoryFormat::R8g8b8a8,&glib::Bytes::from_owned(vec![0u8;4]),4).upcast::<gtk::gdk::Texture>();
+        for _ in 0..8 {page.start_video_preview(pack.items[0].id,&image,&poster);assert!(until(Duration::from_secs(4),||page.video_preview.borrow().is_some()));page.stop_video_preview();let _=until(Duration::from_millis(100),||false);}
+        window.close();let _=until(Duration::from_millis(200),||false);heartbeat.remove();
+        assert!(peak.get()<baseline+192,"Unbounded video descriptors: base {baseline}, peak {}",peak.get());
+        assert!(gap.get()<Duration::from_millis(400),"Video picker froze for {:?}",gap.get());
+        println!("Video grid48, hover8: descriptor baseline {baseline}, peak {}, max UI gap {:?}",peak.get(),gap.get());
     }
 
     #[test]
