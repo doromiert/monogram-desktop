@@ -13,6 +13,7 @@ struct PairTask {
     page_spinner: gtk::Spinner,
     pending: Rc<Cell<bool>>,
     active: Cell<bool>,
+    retry: std::cell::RefCell<Option<Rc<dyn Fn()>>>,
 }
 impl PairTask {
     fn new(ui:&Rc<Ui>,message:&str,status:&adw::ActionRow,spinner:&gtk::Spinner,pending:&Rc<Cell<bool>>)->Rc<Self> {
@@ -22,10 +23,11 @@ impl PairTask {
         let cancel=gtk::Button::with_label("Cancel Pairing");body.append(&cancel);
         let (dialog,_)=ui.dialog("Pair a Device",&body,440,260);
         pending.set(true);status.set_title(message);spinner.start();
-        let task=Rc::new(Self{dialog:dialog.downgrade(),body,label,spinner:progress,cancel,status:status.clone(),page_spinner:spinner.clone(),pending:pending.clone(),active:Cell::new(true)});
-        let weak=Rc::downgrade(&task);task.cancel.connect_clicked(move|_|{if let Some(t)=weak.upgrade(){if t.active.get(){t.cancel();}else{t.close_dialog();}}});
+        let task=Rc::new(Self{dialog:dialog.downgrade(),body,label,spinner:progress,cancel,status:status.clone(),page_spinner:spinner.clone(),pending:pending.clone(),active:Cell::new(true),retry:Default::default()});
+        let weak=Rc::downgrade(&task);task.cancel.connect_clicked(move|_|{if let Some(t)=weak.upgrade(){if t.active.get(){t.cancel();}else{let retry=t.retry.borrow().clone();t.close_dialog();if let Some(retry)=retry{retry();}}}});
         let owned=task.clone();dialog.connect_closed(move|_|owned.cancel());task
     }
+    fn retry_with(&self,retry:impl Fn()+'static){self.retry.replace(Some(Rc::new(retry)));}
     fn close_dialog(&self){if let Some(dialog)=self.dialog.upgrade(){dialog.close();}}
     fn message(&self,text:&str){self.label.set_text(text);self.status.set_title(text);}
     fn abort_native(&self){
@@ -40,7 +42,7 @@ impl PairTask {
     fn finish(&self,result:Result<&str,&str>){
         if !self.active.replace(false){return;}
         self.pending.set(false);self.spinner.stop();self.page_spinner.stop();
-        match result{Ok(text)=>{self.message(text);self.close_dialog();},Err(text)=>{self.abort_native();self.message(text);self.cancel.set_label("Close");}}
+        match result{Ok(text)=>{self.message(text);self.close_dialog();},Err(text)=>{self.abort_native();self.message(text);self.cancel.set_label(if self.retry.borrow().is_some(){"Try Again"}else{"Close"});}}
     }
 }
 fn watch_pairing(task:&Rc<PairTask>,mesh:Arc<monogram_sync::Mesh>,peers:usize){
@@ -221,9 +223,10 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
     let enabled_copy = enabled.clone();
     let progress = spinner.clone();
     let busy=pending.clone();
-    display.connect_activated(move |_| {
+    display.connect_activated(move |row| {
         let Some(ui)=weak.upgrade() else{return;};enabled_copy.set_active(true);
         let task=PairTask::new(&ui,"Preparing a one-time pairing code…",&status_copy,&progress,&busy);
+        let row=row.downgrade();task.retry_with(move||{if let Some(row)=row.upgrade(){row.emit_by_name::<()>("activated",&[]);}});
         glib::MainContext::default().spawn_local(async move {
             let mesh=match lan_sync::start().await{Ok(mesh)=>mesh,Err(error)=>{task.finish(Err(&error));return;}};
             if !task.active.get(){return;}let worker=mesh.clone();let token=mesh.pairing_token();
@@ -251,7 +254,7 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
     let e = enabled.clone();
     let p = spinner.clone();
     let busy=pending.clone();
-    scan.connect_activated(move |_| {
+    scan.connect_activated(move |row| {
         let Some(ui) = weak.upgrade() else {
             return;
         };
@@ -259,7 +262,7 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
         let s = s.clone();
         let e = e.clone();
         let p = p.clone();
-        let parent = ui.window.clone();let busy=busy.clone();
+        let parent = ui.window.clone();let busy=busy.clone();let retry=row.downgrade();
         glib::MainContext::default().spawn_local(async move {
             let chooser = gtk::FileDialog::builder()
                 .title("Scan Monogram Pairing QR")
@@ -277,6 +280,7 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
                 return;
             };
             let task=PairTask::new(&ui,"Scanning pairing QR…",&s,&p,&busy);
+            task.retry_with(move||{if let Some(row)=retry.upgrade(){row.emit_by_name::<()>("activated",&[]);}});
             let decoded = gio::spawn_blocking(move || decode_qr(path)).await;
             let Some(_ui) = weak.upgrade() else {return;};
             if !task.active.get(){return;}
@@ -380,7 +384,10 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
     });
 }
 fn join(ui:&Rc<Ui>,code:String,status:&adw::ActionRow,spinner:&gtk::Spinner,pending:&Rc<Cell<bool>>) {
-    let task=PairTask::new(ui,"Connecting to the paired device…",status,spinner,pending);join_task(task,code);
+    let task=PairTask::new(ui,"Connecting to the paired device…",status,spinner,pending);
+    let weak=Rc::downgrade(ui);let again=code.clone();let status=status.clone();let spinner=spinner.clone();let pending=pending.clone();
+    task.retry_with(move||{if let Some(ui)=weak.upgrade(){join(&ui,again.clone(),&status,&spinner,&pending);}});
+    join_task(task,code);
 }
 fn join_task(task:Rc<PairTask>,code:String){
     task.message("Connecting to the paired device…");
@@ -496,6 +503,8 @@ fn numeric_join(ui: &Rc<Ui>, status: &adw::ActionRow,spinner:&gtk::Spinner,pendi
 }
 fn numeric_dialog(ui: &Rc<Ui>, status: &adw::ActionRow, display: bool,spinner:&gtk::Spinner,pending:&Rc<Cell<bool>>) {
     let task=PairTask::new(ui,"Starting code pairing…",status,spinner,pending);
+    let retry_ui=Rc::downgrade(ui);let retry_status=status.clone();let retry_spinner=spinner.clone();let retry_pending=pending.clone();
+    task.retry_with(move||{if let Some(ui)=retry_ui.upgrade(){numeric_dialog(&ui,&retry_status,display,&retry_spinner,&retry_pending);}});
     let weak = Rc::downgrade(ui);
     glib::MainContext::default().spawn_local(async move {
         let mesh = match lan_sync::start().await {
@@ -701,6 +710,8 @@ mod review_tests {
         task.cancel.emit_clicked();assert!(!task.active.get());assert!(!pending.get());assert!(!spinner.is_spinning());
         task.finish(Ok("Late result"));assert_eq!(status.title(),"Pairing cancelled.");
         let weak=Rc::downgrade(&task);drop(task);pump();assert!(weak.upgrade().is_none(),"Pair dialog leaked its task");
+        let retried=Rc::new(Cell::new(false));let task=PairTask::new(&ui,"Starting…",&status,&spinner,&pending);let flag=retried.clone();task.retry_with(move||flag.set(true));
+        task.finish(Err("Temporary failure"));assert_eq!(task.cancel.label().as_deref(),Some("Try Again"));task.cancel.emit_clicked();assert!(retried.get());drop(task);pump();
         let root=bx(true,12);
         let source="A short message with https://litterbox.catbox.moe/";
         let body=wrap(source,"message-text");let status=bx(false,0);status.append(&text("13:31","message-meta"));
