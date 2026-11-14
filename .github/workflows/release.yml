@@ -93,7 +93,7 @@ jobs:
         run: |
           mkdir -p dist
           curl -fsSL -o quick-sharun \
-            https://raw.githubusercontent.com/pkgforge-dev/Anylinux-AppImages/a6e1c9daae86c4454675bd3b4f0bbb27d11d6ea8/useful-tools/quick-sharun.sh
+            https://raw.githubusercontent.com/pkgforge-dev/Anylinux-AppImages/ab06090c5b7946beb6efb04b9feea39362f6898e/useful-tools/quick-sharun.sh
           chmod +x quick-sharun
           ./quick-sharun /usr/bin/monogram-desktop /usr/bin/bwrap
           # Assets, the sandboxed renderer (kept unpatched) and our env hook.
