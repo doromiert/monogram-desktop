@@ -1359,6 +1359,10 @@ impl Ui {
             let Some(s) = weak.upgrade() else {
                 return glib::Propagation::Proceed;
             };
+            if key==gdk::Key::Up && state.is_empty() && s.composer_text().is_empty() {
+                let id=s.state.borrow().current().messages.iter().rev().find(|m|m.own&&!m.retracted&&!m.unavailable&&!m.text.is_empty()).map(|m|m.id.clone());
+                if let Some(id)=id{s.edit_message(&id);return glib::Propagation::Stop;}
+            }
             if matches!(key, gdk::Key::Return | gdk::Key::KP_Enter)
                 && !state.contains(gdk::ModifierType::SHIFT_MASK)
             {

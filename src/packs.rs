@@ -64,6 +64,7 @@ pub struct Item {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Pack {
+    #[serde(default)] pub sync_pending: bool,
     #[serde(default)] pub sync_id: String,
     pub id: i64,
     pub name: String,
@@ -99,6 +100,20 @@ pub struct Asset {
     pub path: PathBuf,
     pub size: u64,
     pub sha256: String,
+}
+impl Pack {
+    pub(crate) fn sync_metadata(&self)->serde_json::Value {
+        serde_json::json!({"id":self.sync_id,"name":self.name,"source":self.source,"emojis":self.kind==Kind::Emoji,"installed":self.installed,"private":self.private_pack,"connected":self.connected,"auto":self.auto_sync,
+            "items":self.items.iter().map(|i|serde_json::json!({"id":i.sync_id,"name":i.name,"emoji":i.emoji,"mime":i.mime,"w":i.width,"h":i.height})).collect::<Vec<_>>()})
+    }
+}
+impl Asset {
+    pub(crate) fn preview_source(&self)->Option<crate::file_share::Attachment> {
+        let mut source=crate::file_share::Attachment::bare("https://monogram.invalid/pack-preview")?;
+        let hash=self.sha256.as_bytes().chunks_exact(2).map(|pair|u8::from_str_radix(std::str::from_utf8(pair).ok()?,16).ok()).collect::<Option<Vec<_>>>()?;
+        if hash.len()!=32{return None;}
+        source.size=Some(self.size);source.mime=self.item.mime.clone();source.sticker=true;source.hashes.insert("sha-256".into(),hash);Some(source)
+    }
 }
 #[derive(Clone, Debug, Default)]
 pub struct Progress {
@@ -328,10 +343,31 @@ impl Library {
         let mut changed=false;if pack.sync_id.is_empty(){pack.sync_id=uuid::Uuid::new_v4().to_string();changed=true;}for item in &mut pack.items{if item.sync_id.is_empty(){item.sync_id=uuid::Uuid::new_v4().to_string();changed=true;}}
         let result=pack.clone();if changed{this.write(&snapshot)?;}Ok(result)}).await
     }
+    pub async fn apply_sync_metadata(&self, value:serde_json::Value)->Result<()> {
+        let this=self.clone();worker(move||{
+            let id=value["id"].as_str().ok_or(Error("Invalid pack metadata identity"))?;
+            monogram_sync::profile::validate("pack-meta",this.account(),id,&value).map_err(|_|Error("Invalid synchronized pack metadata"))?;
+            let _gate=this.owner.gate.lock().unwrap();let mut snapshot=this.read()?;
+            let previous=snapshot.packs.iter().find(|p|p.sync_id==id).cloned();
+            if previous.as_ref().is_some_and(|p|!p.sync_pending&&p.sync_metadata()==value){return Ok(());}
+            let items=value["items"].as_array().unwrap().iter().map(|item|{
+                let shared=item["id"].as_str().unwrap();let old=previous.as_ref().and_then(|p|p.items.iter().find(|i|i.sync_id==shared));let mime=item["mime"].as_str().unwrap();
+                Ok(Item{sync_id:shared.into(),id:old.map(|i|i.id).unwrap_or_else(new_id),name:valid_name(item["name"].as_str().unwrap())?,emoji:tag(item["emoji"].as_str().unwrap())?,mime:mime.into(),file:old.filter(|i|i.mime==mime).map(|i|i.file.clone()).unwrap_or(format!("{}{}",uuid::Uuid::new_v4(),extension(mime)?)),width:item["w"].as_u64().unwrap().min(512)as u32,height:item["h"].as_u64().unwrap().min(512)as u32,remote_id:String::new()})
+            }).collect::<Result<Vec<_>>>()?;
+            let pack=Pack{sync_pending:true,sync_id:id.into(),id:previous.as_ref().map(|p|p.id).unwrap_or_else(new_id),name:valid_name(value["name"].as_str().unwrap())?,source:value["source"].as_str().unwrap().into(),kind:if value["emojis"].as_bool().unwrap(){Kind::Emoji}else{Kind::Stickers},installed:value["installed"].as_bool().unwrap(),private_pack:value["private"].as_bool().unwrap(),connected:value["connected"].as_bool().unwrap(),auto_sync:value["auto"].as_bool().unwrap(),last_sync:0,last_attempt:0,sync_error:String::new(),items};
+            let position=previous.as_ref().and_then(|old|snapshot.packs.iter().position(|p|p.id==old.id)).unwrap_or(0);
+            if let Some(old)=previous{let removed=old.items.into_iter().filter(|i|!pack.items.iter().any(|new|new.id==i.id)).collect();snapshot.packs.retain(|p|p.id!=old.id);archive_items(&mut snapshot,old.id,removed);}
+            snapshot.packs.insert(position.min(snapshot.packs.len()),pack);this.write(&snapshot)
+        }).await
+    }
     pub async fn apply_sync_order(&self, order: serde_json::Value) -> Result<bool> {
         let this=self.clone();worker(move||{
             let _gate=this.owner.gate.lock().unwrap();let mut snapshot=this.read()?;
+            let map_ids=|field:&str|->Option<Vec<i64>>{order.get(field)?.as_array()?.iter().map(|id|snapshot.packs.iter().flat_map(|p|p.items.iter()).find(|i|Some(i.sync_id.as_str())==id.as_str()).map(|i|i.id)).collect()};
+            let favorites=map_ids("favorites");let recent=map_ids("recent");
+            if order.get("favorites").is_some()&&favorites.is_none() || order.get("recent").is_some()&&recent.is_none(){return Ok(false);}
             if !reorder_synced_packs(&mut snapshot.packs,&order){return Ok(false);}
+            if let Some(ids)=favorites{snapshot.favorites=ids;}if let Some(ids)=recent{snapshot.recent=ids;}
             this.write(&snapshot)?;Ok(true)
         }).await
     }
@@ -598,7 +634,7 @@ impl Library {
                 archive_items(&mut s, target.unwrap(), old);
                 pack
             } else {
-                let pack = Pack {
+                let pack = Pack {sync_pending:false,
             sync_id: String::new(),
                     id: new_id(),
                     name: valid_name(&name)?,
@@ -644,8 +680,9 @@ impl Library {
             }else{pack.sync_id.clear();pack.source=format!("local:{}",uuid::Uuid::new_v4());pack.installed=true;pack.private_pack=true;pack.connected=false;pack.auto_sync=false;for item in &mut pack.items{item.sync_id.clear();}None};
             pack.id=existing.as_ref().map(|p|p.id).unwrap_or_else(new_id);
             for item in &mut pack.items{item.id=existing.as_ref().and_then(|p|p.items.iter().find(|old|!item.sync_id.is_empty()&&old.sync_id==item.sync_id)).map(|old|old.id).unwrap_or_else(new_id);}
+            let position=existing.as_ref().and_then(|old|s.packs.iter().position(|p|p.id==old.id)).unwrap_or(0);
             if let Some(old)=existing{let removed=old.items.into_iter().filter(|old|!pack.items.iter().any(|i|i.id==old.id)).collect();s.packs.retain(|p|p.id!=old.id);archive_items(&mut s,old.id,removed);}
-            s.packs.insert(0,pack.clone());
+            s.packs.insert(position.min(s.packs.len()),pack.clone());
             stage.publish(&this.owner.path)?;
             this.check(&job)?;
             this.write(&s)?;
@@ -670,6 +707,7 @@ impl Library {
                 .iter()
                 .find(|p| p.id == id)
                 .ok_or(Error("Pack is no longer available."))?;
+            if pack.sync_pending { return Err(Error("This pack is still downloading. Wait for it to finish before exporting.")); }
             let output = this
                 .owner
                 .path
@@ -740,7 +778,7 @@ fn archive_items(s: &mut Snapshot, parent: i64, items: Vec<Item>) {
             .find(|p| p.id == parent)
             .map(|p| p.kind)
             .unwrap_or(Kind::Stickers);
-        s.packs.push(Pack {
+        s.packs.push(Pack {sync_pending:false,
             sync_id: String::new(),
             id: new_id(),
             name: "Retained artwork".into(),
@@ -1209,7 +1247,7 @@ fn read_archive(path: &Path, stage: &mut Staging, job: &Job) -> Result<Pack> {
             remote_id: String::new(),
         });
     }
-    Ok(Pack {
+    Ok(Pack {sync_pending:false,
             sync_id: manifest.sync.as_ref().map(|s|s.id.clone()).unwrap_or_default(),
         id: new_id(),
         name: valid_name(&manifest.name)?,
@@ -2049,7 +2087,7 @@ impl Library {
             );
         }
         let now = chrono::Utc::now().timestamp();
-        Ok(Pack {
+        Ok(Pack {sync_pending:false,
             sync_id: String::new(),
             id: previous.map(|p| p.id).unwrap_or_else(new_id),
             name,
@@ -2427,8 +2465,25 @@ fn reorder_synced_packs(packs: &mut [Pack], order: &serde_json::Value) -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn metadata_and_preferences_arrive_before_media_without_changing_local_ids_or_order() {
+        let root=std::env::temp_dir().join(format!("pack-metadata-{}",uuid::Uuid::new_v4()));private_dir(&root).unwrap();
+        let mut stage=Staging::new(&root).unwrap();let mut original=read_archive(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/device-sync/mobile.xmsp"),&mut stage,&Job::new()).unwrap();original.installed=true;
+        let archive=root.join("full.xmsp");write_archive(&original,&stage.path,&archive,&Job::new()).unwrap();
+        let target=root.join("receiver");private_dir(&target).unwrap();let library=Library{owner:Arc::new(Owner{account:"receiver@fixture.invalid".into(),path:target.clone(),gate:Mutex::new(()),valid:AtomicBool::new(true)})};
+        gtk::glib::MainContext::default().block_on(async {
+            let metadata=original.sync_metadata();library.apply_sync_metadata(metadata.clone()).await.unwrap();
+            let placeholder=library.snapshot().await.unwrap().packs[0].clone();assert!(placeholder.sync_pending);assert!(!target.join(&placeholder.items[0].file).exists());
+            let mut second=metadata;let second_id=uuid::Uuid::new_v4().to_string();second["id"]=serde_json::json!(second_id);second["items"][0]["id"]=serde_json::json!(uuid::Uuid::new_v4().to_string());library.apply_sync_metadata(second).await.unwrap();
+            let mut state=serde_json::json!({"emojis":[],"stickers":[],"favorites":[original.items[0].sync_id],"recent":[original.items[0].sync_id]});state[if original.kind==Kind::Emoji{"emojis"}else{"stickers"}]=serde_json::json!([second_id,original.sync_id]);
+            assert!(library.apply_sync_order(state).await.unwrap());let imported=library.import_sync_xmsp(archive,Job::new(),original.sync_id.clone()).await.unwrap();
+            assert!(!imported.sync_pending);assert_eq!(imported.id,placeholder.id);assert_eq!(imported.items[0].id,placeholder.items[0].id);assert!(target.join(&imported.items[0].file).is_file());
+            let result=library.snapshot().await.unwrap();assert_eq!(result.packs[1].id,placeholder.id);assert_eq!(result.favorites,vec![placeholder.items[0].id]);assert_eq!(result.recent,result.favorites);
+        });drop(stage);let _=fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn synced_pack_order_uses_shared_ids_and_waits_without_partial_changes() {
-        let make=|id,kind,installed|Pack{sync_id:uuid::Uuid::new_v4().to_string(),id,name:format!("Pack {id}"),source:"local:fixture".into(),kind,installed,private_pack:true,connected:false,auto_sync:false,last_sync:0,last_attempt:0,sync_error:String::new(),items:vec![]};
+        let make=|id,kind,installed|Pack{sync_pending:false,sync_id:uuid::Uuid::new_v4().to_string(),id,name:format!("Pack {id}"),source:"local:fixture".into(),kind,installed,private_pack:true,connected:false,auto_sync:false,last_sync:0,last_attempt:0,sync_error:String::new(),items:vec![]};
         let mut packs=vec![make(100,Kind::Stickers,true),make(200,Kind::Emoji,true),make(300,Kind::Stickers,true),make(400,Kind::Stickers,false),make(500,Kind::Emoji,true)];
         let order=serde_json::json!({"stickers":[packs[2].sync_id,packs[0].sync_id],"emojis":[packs[4].sync_id,packs[1].sync_id]});
         assert!(reorder_synced_packs(&mut packs,&order));assert_eq!(packs.iter().map(|p|p.id).collect::<Vec<_>>(),vec![300,500,100,400,200]);
@@ -2453,7 +2508,7 @@ mod tests {
         let mut f = new_file(&root.join(&file)).unwrap();
         f.write_all(&data).unwrap();
         drop(f);
-        let pack = Pack {
+        let pack = Pack {sync_pending:false,
             sync_id: String::new(),
             id: new_id(),
             name: "Local pack".into(),
@@ -2620,6 +2675,12 @@ fn rooted_file(root: &Path, name: &str) -> Result<File> {
     Ok(file)
 }
 impl Library {
+    pub(crate) fn reopen_preview(&self,asset:&Asset)->std::result::Result<crate::downloads::VerifiedFile,&'static str> {
+        if !self.owner.valid.load(Ordering::Acquire)||asset.path!=self.owner.path.join(&asset.item.file){return Err("The artwork account changed");}
+        let source=asset.preview_source().ok_or("Invalid artwork hash")?;
+        let input=crate::downloads::verified_input(&asset.path,&source,&AtomicBool::new(false))?;
+        if !self.owner.valid.load(Ordering::Acquire){return Err("The artwork account changed");}Ok(input)
+    }
     pub async fn verified_asset(
         &self,
         id: i64,

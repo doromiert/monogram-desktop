@@ -24,9 +24,20 @@ pub static REVISION: AtomicU64 = AtomicU64::new(0);
 static ADAPTER_STATUS: Mutex<String> = Mutex::new(String::new());
 const KEY_ACCOUNT: &str = "monogram-lan-sync@localhost";
 type Result<T> = std::result::Result<T, String>;
-fn error(_: impl std::fmt::Debug) -> String {
-    "Could not read or save synchronized settings.".into()
+fn error(reason: impl std::fmt::Debug) -> String {
+    // Types identify the failing layer without logging JSON, keys or passwords.
+    eprintln!("Monogram sync settings operation failed: {}",std::any::type_name_of_val(&reason));
+    "Could not apply synced settings. Update Monogram on both devices, then retry.".into()
 }
+fn keyring_error(reason:crate::credentials::Error)->String {
+    eprintln!("Monogram sync keyring: {reason}");
+    match reason {
+        crate::credentials::Error::Locked=>"Unlock your system keyring or password manager, then try pairing again.",
+        crate::credentials::Error::Unavailable=>"Your system keyring is unavailable. Start and unlock your password manager’s Secret Service, then retry pairing.",
+        _=>"The saved sync key could not be read. Restore its entry in your system keyring, then try again.",
+    }.into()
+}
+fn unicode_wire(value:&str)->String {value.chars().filter(|c|!matches!(c,'\u{fe0f}'|'\u{fe0e}')).collect()}
 fn root() -> PathBuf {
     crate::crypto::lifecycle::root().join("device-sync")
 }
@@ -56,12 +67,10 @@ pub async fn start() -> Result<Arc<Mesh>> {
     }
     let saved = crate::credentials::load_service(KEY_ACCOUNT, "lan-sync-master")
         .await
-        .map_err(error)?;
+        .map_err(keyring_error)?;
     let key = if let Some(saved) = saved {
-        B64.decode(saved.as_bytes())
-            .map_err(error)?
-            .try_into()
-            .map_err(error)?
+        B64.decode(saved.as_bytes()).ok().and_then(|key|key.try_into().ok())
+            .ok_or_else(||"The saved sync key is invalid. Restore its system-keyring entry; existing sync data has been preserved.".to_string())?
     } else {
         let mut key = [0; 32];
         openssl::rand::rand_bytes(&mut key).map_err(error)?;
@@ -71,7 +80,7 @@ pub async fn start() -> Result<Arc<Mesh>> {
             Zeroizing::new(B64.encode(key)),
         )
         .await
-        .map_err(error)?;
+        .map_err(keyring_error)?;
         key
     };
     let mesh = gio::spawn_blocking(move || {
@@ -204,15 +213,43 @@ async fn cycle(mesh: &Arc<Mesh>, store: &Store) -> Result<()> {
         }
         export_fingerprints(mesh, owner)?;
         let library = Library::open(owner).await.map_err(error)?;
+        let snapshot=library.snapshot().await.map_err(error)?;
+        let mut ready=Vec::new();let mut item_ids=std::collections::HashMap::new();
         let mut pack_order=json!({"stickers":[],"emojis":[]});
-        for pack in library.snapshot().await.map_err(error)?.packs {
-            if pack.items.is_empty() || pack.source.starts_with("local:replaced:") {
-                continue;
-            }
-            let pack = library.sync_tag(pack.id).await.map_err(error)?;
-            if pack.installed {pack_order[if pack.kind==crate::packs::Kind::Emoji{"emojis"}else{"stickers"}].as_array_mut().unwrap().push(json!(pack.sync_id));}
+        for pack in &snapshot.packs {
+            if pack.sync_pending||pack.items.is_empty()||pack.source.starts_with("local:replaced:"){continue;}
+            let pack=library.sync_tag(pack.id).await.map_err(error)?;
+            publish_json(mesh,"pack-meta",owner,&pack.sync_id,pack.sync_metadata())?;
+            if pack.installed{pack_order[if pack.kind==crate::packs::Kind::Emoji{"emojis"}else{"stickers"}].as_array_mut().unwrap().push(json!(pack.sync_id));}
+            for item in &pack.items{item_ids.insert(item.id,(item.sync_id.clone(),pack.kind));}
+            ready.push(pack);
+        }
+        use crate::ui::favorite_order::{self,Kind as FavoriteKind};
+        let preferences=store.emoji_preferences().map_err(error)?;
+        let mut favorites=Vec::new();let mut mixed=preferences.favorites.iter().map(|emoji|(format!("unicode:{}",unicode_wire(emoji)),favorite_order::emoji_key(emoji))).collect::<Vec<_>>();
+        for kind in [crate::packs::Kind::Stickers,crate::packs::Kind::Emoji]{
+            let mut selected=snapshot.favorites.iter().filter_map(|id|item_ids.get(id).filter(|(_,k)|*k==kind).map(|(uuid,_)|(uuid.clone(),favorite_order::pack_key(owner,*id)))).collect::<Vec<_>>();
+            favorite_order::sort_saved(&store.db,if kind==crate::packs::Kind::Emoji{FavoriteKind::Emoji}else{FavoriteKind::Stickers},&mut selected,|v|v.1.clone()).map_err(error)?;
+            for(uuid,key)in selected {favorites.push(uuid.clone());if kind==crate::packs::Kind::Emoji{mixed.push((format!("item:{uuid}"),key));}}
+        }
+        favorite_order::sort_saved(&store.db,FavoriteKind::Emoji,&mut mixed,|v|v.1.clone()).map_err(error)?;
+        pack_order["emoji_favorites"]=json!(mixed.iter().filter_map(|(wire,_)|wire.strip_prefix("unicode:")).collect::<Vec<_>>());
+        pack_order["emoji_favorite_order"]=json!(mixed.iter().map(|v|&v.0).collect::<Vec<_>>());
+        let mut mixed_recent=preferences.recent.iter().map(|emoji|(format!("unicode:{}",unicode_wire(emoji)),favorite_order::emoji_key(emoji))).chain(snapshot.recent.iter().filter_map(|id|item_ids.get(id).filter(|(_,kind)|*kind==crate::packs::Kind::Emoji).map(|(uuid,_)|(format!("item:{uuid}"),favorite_order::pack_key(owner,*id))))).collect::<Vec<_>>();
+        let saved:Vec<String>=serde_json::from_str(&store.pref("picker:recent:emoji","[]")).unwrap_or_default();mixed_recent.sort_by_key(|(_,key)|saved.iter().position(|old|old==key).unwrap_or(usize::MAX));
+        pack_order["emoji_recent"]=json!(mixed_recent.iter().filter_map(|(wire,_)|wire.strip_prefix("unicode:")).collect::<Vec<_>>());
+        pack_order["emoji_recent_order"]=json!(mixed_recent.iter().map(|v|&v.0).collect::<Vec<_>>());
+        pack_order["emoji_pinned"]=json!(preferences.pinned.iter().map(|v|unicode_wire(v)).collect::<Vec<_>>());
+        pack_order["favorites"]=json!(favorites);
+        pack_order["recent"]=json!(snapshot.recent.iter().filter_map(|id|item_ids.get(id).map(|(uuid,_)|uuid)).collect::<Vec<_>>());
+        if snapshot.packs.is_empty(){for field in ["favorites","recent"]{pack_order.as_object_mut().unwrap().remove(field);}}
+        if store.pref("emoji:favorites","").is_empty(){for field in ["emoji_favorites","emoji_favorite_order"]{pack_order.as_object_mut().unwrap().remove(field);}}
+        if store.pref("emoji:pinned","").is_empty(){pack_order.as_object_mut().unwrap().remove("emoji_pinned");}
+        if store.pref("emoji:usage","").is_empty(){for field in ["emoji_recent","emoji_recent_order"]{pack_order.as_object_mut().unwrap().remove(field);}}
+        if !snapshot.packs.iter().any(|p|p.sync_pending){publish_json(mesh,"pack-order",owner,"order",pack_order)?;}
+        for pack in ready {
             let mut value = serde_json::to_value(&pack).map_err(error)?;
-            for field in ["last_sync", "last_attempt", "sync_error"] {
+            for field in ["last_sync", "last_attempt", "sync_error", "sync_pending"] {
                 value.as_object_mut().unwrap().remove(field);
             }
             let sig = digest(&serde_json::to_vec(&value).map_err(error)?);
@@ -246,7 +283,7 @@ async fn cycle(mesh: &Arc<Mesh>, store: &Store) -> Result<()> {
             result?;
             mesh.store.lock().unwrap().set_signature(&k, sig)?;
         }
-        publish_json(mesh,"pack-order",owner,"order",pack_order)?;
+
     }
     let pending = mesh.store.lock().unwrap().pending();
     for meta in pending {
@@ -284,7 +321,7 @@ async fn apply(store: &Store, meta: &Meta, path: &std::path::Path) -> Result<Opt
             .await
             .map_err(error)?;
         let mut value = serde_json::to_value(pack).map_err(error)?;
-        for field in ["last_sync", "last_attempt", "sync_error"] {
+        for field in ["last_sync", "last_attempt", "sync_error", "sync_pending"] {
             value.as_object_mut().unwrap().remove(field);
         }
         return Ok(Some(digest(&serde_json::to_vec(&value).map_err(error)?)));
@@ -343,9 +380,20 @@ async fn apply(store: &Store, meta: &Meta, path: &std::path::Path) -> Result<Opt
                 )
                 .map_err(error)?;
         }
+        "pack-meta" => {
+            if !store.accounts().iter().any(|a|a.jid==meta.owner){return Ok(None);}
+            Library::open(&meta.owner).await.map_err(error)?.apply_sync_metadata(value.clone()).await.map_err(error)?;
+        }
         "pack-order" => {
             let library=Library::open(&meta.owner).await.map_err(error)?;
             if !library.apply_sync_order(value.clone()).await.map_err(error)? {return Ok(None);}
+            let snapshot=library.snapshot().await.map_err(error)?;
+            let local_keys=|field:&str|->Option<Vec<String>>{value.get(field)?.as_array()?.iter().map(|key|{let key=key.as_str()?;if let Some(emoji)=key.strip_prefix("unicode:"){Some(crate::ui::favorite_order::emoji_key(emoji))}else{let id=key.strip_prefix("item:")?;snapshot.packs.iter().flat_map(|p|p.items.iter()).find(|item|item.sync_id==id).map(|item|crate::ui::favorite_order::pack_key(&meta.owner,item.id))}}).collect()};
+            for field in ["emoji_favorite_order","emoji_recent_order"]{if value.get(field).is_some()&&local_keys(field).is_none(){return Ok(None);}}
+            store.import_synced_emoji_preferences(&value).map_err(error)?;
+            if let Some(keys)=local_keys("emoji_favorite_order"){crate::ui::favorite_order::import_synced_order(&store.db,crate::ui::favorite_order::Kind::Emoji,&meta.owner,keys).map_err(error)?;}
+            if let Some(keys)=local_keys("emoji_recent_order"){store.set_pref("picker:recent:emoji",&serde_json::to_string(&keys).map_err(error)?).map_err(error)?;}
+            if value.get("favorites").is_some(){let keys=snapshot.favorites.iter().filter(|id|snapshot.packs.iter().any(|p|p.kind==crate::packs::Kind::Stickers&&p.items.iter().any(|i|i.id==**id))).map(|id|crate::ui::favorite_order::pack_key(&meta.owner,*id)).collect();crate::ui::favorite_order::import_synced_order(&store.db,crate::ui::favorite_order::Kind::Stickers,&meta.owner,keys).map_err(error)?;}
         }
         "folders" => {
             store
@@ -453,6 +501,9 @@ mod native_tests {
             meta.kind="token".into();meta.id="giphy".into();std::fs::write(&path,json!({"value":"fictional-api-key"}).to_string()).unwrap();apply(&store,&meta,&path).await.unwrap();assert_eq!(crate::credentials::load_service(owner,"giphy").await.unwrap().unwrap().as_str(),"fictional-api-key");
             let old=store.load_windowed(owner);let folders=json!({"rules":{"Friends":{"types":["contacts"],"exclude_muted":false,"exclude_read":false,"exclude_archived":true,"include":[],"exclude":[],"icon":"cat","pinned":[]}},"order":["Friends","All"],"all_hidden":true});
             meta.kind="folders".into();meta.id="folders".into();std::fs::write(&path,folders.to_string()).unwrap();apply(&store,&meta,&path).await.unwrap();store.save_chat_state(&old).unwrap();let reloaded=store.load_windowed(owner);assert!(reloaded.all_folder_hidden);assert_eq!(reloaded.folders["Friends"].icon,"cat");
+            let library_state=json!({"emojis":[],"stickers":[],"favorites":[],"recent":[],"emoji_favorites":["☠","❤"],"emoji_recent":["🐢","😂"],"emoji_favorite_order":["unicode:☠","unicode:❤"],"emoji_recent_order":["unicode:🐢","unicode:😂"]});
+            meta.kind="pack-order".into();meta.id="order".into();std::fs::write(&path,library_state.to_string()).unwrap();assert!(apply(&store,&meta,&path).await.unwrap().is_some());
+            let preferences=store.emoji_preferences().unwrap();assert_eq!(preferences.favorites,["☠","❤️"]);assert_eq!(preferences.recent,["🐢","😂"]);assert!(store.pref("picker:recent:emoji","").contains("emoji:🐢"));
             store.forget(owner).unwrap();meta.kind="account".into();meta.id="login".into();std::fs::write(&path,account.to_string()).unwrap();assert!(apply(&store,&meta,&path).await.is_err());assert!(store.accounts().is_empty());
             let first=start().await.unwrap();let id=first.store.lock().unwrap().state.id.clone();stop();drop(first);gtk::glib::timeout_future(Duration::from_millis(800)).await;
             let again=start().await.unwrap();assert_eq!(again.store.lock().unwrap().state.id,id);stop();drop(again);

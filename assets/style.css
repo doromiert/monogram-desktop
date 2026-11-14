@@ -267,3 +267,6 @@
 .emoji-completion-popover > contents { border-radius: 18px; padding: 6px; }
 .emoji-completion-list { background: transparent; border-radius: 12px; }
 .emoji-completion-list > row { border-radius: 12px; padding: 0; }
+
+.message-editing textview, .message-editing textview text, .message-editing scrolledwindow { background: transparent; color: inherit; box-shadow: none; border: none; }
+.message-editing textview { padding: 2px; }

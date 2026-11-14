@@ -1690,7 +1690,7 @@ impl Ui {
         else {
             return;
         };
-        clear(&bubble);
+        clear(&bubble);bubble.add_css_class("message-editing");bubble.remove_css_class("emoji-only");
         let editor = gtk::TextView::builder()
             .wrap_mode(gtk::WrapMode::WordChar)
             .build();
@@ -1714,12 +1714,14 @@ impl Ui {
         let actions = bx(false, 6);
         actions.set_halign(gtk::Align::End);
         let cancel = gtk::Button::with_label("Cancel");
-        self.weak_button(&cancel, |s| s.render_messages(false));
+        let weak=Rc::downgrade(self);let cancel_id=id.to_string();
+        cancel.connect_clicked(move |_|{if let Some(ui)=weak.upgrade(){ui.rendered_rows.borrow_mut().rows.remove(&cancel_id);ui.render_messages(false);}});
         actions.append(&cancel);
         let save = gtk::Button::with_label("Save");
         save.add_css_class("suggested-action");
         let weak = Rc::downgrade(self);
         let id = id.to_string();
+        let edit_view=editor.clone();
         save.connect_clicked(move |_| {
             if let Some(ui) = weak.upgrade() {
                 if ui.generation.get() != generation
@@ -1728,7 +1730,7 @@ impl Ui {
                 {
                     return;
                 }
-                let b = editor.buffer();
+                let b = edit_view.buffer();
                 let value = b.text(&b.start_iter(), &b.end_iter(), true);
                 if value.trim().is_empty() {
                     return;
@@ -1741,7 +1743,7 @@ impl Ui {
                     let Some(target) = crate::message_actions::original_wire(&m) else {
                         return;
                     };
-                    let mut formatting=crate::formatting_ui::editor_formatting(&editor,&edit_spoiler);
+                    let mut formatting=crate::formatting_ui::editor_formatting(&edit_view,&edit_spoiler);
                     formatting.markdown=original.markdown;
                     if formatting.markdown{formatting.unstyled=true;}
                     ui.send_formatted_action(&id,crate::message_actions::Action::Correct { target },formatting.styled());
@@ -1755,7 +1757,7 @@ impl Ui {
                     .iter_mut()
                     .find(|m| m.id == id)
                 {
-                    let formatting=crate::formatting_ui::editor_formatting(&editor,&edit_spoiler).styled();
+                    let formatting=crate::formatting_ui::editor_formatting(&edit_view,&edit_spoiler).styled();
                     m.text = formatting.body.clone();m.preview_spoilers=Some(formatting.spoiler_context());m.formatting=Some(formatting);
                 }
                 ui.render_messages(false);
@@ -1764,6 +1766,18 @@ impl Ui {
         });
         actions.append(&save);
         bubble.append(&actions);
+        let completion=crate::emoji_completion::attach(&editor);
+        let keys=gtk::EventControllerKey::new();keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let confirm=save.downgrade();let dismiss=cancel.downgrade();
+        keys.connect_key_pressed(move|_,key,_,modifiers|{
+            if matches!(key,gdk::Key::Return|gdk::Key::KP_Enter)&&!modifiers.contains(gdk::ModifierType::SHIFT_MASK){
+                if let Some(save)=confirm.upgrade(){save.emit_clicked();}return glib::Propagation::Stop;
+            }
+            if completion.key(key,modifiers){return glib::Propagation::Stop;}
+            if key==gdk::Key::Escape {if let Some(cancel)=dismiss.upgrade(){cancel.emit_clicked();}return glib::Propagation::Stop;}
+            glib::Propagation::Proceed
+        });editor.add_controller(keys);
+        let b=editor.buffer();b.place_cursor(&b.end_iter());editor.grab_focus();bubble.queue_resize();
     }
 }
 
@@ -1830,3 +1844,34 @@ mod reaction_scroll_native;
 #[cfg(test)]
 #[path = "../tests/reaction_media_native.rs"]
 mod reaction_media_native;
+
+#[cfg(test)]
+mod editor_native_tests {
+    use super::*;
+    fn wait(mut ready:impl FnMut()->bool) {
+        let context=glib::MainContext::default();let end=std::time::Instant::now()+Duration::from_secs(6);
+        while std::time::Instant::now()<end {for _ in 0..50{if !context.pending(){break;}context.iteration(false);}if ready(){return;}std::thread::sleep(Duration::from_millis(3));}assert!(ready(),"Editor did not settle");
+    }
+    fn text_view(widget:&gtk::Widget)->Option<gtk::TextView>{if let Some(view)=widget.downcast_ref::<gtk::TextView>(){return Some(view.clone());}let mut child=widget.first_child();while let Some(current)=child{child=current.next_sibling();if let Some(view)=text_view(&current){return Some(view);}}None}
+    fn key(widget:&impl IsA<gtk::Widget>,value:&str){
+        assert!(widget.grab_focus());let output=std::process::Command::new("xdotool").args(["search","--onlyvisible","--pid",&std::process::id().to_string(),"--name","Monogram"]).output().unwrap();let id=String::from_utf8(output.stdout).unwrap().lines().next().unwrap().to_owned();let value=value.to_owned();let task=std::thread::spawn(move||assert!(std::process::Command::new("xdotool").args(["key","--window",&id,&value]).status().unwrap().success()));wait(||task.is_finished());task.join().unwrap();
+    }
+    #[test]
+    #[ignore="requires isolated native display, xdotool and Secret Service"]
+    fn editing_uses_composer_completion_and_native_keyboard_rules(){
+        let app=adw::Application::builder().application_id("com.negzero.MonogramDesktop.EditFixture").flags(gtk::gio::ApplicationFlags::NON_UNIQUE).build();app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let ui=Ui::new(&app,true);ui.window.set_default_size(1200,800);ui.window.present();
+        {let mut state=ui.state.borrow_mut();state.account.clear();state.current_mut().messages=vec![Message{id:"own-edit-fixture".into(),text:"Original".into(),own:true,kind:"text".into(),time:"12:00".into(),..Default::default()},Message{id:"incoming-edit-fixture".into(),text:"Incoming".into(),kind:"text".into(),time:"12:01".into(),..Default::default()}];}
+        ui.composer.buffer().set_text("");ui.render_messages(true);wait(||ui.bubbles.borrow().contains_key("own-edit-fixture"));
+        key(&ui.composer,"Up");wait(||ui.bubbles.borrow().get("own-edit-fixture").and_then(text_view).is_some());
+        let bubble=ui.bubbles.borrow()["own-edit-fixture"].clone();let editor=text_view(&bubble).unwrap();wait(||editor.width()>100);
+        let limit=bubble.parent().unwrap();assert!(bubble.width()>limit.width()*2/5-32,"Editing bubble did not use maximum width: {}/{}",bubble.width(),limit.width());
+        let buffer=editor.buffer();buffer.set_text(":sku");buffer.place_cursor(&buffer.end_iter());
+        wait(||{let mut child=editor.first_child();while let Some(current)=child{child=current.next_sibling();if current.is::<gtk::Popover>()&&current.is_mapped(){return true;}}false});
+        key(&editor,"Tab");wait(||!buffer.text(&buffer.start_iter(),&buffer.end_iter(),true).starts_with(':'));
+        buffer.set_text("Edited");buffer.place_cursor(&buffer.end_iter());key(&editor,"shift+Return");wait(||buffer.text(&buffer.start_iter(),&buffer.end_iter(),true).ends_with('\n'));
+        key(&editor,"Return");wait(||ui.state.borrow().message("own-edit-fixture").is_some_and(|m|m.text=="Edited\n"));wait(||ui.bubbles.borrow().get("own-edit-fixture").and_then(text_view).is_none());
+        key(&ui.composer,"Up");wait(||ui.bubbles.borrow().get("own-edit-fixture").and_then(text_view).is_some());
+        let editor=text_view(&ui.bubbles.borrow()["own-edit-fixture"]).unwrap();key(&editor,"Escape");wait(||ui.bubbles.borrow().get("own-edit-fixture").and_then(text_view).is_none());ui.window.close();
+    }
+}

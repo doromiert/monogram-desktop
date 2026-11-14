@@ -79,6 +79,16 @@ fn read(db: &Connection, kind: Kind) -> rusqlite::Result<Order> {
             .collect(),
     ))
 }
+pub(crate) fn sort_saved<T>(db:&Connection,kind:Kind,items:&mut [T],key:impl Fn(&T)->String)->rusqlite::Result<()> {
+    read(db,kind)?.sort(items,key);Ok(())
+}
+pub(crate) fn import_synced_order(db:&Connection,kind:Kind,owner:&str,keys:Vec<String>)->rusqlite::Result<()> {
+    let old=read(db,kind)?;let prefix=format!("pack:{owner}:");let mut incoming=keys.into_iter();
+    let mut merged=old.keys.into_iter().filter_map(|key|if key.starts_with("emoji:")||key.starts_with(&prefix){incoming.next()}else{Some(key)}).collect::<Vec<_>>();merged.extend(incoming);
+    let mut seen=HashSet::new();merged.retain(|key|seen.insert(key.clone()));
+    let json=serde_json::to_string(&merged).map_err(|_|rusqlite::Error::InvalidQuery)?;
+    db.execute("INSERT INTO preferences(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![kind.preference(),json])?;Ok(())
+}
 fn load(db: &Connection) -> rusqlite::Result<HashMap<Kind, Order>> {
     [Kind::Emoji, Kind::Stickers, Kind::Gifs]
         .into_iter()
@@ -676,6 +686,13 @@ pub(crate) fn attach(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn synced_mixed_order_preserves_other_accounts_and_remaps_local_items() {
+        let db=Connection::open_in_memory().unwrap();db.execute_batch("CREATE TABLE preferences(key TEXT PRIMARY KEY,value TEXT)").unwrap();
+        import_synced_order(&db,Kind::Emoji,"other",vec!["emoji:❤️".into(),"pack:other:2".into(),"pack:mine:1".into()]).unwrap();
+        import_synced_order(&db,Kind::Emoji,"mine",vec!["pack:mine:999".into(),"emoji:☠️".into()]).unwrap();
+        assert_eq!(read(&db,Kind::Emoji).unwrap().keys,["pack:mine:999","pack:other:2","emoji:☠️"]);
+    }
     #[test]
     fn order_moves_preserve_hidden_accounts_and_never_change_membership() {
         let db = Connection::open_in_memory().unwrap();

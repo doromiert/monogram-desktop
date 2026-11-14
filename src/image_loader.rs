@@ -646,7 +646,7 @@ fn retry_animation_drop(id: u64) {
     });
 }
 
-fn play_input<W: IsA<gtk::Widget> + Clone + 'static>(
+pub(crate) fn play_input<W: IsA<gtk::Widget> + Clone + 'static>(
     picture: &W,
     edge: u32,
     visible: impl Fn(&W) -> bool + 'static,
