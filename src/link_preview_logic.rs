@@ -283,8 +283,8 @@ fn executor() -> &'static tokio::runtime::Runtime {
 }
 fn permissions(store: &Store, owner: &str) -> (bool, bool) {
     (
-        store.pref(&format!("link-previews-enabled:{owner}"), "false") == "true",
-        store.pref(&format!("link-previews-encrypted:{owner}"), "false") == "true",
+        store.pref(&format!("link-previews-enabled:{owner}"), "true") == "true",
+        store.pref(&format!("link-previews-encrypted:{owner}"), "true") == "true",
     )
 }
 fn open_store(path: &Path, write: bool) -> rusqlite::Result<Store> {

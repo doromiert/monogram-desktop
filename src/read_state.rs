@@ -58,60 +58,7 @@ impl Ui {
     }
 
     fn queue_displayed_marker(self: &Rc<Self>) {
-        if !self.window.is_active() || !self.read_receipts_enabled() || !self.reading_current_chat()
-        {
-            return;
-        }
-        let state = self.state.borrow();
-        let chat = state.current();
-        if chat.group || state.account.is_empty() {
-            return;
-        }
-        let bubbles = self.bubbles.borrow();
-        let visible = chat.messages.iter().rev().find(|message| {
-            !message.own
-                && !message.unavailable
-                && !message.retracted
-                && !message.markable_id.is_empty()
-                && bubbles
-                    .get(&message.id)
-                    .and_then(|bubble| bubble.compute_bounds(&self.scroll))
-                    .is_some_and(|bounds| {
-                        bounds.y() < self.scroll.height() as f32
-                            && bounds.y() + bounds.height() > 0.
-                    })
-        });
-        let Some(message) = visible else { return };
-        let key = (
-            state.account.clone(),
-            chat.jid.clone(),
-            message.id.clone(),
-            self.store.read_receipts(&state.account).revision,
-        );
-        drop(bubbles);
-        drop(state);
-        if self.read_ui.borrow().last.as_ref() == Some(&key) {
-            return;
-        }
-        self.read_ui.borrow_mut().last = Some(key.clone());
-        let weak = Rc::downgrade(self);
-        gtk::glib::MainContext::default().spawn_local(async move {
-            let Some(ui) = weak.upgrade() else { return };
-            let (owner, peer, id, _) = key.clone();
-            let candidate = ui
-                .store
-                .write_snapshot(move |store| store.mark_displayed(&owner, &peer, &[id]))
-                .await;
-            if ui.state.borrow().account != key.0 || !ui.read_receipts_enabled() {
-                return;
-            }
-            if let Ok(Some(candidate)) = candidate {
-                ui.command(crate::protocol::Command::Displayed {
-                    peer: candidate.peer,
-                    id: candidate.id,
-                });
-            }
-        });
+        if self.reading_current_chat() { self.mark_current_chat_read(); }
     }
     pub fn receive_read_marker(self: &Rc<Self>, owner: &str, peer: &str, wire: &str, own: bool) {
         let (owner, peer, wire) = (owner.to_owned(), peer.to_owned(), wire.to_owned());
@@ -156,59 +103,77 @@ impl Ui {
         });
     }
     pub fn reading_current_chat(&self) -> bool {
-        // A chat visible on another monitor is still being viewed even when
-        // keyboard focus is on a different application.
-        self.window.is_mapped()
+        self.window.is_active()
+            && self.window.is_mapped()
             && self.timeline.is_mapped()
-            && self
-                .window
-                .surface()
-                .and_then(|surface| surface.dynamic_cast::<gtk::gdk::Toplevel>().ok())
-                .is_none_or(|toplevel| {
-                    !toplevel.state().intersects(
-                        gtk::gdk::ToplevelState::MINIMIZED | gtk::gdk::ToplevelState::SUSPENDED,
-                    )
-                })
             && self.pages.visible_child_name().as_deref() == Some("chat")
-            && !self
-                .dialogs
-                .borrow()
-                .iter()
-                .any(|dialog| dialog.is_visible())
+            && !self.dialogs.borrow().iter().any(|dialog| dialog.is_visible())
             && self.active_media.borrow().is_none()
             && self.active_story.borrow().is_none()
-            && self.history_window.newest()
-            && !self.rendering_messages()
-            && self.at_message_end()
     }
-
     pub fn mark_visible_chat_read(self: &Rc<Self>) {
-        if !self.reading_current_chat() {
-            return;
-        }
-        self.queue_displayed_marker();
-        let mut state = self.state.borrow_mut();
-        if state.account.is_empty()
-            || (state.current().unread == 0
-                && !state
-                    .current()
-                    .messages
-                    .iter()
-                    .any(|message| message.unread))
-        {
-            return;
-        }
-        let owner = state.account.clone();
-        let peer = state.current().jid.clone();
-        if self.store.mark_read(&owner, &peer).is_err() {
-            return;
-        }
-        let chat = state.current_mut();
-        chat.unread = 0;
-        for message in &mut chat.messages {
-            message.unread = false;
-        }
-        drop(state);
-        self.refresh_chats(None);
+        if self.reading_current_chat() { self.mark_current_chat_read(); }
     }
+    /// Sending is also an explicit acknowledgement of the current conversation.
+    /// The archive write and outgoing marker are coalesced and run off GTK.
+    pub fn mark_current_chat_read(self: &Rc<Self>) {
+        let mut state=self.state.borrow_mut();
+        if state.account.is_empty() { return; }
+        let owner=state.account.clone();
+        let chat=state.current_mut();
+        let Some((time,id))=chat.latest_key().map(|(t,i)|(t.to_owned(),i.to_owned())) else { return; };
+        let peer=chat.jid.clone();
+        let changed=chat.unread>0 || chat.unread_mark || chat.messages.iter().any(|m|m.unread);
+        chat.unread=0;chat.unread_mark=false;
+        for message in &mut chat.messages { message.unread=false; }
+        drop(state);
+        let revision=self.store.read_receipts(&owner).revision;
+        let key=(owner.clone(),peer.clone(),id.clone(),revision);
+        if !changed && self.read_ui.borrow().last.as_ref()==Some(&key) { return; }
+        self.read_ui.borrow_mut().last=Some(key.clone());
+        if changed { self.refresh_chats(None); }
+        let weak=Rc::downgrade(self);
+        gtk::glib::MainContext::default().spawn_local(async move {
+            let Some(ui)=weak.upgrade() else { return; };
+            let (account,address)=(owner.clone(),peer.clone());
+            let result=ui.store.write_snapshot(move |store| {
+                store.mark_read_through(&account,&address,&time,&id)?;
+                store.mark_latest_displayed(&account,&address,&time,&id)
+            }).await;
+            if ui.state.borrow().account!=owner { return; }
+            match result {
+                Ok(Some(candidate)) if ui.read_receipts_enabled() => {
+                    ui.command(crate::protocol::Command::Displayed { peer:candidate.peer,id:candidate.id });
+                }
+                Err(_) => {if ui.read_ui.borrow().last.as_ref()==Some(&key){ui.read_ui.borrow_mut().last=None;}ui.notice("Read status could not be saved. Retrying…");}
+                _=>{}
+            }
+        });
+    }
+}
+
+#[cfg(test)] mod native_tests {
+ use super::*;use crate::model::{Account,Message,State};use gtk::{gio,glib};use std::time::{Duration,Instant};
+ fn pump(){let context=glib::MainContext::default();let deadline=Instant::now()+Duration::from_millis(350);while Instant::now()<deadline{context.iteration(false);std::thread::sleep(Duration::from_millis(1));}}
+ #[test]#[ignore="requires private GTK display, xdotool and D-Bus"]
+ fn focused_history_arrivals_send_acknowledgement_and_typing_subtitle(){
+  let app=adw::Application::builder().application_id("com.negzero.MonogramReadTest").flags(gio::ApplicationFlags::NON_UNIQUE).build();app.register(None::<&gio::Cancellable>).unwrap();
+  let ui=Ui::new(&app,true);let owner="alice@example.invalid";let peer="bob@example.invalid";
+  ui.store.save_account(&Account{jid:owner.into(),host:String::new(),port:5222,direct_tls:false}).unwrap();
+  let mut state=State::live(owner,vec![]);state.active=state.chat_for(peer).id.clone();
+  for n in 0..100 {state.current_mut().messages.push(Message{id:format!("r{n:03}"),wire_id:format!("w{n}"),markable_id:format!("w{n}"),sender:peer.into(),text:format!("History row {n}\nSecond line"),timestamp:format!("2026-11-14T10:{:02}:{:02}Z",n/60,n%60),..Default::default()});}
+  ui.store.save(&state).unwrap();ui.activate_state(ui.store.load_windowed(owner));ui.select_chat(peer);ui.window.set_default_size(900,520);ui.window.present();pump();
+  let ids=std::process::Command::new("xdotool").args(["search","--name","^Monogram$"]).output().unwrap();let id=String::from_utf8(ids.stdout).unwrap().lines().last().unwrap().to_owned();assert!(std::process::Command::new("xdotool").args(["windowfocus","--sync",&id]).status().unwrap().success());pump();assert!(ui.window.is_active());
+  ui.scroll.vadjustment().set_value(0.);pump();assert!(!ui.at_message_end());assert!(ui.reading_current_chat());
+  assert!(ui.receive_message(owner,peer.into(),Message{id:"fresh".into(),wire_id:"fresh-wire".into(),markable_id:"fresh-wire".into(),sender:peer.into(),text:"New while reading older history".into(),timestamp:"2026-11-14T12:00:00Z".into(),..Default::default()},false,None));pump();
+  assert_eq!(ui.state.borrow().current().unread,0);assert_eq!(ui.store.unread_count(owner,peer),0);
+  assert!(ui.store.pending_displayed(owner).unwrap().iter().any(|c|c.wire=="fresh-wire"));
+  ui.backend_event(ui.generation.get(),owner,crate::protocol::BackendEvent::Typing{peer:peer.into(),composing:true});pump();
+  fn has_typing(w:&gtk::Widget)->bool{if let Some(label)=w.downcast_ref::<gtk::Label>(){if label.text()=="Typing…"{return true;}}let mut c=w.first_child();while let Some(w)=c{c=w.next_sibling();if has_typing(&w){return true;}}false}
+  assert!(has_typing(ui.title.upcast_ref()));
+  ui.backend_event(ui.generation.get(),owner,crate::protocol::BackendEvent::Typing{peer:peer.into(),composing:false});pump();assert!(!has_typing(ui.title.upcast_ref()));
+  // Sending acknowledges a conversation without requiring the newest row to be on screen.
+  ui.state.borrow_mut().current_mut().unread=1;ui.mark_current_chat_read();assert_eq!(ui.state.borrow().current().unread,0);pump();
+  eprintln!("Native focused history: incoming cleared immediately, latest marker queued, typing replaced subtitle and restored it");ui.window.close();
+ }
 }

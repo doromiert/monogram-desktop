@@ -1155,6 +1155,7 @@ mod actor_tests {
                         direct_tls: false,
                     })
                     .unwrap();
+                history.set_blind_trust(owner,peer,false).unwrap(); // Explicit strict-policy opt-out.
                 let mut local = Device::memory(owner, 81).unwrap();
                 let local_bundle = Bundle::from_parts(local.prepare().unwrap()).unwrap();
                 let mut phone = Device::memory(owner, 82).unwrap();

@@ -27,9 +27,9 @@ an in-memory interaction or surface; "planned" means it is still absent.
 | HTML widgets | Upstream sandbox source audited; no renderer/runtime integrated | Resolve upstream licensing, GTK host and compatible XMPP proposal; enforce accepted **16 KiB compressed** budget plus independent expansion/memory/execution bounds on both clients |
 | Media authoring | Planned | Crop/trim/markup, compression, albums, camera capture and desktop permission/device flows |
 | Locations and previews | Location card/form preview | Real safe map rendering, provider privacy, coordinates, live/location selection and valid fallback removal |
-| Legacy OMEMO in DMs/MUCs | [Live Legacy OMEMO direct and room text/replies/attachments](LEGACY_OMEMO.md), authenticated same-author cross-device direct XEP-0424 retractions and consented public XEP-0444 reactions, complete member/own-device targets, separate durable identity/ratchet/trust, live/carbon/MAM receive and per-contact/per-room opt-in blind trust including conversation-scoped own devices | Rich actions, embedded-thumbnail receive, broader recovery and independent mobile room coverage |
+| Legacy OMEMO in DMs/MUCs | [Live Legacy OMEMO direct and room text/replies/attachments](LEGACY_OMEMO.md), authenticated same-author cross-device direct XEP-0424 retractions and consented public XEP-0444 reactions, complete member/own-device targets, separate durable identity/ratchet/trust, live/carbon/MAM receive and default-on direct-contact blind trust and separate room opt-in including conversation-scoped own devices | Rich actions, embedded-thumbnail receive, broader recovery and independent mobile room coverage |
 | OMEMO2 / Monocles PQ | Sending choice OMEMO2 uses the pinned Monocles hybrid PQ backend with separate encrypted identity/ratchet/trust and durable inbox/outbox; Legacy, Classic and PQ incoming decryption and fingerprint reviews stay independent of sending choice. Actual mobile Java/JNI bidirectional/restart/tamper checks, isolated TLS actor/PEP send/reply and live provider bundle publication verified; Classic [receive compatibility](OMEMO2.md) retained | PQ room runtime acceptance, complete background retry and rich content, restore/migration/revocation and remaining mobile policies |
-| Device and contact access control | Separate Legacy, Classic and full hybrid PQ fingerprint reviews, per-contact opt-in authenticated blind trust, own-device review plus conversation-scoped automatic PQ own-device approval on both clients when blind trust is enabled (explicit blocks preserved), and public key PEP setup; live RFC-6121 directional contact request/allow/accept/deny/cancel/revoke with account-local durable auto-approval, server-confirmed status, metadata-preserving revocation and reactive native controls | Matching mobile contextual own-device blind trust in Legacy/Classic, live Legacy/PQ room trust acceptance, device revocation and broader trust lifecycle acceptance |
+| Device and contact access control | Separate Legacy, Classic and full hybrid PQ fingerprint reviews, default-on direct-contact authenticated blind trust, own-device review plus conversation-scoped automatic PQ own-device approval on both clients when blind trust is enabled (explicit blocks preserved), and public key PEP setup; live RFC-6121 directional contact request/allow/accept/deny/cancel/revoke with account-local durable auto-approval, server-confirmed status, metadata-preserving revocation and reactive native controls | Matching mobile contextual own-device blind trust in Legacy/Classic, live Legacy/PQ room trust acceptance, device revocation and broader trust lifecycle acceptance |
 | Groups, MUCs, MIX and Spaces | Live bookmarked MUC discovery, autojoin, join presence, plain/Legacy-encrypted text, replies and attachments, room MAM paging, complete offline member discovery, fresh before/after encryption checks and revision-fenced real-JID contexts, real private-group creation/service discovery and explicit room join/leave, durable nickname/autojoin choices, private XEP-0402 bookmark writes and separate keyring room passwords; native public-room browser using service discovery, RSM paging/unpaged fallback, cumulative failures and explicit Join; spaces/channel form/list previews | Room details, full membership and role editing, room rich content/PQ encryption, live MIX and Spaces |
 | Invitations and contact requests | Durable account-scoped contact requests with paged review, acknowledged accept-and-request-back responses, one-way permission controls and server withdrawal/authorization reconciliation; mediated/direct room invitation inbox, encrypted invitation passwords, confirmed join/local dismissal, revision guards and durable keyring cleanup; empty Requests and invitations controls hidden on both clients; created groups grant selected members and send mediated invitations with per-recipient failures | Cross-device dismissal and full invitation management |
 | Presence and typing | Roster-authorized multi-resource status with unknown/unshared presence hidden, stale startup status cleared, and live direct typing with expiry/privacy control; clears on disconnect | Group states, full carbons/delay/archive rejection and broader interoperability |
@@ -37,7 +37,7 @@ an in-memory interaction or surface; "planned" means it is still absent.
 | Contacts and profiles | Live roster and verified direct-chat PEP/vCard avatars with a bounded account disk cache and offline restoration, conversation info following chat/account selection, [server-enforced contact blocking](BLOCKING.md) with direct profile/list actions, cross-resource pushes and acknowledged offline cache, editable profile preview | Avatar publication, local overrides, vCard fields, avatar publication/suggestions, colors and notes |
 | Stories and persistent profile posts | Horizontal chat-list avatar strip and timed native overlay viewer | Correct PEP/Atom access, expiry, persistent saves, edits/retractions, media and profile editing |
 | Notifications | Basic live desktop notifications, opt-in message previews, local chat mute and notification preferences | Actions/attention, mention matching, timed-mute expiry and background behavior |
-| Read state and archives | Visible-at-bottom local unread clearing, authenticated own-carbon read synchronization, default-off public XEP-0333 receipts with durable opt-in and monotonic read status, retained message widgets, bounded adaptive paging, roughly three screen heights cached on each side, reply jumps and paged direct MAM | Broader cross-client read interoperability, account-wide recovery and room readers |
+| Read state and archives | Focused-chat local unread clearing (including older-history views), immediate send acknowledgement, authenticated own-carbon read synchronization, default-on direct public XEP-0333 receipts with durable opt-out and monotonic read status, retained message widgets, bounded adaptive paging, current screen plus two screens cached on each side, reply jumps and paged direct MAM | Broader cross-client read interoperability, account-wide recovery and room readers |
 | Wallet overview / multiple wallets | Source 3D meshes/GLSL rendered in Rust, precision/QR controls, local add/remove/animated switch and activity fixtures | Production 3D card, secure keyring/SDK integration, unlock/lock, durable wallet slots and removal semantics |
 | Wallet recovery and scan | Planned | Polyseed/default recovery, 2×8 words UI, restore/import, node configuration, parallel bounded scanning, checkpoints and useful progress |
 | Send/request and fiat pricing | Local amount/currency/note/request-card forms | Exact atomic amounts, online fiat list/formatting/rates, address reservation, fees, confirmation and transaction history |
@@ -172,3 +172,37 @@ missing top-edge frames during GPU reaction expansion. Three native before/after
 recordings reproduce the failure and verify its removal; software/layout-only
 fixtures do not establish GPU pixel correctness. Reaction UI and protocol behavior
 are unchanged. System GTK remains unchanged; broader parity is still open.
+
+## 2026-11-14 regression update
+
+Android 0.2.205 and the matching desktop source add one-time, account-scoped
+migration enabling read receipts, typing, embeds (including encrypted chats),
+and direct-contact blind trust. Subsequent user opt-outs persist. Explicitly
+blocked fingerprints are still rejected; room blind trust remains separate.
+Desktop group read-receipt transmission remains an existing parity gap.
+
+Device Sync is a native Preferences page with activatable action rows, and
+accepts the desktop built-in All folder. Android camera/gallery pairing closes
+the scanner before showing its result and requests credential authorization
+when required. Invitation creation releases the storage lock before acquiring
+the pairing lock. APK native-core bytes and signing certificate are verified.
+Sticker exports use `.nzsp` and a dedicated MIME type; legacy `.xmsp` imports
+remain supported. Monero settings offer the mobile node catalogue and separate
+custom-node credentials, with a bundled symbolic icon. Wallet spending and the
+other existing wallet-engine gaps above are unchanged.
+
+Desktop custom emoji rows now own their asynchronous renderer, which holds a
+weak widget reference and is released on row disposal. A production-path native
+test decodes actual artwork, paints five slots, and checks disposal. Direct
+Legacy inline artwork uses the negotiated [local proposal](PROPOSED_XEP_LEGACY_INLINE.md);
+modern OMEMO formats stay compatible. Old received Legacy fallback-only messages
+cannot recover artwork that was never transmitted. Mobile custom emoji have a
+name editor independent of fallback emoji, with native name-based suggestions
+and pack keywords. Native desktop picker name search remains available.
+
+Native checks cover window/app icons, inline sync settings, node selection,
+whole-link wrapping and compact document rows. Large Markdown lists recycle
+native rows, and sticker worker reaping no longer blocks GTK during eviction.
+See [PERF.md](../PERF.md) for the repeated upward-scroll workload and its limits.
+Phone camera/credential UI and user-workload acceptance still require a phone;
+no attached Android device was available during these checks.

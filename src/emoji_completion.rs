@@ -328,13 +328,14 @@ pub fn attach(view: &gtk::TextView) -> Rc<Completion> {
         .activate_on_single_click(true)
         .focusable(false)
         .build();
-    list.add_css_class("boxed-list");
+    list.add_css_class("emoji-completion-list");
     let popover = gtk::Popover::builder()
         .child(&list)
         .position(gtk::PositionType::Top)
         .autohide(false)
         .has_arrow(false)
         .build();
+    popover.add_css_class("emoji-completion-popover");
     let completion = Rc::new(Completion {
         view: view.downgrade(),
         popover,

@@ -1915,10 +1915,11 @@ impl Ui {
         match action {
             PackLibraryAction::ImportXmsp => {
                 let chooser = gtk::FileDialog::builder()
-                    .title("Import XMSP Pack")
+                    .title("Import Sticker or Emoji Pack")
                     .modal(true)
                     .build();
                 let filter = gtk::FileFilter::new();
+                filter.add_pattern("*.nzsp");
                 filter.add_pattern("*.xmsp");
                 let filters = gio::ListStore::new::<gtk::FileFilter>();
                 filters.append(&filter);

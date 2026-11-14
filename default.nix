@@ -129,6 +129,7 @@ in craneLib.buildPackage (commonArgs // {
       --set MONOGRAM_MATH_HELPER ${mathRenderer}/bin/monogram-math-renderer
       --set MONOGRAM_LOTTIE_HELPER $out/libexec/monogram-sticker-renderer
       --set MONOGRAM_BWRAP ${bubblewrap}/bin/bwrap
+      --prefix XDG_DATA_DIRS : $out/share
       --set MONOGRAM_ASSET_DIR $out/share/monogram-desktop
       --set MONOGRAM_EPOXY_LIBRARY ${libepoxy}/lib/libepoxy.so.0
       --set GTK_USE_PORTAL 1

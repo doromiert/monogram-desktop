@@ -1,4 +1,16 @@
 //! Disposable loopback-only transport checks; launched by xmpp_fixture.py.
+#[path = "../src/lan_sync.rs"]
+mod lan_sync;
+#[path = "../src/monero_settings.rs"]
+mod monero_settings;
+#[path = "../src/chat_states.rs"]
+mod chat_states;
+#[path = "../src/defaults.rs"]
+mod defaults;
+#[path = "../src/formatting.rs"]
+mod formatting;
+#[path = "../src/markdown.rs"]
+mod markdown;
 #[path = "../src/action_store.rs"]
 mod action_store;
 #[path = "../src/avatar.rs"]
@@ -25,6 +37,8 @@ mod history_window;
 mod iq;
 #[path = "../src/legacy_polls.rs"]
 mod legacy_polls;
+#[path = "../src/legacy_inline.rs"]
+mod legacy_inline;
 #[path = "../src/media_store.rs"]
 mod media_store;
 #[path = "../src/message_actions.rs"]

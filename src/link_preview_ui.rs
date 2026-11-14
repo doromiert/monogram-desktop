@@ -464,16 +464,15 @@ mod tests {
             gtk::gdk::MemoryTexture::new(20, 20, gtk::gdk::MemoryFormat::R8g8b8a8, &bytes, 20 * 4);
         let inline_status = bx(false, 2);
         inline_status.append(&label("12:34", "message-meta"));
-        let linked_inline = InlineMessageText::new(source, &emoji, Some(&inline_status), &links);
+        let (linked_root, linked_inline) = InlineMessageText::new(source, &emoji, Some(&inline_status), &links);
         linked_inline.set_texture(&asset.cid, texture.clone().upcast());
-        let inline_message = linked_inline
-            .root
+        let inline_message = linked_root
             .first_child()
             .and_downcast::<MessageText>()
             .unwrap();
         inline_message.set_compact(true);
         let mut inline_labels = Vec::new();
-        labels(linked_inline.root.upcast_ref(), &mut inline_labels);
+        labels(linked_root.upcast_ref(), &mut inline_labels);
         assert!(inline_labels[0].label().contains("<a href="));
         assert!(
             inline_labels[0]
@@ -481,16 +480,16 @@ mod tests {
                 .is_some_and(|attrs| attrs.attributes().len() >= 4)
         );
         let mut inline_pictures = Vec::new();
-        pictures(linked_inline.root.upcast_ref(), &mut inline_pictures);
+        pictures(linked_root.upcast_ref(), &mut inline_pictures);
         assert!(inline_pictures.iter().any(gtk::Picture::is_visible));
 
-        let preview_inline = InlineMessageText::new(source, &emoji, None, &links);
+        let (preview_root, preview_inline) = InlineMessageText::new(source, &emoji, None, &links);
         preview_inline.set_texture(&asset.cid, texture.upcast());
         let mut preview_labels = Vec::new();
-        labels(preview_inline.root.upcast_ref(), &mut preview_labels);
+        labels(preview_root.upcast_ref(), &mut preview_labels);
         assert!(preview_labels[0].label().contains("<a href="));
         let mut preview_pictures = Vec::new();
-        pictures(preview_inline.root.upcast_ref(), &mut preview_pictures);
+        pictures(preview_root.upcast_ref(), &mut preview_pictures);
         assert!(preview_pictures.iter().any(gtk::Picture::is_visible));
 
         let preview = Preview {

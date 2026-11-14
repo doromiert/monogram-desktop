@@ -667,6 +667,7 @@ impl Ui {
             } else if media {
                 bubble.add_css_class("media-bubble");
             }
+            if m.attachment.is_some() && !media { bubble.add_css_class("document-bubble"); }
             let heading = bx(false, 6);
             heading.set_margin_bottom(6);
             let author = text(&m.author, "message-author");

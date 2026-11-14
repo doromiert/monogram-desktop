@@ -10,6 +10,12 @@ pub fn asset(name: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"))
         .join(name)
 }
+pub fn install_icons() {
+    gtk::Window::set_default_icon_name("com.negzero.MonogramDesktop");
+    if let Some(display) = gdk::Display::default() {
+        gtk::IconTheme::for_display(&display).add_search_path(asset("icons"));
+    }
+}
 pub fn bx(vertical: bool, spacing: i32) -> gtk::Box {
     gtk::Box::new(
         if vertical {
@@ -293,9 +299,9 @@ fn link_markup(source: &str, suffix: &str, links: &[crate::link_previews::Clicka
         markup.push_str(&glib::markup_escape_text(&source[cursor..link.range.start]));
         markup.push_str("<a href=\"");
         markup.push_str(&glib::markup_escape_text(&link.uri));
-        markup.push_str("\">");
+        markup.push_str("\"><span allow_breaks=\"false\">");
         markup.push_str(&glib::markup_escape_text(&source[link.range.clone()]));
-        markup.push_str("</a>");
+        markup.push_str("</span></a>");
         cursor = link.range.end;
     }
     markup.push_str(&glib::markup_escape_text(&source[cursor..]));

@@ -203,8 +203,8 @@ mod composer_tests {
         .unwrap();
         let status = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         status.append(&gtk::Label::new(Some("12:34 ✓")));
-        let short = InlineMessageText::new(&short_body, &short_emoji, Some(&status), &[]);
-        let text = InlineMessageText::new(&body, &emoji, None, &[]);
+        let (short_root, short) = InlineMessageText::new(&short_body, &short_emoji, Some(&status), &[]);
+        let (text_root, text) = InlineMessageText::new(&body, &emoji, None, &[]);
         let bytes = glib::Bytes::from_owned(
             [0x9c, 0x4d, 0xcc, 0xff]
                 .into_iter()
@@ -222,13 +222,13 @@ mod composer_tests {
         short.set_texture(&short_emoji.ranges[0].asset.cid, texture.clone().upcast());
         text.set_texture(&emoji.ranges[0].asset.cid, texture.upcast());
         let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        content.append(&short.root);
-        content.append(&text.root);
+        content.append(&short_root);
+        content.append(&text_root);
         content.set_margin_top(8);
         content.set_margin_bottom(8);
         content.set_margin_start(8);
         content.set_margin_end(8);
-        text.root.set_margin_bottom(8);
+        text_root.set_margin_bottom(8);
         let window = gtk::Window::builder()
             .default_width(360)
             .default_height(180)
@@ -240,11 +240,11 @@ mod composer_tests {
         glib::timeout_add_local_once(Duration::from_millis(200), move || finished.quit());
         loop_.run();
         assert!(
-            short.root.height() < 50,
+            short_root.height() < 50,
             "short inline text split into rows"
         );
         assert!(
-            text.root.height() < 100,
+            text_root.height() < 100,
             "inline paragraph grew separate rows"
         );
         let snapshot = gtk::Snapshot::new();
@@ -275,6 +275,7 @@ mod inline_overlay_imp {
     pub struct InlineOverlay {
         pub children: RefCell<Vec<Child>>,
         pub reposition: RefCell<Option<Box<dyn Fn()>>>,
+        pub(super) renderer: RefCell<Option<Rc<super::InlineMessageText>>>,
     }
 
     #[glib::object_subclass]
@@ -286,6 +287,8 @@ mod inline_overlay_imp {
 
     impl ObjectImpl for InlineOverlay {
         fn dispose(&self) {
+            self.renderer.borrow_mut().take();
+            self.reposition.borrow_mut().take();
             for child in self.children.borrow_mut().drain(..) {
                 child.widget.unparent();
             }
@@ -401,7 +404,7 @@ impl InlineOverlay {
 /// A retained inline renderer. Cached assets can arrive independently without
 /// rebuilding the message list; only this compact run is refreshed.
 pub(crate) struct InlineMessageText {
-    pub(crate) root: InlineOverlay,
+    root: glib::WeakRef<InlineOverlay>,
     label: gtk::Label,
     body: String,
     emoji: InlineEmoji,
@@ -421,7 +424,7 @@ impl InlineMessageText {
         emoji: &InlineEmoji,
         status: Option<&gtk::Box>,
         links: &[crate::link_previews::ClickableUrl],
-    ) -> Rc<Self> {
+    ) -> (InlineOverlay, Rc<Self>) {
         let label = crate::widgets::wrap(body, "message-text");
         label.set_selectable(true);
         label.update_property(&[gtk::accessible::Property::Label(body)]);
@@ -438,7 +441,7 @@ impl InlineMessageText {
         }
         root.add_css_class("inline-emoji-text");
         let this = Rc::new(Self {
-            root,
+            root: root.downgrade(),
             label,
             body: body.to_owned(),
             emoji: emoji.clone(),
@@ -448,18 +451,19 @@ impl InlineMessageText {
         });
         this.refresh();
         let weak = Rc::downgrade(&this);
-        this.root.connect_map(move |_| {
+        root.connect_map(move |_| {
             if let Some(this) = weak.upgrade() {
                 this.reposition();
             }
         });
         let weak = Rc::downgrade(&this);
-        this.root.imp().reposition.replace(Some(Box::new(move || {
+        root.imp().reposition.replace(Some(Box::new(move || {
             if let Some(this) = weak.upgrade() {
                 this.reposition();
             }
         })));
-        this
+        root.imp().renderer.replace(Some(this.clone()));
+        (root, this)
     }
 
     pub(crate) fn set_texture(&self, cid: &str, texture: gdk::Texture) {
@@ -483,6 +487,7 @@ impl InlineMessageText {
     }
 
     fn refresh(&self) {
+        let Some(root)=self.root.upgrade() else { return; };
         self.slots.borrow_mut().clear();
         let byte_offsets = self
             .body
@@ -506,7 +511,7 @@ impl InlineMessageText {
             picture.add_css_class("inline-custom-emoji");
             picture.set_paintable(texture.as_ref());
             picture.set_visible(texture.is_some());
-            self.root.add_overlay(&picture);
+            root.add_overlay(&picture);
             self.slots
                 .borrow_mut()
                 .entry(range.asset.cid.clone())
@@ -559,9 +564,10 @@ impl InlineMessageText {
         self.reposition();
     }
     fn reposition(&self) {
+        let Some(root)=self.root.upgrade() else { return; };
         let layout = self.label.layout();
         let (layout_x, layout_y) = self.label.layout_offsets();
-        let Some(label_bounds) = self.label.compute_bounds(&self.root) else {
+        let Some(label_bounds) = self.label.compute_bounds(&root) else {
             return;
         };
         for slots in self.slots.borrow().values() {
@@ -580,24 +586,24 @@ impl InlineMessageText {
                     + position.y() / gtk::pango::SCALE
                     + (position.height() / gtk::pango::SCALE - 20).max(0) / 2;
                 let (x, y) = (x.max(0), y.max(0));
-                self.root.set_overlay_position(&picture, x, y);
+                root.set_overlay_position(&picture, x, y);
             }
         }
     }
 }
 
 fn inline_lottie_visible(renderer: &InlineMessageText) -> bool {
-    if !renderer.root.is_mapped() {
+    let Some(root)=renderer.root.upgrade() else {return false;};
+    if !root.is_mapped() {
         return false;
     }
-    let Some(scroll) = renderer
-        .root
+    let Some(scroll) = root
         .ancestor(gtk::ScrolledWindow::static_type())
         .and_then(|widget| widget.downcast::<gtk::ScrolledWindow>().ok())
     else {
         return true;
     };
-    renderer.root.compute_bounds(&scroll).is_some_and(|bounds| {
+    root.compute_bounds(&scroll).is_some_and(|bounds| {
         bounds.y() + bounds.height() >= 0. && bounds.y() <= scroll.height() as f32
     })
 }
@@ -714,7 +720,7 @@ impl Ui {
         links: &[crate::link_previews::ClickableUrl],
         formatting: Option<&crate::markdown::RichText>,
     ) -> gtk::Widget {
-        let renderer = InlineMessageText::new(body, emoji, status, links);
+        let (root, renderer) = InlineMessageText::new(body, emoji, status, links);
         if let Some(rich)=formatting{renderer.set_rich(rich.clone());}
         let owner = self.state.borrow().account.clone();
         let generation = self.generation.get();
@@ -746,25 +752,44 @@ impl Ui {
                 if file.mime == "application/x-tgsticker" {
                     play_inline_lottie(weak_renderer, cid, verified);
                 } else if file.mime.starts_with("image/") {
-                    let cancel = gio::Cancellable::new();
-                    let decoded = gio::spawn_blocking(move || {
-                        let mut decoder = crate::image_loader::Decoder::open(verified, &cancel)?;
-                        decoder.frame(48).map(|frame| frame.texture)
-                    })
-                    .await;
-                    let Ok(Ok(texture)) = decoded else {
-                        return;
-                    };
-                    let (Some(ui), Some(renderer)) = (weak_ui.upgrade(), weak_renderer.upgrade())
-                    else {
-                        return;
-                    };
-                    if ui.generation.get() == generation && ui.state.borrow().account == owner {
-                        renderer.set_texture(&cid, texture);
-                    }
+                    let Some(renderer)=weak_renderer.upgrade() else {return;};
+                    let Some(root)=renderer.root.upgrade() else {return;};
+                    let visible=weak_renderer.clone();
+                    // Reuse the bounded raster scheduler, including GIF/WebP animation,
+                    // visibility pausing and worker-side decoder disposal.
+                    crate::image_loader::play_opened(&root,verified,48,
+                        move |_|visible.upgrade().is_some_and(|r|inline_lottie_visible(&r)),
+                        move |_,texture|{if let Some(renderer)=weak_renderer.upgrade(){renderer.set_texture(&cid,texture);}});
+
                 }
             });
         }
-        renderer.root.clone().upcast()
+        root.upcast()
     }
+}
+
+#[cfg(test)]mod production_render_tests {
+ use super::*;use crate::packs::{InlineAsset,InlineRange};use std::time::Instant;
+ #[test]#[ignore="requires private GTK display and image loaders"]
+ fn returned_widget_keeps_async_renderer_alive_and_releases_it_with_the_row(){
+  use base64::Engine;let app=adw::Application::builder().application_id("com.negzero.MonogramInlineProof").flags(gio::ApplicationFlags::NON_UNIQUE).build();app.register(None::<&gio::Cancellable>).unwrap();
+  let ui=Ui::new(&app,true);ui.state.borrow_mut().account="inline@fixture.invalid".into();
+  let bytes=base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=").unwrap();
+  let asset=InlineAsset::new("image/png".into(),bytes).unwrap();let body="🙂🙂🙂🙂🙂";
+  let inline=InlineEmoji::new(body.into(),(0..5).map(|n|InlineRange{start:n,end:n+1,asset:asset.clone()}).collect()).unwrap();
+  // This is the production entry point: it returns only the widget, not an Rc renderer.
+  let widget=ui.inline_message_text_formatted(body,&inline,None,&[],None);let root=widget.downcast::<InlineOverlay>().unwrap();
+  let weak=Rc::downgrade(root.imp().renderer.borrow().as_ref().unwrap());
+  let window=gtk::Window::builder().child(&root).default_width(300).default_height(100).build();window.present();
+  let context=glib::MainContext::default();let deadline=Instant::now()+Duration::from_secs(8);
+  while Instant::now()<deadline {
+   context.iteration(false);
+   if root.imp().renderer.borrow().as_ref().is_some_and(|r|r.textures.borrow().len()==1){break;}
+   std::thread::sleep(Duration::from_millis(2));
+  }
+  let renderer=weak.upgrade().expect("Renderer must live with its returned row");assert_eq!(renderer.textures.borrow().len(),1,"Artwork must finish decoding through the production async path");
+  let slots=renderer.slots.borrow();assert_eq!(slots.values().map(Vec::len).sum::<usize>(),5);assert!(slots.values().flatten().all(|s|s.picture.upgrade().is_some_and(|p|p.paintable().is_some())));drop(slots);drop(renderer);
+  window.set_child(gtk::Widget::NONE);window.close();drop(root);drop(window);let cleanup=Instant::now()+Duration::from_secs(1);while weak.upgrade().is_some()&&Instant::now()<cleanup{context.iteration(false);std::thread::sleep(Duration::from_millis(2));}assert!(weak.upgrade().is_none(),"Discarding a virtual row must release its renderer");ui.window.close();
+  eprintln!("Production custom emoji: async artwork decoded, all five slots painted, renderer released with row");
+ }
 }

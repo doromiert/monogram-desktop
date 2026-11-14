@@ -1,0 +1,15 @@
+[Icon Theme]
+Name=Monogram
+Directories=scalable/apps,scalable/actions
+[scalable/apps]
+Size=128
+Type=Scalable
+MinSize=16
+MaxSize=512
+Context=Applications
+[scalable/actions]
+Size=16
+Type=Scalable
+MinSize=8
+MaxSize=256
+Context=Actions

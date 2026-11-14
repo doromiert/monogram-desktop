@@ -50,7 +50,7 @@ drafts, authorization requests or transport.
   for reply jumps, search and selection. This is not an account-wide MAM sync.
 - Outgoing delivery receipts are requested. The visible Delivered state means
   receipt by another client, never that a person read the message. Receipt sender
-  and message ID must match the stored conversation. Sending receipts is opt-in
+  and message ID must match the stored conversation. Sending direct receipts is on by default, with an explicit opt-out
   and follows successful local persistence; archive/carbon replay never generates
   receipt acknowledgements.
 - Per-account preferences control typing, delivery receipts, notifications and
@@ -67,7 +67,7 @@ Direct chats use the sending policy in **Conversation Security**. Automatic
 checks OMEMO 2 and then Legacy OMEMO on the first send and caches the result for
 24 hours. Explicit choices constrain outgoing messages. Receiving and
 fingerprint review work independently for both versions. Devices still require
-approval unless the specific contact has opt-in blind trust enabled. A
+approval unless the specific contact has blind trust enabled (on by default after the one-time upgrade). A
 connection, timeout or storage failure stops automatic selection. Only a
 definitive result for both protocols permits automatic plaintext. A sent or
 uncertain message never changes protocol on retry. See [OMEMO 2](OMEMO2.md)

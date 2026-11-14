@@ -6,10 +6,12 @@ mod avatar_ui;
 mod blocking;
 mod blocking_ui;
 mod clipboard_upload;
+mod chat_states;
 mod contact_access;
 mod contact_access_ui;
 mod composer_attachments_ui;
 mod credentials;
+mod defaults;
 mod keepassxc;
 mod keepassxc_ui;
 mod crypto;
@@ -31,6 +33,7 @@ mod renderer_sandbox;
 mod reply_preview_ui;
 mod navigation_ui;
 mod monero_settings_ui;
+mod monero_settings;
 mod lan_sync;
 mod lan_sync_ui;
 mod gifs;
@@ -42,6 +45,7 @@ mod inline_emoji_ui;
 mod invitation_ui;
 mod iq;
 mod legacy_polls;
+mod legacy_inline;
 mod link_preview_logic;
 mod link_preview_ui;
 mod link_previews;
@@ -123,6 +127,7 @@ fn main() -> gtk::glib::ExitCode {
         )
         .build();
     app.connect_activate(move |app| {
+        crate::widgets::install_icons();
         if let Some(window) = app.active_window() {
             window.present();
             return;

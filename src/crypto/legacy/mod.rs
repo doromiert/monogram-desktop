@@ -762,11 +762,15 @@ fn receive_for(
                             message = attr(message, name, value);
                         }
                     }
+                    if let Some(content)=crate::legacy_inline::decode(body).map_err(Error::Invalid)? {
+                        for child in content.children(){message.append_child(child.clone());}
+                    } else {
                     message.append_child(
                         Element::builder("body", payload::CLIENT)
                             .append(body)
                             .build(),
                     );
+                    }
                     // Legacy authenticates only the body. Ignore every outside extension.
                     Some(message)
                 }

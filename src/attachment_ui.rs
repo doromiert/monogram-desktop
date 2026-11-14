@@ -15,8 +15,8 @@ impl Ui {
         let owner = self.state.borrow().account.clone();
         let id = message.id.clone();
         let media = file.media_candidate();
-        let content = bx(true, 8);
-        let controls = bx(true, 8);
+        let content = bx(true, 4);
+        let controls = bx(true, 4);
         controls.add_css_class("attachment-controls");
         if file.video_candidate() {
             self.attach_video(message, &content, &controls);
@@ -24,31 +24,32 @@ impl Ui {
             self.attach_image(message, &content, &controls);
         }
         content.append(&controls);
-        let line = bx(false, 10);
+        content.add_css_class("document-attachment");
+        let line = bx(false, 8);
         let icon = if media {
             "image-x-generic-symbolic"
         } else {
             "document-save-symbolic"
         };
         let image = gtk::Image::from_icon_name(icon);
-        image.set_pixel_size(28);
+        image.set_pixel_size(24);
         line.append(&image);
         let words = bx(true, 2);
-        words.append(&wrap(
-            if media {
-                file.image_label()
-            } else {
-                &file.name
-            },
-            "heading",
-        ));
+        let name = text(&file.name, "heading");
+        name.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        name.set_max_width_chars(30);
+        words.set_hexpand(true);
+        words.set_valign(gtk::Align::Center);
+        words.append(&name);
         let detail = match (media, file.size) {
             (true, Some(size)) => glib::format_size(size).to_string(),
             (true, None) => String::new(),
             (false, Some(size)) => format!("{} · {}", glib::format_size(size), file.mime),
             (false, None) => file.mime.clone(),
         };
-        let info = wrap(&detail, "caption dim-label");
+        let info = text(&detail, "caption dim-label");
+        info.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        info.set_max_width_chars(30);
         info.set_visible(!detail.is_empty());
         words.append(&info);
         line.append(&words);

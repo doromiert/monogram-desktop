@@ -1,59 +1,9 @@
 use crate::ui::Ui;
 use adw::prelude::*;
 use gtk::glib;
-use serde::{Deserialize, Serialize};
 use std::rc::Rc;
 use zeroize::Zeroizing;
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Settings {
-    pub enabled: bool,
-    #[serde(default)]
-    pub network: String,
-    #[serde(default)]
-    pub daemon: String,
-    #[serde(default)]
-    pub username: String,
-    #[serde(default = "encrypted")]
-    pub require_encryption: bool,
-}
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            network: "MAINNET".into(),
-            daemon: String::new(),
-            username: String::new(),
-            require_encryption: true,
-        }
-    }
-}
-fn encrypted() -> bool {
-    true
-}
-pub fn validate(value: &Settings) -> Result<(), &'static str> {
-    if !["MAINNET", "STAGENET", "TESTNET"].contains(&value.network.as_str()) {
-        return Err("Choose a valid Monero network.");
-    }
-    if !value.daemon.is_empty() {
-        let url = reqwest::Url::parse(&value.daemon)
-            .map_err(|_| "Enter an HTTPS Monero node address.")?;
-        if url.scheme() != "https"
-            || url.host_str().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-            || !["", "/"].contains(&url.path())
-            || url.port() == Some(0)
-        {
-            return Err("Use an HTTPS node address without a path, query, or embedded password.");
-        }
-    }
-    if value.username.len() > 256 || value.username.chars().any(char::is_control) {
-        return Err("Invalid node username.");
-    }
-    Ok(())
-}
+pub use crate::monero_settings::{Settings,validate};
 pub fn add(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
     let owner = ui.state.borrow().account.clone();
     let value: Settings =
@@ -61,9 +11,9 @@ pub fn add(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
             .unwrap_or_default();
     let page = adw::PreferencesPage::builder()
         .title("Monero")
-        .icon_name("wallet-symbolic")
+        .icon_name("monogram-monero-symbolic")
         .build();
-    let group=adw::PreferencesGroup::builder().title("Monero").description("Account-specific wallet and payment settings. Private wallet material stays encrypted.").build();
+    let group=adw::PreferencesGroup::builder().title("Monero").build();
     let enabled = adw::SwitchRow::builder()
         .title("Enable Monero")
         .active(value.enabled)
@@ -84,11 +34,12 @@ pub fn add(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
         .build();
     group.add(&enabled);
     group.add(&network);
-    group.add(&privacy);
+    let payments = adw::PreferencesGroup::builder().title("Payments").build();
+    payments.add(&privacy);
     page.add(&group);
     let node = adw::PreferencesGroup::builder()
-        .title("Remote Node")
-        .description("HTTPS protects node traffic. Use a node you trust.")
+        .title("Monero Node")
+        .description("Choose a public node or enter your own HTTPS address, just as on your phone.")
         .build();
     let endpoint = adw::EntryRow::builder()
         .title("HTTPS address")
@@ -101,13 +52,40 @@ pub fn add(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
     let password = adw::PasswordEntryRow::builder()
         .title("Password · leave empty to keep saved password")
         .build();
-    node.add(&endpoint);
-    node.add(&username);
-    node.add(&password);
+    const NODES: &[(&str, &str)] = &[
+        ("Cake Wallet", "https://xmr-node.cakewallet.com:18081"),
+        ("Seth For Privacy", "https://node.sethforprivacy.com"),
+        ("Monero.one · Europe", "https://eu.node.monero.one"),
+        ("Monero.one · United States", "https://us.node.monero.one"),
+    ];
+    let choices = gtk::StringList::new(&[]);
+    let populate = move |network: u32, choices: &gtk::StringList| {
+        let mut names = vec!["Not configured"];
+        if network == 0 { names.extend(NODES.iter().map(|(name, _)| *name)); }
+        names.push("Custom HTTPS node");
+        choices.splice(0, choices.n_items(), &names);
+    };
+    populate(network.selected(), &choices);
+    let selected = if endpoint.text().is_empty() { 0 } else if network.selected() == 0 {
+        NODES.iter().position(|(_, url)| *url == endpoint.text()).map(|i| i as u32 + 1).unwrap_or(5)
+    } else { 1 };
+    let picker = adw::ComboRow::builder().title("Node").model(&choices).selected(selected).build();
+    node.add(&picker);
+    let custom = adw::PreferencesGroup::builder().title("Custom Node").build();
+    custom.add(&endpoint);
+    custom.add(&username);
+    custom.add(&password);
+    custom.set_visible(selected == choices.n_items()-1);
+    let custom_ref = custom.clone(); let entries = choices.clone();
+    picker.connect_selected_notify(move |row| custom_ref.set_visible(row.selected() == entries.n_items()-1));
+    let entries = choices.clone(); let node_picker = picker.clone();
+    network.connect_selected_notify(move |row| { populate(row.selected(), &entries); node_picker.set_selected(entries.n_items()-1); });
     let secret = password.clone();
     dialog.connect_closed(move |_| secret.set_text(""));
     page.add(&node);
-    let save = gtk::Button::with_label("Save Monero Settings");
+    page.add(&custom);
+    page.add(&payments);
+    let save = gtk::Button::with_label("Apply");
     save.add_css_class("suggested-action");
     save.set_sensitive(!owner.is_empty());
     let status = gtk::Label::new(Some(if owner.is_empty() {
@@ -117,12 +95,15 @@ pub fn add(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
     }));
     status.set_wrap(true);
     status.set_xalign(0.);
-    let actions = adw::PreferencesGroup::new();
-    actions.add(&save);
-    actions.add(&status);
-    page.add(&actions);
+    group.set_header_suffix(Some(&save));
+    status.set_visible(owner.is_empty());
+    let feedback = adw::PreferencesGroup::new();
+    feedback.add(&status);
+    page.add(&feedback);
     let wallets=adw::PreferencesGroup::builder().title("Synced Wallets").description("Encrypted recovery data is kept in Device Sync. Spending from the desktop wallet is not available yet.").build();
-    for value in crate::lan_sync::public_records(&ui.store, &format!("synced-wallet:{owner}:")) {
+    let records = crate::lan_sync::public_records(&ui.store, &format!("synced-wallet:{owner}:"));
+    wallets.set_visible(!records.is_empty());
+    for value in records {
         wallets.add(
             &adw::ActionRow::builder()
                 .title(value["name"].as_str().unwrap_or("Wallet"))
@@ -151,10 +132,13 @@ pub fn add(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
         let value = Settings {
             enabled: enabled.is_active(),
             network: ["MAINNET", "STAGENET", "TESTNET"][network.selected().min(2) as usize].into(),
-            daemon: endpoint.text().trim().into(),
+            daemon: if picker.selected() == 0 { String::new() }
+                else if network.selected() == 0 && picker.selected() <= 4 { NODES[picker.selected() as usize-1].1.into() }
+                else { endpoint.text().trim().into() },
             username: username.text().trim().into(),
             require_encryption: privacy.is_active(),
         };
+        status.set_visible(true);
         if let Err(error) = validate(&value) {
             status.set_text(error);
             return;

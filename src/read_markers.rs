@@ -159,7 +159,7 @@ impl Store {
     }
     pub fn read_receipts(&self, owner: &str) -> Policy {
         Policy {
-            enabled: self.pref(&format!("read_receipts:{owner}"), "false") == "true",
+            enabled: self.pref(&format!("read_receipts:{owner}"), "true") == "true",
             revision: self
                 .pref(&format!("read-receipts-revision:{owner}"), "0")
                 .parse::<u64>()
@@ -225,6 +225,10 @@ impl Store {
         Ok((count == 1).then_some(m))
     }
     /// Queue only IDs explicitly displayed locally, after their unread flags have been persisted.
+    pub fn mark_latest_displayed(&self,owner:&str,peer:&str,time:&str,id:&str)->rusqlite::Result<Option<Candidate>> {
+        let anchor:Option<String>=self.db.query_row("SELECT id FROM messages WHERE account=? AND peer=? AND (timestamp,id)<=(?,?) AND COALESCE(json_extract(body,'$.own'),0)=0 AND COALESCE(json_extract(body,'$.unread'),0)=0 AND COALESCE(json_extract(body,'$.retracted'),0)=0 AND COALESCE(json_extract(body,'$.unavailable'),0)=0 AND COALESCE(json_extract(body,'$.markable_id'),'')!='' ORDER BY timestamp DESC,id DESC LIMIT 1",params![owner,peer,time,id],|r|r.get(0)).optional()?;
+        match anchor {Some(id)=>self.mark_displayed(owner,peer,&[id]),None=>Ok(None)}
+    }
     pub fn mark_displayed(
         &self,
         owner: &str,
@@ -648,7 +652,8 @@ mod tests {
             .save_chat_message(owner, &chat, Some(&received_message))
             .unwrap();
         let ids = vec![received_message.id.clone()];
-        assert!(!store.read_receipts(owner).enabled);
+        assert!(store.read_receipts(owner).enabled);
+        store.set_read_receipts(owner,false).unwrap();
         assert!(store.mark_displayed(owner, peer, &ids).unwrap().is_none());
         let enabled = store.set_read_receipts(owner, true).unwrap();
         let queued = store.mark_displayed(owner, peer, &ids).unwrap().unwrap();
@@ -740,4 +745,18 @@ mod tests {
         );
         assert!(markable_id(&outgoing).is_none());
     }
+}
+
+#[cfg(test)] mod focused_read_tests {
+ use super::*;
+ #[test]fn sending_or_focused_view_queues_latest_receipt_even_outside_loaded_rows(){
+  let s=Store::open(true).unwrap();let owner="alice@example.invalid";let peer="bob@example.invalid";
+  s.save_account(&crate::model::Account{jid:owner.into(),host:String::new(),port:5222,direct_tls:false}).unwrap();
+  let chat=crate::model::Chat{jid:peer.into(),unread:3,..Default::default()};
+  for n in 0..4 {let m=Message{id:format!("m{n}"),wire_id:format!("w{n}"),markable_id:format!("w{n}"),sender:peer.into(),timestamp:format!("2026-11-14T10:0{n}:00Z"),text:"hello".into(),own:n==2,unread:n!=2,..Default::default()};s.save_chat_message(owner,&chat,Some(&m)).unwrap();}
+  s.mark_read_through(owner,peer,"2026-11-14T10:02:00Z","m2").unwrap();
+  assert_eq!(s.unread_count(owner,peer),1,"A later arrival must stay unread");
+  let c=s.mark_latest_displayed(owner,peer,"2026-11-14T10:02:00Z","m2").unwrap().unwrap();assert_eq!(c.wire,"w1");assert_eq!(s.pending_displayed(owner).unwrap().len(),1);
+  s.set_read_receipts(owner,false).unwrap();assert!(s.mark_latest_displayed(owner,peer,"2026-11-14T10:02:00Z","m2").unwrap().is_none());
+ }
 }

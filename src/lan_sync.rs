@@ -332,9 +332,9 @@ async fn apply(store: &Store, meta: &Meta, path: &std::path::Path) -> Result<Str
             }
         }
         "monero-settings" => {
-            let settings: crate::monero_settings_ui::Settings =
+            let settings: crate::monero_settings::Settings =
                 serde_json::from_value(value.clone()).map_err(error)?;
-            crate::monero_settings_ui::validate(&settings).map_err(str::to_owned)?;
+            crate::monero_settings::validate(&settings).map_err(str::to_owned)?;
             store
                 .set_pref(
                     &format!("monero-settings:{}", meta.owner),
