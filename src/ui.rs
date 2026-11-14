@@ -359,7 +359,7 @@ impl Ui {
             input_scroll: gtk::ScrolledWindow::builder()
                 .min_content_height(32)
                 .max_content_height(108)
-                .propagate_natural_height(false)
+                .propagate_natural_height(true)
                 .hexpand(true)
                 .build(),
             reply_bar: gtk::Revealer::new(),
@@ -1304,12 +1304,6 @@ impl Ui {
         self.input_scroll.set_child(Some(&self.composer));
         self.input_scroll
             .set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-        let weak = Rc::downgrade(self);
-        self.input_scroll.vadjustment().connect_changed(move |_| {
-            if let Some(s) = weak.upgrade() {
-                s.queue_composer_height();
-            }
-        });
         let input = gtk::Overlay::builder()
             .child(&self.input_scroll)
             .hexpand(true)
@@ -1379,58 +1373,10 @@ impl Ui {
         let b = self.composer.buffer();
         b.text(&b.start_iter(), &b.end_iter(), true).into()
     }
-    fn queue_composer_height(self: &Rc<Self>) {
-        let weak = Rc::downgrade(self);
-        glib::idle_add_local_once(move || {
-            if let Some(s) = weak.upgrade() {
-                s.sync_composer_height();
-                let weak = Rc::downgrade(&s);
-                // GTK scrolls the insertion mark after layout; settle on the next frame.
-                s.input_scroll.add_tick_callback(move |_, _| {
-                    if let Some(s) = weak.upgrade() {
-                        s.sync_composer_height();
-                    }
-                    glib::ControlFlow::Break
-                });
-            }
-        });
-    }
-    fn sync_composer_height(&self) {
-        let end = self.composer.buffer().end_iter();
-        let last_line = self.composer.iter_location(&end);
-        let content_height = last_line
-            .y()
-            .saturating_add(last_line.height())
-            .saturating_add(self.composer.top_margin())
-            .saturating_add(self.composer.bottom_margin());
-        let viewport_height = content_height.clamp(32, 108);
-        if self.input_scroll.min_content_height() != viewport_height {
-            self.input_scroll.set_min_content_height(viewport_height);
-        }
-        let policy = if content_height > 108 {
-            gtk::PolicyType::Automatic
-        } else {
-            gtk::PolicyType::Never
-        };
-        if self.input_scroll.vscrollbar_policy() != policy {
-            self.input_scroll.set_vscrollbar_policy(policy);
-        }
-        if content_height <= 108 {
-            // Compact composers show every line; only capped composers follow the caret.
-            let adjustment = self.input_scroll.vadjustment();
-            if adjustment.value() != adjustment.lower() {
-                adjustment.set_value(adjustment.lower());
-            }
-            let mut start = self.composer.buffer().start_iter();
-            self.composer
-                .scroll_to_iter(&mut start, 0.0, true, 0.0, 0.0);
-        }
-    }
     pub fn compose_changed(self: &Rc<Self>) {
         let composer_text = self.composer_text();
         self.composer_placeholder
             .set_visible(composer_text.is_empty());
-        self.queue_composer_height();
         self.update_send_button();
         if self.loading.get() {
             return;
@@ -3082,5 +3028,63 @@ impl Ui {
             &format!("{key}:{}", self.state.borrow().account),
             if default { "true" } else { "false" },
         ) == "true"
+    }
+}
+
+#[cfg(test)]
+mod composer_tests {
+    use super::*;
+
+    /// The composer is sized by its scroll window from its content in the same layout pass
+    /// (propagate_natural_height). Hand-syncing the height from an idle callback let GTK paint a
+    /// frame where the text had grown but the viewport had not, and fought GTK's scroll-to-caret.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn composer_height_follows_its_content_and_caps_without_manual_syncing() {
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id("com.negzero.ComposerHeightFixture")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let ui = Ui::new(&app, true);
+        let css = gtk::CssProvider::new();
+        css.load_from_path(crate::widgets::asset("style.css"));
+        gtk::style_context_add_provider_for_display(
+            &gtk::gdk::Display::default().unwrap(),
+            &css,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        ui.window.set_default_size(900, 700);
+        ui.window.present();
+        let context = glib::MainContext::default();
+        let settle = |ms: u64| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            while std::time::Instant::now() < deadline {
+                context.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        };
+        settle(400);
+        let sentence = "The quick brown fox jumps over the lazy dog while the rest of the sentence keeps going on and on so that it wraps over several visual lines. ";
+        let height = |ui: &Rc<Ui>| ui.input_scroll.measure(gtk::Orientation::Vertical, ui.composer.width()).1;
+        let content = |ui: &Rc<Ui>| ui.composer.measure(gtk::Orientation::Vertical, ui.composer.width()).1;
+        // A one-line (or empty) composer must stay compact: the vertical scrollbar's own minimum
+        // height used to inflate it to ~58px.
+        assert!(height(&ui) <= 34, "empty composer is {}px tall", height(&ui));
+        let mut lines_seen = std::collections::BTreeSet::new();
+        let long = sentence.repeat(8);
+        for length in [10, 70, 140, 210, 280, 360, 500, 700] {
+            let text = &long[..length];
+            ui.composer.buffer().set_text(text);
+            settle(120);
+            let expected = content(&ui).clamp(32, 108);
+            assert_eq!(height(&ui), expected, "{} chars: composer height must follow its content, capped at 108", text.len());
+            lines_seen.insert(expected);
+        }
+        assert!(lines_seen.len() >= 4 && lines_seen.contains(&108), "heights seen: {lines_seen:?}");
+        ui.composer.buffer().set_text("");
+        settle(120);
+        assert!(height(&ui) <= 34, "cleared composer is {}px tall", height(&ui));
     }
 }

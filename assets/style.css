@@ -33,6 +33,10 @@
 .composer:focus-within { outline-color: alpha(@accent_color,.5); }
 .composer scrolledwindow, .composer textview, .composer textview text { background: transparent; border: none; box-shadow: none; outline: none; }
 .composer scrolledwindow undershoot { background: none; box-shadow: none; }
+/* A scrolled window's minimum height includes its vertical scrollbar's, which made the composer
+   58px tall for one line. Let the content size it instead (see Ui::composer height). */
+.composer scrolledwindow > scrollbar.vertical { min-height: 0; }
+.composer scrolledwindow > scrollbar.vertical > range > trough > slider { min-height: 8px; }
 .composer textview { padding: 0; color: @window_fg_color; }
 .composer textview text { color: @window_fg_color; }
 .send { border-radius: 50%; min-width: 36px; min-height: 36px; padding: 0; }
