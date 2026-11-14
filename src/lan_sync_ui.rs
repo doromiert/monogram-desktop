@@ -61,15 +61,12 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
         )
         .build();
     group.add(&enabled);
-    let status = gtk::Label::new(Some(if enabled.is_active(){"Starting…"}else{"Device sync is off"}));
-    status.set_wrap(true);
-    status.set_xalign(0.);
-    let status_row = adw::ActionRow::builder().title("Status").build();
-    status.set_max_width_chars(42);
-    status_row.add_suffix(&status);
-    group.add(&status_row);
+    let status = adw::ActionRow::builder()
+        .title(if enabled.is_active(){"Starting…"}else{"Device sync is off"})
+        .title_lines(0).use_markup(false).build();
+    group.add(&status);
     let spinner = gtk::Spinner::new();
-    status_row.add_prefix(&spinner);
+    status.add_prefix(&spinner);
     spinner.set_valign(gtk::Align::Center);
     spinner.bind_property("spinning", &spinner, "visible").sync_create().build();
     page.add(&group);
@@ -148,17 +145,17 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
         );
         if !row.is_active() {
             lan_sync::stop();
-            s.set_text("Device sync is off.");
+            s.set_title("Device sync is off.");
             return;
         }
-        s.set_text("Starting encrypted sync…");
+        s.set_title("Starting encrypted sync…");
         progress.start();
         let s = s.clone();
         let progress = progress.clone();
         glib::MainContext::default().spawn_local(async move {
             let result = lan_sync::start().await;
             progress.stop();
-            s.set_text(result.err().as_deref().unwrap_or("Ready to pair."));
+            s.set_title(result.err().as_deref().unwrap_or("Ready to pair."));
         });
     });
     let weak = Rc::downgrade(ui);
@@ -170,7 +167,7 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
             return;
         };
         enabled_copy.set_active(true);
-        status_copy.set_text("Preparing a one-time pairing code…");
+        status_copy.set_title("Preparing a one-time pairing code…");
         progress.start();
         let s = status_copy.clone();
         let p = progress.clone();
@@ -185,10 +182,10 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
                     let m = mesh.clone();
                     match gio::spawn_blocking(move || m.invite()).await {
                         Ok(Ok(code)) => pair_qr(&ui, mesh, &code),
-                        _ => s.set_text("Connect both devices to the same local network."),
+                        _ => s.set_title("Connect both devices to the same local network."),
                     }
                 }
-                Err(error) => s.set_text(&error),
+                Err(error) => s.set_title(&error),
             }
             p.stop();
         });
@@ -232,10 +229,10 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
                 return;
             };
             let Some(path) = file.path() else {
-                s.set_text("Choose a local image containing the pairing QR.");
+                s.set_title("Choose a local image containing the pairing QR.");
                 return;
             };
-            s.set_text("Scanning pairing QR…");
+            s.set_title("Scanning pairing QR…");
             p.start();
             let decoded = gio::spawn_blocking(move || decode_qr(path)).await;
             let Some(ui) = weak.upgrade() else {
@@ -248,7 +245,7 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
                 }
                 _ => {
                     p.stop();
-                    s.set_text("No Monogram pairing QR was found in the image.");
+                    s.set_title("No Monogram pairing QR was found in the image.");
                 }
             }
         });
@@ -273,9 +270,9 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
         glib::MainContext::default().spawn_local(async move {
             if let Some(mesh) = lan_sync::current() {
                 let summary = lan_sync::summary(mesh).await;
-                status.set_text(summary["status"].as_str().unwrap_or("Syncing…"));
+                status.set_title(summary["status"].as_str().unwrap_or("Syncing…"));
             } else if !enabled.is_active() {
-                status.set_text("Device sync is off.");
+                status.set_title("Device sync is off.");
             }
             polling.set(false);
         });
@@ -340,8 +337,8 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
         glib::ControlFlow::Continue
     });
 }
-fn join(ui: &Rc<Ui>, code: String, status: &gtk::Label, spinner: &gtk::Spinner) {
-    status.set_text("Connecting to the paired device…");
+fn join(ui: &Rc<Ui>, code: String, status: &adw::ActionRow, spinner: &gtk::Spinner) {
+    status.set_title("Connecting to the paired device…");
     spinner.start();
     let s = status.clone();
     let p = spinner.clone();
@@ -358,7 +355,7 @@ fn join(ui: &Rc<Ui>, code: String, status: &gtk::Label, spinner: &gtk::Spinner) 
             return;
         }
         p.stop();
-        s.set_text(match &result {
+        s.set_title(match &result {
             Ok(_) => "Paired. Your settings are syncing.",
             Err(error) => error,
         });
@@ -466,21 +463,21 @@ fn refresh_folders(ui: &Rc<Ui>) {
     ui.rebuild_folders();
     ui.refresh_chats(None);
 }
-fn numeric_show(ui: &Rc<Ui>, status: &gtk::Label) {
+fn numeric_show(ui: &Rc<Ui>, status: &adw::ActionRow) {
     numeric_dialog(ui, status, true);
 }
-fn numeric_join(ui: &Rc<Ui>, status: &gtk::Label) {
+fn numeric_join(ui: &Rc<Ui>, status: &adw::ActionRow) {
     numeric_dialog(ui, status, false);
 }
-fn numeric_dialog(ui: &Rc<Ui>, status: &gtk::Label, display: bool) {
-    status.set_text("Starting code pairing…");
+fn numeric_dialog(ui: &Rc<Ui>, status: &adw::ActionRow, display: bool) {
+    status.set_title("Starting code pairing…");
     let weak = Rc::downgrade(ui);
     let status = status.clone();
     glib::MainContext::default().spawn_local(async move {
         let mesh = match lan_sync::start().await {
             Ok(m) => m,
             Err(e) => {
-                status.set_text(&e);
+                status.set_title(&e);
                 return;
             }
         };
@@ -668,6 +665,8 @@ mod review_tests {
         let css=gtk::CssProvider::new();css.load_from_path(asset("style.css"));gtk::style_context_add_provider_for_display(&gtk::gdk::Display::default().unwrap(),&css,gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
         let dialog=adw::PreferencesDialog::new();add_preferences(&ui,&dialog);crate::monero_settings_ui::add(&ui,&dialog);dialog.present(Some(&ui.window));pump();
         let all=descendants(&dialog);
+        let status=all.iter().filter_map(|w|w.downcast_ref::<gtk::Label>()).find(|label|label.text()=="Device sync is off").unwrap();
+        assert_eq!(status.layout().line_count(),1,"Short sync status should use the row width");
         for title in ["Show Pairing QR Code","Scan QR from Image…","Show Rotating Pairing Code","Enter an Eight-Digit Code…"] {
             assert!(all.iter().filter_map(|w|w.downcast_ref::<adw::ActionRow>()).any(|row|row.title()==title && row.is_activatable()));
         }
