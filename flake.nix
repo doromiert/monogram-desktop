@@ -17,7 +17,6 @@
         in { default = pkgs.mkShell {
           inputsFrom = [ self.packages.${system}.default ];
           MONOGRAM_MATH_HELPER = "${self.packages.${system}.default.mathRenderer}/bin/monogram-math-renderer";
-          MONOGRAM_PREBUILT_LOTTIE_HELPER = "${self.packages.${system}.default.stickerRenderer}/bin/monogram-sticker-renderer";
           MONOGRAM_BWRAP = "${pkgs.bubblewrap}/bin/bwrap";
           PROTOC = "${pkgs.protobuf}/bin/protoc";
           JAVA_HOME = "${pkgs.jdk21}/lib/openjdk";

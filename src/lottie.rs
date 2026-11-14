@@ -1,4 +1,4 @@
-//! On-demand TGS frames from a native rlottie process confined by bubblewrap.
+//! On-demand TGS frames from a pure-Rust (rasterlottie) helper process confined by bubblewrap.
 //! Open and frame calls belong on workers; no JSON/native parsing occurs in GTK.
 use crate::downloads::VerifiedFile;
 use gtk::{gdk, gio, glib, prelude::*};
@@ -102,10 +102,20 @@ fn read_pipe(
     }
     Ok(())
 }
-fn program(variable: &str, fallback: &str) -> Result<PathBuf> {
+/// The renderer is built beside this executable (or one level up for test binaries).
+fn helper() -> Result<PathBuf> {
+    const NAME: &str = "monogram-sticker-renderer";
+    let beside = std::env::current_exe().ok().and_then(|exe| {
+        let dir = exe.parent()?;
+        [dir.join(NAME), dir.parent()?.join(NAME)].into_iter().find(|p| p.is_file())
+    });
+    program("MONOGRAM_LOTTIE_HELPER", beside)
+}
+fn program(variable: &str, fallback: Option<PathBuf>) -> Result<PathBuf> {
     let path = std::env::var_os(variable)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(fallback));
+        .or(fallback)
+        .ok_or("Sandboxed sticker renderer is unavailable")?;
     if !path.is_absolute() || !path.is_file() {
         return Err("Sandboxed sticker renderer is unavailable");
     }
@@ -152,11 +162,8 @@ impl Decoder {
         if !bytes.starts_with(&[0x1f, 0x8b]) {
             return Err("Invalid TGS sticker");
         }
-        let helper = program(
-            "MONOGRAM_LOTTIE_HELPER",
-            env!("MONOGRAM_BUILT_LOTTIE_HELPER"),
-        )?;
-        let bwrap = program("MONOGRAM_BWRAP", env!("MONOGRAM_BUILT_BWRAP"))?;
+        let helper = helper()?;
+        let bwrap = program("MONOGRAM_BWRAP", Some(env!("MONOGRAM_BUILT_BWRAP").into()))?;
         let mut command = Command::new(bwrap);
         crate::renderer_sandbox::runtime(&mut command);
         command
@@ -318,7 +325,7 @@ mod tests {
         let worker = std::thread::spawn(move || {
             let cancel = gio::Cancellable::new();
             let mut decoder =
-                Decoder::open(input, 64, &cancel).expect("real sandboxed rlottie fixture");
+                Decoder::open(input, 64, &cancel).expect("real sandboxed sticker fixture (run `cargo build --bins` first)");
             assert_eq!(decoder.frames, 30);
             let first = decoder.frame_at(0).unwrap().texture.save_to_png_bytes();
             let second = decoder.frame_at(15).unwrap().texture.save_to_png_bytes();
