@@ -197,13 +197,10 @@ async fn cycle(mesh: &Arc<Mesh>, store: &Store) -> Result<()> {
         }
         let folders = store.pref(&format!("folders:{owner}"), "");
         if !folders.is_empty() {
-            publish_json(
-                mesh,
-                "folders",
-                owner,
-                "folders",
-                serde_json::from_str(&folders).map_err(error)?,
-            )?;
+            let mut value=serde_json::from_str(&folders).map_err(error)?;
+            monogram_sync::profile::normalize_folders(&mut value);
+            publish_json(mesh,"folders",owner,"folders",value)
+                .map_err(|error|format!("Could not sync folders for {owner}: {error}"))?;
         }
         export_fingerprints(mesh, owner)?;
         let library = Library::open(owner).await.map_err(error)?;

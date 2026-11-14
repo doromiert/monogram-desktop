@@ -631,7 +631,7 @@ impl Worker {
         if let Some(encoded)=crate::legacy_inline::encode(&clear) {
             let requests=iq::Client::new(self.network.clone());
             let query=Element::builder("query","http://jabber.org/protocol/disco#info").build();
-            if requests.request(peer,iq::Kind::Get,query).await.ok().flatten().is_some_and(|q|q.children().any(|f|f.is("feature","http://jabber.org/protocol/disco#info") && f.attr("var")==Some(crate::legacy_inline::NS))) {body=encoded;}
+            if peer==self.owner || requests.request(peer,iq::Kind::Get,query).await.ok().flatten().is_some_and(|q|q.children().any(|f|f.is("feature","http://jabber.org/protocol/disco#info") && f.attr("var")==Some(crate::legacy_inline::NS))) {body=encoded;}else{return Err(Error::Unavailable("Could not confirm encrypted custom emoji support. Reconnect or use OMEMO 2, then retry."));}
         }
         let mut xml = local.encrypt(peer, &body, &message.wire_id).await?;
         decorate_outgoing(&mut xml, &clear, message);

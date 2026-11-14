@@ -3,6 +3,61 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
 
+struct PairTask {
+    dialog: glib::WeakRef<adw::Dialog>,
+    body: gtk::Box,
+    label: gtk::Label,
+    spinner: gtk::Spinner,
+    cancel: gtk::Button,
+    status: adw::ActionRow,
+    page_spinner: gtk::Spinner,
+    pending: Rc<Cell<bool>>,
+    active: Cell<bool>,
+}
+impl PairTask {
+    fn new(ui:&Rc<Ui>,message:&str,status:&adw::ActionRow,spinner:&gtk::Spinner,pending:&Rc<Cell<bool>>)->Rc<Self> {
+        let body=crate::widgets::bx(true,12);crate::widgets::margins(&body,18);
+        let progress=gtk::Spinner::new();progress.start();body.append(&progress);
+        let label=crate::widgets::wrap(message,"");body.append(&label);
+        let cancel=gtk::Button::with_label("Cancel Pairing");body.append(&cancel);
+        let (dialog,_)=ui.dialog("Pair a Device",&body,440,260);
+        pending.set(true);status.set_title(message);spinner.start();
+        let task=Rc::new(Self{dialog:dialog.downgrade(),body,label,spinner:progress,cancel,status:status.clone(),page_spinner:spinner.clone(),pending:pending.clone(),active:Cell::new(true)});
+        let weak=Rc::downgrade(&task);task.cancel.connect_clicked(move|_|{if let Some(t)=weak.upgrade(){if t.active.get(){t.cancel();}else{t.close_dialog();}}});
+        let owned=task.clone();dialog.connect_closed(move|_|owned.cancel());task
+    }
+    fn close_dialog(&self){if let Some(dialog)=self.dialog.upgrade(){dialog.close();}}
+    fn message(&self,text:&str){self.label.set_text(text);self.status.set_title(text);}
+    fn abort_native(&self){
+        if let Some(mesh)=lan_sync::current(){let boundary=mesh.invalidate_pairing();gio::spawn_blocking(move||mesh.finish_cancel_pairing(boundary));}
+    }
+    fn cancel(&self){
+        if !self.active.replace(false){return;}
+        self.pending.set(false);self.spinner.stop();self.page_spinner.stop();self.message("Pairing cancelled.");
+        self.abort_native();
+        self.close_dialog();
+    }
+    fn finish(&self,result:Result<&str,&str>){
+        if !self.active.replace(false){return;}
+        self.pending.set(false);self.spinner.stop();self.page_spinner.stop();
+        match result{Ok(text)=>{self.message(text);self.close_dialog();},Err(text)=>{self.abort_native();self.message(text);self.cancel.set_label("Close");}}
+    }
+}
+fn watch_pairing(task:&Rc<PairTask>,mesh:Arc<monogram_sync::Mesh>,peers:usize){
+    let weak=Rc::downgrade(task);let started=std::time::Instant::now();let checking=Rc::new(Cell::new(false));
+    glib::timeout_add_local(Duration::from_millis(200),move||{
+        let Some(task)=weak.upgrade().filter(|t|t.active.get())else{return glib::ControlFlow::Break;};
+        if started.elapsed()>Duration::from_secs(120){task.finish(Err("Pairing code expired. Open a new code and try again."));return glib::ControlFlow::Break;}
+        if checking.replace(true){return glib::ControlFlow::Continue;}
+        let mesh=mesh.clone();let busy=checking.clone();
+        glib::MainContext::default().spawn_local(async move{
+            let state=gio::spawn_blocking(move||(mesh.store.lock().unwrap().state.peers.len(),mesh.status.lock().unwrap().clone())).await;
+            busy.set(false);if !task.active.get(){return;}
+            if let Ok((count,status))=state {if count>peers{task.finish(Ok("Paired. Your settings are syncing."));}else if status.starts_with("Verifying"){task.message("Verifying pairing request…");}}
+        });glib::ControlFlow::Continue
+    });
+}
+
 pub fn install(ui: &Rc<Ui>) {
     let weak = Rc::downgrade(ui);
     glib::timeout_add_local_once(Duration::from_millis(100), move || {
@@ -70,6 +125,7 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
     spinner.set_valign(gtk::Align::Center);
     spinner.bind_property("spinning", &spinner, "visible").sync_create().build();
     page.add(&group);
+    let pending=Rc::new(Cell::new(false));
     let actions = adw::PreferencesGroup::builder()
         .title("Pair Another Device")
         .build();
@@ -89,19 +145,21 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
     let weak = Rc::downgrade(ui);
     let active = enabled.clone();
     let s = status.clone();
+    let p=spinner.clone();let busy=pending.clone();
     typed.connect_activated(move |_| {
         if let Some(ui) = weak.upgrade() {
             active.set_active(true);
-            numeric_show(&ui, &s);
+            numeric_show(&ui, &s,&p,&busy);
         }
     });
     let weak = Rc::downgrade(ui);
     let active = enabled.clone();
     let s = status.clone();
+    let p=spinner.clone();let busy=pending.clone();
     enter.connect_activated(move |_| {
         if let Some(ui) = weak.upgrade() {
             active.set_active(true);
-            numeric_join(&ui, &s);
+            numeric_join(&ui, &s,&p,&busy);
         }
     });
     page.add(&actions);
@@ -135,6 +193,7 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
     let weak = Rc::downgrade(ui);
     let s = status.clone();
     let progress = spinner.clone();
+    let pairing=pending.clone();
     enabled.connect_active_notify(move |row| {
         let Some(ui) = weak.upgrade() else {
             return;
@@ -151,49 +210,33 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
         s.set_title("Starting encrypted sync…");
         progress.start();
         let s = s.clone();
-        let progress = progress.clone();
+        let progress = progress.clone();let pairing=pairing.clone();
         glib::MainContext::default().spawn_local(async move {
             let result = lan_sync::start().await;
-            progress.stop();
-            s.set_title(result.err().as_deref().unwrap_or("Ready to pair."));
+            if !pairing.get(){progress.stop();s.set_title(result.err().as_deref().unwrap_or("Ready to pair."));}
         });
     });
     let weak = Rc::downgrade(ui);
     let status_copy = status.clone();
     let enabled_copy = enabled.clone();
     let progress = spinner.clone();
+    let busy=pending.clone();
     display.connect_activated(move |_| {
-        let Some(ui) = weak.upgrade() else {
-            return;
-        };
-        enabled_copy.set_active(true);
-        status_copy.set_title("Preparing a one-time pairing code…");
-        progress.start();
-        let s = status_copy.clone();
-        let p = progress.clone();
-        let weak = Rc::downgrade(&ui);
+        let Some(ui)=weak.upgrade() else{return;};enabled_copy.set_active(true);
+        let task=PairTask::new(&ui,"Preparing a one-time pairing code…",&status_copy,&progress,&busy);
         glib::MainContext::default().spawn_local(async move {
-            let result = lan_sync::start().await;
-            let Some(ui) = weak.upgrade() else {
-                return;
-            };
-            match result {
-                Ok(mesh) => {
-                    let m = mesh.clone();
-                    match gio::spawn_blocking(move || m.invite()).await {
-                        Ok(Ok(code)) => pair_qr(&ui, mesh, &code),
-                        _ => s.set_title("Connect both devices to the same local network."),
-                    }
-                }
-                Err(error) => s.set_title(&error),
-            }
-            p.stop();
+            let mesh=match lan_sync::start().await{Ok(mesh)=>mesh,Err(error)=>{task.finish(Err(&error));return;}};
+            if !task.active.get(){return;}let worker=mesh.clone();let token=mesh.pairing_token();
+            let result=gio::spawn_blocking(move||{let peers=worker.store.lock().unwrap().state.peers.len();worker.invite_for(token).map(|value|(value,peers))}).await;
+            if !task.active.get(){return;}
+            match result {Ok(Ok((value,peers)))=>pair_qr(task,mesh,&value,peers),Ok(Err(error))=>task.finish(Err(&error)),Err(_)=>task.finish(Err("Could not create pairing code."))}
         });
     });
     let weak = Rc::downgrade(ui);
     let s = status.clone();
     let e = enabled.clone();
     let p = spinner.clone();
+    let busy=pending.clone();
     code.connect_apply(move |entry| {
         let Some(ui) = weak.upgrade() else {
             return;
@@ -201,12 +244,13 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
         let value = entry.text().trim().to_string();
         entry.set_text("");
         e.set_active(true);
-        join(&ui, value, &s, &p);
+        join(&ui, value, &s, &p,&busy);
     });
     let weak = Rc::downgrade(ui);
     let s = status.clone();
     let e = enabled.clone();
     let p = spinner.clone();
+    let busy=pending.clone();
     scan.connect_activated(move |_| {
         let Some(ui) = weak.upgrade() else {
             return;
@@ -215,7 +259,7 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
         let s = s.clone();
         let e = e.clone();
         let p = p.clone();
-        let parent = ui.window.clone();
+        let parent = ui.window.clone();let busy=busy.clone();
         glib::MainContext::default().spawn_local(async move {
             let chooser = gtk::FileDialog::builder()
                 .title("Scan Monogram Pairing QR")
@@ -232,20 +276,17 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
                 s.set_title("Choose a local image containing the pairing QR.");
                 return;
             };
-            s.set_title("Scanning pairing QR…");
-            p.start();
+            let task=PairTask::new(&ui,"Scanning pairing QR…",&s,&p,&busy);
             let decoded = gio::spawn_blocking(move || decode_qr(path)).await;
-            let Some(ui) = weak.upgrade() else {
-                return;
-            };
+            let Some(_ui) = weak.upgrade() else {return;};
+            if !task.active.get(){return;}
             match decoded {
                 Ok(Ok(value)) => {
                     e.set_active(true);
-                    join(&ui, value, &s, &p);
+                    join_task(task, value);
                 }
                 _ => {
-                    p.stop();
-                    s.set_title("No Monogram pairing QR was found in the image.");
+                    task.finish(Err("No Monogram pairing QR was found in the image."));
                 }
             }
         });
@@ -254,6 +295,7 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
     let s = status.downgrade();
     let active = enabled.downgrade();
     let polling = Rc::new(Cell::new(false));
+    let busy=pending.clone();
     glib::timeout_add_local(Duration::from_secs(1), move || {
         let (Some(dialog), Some(status), Some(enabled)) =
             (parent.upgrade(), s.upgrade(), active.upgrade())
@@ -263,14 +305,14 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
         if !dialog.is_visible() {
             return glib::ControlFlow::Break;
         }
-        if polling.replace(true) {
+        if busy.get() || polling.replace(true) {
             return glib::ControlFlow::Continue;
         }
-        let polling = polling.clone();
+        let polling = polling.clone();let busy=busy.clone();
         glib::MainContext::default().spawn_local(async move {
             if let Some(mesh) = lan_sync::current() {
                 let summary = lan_sync::summary(mesh).await;
-                status.set_title(summary["status"].as_str().unwrap_or("Syncing…"));
+                if !busy.get(){status.set_title(summary["status"].as_str().unwrap_or("Syncing…"));}
             } else if !enabled.is_active() {
                 status.set_title("Device sync is off.");
             }
@@ -337,33 +379,21 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
         glib::ControlFlow::Continue
     });
 }
-fn join(ui: &Rc<Ui>, code: String, status: &adw::ActionRow, spinner: &gtk::Spinner) {
-    status.set_title("Connecting to the paired device…");
-    spinner.start();
-    let s = status.clone();
-    let p = spinner.clone();
-    let weak = Rc::downgrade(ui);
+fn join(ui:&Rc<Ui>,code:String,status:&adw::ActionRow,spinner:&gtk::Spinner,pending:&Rc<Cell<bool>>) {
+    let task=PairTask::new(ui,"Connecting to the paired device…",status,spinner,pending);join_task(task,code);
+}
+fn join_task(task:Rc<PairTask>,code:String){
+    task.message("Connecting to the paired device…");
     glib::MainContext::default().spawn_local(async move {
-        let result = match lan_sync::start().await {
-            Ok(mesh) => gio::spawn_blocking(move || mesh.join(&code))
-                .await
-                .map_err(|_| "Pairing failed.".to_string())
-                .and_then(|v| v),
-            Err(error) => Err(error),
-        };
-        if weak.upgrade().is_none() {
-            return;
-        }
-        p.stop();
-        s.set_title(match &result {
-            Ok(_) => "Paired. Your settings are syncing.",
-            Err(error) => error,
-        });
+        let mesh=match lan_sync::start().await{Ok(mesh)=>mesh,Err(error)=>{task.finish(Err(&error));return;}};
+        if !task.active.get(){return;}
+        let token=mesh.pairing_token();let result=gio::spawn_blocking(move||mesh.join_for(&code,token)).await;
+        match result{Ok(Ok(_))=>task.finish(Ok("Paired. Your settings are syncing.")),Ok(Err(error))=>task.finish(Err(&error)),Err(_)=>task.finish(Err("Pairing failed. Try again."))}
     });
 }
-fn pair_qr(ui: &Rc<Ui>, mesh: Arc<monogram_sync::Mesh>, value: &str) {
+fn pair_qr(task:Rc<PairTask>,mesh:Arc<monogram_sync::Mesh>,value:&str,peers:usize) {
     let Ok(qr) = qrcode::QrCode::new(value.as_bytes()) else {
-        ui.notice("Could not create pairing QR.");
+        task.finish(Err("Could not create pairing QR."));
         return;
     };
     let width = qr.width();
@@ -386,9 +416,8 @@ fn pair_qr(ui: &Rc<Ui>, mesh: Arc<monogram_sync::Mesh>, value: &str) {
         }
         let _ = cr.fill();
     });
-    let body = crate::widgets::bx(true, 12);
-    crate::widgets::margins(&body, 18);
-    body.append(&drawing);
+    let body=task.body.clone();
+    body.prepend(&drawing);
     body.append(&crate::widgets::wrap(
         "Scan from Device Sync on your other device. This one-time code expires in two minutes.",
         "",
@@ -396,14 +425,9 @@ fn pair_qr(ui: &Rc<Ui>, mesh: Arc<monogram_sync::Mesh>, value: &str) {
     let copy = gtk::Button::with_label("Copy Pairing Code");
     let value = value.to_string();
     copy.connect_clicked(move |b| b.clipboard().set_text(&value));
-    body.append(&copy);
-    let (dialog, _) = ui.dialog("Pair a Device", &body, 400, 500);
-    let weak = Arc::downgrade(&mesh);
-    dialog.connect_closed(move |_| {
-        if let Some(mesh) = weak.upgrade() {
-            mesh.cancel_invite();
-        }
-    });
+    body.append(&copy);body.reorder_child_after(&task.cancel,Some(&copy));
+    task.message("Waiting for the other device to scan this code…");
+    watch_pairing(&task,mesh,peers);
 }
 fn decode_qr(path: std::path::PathBuf) -> Result<String, String> {
     let file = std::fs::File::open(path).map_err(|_| "Could not read image.")?;
@@ -463,29 +487,27 @@ fn refresh_folders(ui: &Rc<Ui>) {
     ui.rebuild_folders();
     ui.refresh_chats(None);
 }
-fn numeric_show(ui: &Rc<Ui>, status: &adw::ActionRow) {
-    numeric_dialog(ui, status, true);
+fn numeric_show(ui: &Rc<Ui>, status: &adw::ActionRow,spinner:&gtk::Spinner,pending:&Rc<Cell<bool>>) {
+    numeric_dialog(ui, status, true,spinner,pending);
 }
-fn numeric_join(ui: &Rc<Ui>, status: &adw::ActionRow) {
-    numeric_dialog(ui, status, false);
+fn numeric_join(ui: &Rc<Ui>, status: &adw::ActionRow,spinner:&gtk::Spinner,pending:&Rc<Cell<bool>>) {
+    numeric_dialog(ui, status, false,spinner,pending);
 }
-fn numeric_dialog(ui: &Rc<Ui>, status: &adw::ActionRow, display: bool) {
-    status.set_title("Starting code pairing…");
+fn numeric_dialog(ui: &Rc<Ui>, status: &adw::ActionRow, display: bool,spinner:&gtk::Spinner,pending:&Rc<Cell<bool>>) {
+    let task=PairTask::new(ui,"Starting code pairing…",status,spinner,pending);
     let weak = Rc::downgrade(ui);
-    let status = status.clone();
     glib::MainContext::default().spawn_local(async move {
         let mesh = match lan_sync::start().await {
             Ok(m) => m,
             Err(e) => {
-                status.set_title(&e);
+                task.finish(Err(&e));
                 return;
             }
         };
-        let Some(ui) = weak.upgrade() else {
-            return;
-        };
-        let body = crate::widgets::bx(true, 12);
-        crate::widgets::margins(&body, 18);
+        let Some(_ui)=weak.upgrade() else{return;};
+        if !task.active.get(){return;}
+        let lease=mesh.pairing_token();
+        let body=task.body.clone();
         let code = gtk::Label::new(Some(if display {
             "Preparing code…"
         } else {
@@ -518,35 +540,24 @@ fn numeric_dialog(ui: &Rc<Ui>, status: &adw::ActionRow, display: bool) {
             "",
         );
         body.append(&feedback);
-        let (dialog, _) = ui.dialog(
-            if display {
-                "Pair with a Rotating Code"
-            } else {
-                "Enter a Pairing Code"
-            },
-            &body,
-            440,
-            400,
-        );
-        let stop = Arc::downgrade(&mesh);
-        dialog.connect_closed(move |_| {
-            if let Some(m) = stop.upgrade() {
-                m.cancel_invite();
-            }
-        });
+        body.reorder_child_after(&task.cancel,Some(&feedback));
+        let Some(dialog)=task.dialog.upgrade()else{return;};
+        task.message(if display{"Preparing rotating pairing code…"}else{"Looking for nearby devices…"});
+        let baseline=gio::spawn_blocking({let mesh=mesh.clone();move||mesh.store.lock().unwrap().state.peers.len()}).await.unwrap_or(0);
         if display {
-            let m = mesh.clone();
-            if let Err(e) = gio::spawn_blocking(move || m.numeric_invite())
+        let m = mesh.clone();
+            if let Err(e) = gio::spawn_blocking(move || m.numeric_invite_for(lease))
                 .await
                 .unwrap_or_else(|_| Err("Could not prepare pairing code.".into()))
             {
-                feedback.set_text(&e);
+                task.finish(Err(&e));
                 return;
             }
         }
         let parent = dialog.downgrade();
         let busy = Rc::new(Cell::new(false));
         let previous = Rc::new(std::cell::RefCell::new(String::new()));
+        if display {watch_pairing(&task,mesh.clone(),baseline);}
         glib::timeout_add_local(Duration::from_secs(1), move || {
             let Some(dialog) = parent.upgrade().filter(|d| d.is_visible()) else {
                 return glib::ControlFlow::Break;
@@ -558,7 +569,7 @@ fn numeric_dialog(ui: &Rc<Ui>, status: &adw::ActionRow, display: bool) {
                 return glib::ControlFlow::Continue;
             }
             let m = mesh.clone();
-            let busy = busy.clone();
+            let busy = busy.clone();let task=task.clone();
             let previous = previous.clone();
             let devices = devices.clone();
             let code = code.clone();
@@ -606,7 +617,7 @@ fn numeric_dialog(ui: &Rc<Ui>, status: &adw::ActionRow, display: bool) {
                             let id = peer["id"].as_str().unwrap_or("").to_string();
                             let m = m.clone();
                             let entry = entry.clone();
-                            let output = feedback.clone();
+                            let output = feedback.clone();let task=task.clone();
                             button.connect_clicked(move |button| {
                                 let value = entry.text().to_string();
                                 if value.len() != 8 || !value.bytes().all(|b| b.is_ascii_digit()) {
@@ -614,15 +625,17 @@ fn numeric_dialog(ui: &Rc<Ui>, status: &adw::ActionRow, display: bool) {
                                     return;
                                 }
                                 button.set_sensitive(false);
-                                output.set_text("Verifying pairing code…");
+                                output.set_text("Verifying pairing code…");task.message("Verifying pairing code…");
                                 let m = m.clone();
                                 let id = id.clone();
                                 let output = output.clone();
-                                let button = button.clone();
+                                let button = button.clone();let task=task.clone();
                                 glib::MainContext::default().spawn_local(async move {
                                     let result =
-                                        gio::spawn_blocking(move || m.join_numeric(&id, &value))
+                                        gio::spawn_blocking(move || m.join_numeric_for(&id, &value,lease))
                                             .await;
+                                    if !task.active.get(){return;}
+                                    if matches!(&result,Ok(Ok(_))){task.finish(Ok("Paired. Your settings are syncing."));return;}
                                     output.set_text(match &result {
                                         Ok(Ok(_)) => "Paired. Your settings are syncing.",
                                         Ok(Err(e)) => e,
@@ -680,6 +693,13 @@ mod review_tests {
             capture(&ui.window,std::path::Path::new(&path).with_extension("monero.png"));
         }
         dialog.close();pump();
+        let status=adw::ActionRow::new();let spinner=gtk::Spinner::new();let pending=Rc::new(Cell::new(false));
+        let started=std::time::Instant::now();let task=PairTask::new(&ui,"Connecting to device…",&status,&spinner,&pending);
+        assert!(started.elapsed()<Duration::from_millis(400));assert!(pending.get());assert!(spinner.is_spinning());
+        assert_eq!(task.label.text(),"Connecting to device…");assert!(task.cancel.is_sensitive());
+        task.cancel.emit_clicked();assert!(!task.active.get());assert!(!pending.get());assert!(!spinner.is_spinning());
+        task.finish(Ok("Late result"));assert_eq!(status.title(),"Pairing cancelled.");
+        let weak=Rc::downgrade(&task);drop(task);pump();assert!(weak.upgrade().is_none(),"Pair dialog leaked its task");
         let root=bx(true,12);
         let source="A short message with https://litterbox.catbox.moe/";
         let body=wrap(source,"message-text");let status=bx(false,0);status.append(&text("13:31","message-meta"));

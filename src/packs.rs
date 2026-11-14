@@ -1,4 +1,6 @@
 //! Account-private packs; XMSP v1 matches Monogram mobile's GPL-3.0-or-later archive profile.
+#[path = "emoji_markup.rs"]
+pub mod emoji_markup;
 use gtk::{gio, glib, prelude::*};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -1454,6 +1456,7 @@ impl InlineEmoji {
         if self.ranges.is_empty() {
             return Ok(());
         }
+        crate::packs::emoji_markup::append(message, self);
         let mut p = Element::builder("p", XHTML).build();
         let mut previous = 0;
         let mut assets = HashSet::new();
@@ -1527,7 +1530,7 @@ impl InlineEmoji {
         }
         let html: Vec<_> = message.children().filter(|c| c.is("html", HTML)).collect();
         let data: Vec<_> = message.children().filter(|c| c.is("data", BOB)).collect();
-        if html.len() != 1 || data.is_empty() || data.len() > 16 {
+        if html.len() > 1 || data.is_empty() || data.len() > 16 {
             return Err(Error("Invalid emoji payload."));
         }
         let mut assets = HashMap::new();
@@ -1554,7 +1557,8 @@ impl InlineEmoji {
                 return Err(Error("Invalid or duplicate emoji asset."));
             }
         }
-        let wrapper = html[0];
+        if let Some(result) = crate::packs::emoji_markup::read(message, body, &assets) { return result; }
+        let wrapper = *html.first().ok_or(Error("Missing emoji markup."))?;
         if !attrs(wrapper, &[])
             || !wrapper.text().trim().is_empty()
             || wrapper.children().count() != 1

@@ -8,12 +8,12 @@ pub fn encode(clear:&Element)->Option<String>{
  let body=clear.get_child("body","jabber:client")?.text();
  crate::packs::InlineEmoji::from_message(clear,&body)?;
  let mut content=Element::builder("message","jabber:client").build();
- for c in clear.children().filter(|c|allowed(c)){content.append_child(c.clone());}
+ for c in clear.children().filter(|c|c.is("body","jabber:client")||c.is("html","http://jabber.org/protocol/xhtml-im")||c.is("data","urn:xmpp:bob")){content.append_child(c.clone());}
  let mut bytes=Vec::new();content.write_to(&mut bytes).ok()?;
  let wire=format!("{PREFIX}{}",String::from_utf8(bytes).ok()?);
  (wire.len()<=MAX).then_some(wire)
 }
-fn allowed(c:&Element)->bool{c.is("body","jabber:client")||c.is("html","http://jabber.org/protocol/xhtml-im")||c.is("data","urn:xmpp:bob")}
+fn allowed(c:&Element)->bool{c.is("body","jabber:client")||c.is("html","http://jabber.org/protocol/xhtml-im")||c.is("data","urn:xmpp:bob")||c.is("markup",crate::formatting::NS)||c.is("file-sharing",crate::file_share::NS)}
 pub fn decode(body:&str)->Result<Option<Element>, &'static str>{
  let Some(xml)=body.strip_prefix(PREFIX) else{return Ok(None);};
  if body.len()>MAX || xml.contains("<!"){return Err("Invalid authenticated inline emoji content");}
@@ -31,7 +31,7 @@ pub fn decode(body:&str)->Result<Option<Element>, &'static str>{
   let asset=crate::packs::InlineAsset{cid:format!("sha-256+{}@bob.xmpp.org",crate::crypto::lifecycle::hex(&openssl::sha::sha256(&bytes))),mime:"image/png".into(),bytes:Arc::new(bytes)};
   let inline=crate::packs::InlineEmoji::new("🙂".into(),vec![crate::packs::InlineRange{start:0,end:1,asset}]).unwrap();
   let mut clear=Element::builder("message","jabber:client").append(Element::builder("body","jabber:client").append("🙂").build()).build();inline.add_to(&mut clear).unwrap();
-  let wire=encode(&clear).unwrap();assert_eq!(crate::packs::InlineEmoji::from_message(&decode(&wire).unwrap().unwrap(),"🙂"),Some(inline));
+  let wire=encode(&clear).unwrap();assert!(!wire.contains(crate::packs::emoji_markup::NS));assert!(!wire.contains(crate::file_share::NS));assert_eq!(crate::packs::InlineEmoji::from_message(&decode(&wire).unwrap().unwrap(),"🙂"),Some(inline));
  }
  #[test]fn reads_mobile_generated_payload(){let wire=include_str!("../tests/fixtures/legacy-inline/mobile.txt");let clear=decode(wire).unwrap().unwrap();let inline=crate::packs::InlineEmoji::from_message(&clear,"🙂🙂").unwrap();assert_eq!(inline.ranges.len(),2);assert_eq!(inline.ranges[0].asset.mime,"image/png");}
  #[test]fn rejects_untrusted_or_malformed_envelopes(){assert!(decode("ordinary body").unwrap().is_none());assert!(decode(&format!("{PREFIX}<message xmlns='jabber:client'><body>🙂</body></message>")).is_err());assert!(decode(&format!("{PREFIX}<!DOCTYPE x><message/>" )).is_err());}
