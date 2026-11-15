@@ -46,3 +46,9 @@ implemented. Existing MP4-only messages cannot recover a still photo that was ne
   expanded viewer, unchanged original attachment and persisted preview metadata.
 - `tests/fixtures/motion-photoMP.jpg` is a synthetic solid-color 3200×2400 image
   produced by mobile's real writer with the existing reaction-video.mp4 fixture.
+
+Final verification: native motion playback passed normal/high-contrast/200% text
+scaling (maximum GTK heartbeat 186–207 ms); the fetched ZenPkgs package passed
+the complete native smoke with 128 ms loading feedback and a 247 ms maximum
+heartbeat gap. Mobile 0.2.219 passed 27 Android and 15 core transport checks;
+physical Android playback/installation remains pending the offline ADB device.
