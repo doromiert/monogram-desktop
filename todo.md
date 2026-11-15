@@ -59,4 +59,4 @@
 
 - [x] Close Stories from any background area or Escape, including while the reply field has focus.
 - [x] Paste clipboard images/files from anywhere in the focused chat window with Ctrl+V or Shift+Insert; preserve ordinary text paste.
-- [ ] Verify native pointer/keyboard behavior and package the desktop update.
+- [x] Verify native pointer/keyboard behavior and package the desktop update (Stories6.86s, clipboard1.37s; packaged smoke110ms feedback/246ms maximum heartbeat gap).
