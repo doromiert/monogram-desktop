@@ -80,4 +80,4 @@
 ## Wrapped link bubble fitting
 
 - [x] Fit wrapped URL bubbles to painted text/preview edges while preserving standard insets and the 432px cap.
-- [ ] Verify fitting stays stable across raw/rich links, preview cards and narrow resizing; publish/install the desktop package.
+- [x] Verify fitting stays stable across raw/rich links, preview cards and narrow resizing; publish/install the desktop package (native 0.49s/0.95s, full source smoke 267ms and packaged smoke 256ms maximum heartbeat; ZenPkgs b97744a9 installed/running).
