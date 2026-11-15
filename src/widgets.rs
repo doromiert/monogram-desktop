@@ -214,7 +214,7 @@ mod message_bubble_limit_imp {
                 if let Some((body_width, rendered_width)) = text.rendered_body_width() {
                     let outer_inset = (child_width - child.width()).max(0);
                     let mut needed = rendered_width + (child_width - body_width).max(0);
-                    let mut sibling = child.first_child();
+                    let mut sibling = (child != *text.upcast_ref::<gtk::Widget>()).then(|| child.first_child()).flatten();
                     while let Some(widget) = sibling {
                         sibling = widget.next_sibling();
                         if widget.is_visible() && widget != *text.upcast_ref::<gtk::Widget>() {
@@ -238,7 +238,7 @@ mod message_bubble_limit_imp {
                 }
             }
             if text.is_none() {
-                if let Some(body)=preview_body(&child).filter(|body|!(body.layout().line_count()>1&&body.label().contains("<a href="))) {
+                if let Some(body)=preview_body(&child) {
                     if let Some(bubble)=body.parent().and_downcast::<gtk::Box>().filter(|b|b.has_css_class("message-bubble")) {
                         let mut needed=body.layout().pixel_size().0+1;
                         let mut sibling=bubble.first_child();
@@ -422,7 +422,6 @@ impl MessageText {
     fn rendered_body_width(&self) -> Option<(i32, i32)> {
         let body = self.imp().body.borrow();
         let body = body.as_ref()?;
-        if body.layout().line_count()>1&&body.label().contains("<a href="){return None;}
         (body.width() > 0).then(|| (body.width(), body.layout().pixel_size().0 + 1))
     }
     pub fn new(body: &gtk::Label, status: &gtk::Box) -> Self {
@@ -925,6 +924,7 @@ mod media_geometry_tests {
         let bounds=short.compute_bounds(&rows).unwrap();assert!((bounds.x()+bounds.width()-rows.width() as f32).abs()<2.,"outgoing bubble keeps right alignment");
         assert!(link.width()<=MESSAGE_MAX_WIDTH);assert!(link.layout().line_count()>1);
         assert!(link.layout().pixel_size().0<=link.width(),"URL fits the expanded bubble");
+        for body in [&link,&raw] {assert!(body.width()<=body.layout().pixel_size().0+2,"wrapped URLs fit their painted edge: allocated {}, painted {}",body.width(),body.layout().pixel_size().0);}
         for body in [&link,&raw] {let text=body.text();for line in body.layout().lines_readonly().iter().skip(1) {let at=line.start_index() as usize;assert!(text[..at].ends_with(['/', '&', '?'])||text[at..].starts_with(['/', '&', '?']),"URL break at {at} must use / & or ?");}}
         assert!(raw.text().starts_with("https://github.com/doromiert/monogram-desktop/pull/2?expanded-message-width=full-conversation-clamp&download=original&more=query"));
         window.set_default_size(280,700);settle();assert!(rows.width()<=280,"URL wrapping must not raise the window minimum");

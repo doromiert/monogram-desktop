@@ -76,3 +76,8 @@
 - [x] Cap bubbles at 40% of the clamp maximum (432px), shrinking to available width on narrow windows.
 - [x] Keep fitting URLs whole; prefer `/`, `&`, `?` breaks otherwise, preserving text/copy/style and safe oversized-segment fallback.
 - [x] Verify raw/rich links, selection, formatting and full app layout; update package (native geometry/selection/formatting passed; final packaged smoke 254ms maximum heartbeat gap; ZenPkgs d57d97c9 installed and running).
+
+## Wrapped link bubble fitting
+
+- [x] Fit wrapped URL bubbles to painted text/preview edges while preserving standard insets and the 432px cap.
+- [ ] Verify fitting stays stable across raw/rich links, preview cards and narrow resizing; publish/install the desktop package.

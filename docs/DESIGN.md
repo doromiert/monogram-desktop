@@ -97,6 +97,8 @@ label width, it gains preferred breaks at `/`, `&`, and `?`; an oversized single
 segment still has grapheme fallback. Native markup adds no hidden text characters.
 URL break attributes are recalculated when the label width/font context changes;
 custom emoji/timestamp shapes survive without preserving stale break attributes.
+Wrapped links still fit their painted line edges and the preview card; wrapping
+does not reserve the full bubble maximum as blank trailing space.
 
 The bubble height is measured at its final content-fitted width. A changed fitted
 width requests remeasurement after allocation, preventing stale wrapped-message
