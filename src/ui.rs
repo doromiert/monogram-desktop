@@ -20,6 +20,7 @@ use std::{
 };
 pub struct Ui {
     pub avatars: RefCell<crate::avatar_ui::Avatars>,
+    pub contact_load_serial: Cell<u64>,
     pub local_contacts: RefCell<HashMap<String, crate::contact_details::LocalContact>>,
     pub local_contact_avatars: RefCell<HashMap<String, gtk::gdk::Texture>>,
     pub images: RefCell<crate::image_ui::Images>,
@@ -264,6 +265,7 @@ impl Ui {
         request_badge.set_visible(false);
         let ui = Rc::new(Self {
             avatars: RefCell::new(Default::default()),
+            contact_load_serial: Cell::new(0),
             local_contacts: RefCell::new(HashMap::new()),
             local_contact_avatars: RefCell::new(HashMap::new()),
             images: RefCell::new(Default::default()),

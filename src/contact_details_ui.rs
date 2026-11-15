@@ -33,6 +33,8 @@ impl Ui {
                 .take(128)
                 .collect()
         };
+        let serial = self.contact_load_serial.get().wrapping_add(1);
+        self.contact_load_serial.set(serial);
         let generation = self.generation.get();
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
@@ -62,7 +64,10 @@ impl Ui {
                     Ok((records, images))
                 })
                 .await;
-            if ui.generation.get() != generation || ui.state.borrow().account != owner {
+            if ui.contact_load_serial.get() != serial
+                || ui.generation.get() != generation
+                || ui.state.borrow().account != owner
+            {
                 return;
             }
             if let Ok((records, images)) = result {
@@ -175,7 +180,12 @@ impl Ui {
         let window = self.window.clone();
         let account = owner.clone();
         let expected = owner.clone();
-        choose.connect_clicked(move |_| {
+        let picture_dialog = dialog.downgrade();
+        let clear_picture = clear.clone();
+        choose.connect_clicked(move |choose| {
+            let choose = choose.clone();
+            let clear_picture = clear_picture.clone();
+            let picture_dialog = picture_dialog.clone();
             let expected = expected.clone();
             let weak = weak.clone();
             let selection = selection.clone();
@@ -198,12 +208,28 @@ impl Ui {
                 let Ok(file) = chooser.open_future(Some(&window)).await else {
                     return;
                 };
+                if weak.upgrade().is_none_or(|ui| {
+                    ui.generation.get() != generation || ui.state.borrow().account != expected
+                }) || picture_dialog
+                    .upgrade()
+                    .is_none_or(|dialog| dialog.parent().is_none())
+                {
+                    return;
+                }
                 button.set_sensitive(false);
+                choose.set_sensitive(false);
+                clear_picture.set_sensitive(false);
                 feedback.set_text("Preparing picture…");
                 let result = gio::spawn_blocking(move || prepare_picture(&account, file)).await;
                 button.set_sensitive(true);
+                choose.set_sensitive(true);
+                clear_picture.set_sensitive(true);
                 let Some(ui) = weak.upgrade().filter(|ui| {
-                    ui.generation.get() == generation && ui.state.borrow().account == expected
+                    ui.generation.get() == generation
+                        && ui.state.borrow().account == expected
+                        && picture_dialog
+                            .upgrade()
+                            .is_some_and(|dialog| dialog.parent().is_some())
                 }) else {
                     if let Ok(Ok((path, _))) = result {
                         gio::spawn_blocking(move || {
@@ -395,12 +421,28 @@ mod tests {
         state.active = state.chat_for(peer).id.clone();
         ui.activate_state(state);
         ui.window.present();
-        ui.store
-            .set_contact_details(owner, peer, "Local Name", "Private note", None)
+        let input = std::env::temp_dir().join(format!("contact-ui-{}.png", uuid::Uuid::new_v4()));
+        let bytes=base64::Engine::decode(&base64::engine::general_purpose::STANDARD,"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=").unwrap();
+        fs::write(&input, bytes).unwrap();
+        let file = gio::File::for_path(&input);
+        let (path, texture) = glib::MainContext::default()
+            .block_on(gio::spawn_blocking(move || prepare_picture(owner, file)))
+            .unwrap()
             .unwrap();
+        assert!(texture.width() <= 256 && texture.height() <= 256);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        ui.store
+            .set_contact_details(owner, peer, "Local Name", "Private note", Some(&path))
+            .unwrap();
+        fs::remove_file(input).unwrap();
+        fs::remove_file(path).unwrap();
         ui.reload_contact_details();
         wait(|| ui.state.borrow().current().display_name() == "Local Name");
         assert_eq!(ui.state.borrow().current().name, "Remote Profile");
+        assert!(ui.local_contact_avatars.borrow().contains_key(peer));
         ui.show_info();
         assert!(
             find::<adw::ActionRow>(&ui.utility.clone().upcast(), &|row| row.title()
