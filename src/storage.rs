@@ -90,6 +90,7 @@ impl Store {
         store.init_rooms()?;
         store.init_requests()?;
         store.init_read_markers()?;
+        store.init_contact_details()?;
         store.init_link_previews()?;
         for account in store.accounts(){store.migrate_chat_defaults(&account.jid)?;}
         store.db.execute_batch("CREATE INDEX IF NOT EXISTS queued_outbox ON messages(account,timestamp,id) WHERE json_extract(body,'$.outbox_pending')=1;")?;

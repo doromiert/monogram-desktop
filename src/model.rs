@@ -285,6 +285,8 @@ pub struct Chat {
     pub automatic_encryption: Option<Selection>,
     pub id: String,
     pub name: String,
+    #[serde(skip)]
+    pub local_name: String,
     pub subtitle: String,
     pub avatar: String,
     pub color: String,
@@ -314,6 +316,7 @@ pub struct Chat {
     pub draft_formatting: Option<crate::formatting::Markup>,
 }
 impl Chat {
+    pub fn display_name(&self) -> &str { if self.local_name.is_empty() { &self.name } else { &self.local_name } }
     pub fn encryption_preference(&self) -> Preference {
         self.sending_preference.unwrap_or(if self.encryption {
             Preference::Omemo2

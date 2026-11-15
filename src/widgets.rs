@@ -59,7 +59,7 @@ pub fn icon_button(icon: &str, title: &str) -> gtk::Button {
     b
 }
 pub fn avatar(chat: &crate::model::Chat, size: i32) -> adw::Avatar {
-    let a = adw::Avatar::new(size, Some(&chat.name), true);
+    let a = adw::Avatar::new(size, Some(chat.display_name()), true);
     a.add_css_class(&format!("avatar-{}", chat.color));
     if chat.id == "saved" {
         a.set_show_initials(false);

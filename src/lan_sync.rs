@@ -219,6 +219,15 @@ async fn cycle(mesh: &Arc<Mesh>, store: &Store) -> Result<()> {
             publish_json(mesh,"folders",owner,"folders",value)
                 .map_err(|error|format!("Could not sync folders for {owner}: {error}"))?;
         }
+        for contact in store.load_all_contact_overrides(owner).map_err(error)?.into_values() {
+            let (value,revision)=store.contact_sync_value(owner,&contact.peer).map_err(error)?;
+            let id=crate::contact_details::id(&contact.peer);let tracker=format!("contact-user-revision:{owner}:{id}");
+            let mut sync=mesh.store.lock().unwrap();
+            if sync.signature(&tracker).and_then(|v|v.parse::<u64>().ok()).is_some_and(|ack|revision<=ack){continue;}
+            let k=key("contact",owner,&id);
+            if revision>0 || !sync.state.objects.contains_key(&k){sync.put_json_at("contact",owner,&id,&value.to_string(),revision.max(1))?;}
+            sync.set_signature(&tracker,revision.to_string())?;
+        }
         export_fingerprints(mesh, owner)?;
         let library = Library::open(owner).await.map_err(error)?;
         let snapshot=library.snapshot().await.map_err(error)?;
@@ -312,8 +321,9 @@ async fn cycle(mesh: &Arc<Mesh>, store: &Store) -> Result<()> {
             Ok(Some(signature)) => {
                 let picker_revision=if meta.kind=="pack-order" {Some(Library::open(&meta.owner).await.map_err(error)?.snapshot().await.map_err(error)?.picker_revision.max(store.pref("picker:user-revision","0").parse().unwrap_or(0)))}else{None};
                 let mut sync = mesh.store.lock().unwrap();
-                if meta.kind=="pack-order" {if !sync.mark_applied_meta(&meta)?{continue;}}else{sync.mark_applied(&meta.key(), &meta.digest)?;}
+                if matches!(meta.kind.as_str(),"pack-order"|"contact") {if !sync.mark_applied_meta(&meta)?{continue;}}else{sync.mark_applied(&meta.key(), &meta.digest)?;}
                 sync.set_signature(&meta.key(), signature)?;
+                if meta.kind=="contact" {sync.set_signature(&format!("contact-user-revision:{}:{}",meta.owner,meta.id),meta.stamp.to_string())?;}
                 if let Some(revision)=picker_revision.filter(|revision|*revision<=meta.stamp){sync.set_signature(&format!("picker-user-revision:{}",meta.owner),revision.to_string())?;}
                 REVISION.fetch_add(1, Ordering::Relaxed);
             }
@@ -346,6 +356,9 @@ async fn apply(store: &Store, meta: &Meta, path: &std::path::Path) -> Result<Opt
         return Err("Invalid synchronized account.".into());
     }
     match meta.kind.as_str() {
+        "contact" => {
+            if !store.apply_contact_sync(&meta.owner,&value,meta.stamp).map_err(error)? {return Ok(None);}
+        },
         "account" => {
             let account = Account {
                 jid: meta.owner.clone(),

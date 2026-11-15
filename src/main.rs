@@ -8,6 +8,8 @@ mod blocking_ui;
 mod clipboard_upload;
 mod chat_states;
 mod contact_access;
+mod contact_details;
+mod contact_details_ui;
 mod contact_access_ui;
 mod composer_attachments_ui;
 mod credentials;

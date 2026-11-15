@@ -166,14 +166,14 @@ impl Ui {
         body.set_width_request(0);
         body.set_hexpand(true);
         body.append(&self.chat_avatar(&chat, 76));
-        let title = wrap(&chat.name, "title-2");
+        let title = wrap(chat.display_name(), "title-2");
         title.set_width_chars(1);
         title.set_max_width_chars(34);
         title.set_lines(3);
         title.set_ellipsize(gtk::pango::EllipsizeMode::End);
         title.set_xalign(0.5);
-        title.set_tooltip_text(Some(&chat.name));
-        title.update_property(&[gtk::accessible::Property::Label(&chat.name)]);
+        title.set_tooltip_text(Some(chat.display_name()));
+        title.update_property(&[gtk::accessible::Property::Label(chat.display_name())]);
         body.append(&title);
         let subtitle = wrap(&chat.subtitle, "dim-label");
         subtitle.set_width_chars(1);
@@ -197,8 +197,10 @@ impl Ui {
                 "security",
             ),
             ("Control Access", "changes-prevent-symbolic", "access"),
+            ("Local Details", "document-edit-symbolic", "local-contact"),
+            ("Suggest Picture…", "image-x-generic-symbolic", "suggest-avatar"),
         ] {
-            if key == "access" && !demo && !live_access {
+            if (key == "access" && !demo || matches!(key,"local-contact"|"suggest-avatar")) && !live_access {
                 continue;
             }
             let row = adw::ActionRow::builder()
@@ -213,6 +215,8 @@ impl Ui {
                 if let Some(ui) = weak.upgrade() {
                     match key {
                         "media" => ui.shared_media(),
+                        "local-contact" => ui.edit_contact_details(&peer),
+                        "suggest-avatar" => ui.suggest_contact_picture(&peer),
                         "security" => ui.security(),
                         _ if ui.state.borrow().account.is_empty() => {
                             ui.preview_form("Control Access", &["Contact address"])

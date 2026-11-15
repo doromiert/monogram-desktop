@@ -211,6 +211,7 @@ impl Ui {
         if owner.is_empty() || chat.id == "saved" || chat.jid.is_empty() {
             return avatar;
         }
+        if let Some(texture)=self.local_contact_avatars.borrow().get(&chat.jid) { avatar.set_custom_image(Some(texture)); return avatar; }
         let mut avatars = self.avatars.borrow_mut();
         if let Some((_, texture)) = avatars.cache.get(&chat.jid) {
             avatar.set_custom_image(texture.as_ref());

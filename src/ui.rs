@@ -20,6 +20,8 @@ use std::{
 };
 pub struct Ui {
     pub avatars: RefCell<crate::avatar_ui::Avatars>,
+    pub local_contacts: RefCell<HashMap<String, crate::contact_details::LocalContact>>,
+    pub local_contact_avatars: RefCell<HashMap<String, gtk::gdk::Texture>>,
     pub images: RefCell<crate::image_ui::Images>,
     pub uploads: RefCell<crate::upload_ui::Uploads>,
     pub downloads: RefCell<crate::downloads::Downloads>,
@@ -262,6 +264,8 @@ impl Ui {
         request_badge.set_visible(false);
         let ui = Rc::new(Self {
             avatars: RefCell::new(Default::default()),
+            local_contacts: RefCell::new(HashMap::new()),
+            local_contact_avatars: RefCell::new(HashMap::new()),
             images: RefCell::new(Default::default()),
             uploads: RefCell::new(Default::default()),
             downloads: RefCell::new(Default::default()),
@@ -983,7 +987,7 @@ impl Ui {
             let words = bx(true, 5);
             words.set_hexpand(true);
             let top = bx(false, 8);
-            let name = text(&chat.name, "chat-name");
+            let name = text(chat.display_name(), "chat-name");
             name.set_hexpand(true);
             name.set_ellipsize(gtk::pango::EllipsizeMode::End);
             top.append(&name);
@@ -1514,6 +1518,8 @@ impl Ui {
         clear(&self.chips);
         self.chips.set_visible(false);
         self.load_current();
+        let local_avatar=self.local_contacts.borrow().get(&self.state.borrow().current().jid).is_some_and(|contact|contact.avatar.is_some());
+        if local_avatar && !self.local_contact_avatars.borrow().contains_key(&self.state.borrow().current().jid) { self.reload_contact_details(); }
         if switched {
             match visible_sidebar.as_deref() {
                 Some("info") => self.show_info(),
@@ -1575,13 +1581,13 @@ impl Ui {
         let state = self.state.borrow();
         let chat = state.current();
         self.composer_placeholder
-            .set_text(&format!("Message {}…", chat.name));
+            .set_text(&format!("Message {}…", chat.display_name()));
         self.composer_placeholder
             .set_visible(self.composer_text().is_empty());
         let title = bx(false, 8);
         title.append(&self.chat_avatar(chat, 28));
         let words = bx(true, 0);
-        words.append(&text(&chat.name, "chat-title"));
+        words.append(&text(chat.display_name(), "chat-title"));
         let subtitle = if self
             .typing
             .borrow()
@@ -1647,9 +1653,9 @@ impl Ui {
         let state = self.state.borrow();
         let owner = state.account.clone();
         for c in &state.chats {
-            if c.name.to_lowercase().contains(&query) {
+            if c.display_name().to_lowercase().contains(&query) {
                 let row = adw::ActionRow::builder()
-                    .title(&c.name)
+                    .title(c.display_name())
                     .subtitle(&c.subtitle)
                     .use_markup(false)
                     .activatable(true)
@@ -2136,7 +2142,9 @@ impl Ui {
         if let Some(v) = story {
             v.close()
         }
+        self.local_contacts.borrow_mut().clear();self.local_contact_avatars.borrow_mut().clear();
         self.state.replace(state);
+        self.reload_contact_details();
         self.load_favorite_orders();
         self.load_blocking_cache();
         self.rebuild_pack_library();
@@ -2393,6 +2401,7 @@ impl Ui {
                     c.contact = item.subscription != "remove" && !c.group && c.jid != owner;
                 }
                 drop(s);
+                self.apply_local_contact_names();
                 self.clear_contact_requests(&resolved);
                 self.refresh_contact_access();
             }
@@ -2817,7 +2826,7 @@ impl Ui {
         let receipt_id = message.wire_id.clone();
         let notify =
             known.is_none() && !visible && !message.own && !historical && c.notifications == "all";
-        let notification_title = c.name.clone();
+        let notification_title = c.display_name().to_string();
         let notification_body = message.preview();
         if let Some(known) = known.clone() {
             let old = c
