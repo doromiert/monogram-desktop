@@ -34,8 +34,8 @@ an in-memory interaction or surface; "planned" means it is still absent.
 | Invitations and contact requests | Durable account-scoped contact requests with paged review, acknowledged accept-and-request-back responses, one-way permission controls and server withdrawal/authorization reconciliation; mediated/direct room invitation inbox, encrypted invitation passwords, confirmed join/local dismissal, revision guards and durable keyring cleanup; empty Requests and invitations controls hidden on both clients; created groups grant selected members and send mediated invitations with per-recipient failures | Cross-device dismissal and full invitation management |
 | Presence and typing | Roster-authorized multi-resource status with unknown/unshared presence hidden, stale startup status cleared, and live direct typing with expiry/privacy control; clears on disconnect | Group states, full carbons/delay/archive rejection and broader interoperability |
 | Direct and MUJI group calls | Call-controls dialog preview | Real media transport, incoming calls, desktop device/portal permissions, mute/camera/speaker, lifecycle and group membership |
-| Contacts and profiles | Live roster and verified direct-chat PEP/vCard avatars with a bounded account disk cache and offline restoration, conversation info following chat/account selection, [server-enforced contact blocking](BLOCKING.md) with direct profile/list actions, cross-resource pushes and acknowledged offline cache, editable profile preview | Avatar publication, local overrides, vCard fields, avatar publication/suggestions, colors and notes |
-| Stories and persistent profile posts | Horizontal chat-list avatar strip and timed native overlay viewer | Correct PEP/Atom access, expiry, persistent saves, edits/retractions, media and profile editing |
+| Contacts and profiles | Live roster and verified direct-chat PEP/vCard avatars with a bounded account disk cache and offline restoration, conversation info following chat/account selection, [server-enforced contact blocking](BLOCKING.md) with direct profile/list actions, cross-resource pushes and acknowledged offline cache, editable profile preview, account-scoped local nickname/notes/avatar overrides with actual-edit revisions across encrypted device sync, and normal-policy image suggestions | Own-avatar publication/accepting suggestions, vCard fields and colors |
+| Stories and persistent profile posts | [Live XEP-0501/Atom stories](STORIES.md), confirmed contact-only PEP access, 24-hour expiry, cached metadata/seen state, recoverable progress/cancel/retry upload, image/animation/video viewing, stable-owner ordinary chat replies, own caption edits/retractions and local own history | Real-contact/server publication acceptance, permanent remote profile saves, viewer receipts, reactions and advanced editing |
 | Notifications | Basic live desktop notifications, opt-in message previews, local chat mute and notification preferences | Actions/attention, mention matching, timed-mute expiry and background behavior |
 | Read state and archives | Focused-chat local unread clearing (including older-history views), immediate send acknowledgement, authenticated own-carbon read synchronization, default-on direct public XEP-0333 receipts with durable opt-out and monotonic read status, retained message widgets, bounded adaptive paging, current screen plus two screens cached on each side, reply jumps and paged direct MAM | Broader cross-client read interoperability, account-wide recovery and room readers |
 | Wallet overview / multiple wallets | Source 3D meshes/GLSL rendered in Rust, precision/QR controls, local add/remove/animated switch and activity fixtures | Production 3D card, secure keyring/SDK integration, unlock/lock, durable wallet slots and removal semantics |
@@ -231,3 +231,18 @@ checks. Sticker replies now use the same verified image thumbnail path as mobile
 and sticker previews use a readable label rather than a generatedWebP filename.
 Native deletion anchor tests and download-policy/reply tests cover these paths.
 The unused DeveloperTools preview entry was removed from the hamburger menu.
+
+
+Contact override sync uses per-account/per-contact portable records with actual user-edit revisions, exact-version acknowledgements and explicit null-avatar clears. Nicknames, notes and PNG bytes cross encrypted Device Sync; local paths and remote roster/profile writes do not. Two Android adapter checks, desktop private-store coverage, 19 shared-core checks and a production JNI paired-TLS contact transfer/version fixture pass. Mobile0.2.218 requires the compatible desktop contact-record update.
+
+Desktop native follow-up verification: ManagePacks lists every pack with install,
+edit and order controls; each picker section has its own edit button. Connected
+packs offer explicit local editing instead of disabled actions. Native pointer
+tests cover category-bar drag, manager drag, sticker drag/rename and700-item
+resource bounds (maxGTKgap82ms); high-contrast run passes. Editor toolbar uses
+flat native styling and only one hover background. Monero settings appear in the
+side panel when enabled for the account, with correct account-switch cleanup;
+this does not add desktop wallet spending. Local contact UI and paired transfer
+are documented in [LOCAL_CONTACTS.md](LOCAL_CONTACTS.md). Allreportedfollow-up
+flows have controls and sub400ms feedback checks; actual user-account Stories
+publication and manualphone↔desktop contact editing were not performed.
