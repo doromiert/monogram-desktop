@@ -43,3 +43,8 @@ unverified.
 Permanent remote profile-post saves, viewer receipts, story reactions and
 advanced story/media editing remain outside this desktop baseline. The native
 preview's local heart control is hidden for live stories.
+
+The desktop viewer closes on a primary click anywhere outside the story card
+(background margins), or Escape, including while the reply entry has focus.
+Previous/Next and other controls retain their normal actions. Window typing
+shortcuts stay suspended while a story is open, preserving the chat draft.

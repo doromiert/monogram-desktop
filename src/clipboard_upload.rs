@@ -153,6 +153,17 @@ pub fn attach(ui: &Rc<Ui>) {
             }
         });
     });
+    let window_keys=gtk::EventControllerKey::new();
+    window_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let weak=Rc::downgrade(ui);
+    window_keys.connect_key_pressed(move |_,key,_,state|{
+        let paste=(matches!(key,gdk::Key::v|gdk::Key::V)&&state.contains(gdk::ModifierType::CONTROL_MASK)&&!state.intersects(gdk::ModifierType::ALT_MASK|gdk::ModifierType::SUPER_MASK))
+            || key==gdk::Key::Insert&&state.contains(gdk::ModifierType::SHIFT_MASK)&&!state.intersects(gdk::ModifierType::CONTROL_MASK|gdk::ModifierType::ALT_MASK|gdk::ModifierType::SUPER_MASK);
+        let Some(ui)=weak.upgrade().filter(|ui|paste&&ui.composer.is_mapped()&&ui.window.visible_dialog().is_none()&&has_media(&ui.window.clipboard()))else{return glib::Propagation::Proceed;};
+        ui.composer.emit_by_name::<()>("paste-clipboard",&[]);
+        glib::Propagation::Stop
+    });
+    ui.window.add_controller(window_keys);
     let view = ui.composer.downgrade();
     ui.composer.clipboard().connect_changed(move |_| {
         if let Some(view) = view.upgrade() {
@@ -331,6 +342,38 @@ impl Ui {
             } else {
                 ui.notice("Media copied");
             }
+        });
+    }
+}
+
+#[cfg(test)]
+mod window_paste_tests {
+    use super::*;
+    use crate::model::*;
+    use std::time::{Duration,Instant};
+    async fn wait(mut ready:impl FnMut()->bool){let end=Instant::now()+Duration::from_secs(8);while !ready(){assert!(Instant::now()<end,"window paste did not settle");glib::timeout_future(Duration::from_millis(10)).await;}}
+    #[test]
+    #[ignore="requires private GTK display, clipboard and Secret Service"]
+    fn images_paste_from_search_focus_and_text_stays_in_search() {
+        let app=adw::Application::builder().application_id("com.negzero.WindowPasteFixture").flags(gio::ApplicationFlags::NON_UNIQUE).build();app.register(gio::Cancellable::NONE).unwrap();
+        let ui=Ui::new(&app,true);let owner="owner@fixture.invalid";
+        ui.store.save_account(&Account{jid:owner.into(),host:"fixture.invalid".into(),port:5222,direct_tls:false}).unwrap();
+        let mut state=State::live(owner,vec![]);state.active=state.chat_for("friend@fixture.invalid").id.clone();ui.activate_state(state);ui.window.set_title(Some("Window paste fixture"));ui.window.present();ui.toggle_media();
+        let texture=gdk::MemoryTexture::new(16,16,gdk::MemoryFormat::R8g8b8a8,&glib::Bytes::from_owned(vec![255;16*16*4]),64);
+        glib::MainContext::default().block_on(async {
+            wait(||ui.media_search.is_mapped()).await;
+            assert!(std::process::Command::new("xdotool").args(["search","--onlyvisible","--name","^Window paste fixture$","windowfocus","--sync"]).status().unwrap().success());
+            ui.composer.buffer().set_text("Keep text draft");ui.media_search.grab_focus();
+            ui.window.clipboard().set_texture(&texture);
+            assert!(std::process::Command::new("xdotool").args(["key","ctrl+v"]).status().unwrap().success());
+            wait(||ui.attachments.borrow().len()==1).await;assert_eq!(ui.composer_text(),"Keep text draft");assert!(ui.media_search.text().is_empty());
+            ui.media_search.grab_focus();ui.window.clipboard().set_text("search paste");
+            assert!(std::process::Command::new("xdotool").args(["key","ctrl+v"]).status().unwrap().success());
+            wait(||ui.media_search.text()=="search paste").await;assert_eq!(ui.attachments.borrow().len(),1);
+            ui.window.clipboard().set_texture(&texture);
+            assert!(std::process::Command::new("xdotool").args(["key","shift+Insert"]).status().unwrap().success());
+            wait(||ui.attachments.borrow().len()==2).await;assert_eq!(ui.composer_text(),"Keep text draft");
+            ui.window.close();
         });
     }
 }

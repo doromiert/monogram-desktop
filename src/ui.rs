@@ -626,6 +626,7 @@ impl Ui {
                 || focus_is_editable
                 || ui.pages.visible_child_name().as_deref() != Some("chat")
                 || ui.active_media.borrow().is_some()
+                || ui.active_story.borrow().is_some()
                 || ui.window.visible_dialog().is_some()
             {
                 return glib::Propagation::Proceed;
