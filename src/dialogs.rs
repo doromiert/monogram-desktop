@@ -1086,6 +1086,7 @@ impl Ui {
                     (
                         crate::downloads::forget(&cleanup_owner),
                         crate::link_previews::forget(&cleanup_owner),
+                        crate::preview_cache::forget(&cleanup_owner),
                     )
                 });
                 let weak = Rc::downgrade(&ui);
@@ -1093,11 +1094,14 @@ impl Ui {
                 let cleanup = cleanup.await;
                 let Some(ui) = weak.upgrade() else { return };
                 match cleanup {
-                    Ok((attachments, previews)) => {
+                    Ok((attachments, previews, stickers)) => {
                         if let Err(reason) = attachments {
                             ui.notice(reason);
                         }
                         if let Err(reason) = previews {
+                            ui.notice(reason);
+                        }
+                        if let Err(reason) = stickers {
                             ui.notice(reason);
                         }
                     }

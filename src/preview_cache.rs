@@ -13,11 +13,41 @@ const MAX_ENTRY: u64 = 2 * 1024 * 1024;
 pub(crate) const MAX_TOTAL: u64 = 128 * 1024 * 1024;
 const PRUNE_EVERY: usize = 64;
 
-pub(crate) fn default_root() -> Option<PathBuf> {
+fn default_root() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
     Some(base.join("monogram-desktop").join("pack-previews"))
+}
+
+/// One directory per account, named by a hash of the account, so removing an account can
+/// remove exactly its previews and the directory names reveal nothing.
+fn account_dir(base: &Path, account: &str) -> PathBuf {
+    let id: String = openssl::sha::sha256(account.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    base.join(id)
+}
+
+pub(crate) fn account_root(account: &str) -> Option<PathBuf> {
+    default_root().map(|base| account_dir(&base, account))
+}
+
+/// Deletes every cached preview of `account`. A missing directory is not an error.
+pub(crate) fn forget(account: &str) -> Result<(), &'static str> {
+    let Some(base) = default_root() else {
+        return Ok(());
+    };
+    forget_in(&base, account)
+}
+
+fn forget_in(base: &Path, account: &str) -> Result<(), &'static str> {
+    match fs::remove_dir_all(account_dir(base, account)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("Sticker preview cache could not be removed"),
+    }
 }
 
 /// Opaque file name for one preview. Only the stored artwork name (a random UUID) is hashed.
@@ -57,7 +87,18 @@ pub(crate) fn store(root: &Path, key: &str, bytes: &[u8]) {
         let _ = fs::set_permissions(root, fs::Permissions::from_mode(0o700));
     }
     let temp = root.join(format!(".{key}.{}.tmp", std::process::id()));
-    if fs::write(&temp, bytes).is_ok() && fs::rename(&temp, root.join(key)).is_err() {
+    let written = {
+        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&temp)
+            .and_then(|mut file| file.write_all(bytes))
+            .is_ok()
+    };
+    if !written || fs::rename(&temp, root.join(key)).is_err() {
         let _ = fs::remove_file(&temp);
     }
     if WRITES.fetch_add(1, Ordering::Relaxed) % PRUNE_EVERY == PRUNE_EVERY - 1 {
@@ -133,6 +174,28 @@ mod tests {
             assert_eq!(fs::metadata(&root).unwrap().permissions().mode() & 0o777, 0o700);
         }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn previews_are_private_and_scoped_to_one_account_until_it_is_removed() {
+        let base = temp();
+        let alice = account_dir(&base, "alice@example.invalid");
+        let bob = account_dir(&base, "bob@example.invalid");
+        assert_ne!(alice, bob);
+        assert!(!alice.to_string_lossy().contains("alice"), "directory names are hashed");
+        let name = key("still", 192, "artwork.webp");
+        store(&alice, &name, b"alice preview");
+        store(&bob, &name, b"bob preview");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(alice.join(&name)).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        forget_in(&base, "alice@example.invalid").unwrap();
+        assert!(load(&alice, &name, None).is_none());
+        assert_eq!(load(&bob, &name, None).as_deref(), Some(&b"bob preview"[..]), "other accounts are kept");
+        forget_in(&base, "alice@example.invalid").unwrap();
+        let _ = fs::remove_dir_all(base);
     }
 
     #[test]

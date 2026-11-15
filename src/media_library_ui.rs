@@ -1924,12 +1924,13 @@ let mut ids=Vec::new();let buttons=page.section_buttons.borrow();let mut child=p
             self.preview_active.set(self.preview_active.get() + 1);
             let weak = Rc::downgrade(self);
             let library = self.library.clone();
+            let account = library.account().to_string();
             glib::spawn_future_local(async move {
                 let result = match library.verified_asset(cell.item_id, Job::new()).await {
                     Ok((asset,verified)) if asset.item.mime=="video/webm" => gio::spawn_blocking(move||{
                         use std::os::fd::AsRawFd;
                         // Extracting a poster decodes video, so keep it in the preview cache.
-                        let root=crate::preview_cache::default_root();
+                        let root=crate::preview_cache::account_root(&account);
                         let key=crate::preview_cache::key("poster",1500,&asset.item.file);
                         let modified=std::fs::metadata(&asset.path).and_then(|m|m.modified()).ok();
                         if let Some(bytes)=root.as_deref().and_then(|root|crate::preview_cache::load(root,&key,modified)) {
@@ -2016,7 +2017,7 @@ let mut ids=Vec::new();let buttons=page.section_buttons.borrow();let mut child=p
             drop(verified);let library=self.library.clone();let preview_asset=asset.clone();
             // Still frames are cached as small PNGs, so reopening the picker does not decode
             // every sticker again. Animated artwork is never cached and keeps playing.
-            let cache_root=crate::preview_cache::default_root();
+            let cache_root=crate::preview_cache::account_root(self.library.account());
             let cache_key=crate::preview_cache::key("still",192,&asset.item.file);
             let modified=std::fs::metadata(&asset.path).and_then(|m|m.modified()).ok();
             let cached=cache_root.as_deref()
