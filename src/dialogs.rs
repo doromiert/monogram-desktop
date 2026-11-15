@@ -505,6 +505,21 @@ impl Ui {
             }
         }
     }
+    fn track_dialog(self: &Rc<Self>, dialog: &impl IsA<adw::Dialog>) {
+        let dialog = dialog.as_ref();
+        self.dialogs.borrow_mut().push(dialog.clone());
+        let weak = Rc::downgrade(self);
+        dialog.connect_closed(move |dialog| {
+            if let Some(ui) = weak.upgrade() {
+                if let Ok(mut dialogs) = ui.dialogs.try_borrow_mut() {
+                    dialogs.retain(|old| old != dialog);
+                }
+                // Closing a modal does not necessarily reactivate the application window.
+                ui.mark_visible_chat_read();
+                ui.schedule_history_maintenance();
+            }
+        });
+    }
     pub fn dialog(
         self: &Rc<Self>,
         title: &str,
@@ -524,15 +539,7 @@ impl Ui {
         view.add_top_bar(&header);
         view.set_content(Some(child));
         d.set_child(Some(&view));
-        self.dialogs.borrow_mut().push(d.clone());
-        let weak = Rc::downgrade(self);
-        d.connect_closed(move |d| {
-            if let Some(ui) = weak.upgrade() {
-                if let Ok(mut dialogs) = ui.dialogs.try_borrow_mut() {
-                    dialogs.retain(|old| old != d);
-                }
-            }
-        });
+        self.track_dialog(&d);
         d.present(Some(&self.window));
         (d, header)
     }
@@ -1768,7 +1775,7 @@ impl Ui {
                 dialog.add(&p)
             }
         }
-        self.dialogs.borrow_mut().push(dialog.clone().upcast());
+        self.track_dialog(&dialog);
         dialog.present(Some(&self.window));
     }
     pub fn shortcuts(self: &Rc<Self>) {
@@ -1797,7 +1804,7 @@ impl Ui {
             }
             d.add(section)
         }
-        self.dialogs.borrow_mut().push(d.clone().upcast());
+        self.track_dialog(&d);
         d.present(Some(&self.window));
     }
     pub fn preview_form(self: &Rc<Self>, title: &str, fields: &[&str]) {

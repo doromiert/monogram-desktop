@@ -107,7 +107,7 @@ impl Ui {
             && self.window.is_mapped()
             && self.timeline.is_mapped()
             && self.pages.visible_child_name().as_deref() == Some("chat")
-            && !self.dialogs.borrow().iter().any(|dialog| dialog.is_visible())
+            && !self.dialogs.borrow().iter().any(|dialog| dialog.is_mapped())
             && self.active_media.borrow().is_none()
             && self.active_story.borrow().is_none()
     }
@@ -174,6 +174,11 @@ impl Ui {
   ui.backend_event(ui.generation.get(),owner,crate::protocol::BackendEvent::Typing{peer:peer.into(),composing:false});pump();assert!(!has_typing(ui.title.upcast_ref()));
   // Sending acknowledges a conversation without requiring the newest row to be on screen.
   ui.state.borrow_mut().current_mut().unread=1;ui.mark_current_chat_read();assert_eq!(ui.state.borrow().current().unread,0);pump();
-  eprintln!("Native focused history: incoming cleared immediately, latest marker queued, typing replaced subtitle and restored it");ui.window.close();
+  // A closed modal must not block reads indefinitely, including room arrivals.
+  ui.state.borrow_mut().current_mut().group=true;
+  ui.shortcuts();pump();let modal=ui.dialogs.borrow().last().unwrap().clone();assert!(modal.is_mapped());assert!(!ui.reading_current_chat());
+  assert!(ui.receive_message(owner,peer.into(),Message{id:"room-after-modal".into(),wire_id:"room-after-modal".into(),sender:format!("{peer}/buddy"),text:"Room arrival behind settings".into(),timestamp:"2026-11-14T13:00:00Z".into(),..Default::default()},false,None));pump();assert_eq!(ui.state.borrow().current().unread,1);
+  modal.close();pump();assert!(ui.dialogs.borrow().is_empty());assert!(ui.reading_current_chat());assert_eq!(ui.state.borrow().current().unread,0);assert_eq!(ui.store.unread_count(owner,peer),0);
+  eprintln!("Native focused history: incoming/send acknowledged, typing restored, room arrival acknowledged after modal close");ui.window.close();
  }
 }
