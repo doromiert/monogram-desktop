@@ -440,3 +440,7 @@ thread_local! {static ROOT:std::cell::RefCell<Option<std::rc::Rc<ui::Ui>>>=const
 #[cfg(test)]
 #[path = "../tests/picker_actions_native.rs"]
 mod picker_actions_native;
+
+#[cfg(test)]
+#[path = "../tests/room_restore_native.rs"]
+mod room_restore_native;

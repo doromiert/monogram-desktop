@@ -309,6 +309,7 @@ impl Rooms {
             }
             return None;
         }
+        bounded(xml).ok()?;
         let user = child(xml, "x", USER).ok().flatten()?;
         if address.resource().is_none()
             || matches!(previous, Membership::Failed(_))
@@ -323,7 +324,7 @@ impl Rooms {
                 .presence(&jid, &address.to_string(), xml, user);
             return None;
         }
-        let item = child(user, "item", USER).ok().flatten();
+        let item = user_item(user).ok()?;
         if item
             .and_then(|value| value.attr("jid"))
             .is_some_and(|real| {
@@ -535,7 +536,7 @@ impl Rooms {
                 )
             }) {
             let user = child(xml, "x", USER)?.ok_or(Error::Invalid)?;
-            let item = child(user, "item", USER)?.ok_or(Error::Invalid)?;
+            let item = user_item(user)?.ok_or(Error::Invalid)?;
             let real = item
                 .attr("jid")
                 .ok_or(Error::Invalid)?
@@ -628,7 +629,7 @@ impl Rooms {
         let own = if archive.is_some() {
             child(xml, "x", USER)
                 .ok()?
-                .and_then(|user| child(user, "item", USER).ok().flatten())
+                .and_then(|user| user_item(user).ok().flatten())
                 .and_then(|item| item.attr("jid"))
                 .and_then(|real| real.parse::<Jid>().ok())
                 .is_some_and(|real| real.to_bare().as_str() == self.owner)

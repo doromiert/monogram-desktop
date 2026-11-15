@@ -28,3 +28,5 @@
 - [x] Remove preview card padding and display artwork directly.
 - [x] Add drag-to-reorder pack-bar items.
 - [x] Track actual picker edits with durable revisions; imports and exports retain versions, latest user change wins across clients.
+
+- [x] Fix multi-session MUC joins that discarded repeated matching presence items; restore the visible room after reconnect and request history after confirmation.

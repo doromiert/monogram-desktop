@@ -1022,6 +1022,10 @@ pub struct Session {
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
 }
 impl Session {
+    #[cfg(test)]
+    pub(crate) fn fixture_channel(tx: channel::UnboundedSender<Command>) -> Self {
+        Self { tx, cancel: None }
+    }
     pub fn start(
         config: Account,
         password: String,

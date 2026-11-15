@@ -1531,18 +1531,29 @@ impl Ui {
         if self.split.is_collapsed() {
             self.split.set_show_sidebar(false)
         }
-        if self.online.get() {
-            let state = self.state.borrow();
-            let chat = state.current();
-            if chat.group && !chat.room_joined {
-                self.command(Command::JoinRoom {
-                    peer: chat.jid.clone(),
-                    nick: None,
-                });
-            } else {
-                drop(state);
-                self.load_history(true)
+        self.resume_current_chat();
+    }
+    fn resume_current_chat(self: &Rc<Self>) {
+        if !self.online.get() {
+            return;
+        }
+        let state = self.state.borrow();
+        let chat = state.current();
+        if chat.group && !chat.room_joined {
+            let request = Command::JoinRoom {
+                peer: chat.jid.clone(),
+                nick: chat.room_nick.clone(),
+            };
+            drop(state);
+            if self.command(request) {
+                self.state.borrow_mut().current_mut().subtitle = "Joining…".into();
+                if self.pages.visible_child_name().as_deref() == Some("chat") {
+                    self.show_chat();
+                }
             }
+        } else {
+            drop(state);
+            self.load_history(true);
         }
     }
     pub fn load_current(self: &Rc<Self>) {
@@ -2413,6 +2424,10 @@ impl Ui {
                         bookmark.name
                     };
                 }
+                drop(state);
+                // Restore the visible room even when its bookmark does not autojoin.
+                // Wait for bookmark loading so imported room passwords/nicknames are available.
+                self.resume_current_chat();
             }
             BackendEvent::RoomPresence(presence) => {
                 let mut state = self.state.borrow_mut();
