@@ -167,8 +167,7 @@ mod message_bubble_limit_imp {
             };
             if orientation == gtk::Orientation::Horizontal {
                 let (minimum, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
-                // The outer clamp owns width; an unbroken URL must not enlarge its minimum.
-                return (minimum.min(320), natural.max(minimum), -1, -1);
+                return (minimum, natural.max(minimum), -1, -1);
             }
             let (minimum, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
             let child_width = if for_size < 0 {
