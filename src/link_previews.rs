@@ -530,7 +530,6 @@ struct Response {
 enum Body {
     Strict,
     HtmlPrefix,
-    MediaPrefix,
 }
 async fn request(address: &str, limit: usize, mode: Body, permit: &Permit) -> Result<Response> {
     let mut url = safe_url(address)?;
@@ -567,7 +566,7 @@ async fn request(address: &str, limit: usize, mode: Body, permit: &Permit) -> Re
         } else {
             "Monogram-LinkPreview/1"
         };
-        let mut req = client
+        let req = client
             .get(url.clone())
             .header(header::USER_AGENT, agent)
             .header(
@@ -575,9 +574,6 @@ async fn request(address: &str, limit: usize, mode: Body, permit: &Permit) -> Re
                 "text/html, application/json, image/jpeg, image/png, image/webp",
             )
             .header(header::ACCEPT_ENCODING, "identity");
-        if matches!(mode, Body::MediaPrefix) {
-            req = req.header(header::RANGE, format!("bytes=0-{}", limit - 1));
-        }
         let mut response = req.send().await.map_err(|_| "HTTPS preview unavailable")?;
         permit.check()?;
         let headers = response.headers();
@@ -608,13 +604,7 @@ async fn request(address: &str, limit: usize, mode: Body, permit: &Permit) -> Re
             )?;
             continue;
         }
-        let partial = matches!(mode, Body::MediaPrefix)
-            && response.status().as_u16() == 206
-            && headers
-                .get(header::CONTENT_RANGE)
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(content_range);
-        if response.status().as_u16() != 200 && !partial {
+        if response.status().as_u16() != 200 {
             return Err("Preview unavailable");
         }
         if headers
@@ -641,9 +631,8 @@ async fn request(address: &str, limit: usize, mode: Body, permit: &Permit) -> Re
                 bytes: vec![],
             });
         }
-        let prefix = matches!(mode, Body::MediaPrefix)
-            || matches!(mode, Body::HtmlPrefix)
-                && (kind.starts_with("text/html") || kind.starts_with("application/xhtml+xml"));
+        let prefix = matches!(mode, Body::HtmlPrefix)
+            && (kind.starts_with("text/html") || kind.starts_with("application/xhtml+xml"));
         if !prefix && response.content_length().is_some_and(|n| n > limit as u64) {
             return Err("Preview too large");
         }
@@ -669,16 +658,6 @@ async fn request(address: &str, limit: usize, mode: Body, permit: &Permit) -> Re
         return Ok(Response { url, mime, bytes });
     }
     Err("Preview redirect limit")
-}
-fn content_range(value: &str) -> bool {
-    value
-        .strip_prefix("bytes 0-")
-        .and_then(|v| v.split_once('/'))
-        .is_some_and(|(end, total)| {
-            !end.is_empty()
-                && end.bytes().all(|b| b.is_ascii_digit())
-                && (total == "*" || !total.is_empty() && total.bytes().all(|b| b.is_ascii_digit()))
-        })
 }
 
 fn attributes(tag: &str) -> HashMap<String, String> {
@@ -1385,13 +1364,12 @@ async fn fetch_inner(address: &str, permit: &Permit, cancel: &gio::Cancellable) 
         media,
     };
     let image = fields.get("og:image").filter(|s| !s.is_empty());
-    if image.is_some() || direct_video.is_some() {
+    if image.is_some() {
         // Optional image failures preserve a useful text card and its original clickable link.
         if let Ok(thumbnail) = thumbnail(
             &original,
             &page_url,
             image,
-            direct_video.as_ref(),
             permit,
             cancel,
         )
@@ -1459,13 +1437,15 @@ async fn thumbnail(
     original: &Url,
     page: &Url,
     image: Option<&String>,
-    video: Option<&Url>,
     permit: &Permit,
     cancel: &gio::Cancellable,
 ) -> Result<Thumbnail> {
     permit.check()?;
-    let is_video = image.is_none();
-    let response = if let Some(image) = image {
+    // Only still images are decoded for a remote preview, and they go through the sandboxed
+    // image loader. A page's `og:video` is never downloaded or handed to a media decoder, since
+    // that would run GStreamer on bytes chosen by a stranger inside the main process.
+    let image = image.ok_or("Preview image unavailable")?;
+    let response = {
         let url = safe_url(
             page.join(image)
                 .map_err(|_| "Invalid preview image")?
@@ -1486,37 +1466,13 @@ async fn thumbnail(
             return Err("Unsupported preview image");
         }
         response
-    } else {
-        let response = request(
-            video.ok_or("Preview image unavailable")?.as_str(),
-            IMAGE_LIMIT,
-            Body::MediaPrefix,
-            permit,
-        )
-        .await?;
-        if !response.mime.to_ascii_lowercase().starts_with("video/") {
-            return Err("Unsupported preview video");
-        }
-        response
     };
     let permit = permit.clone();
     let cancel = cancel.clone();
     let address = original.to_string();
     tokio::task::spawn_blocking(move || {
         permit.check()?;
-        let encoded = if is_video {
-            let temporary = {
-                let _guard = crate::downloads::CACHE_IO.lock().unwrap();
-                permit.check()?;
-                let dir = directory(permit.owner())?;
-                let part = Temporary(dir.join(format!(".{}.mp4", uuid::Uuid::new_v4())));
-                write_private(&part.0, &response.bytes)?;
-                part
-            };
-            crate::image_loader::encode_video_preview(&temporary.0, &cancel, 3000)?
-        } else {
-            crate::image_loader::encode_link_preview(response.bytes, &cancel)?
-        };
+        let encoded = crate::image_loader::encode_link_preview(response.bytes, &cancel)?;
         permit.check()?;
         if cancel.is_cancelled() || encoded.bytes.len() > IMAGE_LIMIT {
             return Err("Preview cancelled");

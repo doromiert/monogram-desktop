@@ -1936,7 +1936,7 @@ let mut ids=Vec::new();let buttons=page.section_buttons.borrow();let mut child=p
                             return Ok((asset,verified,Some(crate::image_loader::EncodedPreview{bytes,width:0,height:0})));
                         }
                         let path=std::path::PathBuf::from(format!("/proc/self/fd/{}",verified.0.as_raw_fd()));
-                        let poster=crate::image_loader::encode_video_preview(&path,&gio::Cancellable::new(),1500)
+                        let poster=crate::image_loader::encode_webm_preview(&path,&gio::Cancellable::new(),1500)
                             .map_err(crate::packs::Error)?;
                         if let Some(root)=&root {crate::preview_cache::store(root,&key,&poster.bytes);}
                         Ok((asset,verified,Some(poster)))
