@@ -1428,6 +1428,7 @@ impl MediaViewer {
         let old = self.frames.replace(frames);
         self.pictures.replace(pictures);
         self.items.replace(items);
+        self.motions.borrow_mut().retain(|id,_|self.items.borrow().iter().any(|item|&item.id==id));
         for frame in old {
             if !self.frames.borrow().iter().any(|f| f == &frame) {
                 self.stack.remove(&frame);
@@ -1483,6 +1484,7 @@ impl MediaViewer {
             }
             let current = index == active;
             if current {viewer.motion_button.set_visible(viewer.motions.borrow().contains_key(&id));}
+            else {viewer.motions.borrow_mut().remove(&id);}
             let edge = if current { 4096 } else { 384 };
             let Some(message) = ui
                 .store
@@ -1596,7 +1598,7 @@ impl MediaViewer {
                         {
                             ui.remember_media_metadata(&viewer.owner,&viewer.peer,&id,&file,&image.mime,image.width,image.height,image.animated);
                             picture.set_paintable(Some(&image.texture));
-                            if image.motion.is_some() && !viewer.motions.borrow().contains_key(&id) {
+                            if current && image.motion.is_some() && !viewer.motions.borrow().contains_key(&id) {
                                 let draw=picture.downgrade();let active=Rc::downgrade(&viewer);let target_id=id.clone();
                                 let controller=crate::motion_photo_ui::MotionPhoto::new(&ui,&file,&path,&picture,&viewer.motion_button,image.texture.clone().upcast(),move |paintable|{if let Some(picture)=draw.upgrade(){picture.set_paintable(Some(paintable));}},move ||active.upgrade().is_some_and(|viewer|!viewer.closing.get()&&viewer.items.borrow()[viewer.index.get()].id==target_id));
                                 viewer.motions.borrow_mut().insert(id.clone(),controller);
