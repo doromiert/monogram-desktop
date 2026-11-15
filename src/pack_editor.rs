@@ -45,18 +45,24 @@ impl Editor {
             spinner.set_spinning(busy);
             spinner.set_visible(busy);
         }
-        if let Some(menu) = self.menu.upgrade() { menu.set_sensitive(!busy); }
+        if let Some(menu) = self.menu.upgrade() {
+            menu.set_sensitive(!busy);
+        }
         if let Some(body) = self.body.upgrade() {
             body.set_sensitive(!busy);
         }
     }
     fn refresh(self: &Rc<Self>) {
-        let serial=self.serial.get().wrapping_add(1);self.serial.set(serial);
+        let serial = self.serial.get().wrapping_add(1);
+        self.serial.set(serial);
         self.feedback("Loading pack…", true);
         let editor = self.clone();
         glib::spawn_future_local(async move {
             let result = editor.library.snapshot().await;
-            if editor.serial.get()!=serial || editor.ui().is_none() || editor.dialog.upgrade().is_none() {
+            if editor.serial.get() != serial
+                || editor.ui().is_none()
+                || editor.dialog.upgrade().is_none()
+            {
                 return;
             }
             match result {
@@ -513,7 +519,7 @@ impl Editor {
             }
         });
         ui.track_dialog(&dialog);
-    dialog.present(Some(&ui.window));
+        dialog.present(Some(&ui.window));
     }
     fn settings(self: &Rc<Self>) {
         let Some(pack) = self.pack.borrow().clone() else {
@@ -596,7 +602,7 @@ impl Editor {
         dialog.set_extra_child(Some(&settings));
         dialog.add_response("close", "Close");
         ui.track_dialog(&dialog);
-    dialog.present(Some(&ui.window));
+        dialog.present(Some(&ui.window));
     }
     fn edit_item(self: &Rc<Self>, id: i64) {
         let Some(item) = self
@@ -687,7 +693,7 @@ impl Editor {
             }
         });
         ui.track_dialog(&dialog);
-    dialog.present(Some(&ui.window));
+        dialog.present(Some(&ui.window));
     }
     fn choose_artwork(self: &Rc<Self>, replace: Option<i64>, images_only: bool) {
         if self.busy.get() {
@@ -920,6 +926,7 @@ pub(crate) fn manage(ui: &Rc<Ui>, page: &Rc<PackLibraryPage>, library: Library, 
     body.append(&rows);
     let scroll = gtk::ScrolledWindow::builder()
         .child(&body)
+        .hscrollbar_policy(gtk::PolicyType::Never)
         .vexpand(true)
         .build();
     view.set_content(Some(&scroll));
@@ -989,6 +996,7 @@ pub(crate) fn manage(ui: &Rc<Ui>, page: &Rc<PackLibraryPage>, library: Library, 
         for pack in snapshot.packs.into_iter().filter(|p| p.kind == kind) {
             let row = adw::ActionRow::builder()
                 .title(&pack.name)
+                .use_markup(false)
                 .subtitle(format!(
                     "{} items{}",
                     pack.items.len(),
@@ -1047,44 +1055,25 @@ pub(crate) fn manage(ui: &Rc<Ui>, page: &Rc<PackLibraryPage>, library: Library, 
             let drag = gtk::DragSource::builder()
                 .actions(gtk::gdk::DragAction::MOVE)
                 .build();
+            drag.set_propagation_phase(gtk::PropagationPhase::Capture);drag.set_button(1);
             drag.connect_prepare(move |_, _, _| {
-                Some(gtk::gdk::ContentProvider::for_value(&id.to_string().to_value()))
+                Some(gtk::gdk::ContentProvider::for_value(
+                    &id.to_string().to_value(),
+                ))
             });
-            drag.connect_drag_begin(|source,_|source.set_icon(Some(&gtk::WidgetPaintable::new(gtk::Widget::NONE)),0,0));
+            drag.connect_drag_begin(|source, _| {
+                source.set_icon(Some(&gtk::WidgetPaintable::new(gtk::Widget::NONE)), 0, 0)
+            });
             row.add_controller(drag);
             let target = gtk::DropTarget::new(String::static_type(), gtk::gdk::DragAction::MOVE);
-            target.set_preload(true);
-            target.connect_enter(|_,_,_|gtk::gdk::DragAction::MOVE);
-            let list = rows.downgrade();
-            let destination = row.downgrade();
-            target.connect_motion(move |target, _, _| {
-                if let (Some(list), Some(to), Some(from)) = (
-                    list.upgrade(),
-                    destination.upgrade(),
-                    target.value().and_then(|v|v.get::<String>().ok()).and_then(|v|v.parse::<i64>().ok()),
-                ) {
-                    let mut child = list.first_child();
-                    while let Some(widget) = child {
-                        child = widget.next_sibling();
-                        if widget.widget_name() == from.to_string() && widget != to {
-                            if let Ok(source) = widget.downcast::<gtk::ListBoxRow>() {
-                                let index = to.index();
-                                list.remove(&source);
-                                list.insert(&source, index);
-                            }
-                            break;
-                        }
-                    }
-                }
-                gtk::gdk::DragAction::MOVE
-            });
-            let drop_save = save.clone();
-            target.connect_drop(move |_, value, _, _| {
-                if value.get::<String>().ok().and_then(|v|v.parse::<i64>().ok()).is_none() {
-                    return false;
-                }
-                drop_save();
-                true
+            let highlight=row.downgrade();
+            target.connect_enter(move|_,_,_|{if let Some(row)=highlight.upgrade(){row.add_css_class("favorite-drop-target");}gtk::gdk::DragAction::MOVE});
+            let highlight=row.downgrade();target.connect_leave(move|_|{if let Some(row)=highlight.upgrade(){row.remove_css_class("favorite-drop-target");}});
+            let list=rows.downgrade();let destination=row.downgrade();let drop_save=save.clone();
+            target.connect_drop(move|_,value,_,_|{
+                let(Some(list),Some(to),Some(from))=(list.upgrade(),destination.upgrade(),value.get::<String>().ok().and_then(|v|v.parse::<i64>().ok()))else{return false;};
+                to.remove_css_class("favorite-drop-target");
+                let mut child=list.first_child();while let Some(widget)=child{child=widget.next_sibling();if widget.widget_name()==from.to_string(){if widget==to{return true;}let Ok(source)=widget.downcast::<gtk::ListBoxRow>()else{return false;};let index=to.index();list.remove(&source);list.insert(&source,index);drop_save();return true;}}false
             });
             row.add_controller(target);
             let keys = gtk::EventControllerKey::new();

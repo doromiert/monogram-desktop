@@ -103,6 +103,9 @@ fn physical(ui: &Ui, widget: &gtk::Widget, args: &[&str]) {
     task.join().unwrap();
 }
 fn drag_between(ui:&Ui,source:&gtk::Widget,target:&gtk::Widget){
+    // AdwDialog scales its contents while opening; screen coordinates need settled bounds.
+    wait(||[source,target].iter().all(|widget|widget.is_mapped()&&widget.width()>0&&widget.compute_bounds(&ui.window).is_some_and(|bounds|bounds.width()+1.>=widget.width()as f32&&bounds.height()+1.>=widget.height()as f32)));
+
     let out=std::process::Command::new("xdotool").args(["search","--onlyvisible","--pid",&std::process::id().to_string(),"--name","Monogram Gesture Fixture"]).output().unwrap();let window=String::from_utf8(out.stdout).unwrap().lines().next().unwrap().to_string();
     let a=source.compute_bounds(&ui.window).unwrap();let b=target.compute_bounds(&ui.window).unwrap();assert!(a.width()>0.&&a.height()>0.&&b.width()>0.&&b.height()>0.);let(tx,ty)=ui.window.surface_transform();let sx=a.x()+a.width()/2.-tx as f32;let sy=a.y()+a.height()/2.-ty as f32;let ex=b.x()+b.width()/2.-tx as f32;let ey=b.y()+b.height()/2.-ty as f32;
     let task=std::thread::spawn(move||{let motion=|x:f32,y:f32|{assert!(std::process::Command::new("xdotool").args(["mousemove","--sync","--window",&window,&(x.round() as i32).to_string(),&(y.round() as i32).to_string()]).status().unwrap().success());};motion(sx,sy);std::process::Command::new("xdotool").args(["mousedown","1"]).status().unwrap();std::thread::sleep(Duration::from_millis(100));for n in 1..=8{motion(sx+(ex-sx)*n as f32/8.,sy+(ey-sy)*n as f32/8.);std::thread::sleep(Duration::from_millis(35));}std::thread::sleep(Duration::from_millis(150));std::process::Command::new("xdotool").args(["mouseup","1"]).status().unwrap();});wait(||task.is_finished());task.join().unwrap();
