@@ -69,4 +69,4 @@
 ## Message clamp width
 
 - [x] Use the full existing chat clamp for message maximum width, fit short bubbles to content, and remove the message-body natural-width character cap.
-- [ ] Verify long text/links, incoming/outgoing alignment, editing and narrow-window sizing; update the desktop package.
+- [x] Verify long text/links, incoming/outgoing alignment, editing and narrow-window sizing; update the desktop package (native0.49s, full packaged smoke115ms feedback/248ms maximum heartbeat gap).
