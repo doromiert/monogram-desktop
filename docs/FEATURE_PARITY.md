@@ -208,3 +208,10 @@ Phone camera/credential UI and user-workload acceptance still require a phone;
 no attached Android device was available during these checks.
 
 Custom emoji additionally emit/read XEP-0514 spans with hash-verified inline XEP-0447/BoB media, preserving the previous authenticated Legacy envelope grammar. Remote-only emoji sources and empty insertion spans remain unsupported; see [inline emoji](INLINE_EMOJI.md). Mobile picker glyphs are padded to the supplied Telegram reference without shrinking grid hit targets.
+
+2026-11-15 upload recovery: desktop and mobile0.2.215 use one fresh validated
+XEP-0363 slot after transport ambiguity or HTTP409, retaining immutable wire
+bytes and selecting the replacement GET URL. PUT acknowledgement keeps its
+normal30s timeout; only downloads retain the short header reconnect policy.
+Local Android-core and desktop TLS regressions pass; real-phone retry of the
+reported MP4 is still needed to confirm its service-specific outcome.

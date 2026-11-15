@@ -118,23 +118,21 @@ inside the protected SFS description. PUT credentials are restricted to the
 XEP's Authorization/Cookie/Expires headers. CR/LF is rejected, redirects are
 refused, and only HTTP 200/201/204 after complete body generation permits sending.
 
-After the body is consumed, a three-second response-header wait may reconnect
-once; the final request retains the normal 30-second read timeout. Transport
-failures may also trigger that one recovery. The repeated PUT
-uses the same slot, headers and byte-identical wire snapshot, following
-[RFC 9110 section 9.2.2](https://www.rfc-editor.org/rfc/rfc9110.html#name-idempotent-methods).
-It never re-encrypts changed plaintext under the original nonce. HTTP rejections
-are not retried. The UI shows confirmation and reconnection states; cancellation
-and the existing owner/generation checks still fence publication. A failed
-recovery returns an error and leaves explicit Retry available. That recovery is
-bounded connection handling, not a correction to the external server.
+After the body is consumed, uploads retain a 30-second acknowledgement timeout.
+A transport failure or HTTP 409 requests one fresh, validated XEP-0363 slot;
+recovery never repeats a possibly committed PUT to the same slot. It reuses
+byte-identical ciphertext, headers from the replacement slot, and the original
+key/nonce. Only the successful slot's GET URL becomes the attachment URL. A
+provider that repeats the occupied PUT URL is refused. Other HTTP rejections
+and cancellation do not retry. The UI keeps reporting upload/reconnection state
+on its worker, and owner/generation checks continue fencing publication.
 
-The local TLS fixture confirms identical encrypted bytes and allowed headers on
-two connections to the same slot, one recovery at most, no replay after HTTP
-403 or cancellation, and rejection of a changed plaintext snapshot. Three cold
-production uploads of synthetic 8 KiB files completed in 3.86–4.10 seconds without
-manual restart; each resulting attachment passed authenticated decryption and
-SHA-256 verification on download. No contact message was sent.
+Local TLS regressions verify a withheld acknowledgement and an explicit 409,
+different recovery PUT URLs, identical payloads, replacement GET selection,
+one recovery at most, and no replay after HTTP 403 or cancellation. Mobile's
+matching encrypted regression also passes using the reported 8,522,645-byte
+MP4 as input. These controlled checks do not establish the original server's
+exact reason for returning 409; an actual phone retry remains necessary.
 
 A pending placeholder is never an immutable wire-message base and cannot be
 submitted by the XMPP or crypto send path. After a successful upload, owner,
