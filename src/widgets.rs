@@ -867,7 +867,7 @@ impl AspectImage {
 mod media_geometry_tests {
     use super::*;
 
-    #[test]
+    #[gtk::test]
     fn inline_media_fits_caps_and_narrow_widths() {
         gtk::init().expect("GTK initializes");
         for (width, borderless, ratio, expected, narrow) in [

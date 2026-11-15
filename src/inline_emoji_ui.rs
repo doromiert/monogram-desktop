@@ -146,7 +146,7 @@ impl ComposerInlineEmoji {
 mod composer_tests {
     use super::*;
 
-    #[test]
+    #[gtk::test]
     fn ordinary_typing_preserves_span_and_inside_edit_prunes_it() {
         gtk::init().unwrap();
         let buffer = gtk::TextBuffer::new(None);

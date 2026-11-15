@@ -426,7 +426,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[gtk::test]
     fn native_links_selection_and_preview_clamp() {
         gtk::init().unwrap();
         let source = "😀 Open example.org/a?q=1 and https://second.example/path.";

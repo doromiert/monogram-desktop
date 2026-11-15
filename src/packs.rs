@@ -2475,7 +2475,7 @@ fn reorder_synced_packs(packs: &mut [Pack], order: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
+    #[gtk::test]
     fn metadata_and_preferences_arrive_before_media_without_changing_local_ids_or_order() {
         let root=std::env::temp_dir().join(format!("pack-metadata-{}",uuid::Uuid::new_v4()));private_dir(&root).unwrap();
         let mut stage=Staging::new(&root).unwrap();let mut original=read_archive(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/device-sync/mobile.xmsp"),&mut stage,&Job::new()).unwrap();original.installed=true;
