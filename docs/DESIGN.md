@@ -93,3 +93,7 @@ outgoing bubbles aligned to the right. Text messages have no extra 40% or
 character-count width cap; editors can use the same available width. Links are
 kept together as words when they fit, with character wrapping only when a URL
 itself exceeds the available column. Media retains its own natural-size limits.
+
+The bubble height is measured at its final content-fitted width. A changed fitted
+width requests remeasurement after allocation, preventing stale wrapped-message
+heights and extra space when the window narrows.

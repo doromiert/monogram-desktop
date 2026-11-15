@@ -139,6 +139,7 @@ mod message_bubble_limit_imp {
         pub child: RefCell<Option<gtk::Widget>>,
         pub own: Cell<bool>,
         pub last_available: Cell<i32>,
+        pub measured_width: Cell<i32>,
     }
 
     #[glib::object_subclass]
@@ -176,6 +177,8 @@ mod message_bubble_limit_imp {
                 let cap=for_size.max(1);
                 if child.has_css_class("message-editing"){cap.max(1)}else{natural.min(cap).max(1)}
             };
+            // Content fitting can choose a narrower width than the initial natural request.
+            let child_width=if for_size==self.last_available.get()&&self.measured_width.get()>0 {self.measured_width.get()}else{child_width};
             let (minimum,natural,base,natural_base)=child.measure(gtk::Orientation::Vertical, child_width);
             // With no width, an aspect-ratio child has no fixed minimum height.
             // GTK otherwise carries its wide natural height into narrow rows.
@@ -203,6 +206,7 @@ mod message_bubble_limit_imp {
             let transform =
                 gtk::gsk::Transform::new().translate(&gtk::graphene::Point::new(x as f32, 0.));
             child.allocate(child_width, height, baseline, Some(transform));
+            let mut fitted_width=child_width;
             if let Some(text) = text.as_ref() {
                 if let Some((body_width, rendered_width)) = text.rendered_body_width() {
                     let outer_inset = (child_width - child.width()).max(0);
@@ -226,6 +230,7 @@ mod message_bubble_limit_imp {
                         let transform = gtk::gsk::Transform::new()
                             .translate(&gtk::graphene::Point::new(x as f32, 0.));
                         child.allocate(tight, height, baseline, Some(transform));
+                        fitted_width=tight;
                     }
                 }
             }
@@ -246,9 +251,14 @@ mod message_bubble_limit_imp {
                         if tight<child_width {
                             let x=if self.own.get(){width.saturating_sub(tight)}else{0};
                             child.allocate(tight,height,baseline,Some(gtk::gsk::Transform::new().translate(&gtk::graphene::Point::new(x as f32,0.))));
+                            fitted_width=tight;
                         }
                     }
                 }
+            }
+            if self.measured_width.replace(fitted_width)!=fitted_width {
+                // GTK ignores resize requests inside size_allocate itself.
+                let weak=self.obj().downgrade();glib::idle_add_local_once(move||{if let Some(widget)=weak.upgrade(){widget.queue_resize();}});
             }
             if let Some(text) = text {
                 let weak = text.downgrade();
@@ -856,8 +866,9 @@ mod media_geometry_tests {
         gtk::style_context_add_provider_for_display(&gdk::Display::default().unwrap(),&css,gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
         let rows=bx(true,8);
         let body=wrap(&"A longer message can use the full readable conversation column. ".repeat(12),"message-text");
-        let long=MessageText::new(&body,&bx(false,0));
-        rows.append(&MessageBubbleLimit::new(&long,false));
+        let status=bx(false,4);status.append(&label("21:10 ✓","caption"));
+        let long=MessageText::new(&body,&status);
+        let long_limit=MessageBubbleLimit::new(&long,false);rows.append(&long_limit);
         let short=MessageText::new(&wrap("meow","message-text"),&bx(false,0));
         rows.append(&MessageBubbleLimit::new(&short,true));
         let editing=bx(true,0);editing.add_css_class("message-editing");editing.append(&gtk::TextView::new());
@@ -880,6 +891,7 @@ mod media_geometry_tests {
         window.set_default_size(400,700);settle();
         assert!(long.width()<=rows.width());assert_eq!(editing.width(),rows.width());
         assert!(body.layout().pixel_size().0<=body.width());
+        assert_eq!(long_limit.height(),long_limit.measure(gtk::Orientation::Vertical,long_limit.width()).1,"height uses the final fitted width");
         assert!(link.layout().pixel_size().0<=link.width(),"oversized URL wraps within a narrow column");
         let prefix="A short introduction before this link: ";let source=format!("{prefix}https://github.com/doromiert/monogram-desktop/pull/2");
         let preferred=wrap(&source,"message-text");let links=crate::link_previews::clickable_urls(&source,None);linkify_message_label(&preferred,&source,&links);

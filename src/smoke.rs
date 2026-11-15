@@ -34,7 +34,7 @@ fn layout(ui: &Ui) {
         .measure(gtk::Orientation::Vertical, ui.timeline.width());
     assert!(
         ui.timeline.height() <= natural + 2,
-        "timeline absorbed spare viewport height"
+        "timeline absorbed spare viewport height: allocated={} natural={} width={}",ui.timeline.height(),natural,ui.timeline.width()
     );
 }
 
