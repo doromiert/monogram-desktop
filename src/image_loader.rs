@@ -661,6 +661,20 @@ pub(crate) fn play_input<W: IsA<gtk::Widget> + Clone + 'static>(
     sticker: bool,
     open: impl Fn() -> Result<crate::downloads::VerifiedFile, &'static str> + Send + Sync + 'static,
 ) {
+    play_input_with(picture, edge, visible, move |w, t, _| draw(w, t), |_, _| {}, sticker, open);
+}
+
+/// `draw` also learns whether the image animates; `failed` runs once if it can never be drawn
+/// (decode or open error), so the caller can replace its loading indicator.
+pub(crate) fn play_input_with<W: IsA<gtk::Widget> + Clone + 'static>(
+    picture: &W,
+    edge: u32,
+    visible: impl Fn(&W) -> bool + 'static,
+    draw: impl Fn(&W, gdk::Texture, bool) + 'static,
+    failed: impl Fn(&W, &'static str) + 'static,
+    sticker: bool,
+    open: impl Fn() -> Result<crate::downloads::VerifiedFile, &'static str> + Send + Sync + 'static,
+) {
     let open = std::sync::Arc::new(open);
     let picture = picture.downgrade();
     let visible = std::rc::Rc::new(visible);
@@ -686,9 +700,10 @@ pub(crate) fn play_input<W: IsA<gtk::Widget> + Clone + 'static>(
         }
         let receive = state.pending.borrow_mut().take();
         if let Some(receive) = receive {
-            match receive.try_recv() {
+            let failure = receive.try_recv();
+            match failure {
                 Ok(Ok(frame)) => {
-                    draw(&picture, frame.texture);
+                    draw(&picture, frame.texture, frame.delay.is_some());
                     let Some(delay) = frame.delay else {
                         let _ = drop_animation_context(&state);
                         return glib::ControlFlow::Break;
@@ -705,6 +720,13 @@ pub(crate) fn play_input<W: IsA<gtk::Widget> + Clone + 'static>(
                         .set(std::time::Instant::now() + Duration::from_millis(100));
                 }
                 Ok(Err(_)) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // The draw callback never runs on failure, so say why a preview stayed blank.
+                    let reason = match &failure {
+                        Ok(Err(reason)) => *reason,
+                        _ => "The preview worker stopped",
+                    };
+                    eprintln!("Monogram preview failed: {reason}");
+                    failed(&picture, reason);
                     let _ = drop_animation_context(&state);
                     return glib::ControlFlow::Break;
                 }

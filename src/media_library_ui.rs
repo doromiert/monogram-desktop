@@ -152,8 +152,22 @@ fn start_lottie(
         })
         .await;
         drop(permit);
-        let (Some(picture), Ok(Ok((decoder, frame)))) = (picture_weak.upgrade(), result) else {
+        let Some(picture) = picture_weak.upgrade() else {
             return;
+        };
+        let (decoder, frame) = match result {
+            Ok(Ok(started)) => started,
+            failure => {
+                if serial.get() == expected && !cancel.is_cancelled() {
+                    let reason = match failure {
+                        Ok(Err(reason)) => reason,
+                        _ => "The preview worker stopped",
+                    };
+                    eprintln!("Monogram preview failed: {reason}");
+                    show_preview_error(&picture, reason);
+                }
+                return;
+            }
         };
         if serial.get() != expected || cancel.is_cancelled() {
             return;
@@ -175,6 +189,14 @@ fn start_lottie(
             frame.delay,
         );
     });
+}
+
+/// Replaces a tile's loading spinner with a stock GNOME icon when its artwork cannot be shown.
+fn show_preview_error(picture: &gtk::Picture, reason: &str) {
+    if let Some(button) = picture.ancestor(gtk::Button::static_type()).and_downcast::<gtk::Button>() {
+        button.set_icon_name("image-missing-symbolic");
+        button.set_tooltip_text(Some(reason));
+    }
 }
 
 type LottieSource=Arc<dyn Fn()->Result<crate::downloads::VerifiedFile,&'static str>+Send+Sync>;
@@ -1906,9 +1928,17 @@ let mut ids=Vec::new();let buttons=page.section_buttons.borrow();let mut child=p
                 let result = match library.verified_asset(cell.item_id, Job::new()).await {
                     Ok((asset,verified)) if asset.item.mime=="video/webm" => gio::spawn_blocking(move||{
                         use std::os::fd::AsRawFd;
+                        // Extracting a poster decodes video, so keep it in the preview cache.
+                        let root=crate::preview_cache::default_root();
+                        let key=crate::preview_cache::key("poster",1500,&asset.item.file);
+                        let modified=std::fs::metadata(&asset.path).and_then(|m|m.modified()).ok();
+                        if let Some(bytes)=root.as_deref().and_then(|root|crate::preview_cache::load(root,&key,modified)) {
+                            return Ok((asset,verified,Some(crate::image_loader::EncodedPreview{bytes,width:0,height:0})));
+                        }
                         let path=std::path::PathBuf::from(format!("/proc/self/fd/{}",verified.0.as_raw_fd()));
                         let poster=crate::image_loader::encode_video_preview(&path,&gio::Cancellable::new(),1500)
                             .map_err(crate::packs::Error)?;
+                        if let Some(root)=&root {crate::preview_cache::store(root,&key,&poster.bytes);}
                         Ok((asset,verified,Some(poster)))
                     }).await.unwrap_or(Err(crate::packs::Error("Video preview failed"))),
                     Ok((asset,verified))=>Ok((asset,verified,None)),
@@ -1984,29 +2014,47 @@ let mut ids=Vec::new();let buttons=page.section_buttons.borrow();let mut child=p
             install_lottie_reopenable(&picture,&spinner,&self.scroll,move||library.reopen_preview(&asset));
         } else if asset.item.mime.starts_with("image/") {
             drop(verified);let library=self.library.clone();let preview_asset=asset.clone();
-            let spinner = spinner.downgrade();
-            let scroll = self.scroll.downgrade();
-            crate::image_loader::play_input(
-                &picture,
-                192,
-                move |picture| {
-                    scroll.upgrade().is_some_and(|scroll| {
-                        picture.compute_bounds(&scroll).is_some_and(|bounds| {
-                            bounds.y() + bounds.height() >= 0.
-                                && bounds.y() <= scroll.height() as f32
+            // Still frames are cached as small PNGs, so reopening the picker does not decode
+            // every sticker again. Animated artwork is never cached and keeps playing.
+            let cache_root=crate::preview_cache::default_root();
+            let cache_key=crate::preview_cache::key("still",192,&asset.item.file);
+            let modified=std::fs::metadata(&asset.path).and_then(|m|m.modified()).ok();
+            let cached=cache_root.as_deref()
+                .and_then(|root|crate::preview_cache::load(root,&cache_key,modified))
+                .and_then(|bytes|gtk::gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)).ok());
+            if let Some(texture)=cached {
+                picture.set_paintable(Some(&texture));
+                spinner.stop();
+                spinner.set_visible(false);
+            } else {
+                let spinner = spinner.downgrade();
+                let scroll = self.scroll.downgrade();
+                crate::image_loader::play_input_with(
+                    &picture,
+                    192,
+                    move |picture| {
+                        scroll.upgrade().is_some_and(|scroll| {
+                            picture.compute_bounds(&scroll).is_some_and(|bounds| {
+                                bounds.y() + bounds.height() >= 0.
+                                    && bounds.y() <= scroll.height() as f32
+                            })
                         })
-                    })
-                },
-                move |picture, texture| {
-                    picture.set_paintable(Some(&texture));
-                    if let Some(spinner) = spinner.upgrade() {
-                        spinner.stop();
-                        spinner.set_visible(false);
-                    }
-                },
-                true,
-                move||library.reopen_preview(&preview_asset),
-            );
+                    },
+                    move |picture, texture, animated| {
+                        picture.set_paintable(Some(&texture));
+                        if let Some(spinner) = spinner.upgrade() {
+                            spinner.stop();
+                            spinner.set_visible(false);
+                        }
+                        if !animated && let Some(root) = &cache_root {
+                            crate::preview_cache::store(root, &cache_key, &texture.save_to_png_bytes());
+                        }
+                    },
+                    show_preview_error,
+                    true,
+                    move||library.reopen_preview(&preview_asset),
+                );
+            }
         } else {
             spinner.stop();
             spinner.set_visible(false);
