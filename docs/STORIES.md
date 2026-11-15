@@ -48,3 +48,9 @@ The desktop viewer closes on a primary click anywhere outside the story card
 (background margins), or Escape, including while the reply entry has focus.
 Previous/Next and other controls retain their normal actions. Window typing
 shortcuts stay suspended while a story is open, preserving the chat draft.
+
+Entry and exit combine a compositor-only card scale/vertical translation with the
+existing fade (200 ms entry, 180 ms exit). Layout stays fixed during the animation;
+libadwaita honors the system animation setting. Dismissal during entry reverses
+from the current progress. Native coverage samples rendered intermediate frames
+on entry and exit, and checks immediate settling with animations disabled.
