@@ -223,3 +223,11 @@ Original-quality mobile video selection now preserves the source dimensions, mat
 MUC send preparation accepts promotions/demotions among member/admin/owner between live presence and a fresh complete affiliation list. It still requires the joined send role, private nonanonymous room discovery, all three authenticated lists, own membership, every visible occupant's identity in those lists, and matching membership revision. The reported room now installs its complete 18-member recipient set in 1.33 seconds, without sending a chat message. Incomplete, unidentified, revoked and stale recipient contexts remain blocked; there is no plaintext fallback.
 
 Automatic room fingerprint trust now defaults on in desktop and mobile0.2.217, with an independent account-scoped upgrade for existing rooms. Subsequent opt-outs and blocked fingerprints remain authoritative. Closing Preferences, Shortcuts or another tracked modal resumes focused-chat read tracking; closed dialogs cannot leave a visible group's unread badge stuck.
+
+2026-11-15 desktop follow-up: deletion preserves bottom-following and the first
+surviving viewport anchor. Joined rooms allow automatic visible media downloads,
+reevaluated as membership changes, with existing10MiB/type/integrity/cancellation
+checks. Sticker replies now use the same verified image thumbnail path as mobile
+and sticker previews use a readable label rather than a generatedWebP filename.
+Native deletion anchor tests and download-policy/reply tests cover these paths.
+The unused DeveloperTools preview entry was removed from the hamburger menu.

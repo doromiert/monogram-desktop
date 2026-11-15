@@ -220,14 +220,14 @@ impl Message {
     pub fn preview(&self) -> String {
         if let Some(upload) = &self.upload {
             return if self.text.is_empty() {
-                format!("📎 {}", upload.name)
+                if upload.sticker { "Sticker".into() } else { format!("📎 {}", upload.name) }
             } else {
                 crate::formatting::preview(self)
             };
         }
         if let Some(file) = &self.attachment {
             return if self.text.is_empty() {
-                format!("📎 {}", file.name)
+                if file.sticker { "Sticker".into() } else { format!("📎 {}", file.name) }
             } else {
                 crate::formatting::preview(self)
             };

@@ -6,6 +6,9 @@ use std::{
     rc::Rc,
     time::{Duration, Instant},
 };
+pub(crate) fn automatic_media_allowed(smoke: bool, own: bool, encrypted: bool, chat: &crate::model::Chat) -> bool {
+    !smoke && (own || encrypted || chat.contact || chat.group && chat.room_joined)
+}
 impl Ui {
     pub fn attachment_content(self: &Rc<Self>, message: &Message) -> gtk::Box {
         let file = message.attachment.as_ref().unwrap().clone();
@@ -98,8 +101,7 @@ impl Ui {
         let p = progress.downgrade();
         let l = info.downgrade();
         let visible = controls.downgrade();
-        let allow_auto = !self.smoke
-            && (message.own || message.encrypted || self.state.borrow().current().contact);
+        let auto_flags = (message.own, message.encrypted);
         glib::timeout_add_local(Duration::from_millis(150), move || {
             let (Some(ui), Some(action), Some(progress), Some(info)) =
                 (weak.upgrade(), a.upgrade(), p.upgrade(), l.upgrade())
@@ -112,6 +114,7 @@ impl Ui {
             let Some(controls) = visible.upgrade().filter(|controls| controls.is_visible()) else {
                 return glib::ControlFlow::Break;
             };
+            let allow_auto = automatic_media_allowed(ui.smoke, auto_flags.0, auto_flags.1, ui.state.borrow().current());
             let status = ui.downloads.borrow().status(&owner, &file);
             if status.is_none()
                 && allow_auto
@@ -269,9 +272,7 @@ impl Ui {
         {
             placeholder.set_ratio(image.intrinsic_aspect_ratio());
         }
-        let allow_auto = !self.smoke
-            && !file.manual
-            && (message.own || message.encrypted || self.state.borrow().current().contact);
+        let auto_flags = (message.own, message.encrypted);
         let cancelled = Rc::new(Cell::new(false));
         let cancelled_action = cancelled.clone();
         let weak = Rc::downgrade(self);
@@ -301,6 +302,7 @@ impl Ui {
                 }
                 return;
             }
+            let allow_auto = !source.manual && automatic_media_allowed(ui.smoke, auto_flags.0, auto_flags.1, ui.state.borrow().current());
             let state = ui.downloads.borrow().status(&account, &source);
             if matches!(state, Some(Status::Running { .. } | Status::Ready(_)))
                 || state.is_none() && allow_auto && !cancelled_action.get()
@@ -349,6 +351,7 @@ impl Ui {
             } else {
                 ui.downloads.borrow().status(&owner, &file)
             };
+            let allow_auto = !file.manual && automatic_media_allowed(ui.smoke, auto_flags.0, auto_flags.1, ui.state.borrow().current());
             if state.is_none() && allow_auto {
                 ui.downloads
                     .borrow_mut()
@@ -558,5 +561,27 @@ impl Ui {
                 });
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod automatic_media_tests {
+    use super::*;
+    #[test]
+    fn joined_room_media_follows_membership_without_rebuilding_rows() {
+        let mut chat=crate::model::Chat { group:true, ..Default::default() };
+        assert!(!automatic_media_allowed(false,false,false,&chat));
+        chat.room_joined=true;
+        assert!(automatic_media_allowed(false,false,false,&chat));
+        assert!(!automatic_media_allowed(true,false,false,&chat));
+        chat.room_joined=false;
+        assert!(!automatic_media_allowed(false,false,false,&chat));
+        chat.group=false;
+        assert!(!automatic_media_allowed(false,false,false,&chat));
+        chat.contact=true;
+        assert!(automatic_media_allowed(false,false,false,&chat));
+        chat.contact=false;
+        assert!(automatic_media_allowed(false,true,false,&chat));
+        assert!(automatic_media_allowed(false,false,true,&chat));
     }
 }

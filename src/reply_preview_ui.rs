@@ -90,7 +90,7 @@ fn image(message: &Message) -> Option<Attachment> {
     message
         .attachment
         .as_ref()
-        .filter(|file| file.image_candidate() && !file.sticker)
+        .filter(|file| file.image_candidate())
         .cloned()
 }
 
@@ -157,8 +157,7 @@ pub fn attach(ui: &Rc<Ui>, reply: &Message, row: &gtk::Box) {
             return;
         }
         slot.set_visible(true);
-        let allow_auto =
-            !ui.smoke && (source.own || source.encrypted || ui.state.borrow().current().contact);
+        let auto_flags = (source.own, source.encrypted);
         let ui = Rc::downgrade(&ui);
         let slot = slot.downgrade();
         let picture = picture.downgrade();
@@ -189,6 +188,7 @@ pub fn attach(ui: &Rc<Ui>, reply: &Message, row: &gtk::Box) {
                 slot.set_visible(false);
                 return glib::ControlFlow::Break;
             }
+            let allow_auto = crate::attachment_ui::automatic_media_allowed(ui.smoke, auto_flags.0, auto_flags.1, state.current());
             drop(state);
             if picture.paintable().is_some() || !ui.in_chat_prefetch(&slot) {
                 return glib::ControlFlow::Continue;
@@ -242,7 +242,8 @@ mod tests {
         assert!(image(&message).is_none());
         message.formatting = None;
         message.attachment.as_mut().unwrap().sticker = true;
-        assert!(image(&message).is_none());
+        assert!(image(&message).is_some());
+        assert_eq!(message.preview(), "Sticker");
     }
     fn find(widget: &gtk::Widget) -> Option<AspectImage> {
         if widget.has_css_class("reply-image-preview") {

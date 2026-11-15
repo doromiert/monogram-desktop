@@ -715,9 +715,6 @@ impl Ui {
         self.action("profile", |s| {
             s.preview_form("Your Profile", &["Display name", "About", "Website"])
         });
-        self.action("developer", |s| {
-            s.preview_form("Developer Tools", &["Service address", "Command"])
-        });
         self.action("call", |s| s.call_preview());
         self.action("attach-file", |s| s.choose_files(false));
         self.action("attach-media", |s| s.choose_files(true));
@@ -784,7 +781,6 @@ impl Ui {
             ("Preferences", "preferences"),
             ("Keyboard Shortcuts", "shortcuts"),
             ("About Monogram", "about"),
-            ("Developer Tools", "developer"),
         ] {
             section.append(Some(title), Some(&format!("win.{action}")))
         }

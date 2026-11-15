@@ -30,3 +30,21 @@
 - [x] Track actual picker edits with durable revisions; imports and exports retain versions, latest user change wins across clients.
 
 - [x] Fix multi-session MUC joins that discarded repeated matching presence items; restore the visible room after reconnect and request history after confirmation.
+
+## Reported regressions — active
+
+- [ ] Restore encrypted MUC sending and make room fingerprint auto-trust on by default on both clients.
+- [x] Preserve viewport/scroll anchoring when deleting messages, including the bottom and a deleted anchor.
+- [x] Automatically download visible media in joined rooms; preserve cancellation, file limits and verification.
+- [x] Remove Developer Tools from the hamburger menu.
+- [ ] Implement live Stories using mobile protocol/source rather than local-only previews.
+- [ ] Show the Monero panel tab after configuring a wallet.
+- [ ] Fix actual pointer dragging to reorder packs on the category bar.
+- [ ] Make Manage Packs show/reorder all packs and add an editor action to each pack heading.
+- [ ] Fix pack editor header color, disabled actions, sticker dragging and duplicate hover highlight.
+- [ ] Check native controls/accessibility and sub400ms feedback on the affected flows.
+
+- [x] Show sticker/custom-emoji reply thumbnails and readable labels in replies and chat sidebar instead of WebP filenames.
+
+- [ ] Add local contact nickname/avatar/notes and suggest-avatar controls in Conversation Info; sync contact overrides with mobile.
+- [ ] Mark focused bottom-of-chat MUC messages read, including after dialogs close.
