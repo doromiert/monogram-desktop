@@ -1870,7 +1870,14 @@ let mut ids=Vec::new();let buttons=page.section_buttons.borrow();let mut child=p
             let (Some(page),Some(image),Ok((_,verified)))=(weak.upgrade(),image.upgrade(),result)else{return;};
             if page.hovered_video.get()!=Some(id)||page.preview_epoch.get()!=epoch||!image.is_mapped(){return;}
             if let Some(player)=crate::video_ui::Playback::new(verified){
-                image.set_paintable(Some(&player.media));player.media.play();page.video_preview.replace(Some((image.downgrade(),poster,player)));
+                // Keep the poster on screen until the stream has a decoded frame; swapping
+                // paintables immediately shows an empty picture while the video loads.
+                let swapped=Rc::new(Cell::new(false));let target=image.downgrade();
+                player.media.connect_invalidate_contents(move|media|{
+                    if swapped.get()||media.intrinsic_width()<=0{return;}
+                    if let Some(image)=target.upgrade(){swapped.set(true);image.set_paintable(Some(media));}
+                });
+                player.media.play();page.video_preview.replace(Some((image.downgrade(),poster,player)));
             }
         });
     }
