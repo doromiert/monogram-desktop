@@ -134,6 +134,7 @@ impl FormattedLabel {
             }
         });
 
+        if !this.rich.links.is_empty(){let weak=Rc::downgrade(&this);watch_url_width(label,move |_|{if let Some(state)=weak.upgrade(){state.render();}});}
         this.render();
         this
     }
@@ -250,16 +251,18 @@ impl FormattedLabel {
         let Some(label) = self.label.upgrade() else {
             return;
         };
-        let attrs = label.attributes();
+        let attrs = text_attributes(&label);
         let revealed = self.revealed.borrow();
-        label.set_markup(&markup(&self.rich, &revealed, &self.suffix.borrow()));
+        label.set_markup(&markup_for_label(&self.rich, &revealed, &self.suffix.borrow(),Some(&label)));
         label.set_attributes(attrs.as_ref());
         label.update_property(&[gtk::accessible::Property::Label(
             &self.copy_text(0, self.rich.text.chars().count()),
         )]);
     }
 }
-fn markup(rich: &RichText, revealed: &BTreeSet<usize>, suffix: &str) -> String {
+#[cfg(test)]
+fn markup(rich: &RichText, revealed: &BTreeSet<usize>, suffix: &str) -> String {markup_for_label(rich,revealed,suffix,None)}
+fn markup_for_label(rich:&RichText,revealed:&BTreeSet<usize>,suffix:&str,label:Option<&gtk::Label>)->String {
     let offsets: Vec<_> = rich
         .text
         .char_indices()
@@ -304,7 +307,7 @@ fn markup(rich: &RichText, revealed: &BTreeSet<usize>, suffix: &str) -> String {
             out.push_str(&format!("<a href=\"monogram-spoiler:{index}\"><span foreground=\"#77777700\" background=\"#777777\" underline=\"none\">"));
         } else if let Some(link) = link {
             out.push_str(&format!(
-                "<a href=\"{}\"><span segment=\"word\">",
+                "<a href=\"{}\">",
                 glib::markup_escape_text(&link.uri)
             ));
         }
@@ -328,16 +331,15 @@ fn markup(rich: &RichText, revealed: &BTreeSet<usize>, suffix: &str) -> String {
             out.push_str(open);
             closes.push(close);
         }
-        out.push_str(&glib::markup_escape_text(
-            &rich.text[offsets[a]..offsets[b]],
-        ));
+        let value=&rich.text[offsets[a]..offsets[b]];
+        if hidden.is_none()&&link.is_some(){out.push_str(&url_text_markup(value,label));}else{out.push_str(&glib::markup_escape_text(value));}
         for close in closes.into_iter().rev() {
             out.push_str(close);
         }
         if hidden.is_some() {
             out.push_str("</span></a>");
         } else if link.is_some() {
-            out.push_str("</span></a>");
+            out.push_str("</a>");
         }
     }
     out.push_str(&glib::markup_escape_text(suffix));

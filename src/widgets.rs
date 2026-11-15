@@ -4,6 +4,9 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
 };
+pub(crate) const TIMELINE_MAX_WIDTH:i32=1080;
+pub(crate) const MESSAGE_MAX_WIDTH:i32=TIMELINE_MAX_WIDTH*2/5;
+
 pub fn asset(name: &str) -> PathBuf {
     std::env::var_os("MONOGRAM_ASSET_DIR")
         .map(PathBuf::from)
@@ -174,7 +177,7 @@ mod message_bubble_limit_imp {
             let child_width = if for_size < 0 {
                 natural.max(minimum).max(1)
             } else {
-                let cap=for_size.max(1);
+                let cap=for_size.min(MESSAGE_MAX_WIDTH).max(1);
                 if child.has_css_class("message-editing"){cap.max(1)}else{natural.min(cap).max(1)}
             };
             // Content fitting can choose a narrower width than the initial natural request.
@@ -195,7 +198,7 @@ mod message_bubble_limit_imp {
                     text.set_compact(false);
                 }
             }
-            let cap = width.max(1);
+            let cap = width.min(MESSAGE_MAX_WIDTH).max(1);
             let (_, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
             let child_width = if child.has_css_class("message-editing"){cap.max(1)}else{natural.min(cap).max(1)};
             let x = if self.own.get() {
@@ -235,7 +238,7 @@ mod message_bubble_limit_imp {
                 }
             }
             if text.is_none() {
-                if let Some(body)=preview_body(&child) {
+                if let Some(body)=preview_body(&child).filter(|body|!(body.layout().line_count()>1&&body.label().contains("<a href="))) {
                     if let Some(bubble)=body.parent().and_downcast::<gtk::Box>().filter(|b|b.has_css_class("message-bubble")) {
                         let mut needed=body.layout().pixel_size().0+1;
                         let mut sibling=bubble.first_child();
@@ -322,7 +325,35 @@ mod message_text_imp {
 }
 glib::wrapper! {pub struct MessageText(ObjectSubclass<message_text_imp::MessageText>) @extends gtk::Box,gtk::Widget,@implements gtk::Accessible,gtk::Buildable,gtk::ConstraintTarget,gtk::Orientable;}
 
-fn link_markup(source: &str, suffix: &str, links: &[crate::link_previews::ClickableUrl]) -> String {
+pub(crate) fn text_attributes(label:&gtk::Label)->Option<gtk::pango::AttrList>{
+    let attrs=label.attributes().and_then(|attrs|attrs.copy());
+    if let Some(attrs)=attrs.as_ref(){let _=attrs.filter(|attr|matches!(attr.type_(),gtk::pango::AttrType::Word|gtk::pango::AttrType::AllowBreaks));}
+    attrs
+}
+
+pub(crate) fn watch_url_width(label:&gtk::Label,update:impl Fn(&gtk::Label)+'static) {
+    let previous=Cell::new((-1,0));
+    label.add_tick_callback(move |label,_|{
+        let state=(label.width(),label.pango_context().serial());
+        if state.0>0&&previous.replace(state)!=state {update(label);}
+        glib::ControlFlow::Continue
+    });
+}
+
+pub(crate) fn url_text_markup(value:&str,label:Option<&gtk::Label>)->String {
+    let split=label.is_some_and(|label|label.width()>0&&label.create_pango_layout(Some(value)).pixel_size().0>label.width());
+    if !split{return format!("<span segment=\"word\">{}</span>",glib::markup_escape_text(value));}
+    let mut markup=String::new();let mut start=0;
+    let run=|text:&str|format!("<span segment=\"word\">{}</span>",glib::markup_escape_text(text));
+    for (at,ch) in value.char_indices().filter(|(_,ch)|matches!(ch,'/'|'&'|'?')) {
+        if start<at {markup.push_str(&run(&value[start..at]));}
+        markup.push_str(&glib::markup_escape_text(&ch.to_string()));start=at+ch.len_utf8();
+    }
+    if start<value.len(){markup.push_str(&run(&value[start..]));}
+    markup
+}
+
+fn link_markup(source: &str, suffix: &str, links: &[crate::link_previews::ClickableUrl],label:&gtk::Label) -> String {
     let mut markup = String::new();
     let mut cursor = 0;
     for link in links {
@@ -336,9 +367,9 @@ fn link_markup(source: &str, suffix: &str, links: &[crate::link_previews::Clicka
         markup.push_str(&glib::markup_escape_text(&source[cursor..link.range.start]));
         markup.push_str("<a href=\"");
         markup.push_str(&glib::markup_escape_text(&link.uri));
-        markup.push_str("\"><span segment=\"word\">");
-        markup.push_str(&glib::markup_escape_text(&source[link.range.clone()]));
-        markup.push_str("</span></a>");
+        markup.push_str("\">");
+        markup.push_str(&url_text_markup(&source[link.range.clone()],Some(label)));
+        markup.push_str("</a>");
         cursor = link.range.end;
     }
     markup.push_str(&glib::markup_escape_text(&source[cursor..]));
@@ -379,16 +410,19 @@ pub fn linkify_message_label(
     if links.is_empty() {
         return;
     }
-    label.set_markup(&link_markup(source, "", links));
+    label.set_markup(&link_markup(source, "", links,label));
     label.set_selectable(true);
     label.update_property(&[gtk::accessible::Property::Label(source)]);
     activate_links(label);
+    let source=source.to_owned();let links=links.to_vec();
+    watch_url_width(label,move|label|label.set_markup(&link_markup(&source,"",&links,label)));
 }
 
 impl MessageText {
     fn rendered_body_width(&self) -> Option<(i32, i32)> {
         let body = self.imp().body.borrow();
         let body = body.as_ref()?;
+        if body.layout().line_count()>1&&body.label().contains("<a href="){return None;}
         (body.width() > 0).then(|| (body.width(), body.layout().pixel_size().0 + 1))
     }
     pub fn new(body: &gtk::Label, status: &gtk::Box) -> Self {
@@ -445,6 +479,7 @@ impl MessageText {
         widget.imp().status.replace(Some(status.clone()));
         if !widget.imp().links.borrow().is_empty() {
             activate_links(body);
+            let weak=widget.downgrade();watch_url_width(body,move |_|{if let Some(widget)=weak.upgrade(){widget.render_body();}});
         }
         widget.render_body();
         widget.refresh_shape();
@@ -482,12 +517,12 @@ impl MessageText {
         if let Some(body) = self.imp().body.borrow().as_ref() {
             // Inline emoji shapes can arrive asynchronously; retain them when
             // compact/status reflow rebuilds the native anchor markup.
-            let attributes = body.attributes();
+            let attributes = text_attributes(body);
             let links = self.imp().links.borrow();
             if links.is_empty() {
                 body.set_label(&format!("{source}{suffix}"));
             } else {
-                body.set_markup(&link_markup(&source, &suffix, &links));
+                body.set_markup(&link_markup(&source, &suffix, &links,body));
             }
             body.set_attributes(attributes.as_ref());
         }
@@ -512,7 +547,7 @@ impl MessageText {
         shape.set_start_index(self.imp().source.borrow().len() as u32 + 1);
         shape.set_end_index(u32::MAX);
         // Preserve the native anchor attributes installed by set_markup.
-        let attrs = if self.imp().rich.borrow().is_some(){body.attributes()}else{body.layout().attributes()}.and_then(|a|a.copy()).unwrap_or_default();
+        let attrs = text_attributes(body).unwrap_or_default();
         attrs.change(shape);
         body.set_attributes(Some(&attrs));
     }
@@ -860,7 +895,7 @@ mod media_geometry_tests {
 
     #[test]
     #[ignore="requires private native display"]
-    fn message_bubbles_use_full_clamp_and_short_messages_stay_tight() {
+    fn message_bubbles_use_clamp_max_fraction_and_urls_wrap_at_separators() {
         adw::init().unwrap();
         let css=gtk::CssProvider::new();css.load_from_path(asset("style.css"));
         gtk::style_context_add_provider_for_display(&gdk::Display::default().unwrap(),&css,gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -873,23 +908,27 @@ mod media_geometry_tests {
         rows.append(&MessageBubbleLimit::new(&short,true));
         let editing=bx(true,0);editing.add_css_class("message-editing");editing.append(&gtk::TextView::new());
         rows.append(&MessageBubbleLimit::new(&editing,true));
-        let link=wrap("https://github.com/doromiert/monogram-desktop/pull/2?expanded-message-width=full-conversation-clamp","message-text");
+        let link=wrap("https://github.com/doromiert/monogram-desktop/pull/2?expanded-message-width=full-conversation-clamp&download=original&more=query","message-text");
+        let link_source=link.text().to_string();
         let mut rich=crate::markdown::RichText::plain(&link.text());rich.links.push(crate::markdown::Link{start:0,end:link.text().len(),uri:link.text().into()});
         let link_text=MessageText::with_rich(&link,&bx(false,0),rich);
         rows.append(&MessageBubbleLimit::new(&link_text,false));
+        let raw=wrap(&link_source,"message-text");let raw_text=MessageText::with_links(&raw,&bx(false,0),crate::link_previews::clickable_urls(&raw.text(),None));rows.append(&MessageBubbleLimit::new(&raw_text,false));
         let clamp=adw::Clamp::builder().child(&rows).maximum_size(1080).tightening_threshold(840).build();
         let window=gtk::Window::builder().default_width(1000).default_height(700).child(&clamp).build();window.present();
         let context=glib::MainContext::default();
         let settle=||{let until=std::time::Instant::now()+std::time::Duration::from_millis(160);while std::time::Instant::now()<until{context.iteration(false);std::thread::sleep(std::time::Duration::from_millis(1));}};
         settle();
-        assert!(long.width()>rows.width()*9/10,"long message {}px should use the {}px clamp",long.width(),rows.width());
-        assert_eq!(editing.width(),rows.width());
+        assert!(long.width()>MESSAGE_MAX_WIDTH*9/10&&long.width()<=MESSAGE_MAX_WIDTH);
+        assert_eq!(editing.width(),rows.width().min(MESSAGE_MAX_WIDTH));
         assert!(short.width()<160,"short bubbles still fit content");
         let bounds=short.compute_bounds(&rows).unwrap();assert!((bounds.x()+bounds.width()-rows.width() as f32).abs()<2.,"outgoing bubble keeps right alignment");
-        assert!(link.width()>rows.width()*2/5,"the reported URL no longer squeezes into 40%");
+        assert!(link.width()<=MESSAGE_MAX_WIDTH);assert!(link.layout().line_count()>1);
         assert!(link.layout().pixel_size().0<=link.width(),"URL fits the expanded bubble");
-        window.set_default_size(400,700);settle();
-        assert!(long.width()<=rows.width());assert_eq!(editing.width(),rows.width());
+        for body in [&link,&raw] {let text=body.text();for line in body.layout().lines_readonly().iter().skip(1) {let at=line.start_index() as usize;assert!(text[..at].ends_with(['/', '&', '?'])||text[at..].starts_with(['/', '&', '?']),"URL break at {at} must use / & or ?");}}
+        assert!(raw.text().starts_with("https://github.com/doromiert/monogram-desktop/pull/2?expanded-message-width=full-conversation-clamp&download=original&more=query"));
+        window.set_default_size(280,700);settle();assert!(rows.width()<=280,"URL wrapping must not raise the window minimum");
+        assert!(long.width()<=rows.width());assert_eq!(editing.width(),rows.width().min(MESSAGE_MAX_WIDTH));
         assert!(body.layout().pixel_size().0<=body.width());
         assert_eq!(long_limit.height(),long_limit.measure(gtk::Orientation::Vertical,long_limit.width()).1,"height uses the final fitted width");
         assert!(link.layout().pixel_size().0<=link.width(),"oversized URL wraps within a narrow column");

@@ -70,3 +70,9 @@
 
 - [x] Use the full existing chat clamp for message maximum width, fit short bubbles to content, and remove the message-body natural-width character cap.
 - [x] Verify long text/links, incoming/outgoing alignment, editing and narrow-window sizing; update the desktop package (native0.49s, full packaged smoke115ms feedback/248ms maximum heartbeat gap).
+
+## Corrected clamp percentage and URL wrapping
+
+- [x] Cap bubbles at 40% of the clamp maximum (432px), shrinking to available width on narrow windows.
+- [x] Keep fitting URLs whole; prefer `/`, `&`, `?` breaks otherwise, preserving text/copy/style and safe oversized-segment fallback.
+- [ ] Verify raw/rich links, selection, formatting and full app layout; update package.

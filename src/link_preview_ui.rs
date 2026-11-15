@@ -439,8 +439,9 @@ mod tests {
             Some((0, source.chars().count() as i32))
         );
         message.refresh_shape();
+        // Markup attributes remain GTK-owned; explicit attributes only retain custom shapes.
         assert!(
-            body.attributes()
+            body.layout().attributes()
                 .is_some_and(|attrs| attrs.attributes().len() >= 3)
         );
 
@@ -476,7 +477,7 @@ mod tests {
         assert!(inline_labels[0].label().contains("<a href="));
         assert!(
             inline_labels[0]
-                .attributes()
+                .layout().attributes()
                 .is_some_and(|attrs| attrs.attributes().len() >= 4)
         );
         let mut inline_pictures = Vec::new();
