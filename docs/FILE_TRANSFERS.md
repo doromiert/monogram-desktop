@@ -251,3 +251,9 @@ playback progress. Pause, loop and seeking reanchor the presentation; explicit
 seek preview survives in-flight seeks. Frame callbacks stop for paused/unmapped
 streams and after samples stop. The native acceptance observes90frames in1.5s
 (16.7ms average,17.1ms maximum) with existing seeking/mute/play-pause checks passing.
+
+Clipboard image/file paste works with Ctrl+V or Shift+Insert anywhere in the
+focused chat window, including media search and other chat controls. The native
+composer Paste menu uses the same handler. Ordinary text paste continues to the
+focused input. Modal dialogs keep their own clipboard behavior; staging captures
+the active account/chat and rejects completion after either changes.

@@ -2152,7 +2152,20 @@ impl StoryViewer {
             }
         });
         v.picture.add_controller(click);
+        let background=gtk::GestureClick::new();
+        background.set_button(gdk::BUTTON_PRIMARY);
+        background.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak=Rc::downgrade(&v);let stage=stage.downgrade();
+        background.connect_released(move |gesture,presses,x,y|{
+            let (Some(v),Some(stage))=(weak.upgrade(),stage.upgrade())else{return;};
+            if presses!=1{return;}
+            let mut target=v.root.pick(x,y,gtk::PickFlags::DEFAULT);
+            while let Some(widget)=target{if widget.is::<gtk::Button>()||widget.is::<gtk::Editable>(){return;}target=widget.parent();}
+            if stage.compute_bounds(&v.root).is_some_and(|bounds|!bounds.contains_point(&graphene::Point::new(x as f32,y as f32))){gesture.set_state(gtk::EventSequenceState::Claimed);v.close();}
+        });
+        v.root.add_controller(background);
         let key = gtk::EventControllerKey::new();
+        key.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = Rc::downgrade(&v);
         key.connect_key_pressed(move |_, k, _, _| {
             if let Some(v) = weak.upgrade() {
@@ -2383,8 +2396,14 @@ impl StoryViewer {
         let started=Instant::now();ui.open_story_item(Story{owner:"You".into(),id:entry.id.clone(),jid:owner.into(),url:entry.url,mime:entry.mime,published:entry.published,caption:entry.caption,asset:path.to_string_lossy().into_owned(),own:true,..Default::default()});assert!(started.elapsed()<Duration::from_millis(400));let viewer=ui.active_story.borrow().as_ref().unwrap().clone();assert!(viewer.loading.get());
         wait(||!viewer.loading.get()&&viewer.picture.paintable().is_some());wait(||ui.store.stories_seen(owner,owner,&entry.id).unwrap());assert!(viewer.edit.is_visible()&&viewer.delete.is_visible());assert!(!ui.reading_current_chat(),"story overlay suspends underlying-chat reads");
         ui.receive_message(owner,peer.into(),Message{id:"behind-story".into(),wire_id:"behind-story".into(),sender:peer.into(),text:"Arrived behind story".into(),timestamp:"2026-11-15T11:00:00Z".into(),..Default::default()},false,None);assert_eq!(ui.state.borrow().current().unread,1);
-        viewer.close();wait(||ui.active_story.borrow().is_none());wait(||ui.state.borrow().current().unread==0&&ui.store.unread_count(owner,peer)==0);
+        let bounds=viewer.root.compute_bounds(&ui.window).unwrap();
+        assert!(std::process::Command::new("xdotool").args(["mousemove","--sync","--window",&window,&(bounds.x()+2.).round().to_string(),&(bounds.y()+bounds.height()-4.).round().to_string(),"click","1"]).status().unwrap().success());
+        wait(||ui.active_story.borrow().is_none());wait(||ui.state.borrow().current().unread==0&&ui.store.unread_count(owner,peer)==0);
         let video_path=std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reaction-video.mp4");let video_entry=crate::stories::Entry{id:"video-fixture".into(),owner:owner.into(),url:"https://example.invalid/story.mp4".into(),mime:"video/mp4".into(),caption:"Video fixture".into(),published:chrono::Utc::now().timestamp_millis()};ui.store.stories_replace(owner,owner,&[video_entry.clone()],video_entry.published).unwrap();
-        ui.open_story_item(Story{owner:"You".into(),id:video_entry.id.clone(),jid:owner.into(),url:video_entry.url,mime:video_entry.mime,published:video_entry.published,caption:video_entry.caption,asset:video_path.to_string_lossy().into_owned(),own:true,..Default::default()});let video=ui.active_story.borrow().as_ref().unwrap().clone();video.pause.set_active(true);wait(||!video.loading.get()&&video.player.borrow().is_some());assert!(video.picture.paintable().is_some());video.close();wait(||ui.active_story.borrow().is_none());assert!(video.player.borrow().is_none());ui.window.close();std::fs::remove_file(path).unwrap();
+        ui.open_story_item(Story{owner:"You".into(),id:video_entry.id.clone(),jid:owner.into(),url:video_entry.url,mime:video_entry.mime,published:video_entry.published,caption:video_entry.caption,asset:video_path.to_string_lossy().into_owned(),own:true,..Default::default()});let video=ui.active_story.borrow().as_ref().unwrap().clone();video.pause.set_active(true);wait(||!video.loading.get()&&video.player.borrow().is_some());assert!(video.picture.paintable().is_some());ui.composer.buffer().set_text("Keep this draft");
+        let again=video.current.borrow().clone().unwrap();video.root.grab_focus();
+        assert!(std::process::Command::new("xdotool").args(["key","Escape"]).status().unwrap().success());wait(||ui.active_story.borrow().is_none());assert_eq!(ui.composer_text(),"Keep this draft");
+        ui.open_story_item(again);let video=ui.active_story.borrow().as_ref().unwrap().clone();video.pause.set_active(true);wait(||!video.loading.get());video.reply.grab_focus();video.reply.set_text("Unsent reply");
+        assert!(std::process::Command::new("xdotool").args(["key","Escape"]).status().unwrap().success());wait(||ui.active_story.borrow().is_none());assert_eq!(ui.composer_text(),"Keep this draft");assert!(video.player.borrow().is_none());ui.window.close();std::fs::remove_file(path).unwrap();
     }
 }

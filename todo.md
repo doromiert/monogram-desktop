@@ -54,3 +54,9 @@
 - [x] Preserve JPEG still and embedded MP4 through the existing XMPP encrypted file path on both clients.
 - [x] Desktop: still-first inline/viewer playback, keyboard-accessible play/stop, one-shot playback returning to still.
 - [x] Verify malformed containers, persistence/retry, native playback/lifecycle and UI responsiveness; build fresh mobile APK (0.2.219 published; physical phone check pending offline ADB).
+
+## Stories and clipboard input
+
+- [x] Close Stories from any background area or Escape, including while the reply field has focus.
+- [x] Paste clipboard images/files from anywhere in the focused chat window with Ctrl+V or Shift+Insert; preserve ordinary text paste.
+- [ ] Verify native pointer/keyboard behavior and package the desktop update.
