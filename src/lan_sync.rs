@@ -24,10 +24,20 @@ pub static REVISION: AtomicU64 = AtomicU64::new(0);
 static ADAPTER_STATUS: Mutex<String> = Mutex::new(String::new());
 const KEY_ACCOUNT: &str = "monogram-lan-sync@localhost";
 type Result<T> = std::result::Result<T, String>;
-fn error(reason: impl std::fmt::Debug) -> String {
+fn error(reason: impl std::fmt::Debug + 'static) -> String {
     // Types identify the failing layer without logging JSON, keys or passwords.
     eprintln!("Monogram sync settings operation failed: {}",std::any::type_name_of_val(&reason));
-    "Could not apply synced settings. Update Monogram on both devices, then retry.".into()
+    user_message(&reason)
+}
+/// The text shown in the sync status row. Only `packs::Error` is expanded: it holds a fixed
+/// `&'static str` (its `From` impls drop io/zip/json sources), so it cannot carry paths, JIDs,
+/// names or JSON. Every other error type may carry user data and stays generic.
+fn user_message(reason: &dyn std::any::Any) -> String {
+    const ADVICE: &str = "Update Monogram on both devices, then retry.";
+    match reason.downcast_ref::<crate::packs::Error>() {
+        Some(pack)=>format!("Could not apply synced settings: {}. {ADVICE}",pack.0.trim_end_matches('.')),
+        None=>format!("Could not apply synced settings. {ADVICE}"),
+    }
 }
 fn keyring_error(reason:crate::credentials::Error)->String {
     eprintln!("Monogram sync keyring: {reason}");
@@ -521,6 +531,34 @@ pub fn public_records(store: &Store, prefix: &str) -> Vec<Value> {
 #[cfg(test)]
 mod native_tests {
     use super::*;
+    const GENERIC: &str = "Could not apply synced settings. Update Monogram on both devices, then retry.";
+    #[test]
+    fn pack_error_reason_is_shown_to_the_user() {
+        let text=user_message(&crate::packs::Error("Invalid pack artwork metadata."));
+        assert_eq!(text,"Could not apply synced settings: Invalid pack artwork metadata. Update Monogram on both devices, then retry.");
+        assert!(!text.contains(".."));
+        // Messages without a trailing period read the same way.
+        assert!(user_message(&crate::packs::Error("Invalid pack metadata identity")).contains("identity. Update"));
+    }
+    #[test]
+    fn non_pack_errors_never_leak_their_content() {
+        let secret="fictional-sync-password";
+        let json=serde_json::from_str::<Value>(&format!("{{\"password\":\"{secret}\" nope")).unwrap_err();
+        let io=std::io::Error::new(std::io::ErrorKind::NotFound,format!("/home/fictional/{secret}"));
+        for text in [user_message(&secret.to_string()),user_message(&json),user_message(&io),user_message(&format!("{secret}@example.invalid"))] {
+            assert_eq!(text,GENERIC);
+            assert!(!text.contains(secret)&&!text.contains("/home/")&&!text.contains("example.invalid"));
+        }
+        // The same holds through the real entry point used by every call site.
+        assert_eq!(error(secret.to_string()),GENERIC);
+    }
+    #[test]
+    fn pack_io_errors_are_already_sanitised() {
+        let io=std::io::Error::new(std::io::ErrorKind::PermissionDenied,"/home/fictional/secret-pack.png");
+        let text=user_message(&crate::packs::Error::from(io));
+        assert!(text.contains("Pack file could not be read or saved"));
+        assert!(!text.contains("fictional")&&!text.contains("/home/"));
+    }
     #[test]
     fn picker_export_uses_user_revision_not_export_time_or_payload_drift(){
         let path=std::env::temp_dir().join(format!("picker-revision-{}",uuid::Uuid::new_v4()));let owner="version@fixture.invalid";
