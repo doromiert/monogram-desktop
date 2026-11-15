@@ -169,10 +169,9 @@ impl Registry {
             || !snapshot.affiliations.contains_key(owner)
             || state.occupants.values().any(|(author, affiliation)| {
                 author.as_ref().is_none_or(|jid| {
-                    snapshot
-                        .affiliations
-                        .get(jid)
-                        .is_none_or(|listed| listed.name() != affiliation)
+                    snapshot.affiliations.get(jid).is_none_or(|_| {
+                        !matches!(affiliation.as_str(), "member" | "admin" | "owner")
+                    })
                 })
             })
         {
@@ -273,6 +272,53 @@ pub async fn fetch(iq: &iq::Client, room: &str) -> Result<MemberSnapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn admitted_affiliation_changes_keep_complete_recipients_but_revocation_blocks() {
+        let room = "room@conference.example.org";
+        let owner = "owner@example.org";
+        for presence_affiliation in ["member", "admin", "owner", "none", "outcast"] {
+            for listed in [Affiliation::Member, Affiliation::Admin, Affiliation::Owner] {
+                let mut rooms = Rooms::new(owner.into());
+                rooms.join(room, Some("own")).unwrap();
+                let own: Element = format!("<presence xmlns='jabber:client' from='{room}/own'><x xmlns='http://jabber.org/protocol/muc#user'><item jid='{owner}/desktop' affiliation='member' role='participant'/><status code='110'/></x></presence>").parse().unwrap();
+                rooms.presence(&own);
+                let other: Element = format!("<presence xmlns='jabber:client' from='{room}/buddy'><x xmlns='http://jabber.org/protocol/muc#user'><item jid='buddy@example.org/phone' affiliation='{presence_affiliation}' role='participant'/></x></presence>").parse().unwrap();
+                rooms.presence(&other);
+                let revision = rooms.begin_member_refresh(room).unwrap();
+                rooms.member_refresh_finished(
+                    room,
+                    revision,
+                    Ok(MemberSnapshot {
+                        room: room.into(),
+                        affiliations: [
+                            (owner.into(), Affiliation::Member),
+                            ("buddy@example.org".into(), listed),
+                        ]
+                        .into(),
+                    }),
+                );
+                assert_eq!(
+                    rooms.recipients(room).is_ok(),
+                    matches!(presence_affiliation, "member" | "admin" | "owner")
+                );
+                // A complete list still has to contain each identified occupant.
+                let revision = rooms.recipient_revision(room).unwrap();
+                assert!(
+                    rooms
+                        .install_recipients(
+                            room,
+                            revision,
+                            MemberSnapshot {
+                                room: room.into(),
+                                affiliations: [(owner.into(), Affiliation::Member)].into()
+                            }
+                        )
+                        .is_err()
+                );
+            }
+        }
+    }
+
     #[test]
     fn multisession_presence_confirms_join_and_keeps_recipient_identity() {
         let room = "room@conference.example.org";
@@ -387,8 +433,8 @@ mod tests {
         let changed = rooms.begin_member_refresh(room).unwrap();
         rooms.member_refresh_finished(room, changed, Ok(mismatched));
         assert!(
-            rooms.recipients(room).is_err(),
-            "occupant affiliations must agree with the lists"
+            rooms.recipients(room).is_ok(),
+            "an affiliation change between admitted roles does not remove membership"
         );
         let message: Element =
             format!("<message xmlns='jabber:client' from='{room}/buddy' type='groupchat'/>")

@@ -176,3 +176,17 @@ The visible group also resumes after reconnect once bookmark credentials and
 nicknames have loaded, including bookmarks with autojoin disabled. A private
 native GTK fixture checks immediate Joining feedback, no premature room MAM,
 and archive loading only after verified self presence.
+
+
+### Complete recipient lists after affiliation changes
+
+The subsequent send failure was reproduced without sending chat text: discovery
+and all three affiliation IQs succeeded, the complete list included the current
+account and every online occupant, but one cached presence said owner while the
+fresh list said member. Both are admitted affiliations. Desktop required exact
+affiliation equality whereas mobile validates membership in the complete list.
+The desktop check now accepts such role changes while retaining complete-list,
+identity, revision and revocation checks. A bounded live preflight installed all
+18 recipients in 1.33 seconds. Regression coverage includes all combinations of
+admitted affiliations plus none/outcast, absent recipients and earlier stale
+membership protections.
