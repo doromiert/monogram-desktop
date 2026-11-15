@@ -2069,7 +2069,28 @@ impl Drop for PackLibraryPage {
     }
 }
 
+/// Preferences → Behavior: keep the media pane open after a sticker is sent.
+pub(crate) const STICKERS_KEEP_OPEN: &str = "stickers_keep_open";
+
+/// Holding Shift while clicking a sticker always keeps the pane open, whatever the setting.
+fn stickers_stay_open(setting: &str, state: gtk::gdk::ModifierType) -> bool {
+    setting != "false" || state.contains(gtk::gdk::ModifierType::SHIFT_MASK)
+}
+
 impl Ui {
+    /// Runs inside the click that sent the sticker, so the keyboard still reports its modifiers.
+    fn after_sticker_sent(self: &Rc<Self>) {
+        let setting = self.store.pref(STICKERS_KEEP_OPEN, "true");
+        let held = gtk::gdk::Display::default()
+            .and_then(|display| display.default_seat())
+            .and_then(|seat| seat.keyboard())
+            .map(|keyboard| keyboard.modifier_state())
+            .unwrap_or_else(gtk::gdk::ModifierType::empty);
+        if !stickers_stay_open(&setting, held) {
+            self.utility.set_show_sidebar(false);
+        }
+    }
+
     /// Re-imports connected Telegram packs whose last check is older than six hours
     /// (`Library::due_updates`). Failures are recorded on the pack by `import_telegram`.
     pub(crate) fn update_due_packs(self: &Rc<Self>) {
@@ -2429,7 +2450,9 @@ impl Ui {
                         };
                         match selection {
                             PackSelection::Sticker(asset) => {
-                                ui.send_pack_sticker(&asset);
+                                if ui.send_pack_sticker(&asset) {
+                                    ui.after_sticker_sent();
+                                }
                             }
                             PackSelection::CustomEmoji { item_id, fallback } => {
                                 let weak = Rc::downgrade(&ui);
@@ -2513,6 +2536,18 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn stickers_close_after_sending_only_when_the_setting_is_off_and_shift_is_not_held() {
+        use gtk::gdk::ModifierType as Mod;
+        assert!(stickers_stay_open("true", Mod::empty()), "default keeps the tab open");
+        assert!(stickers_stay_open("", Mod::empty()), "an unset or odd value keeps the tab open");
+        assert!(!stickers_stay_open("false", Mod::empty()));
+        assert!(!stickers_stay_open("false", Mod::CONTROL_MASK | Mod::ALT_MASK), "only Shift overrides");
+        assert!(stickers_stay_open("false", Mod::SHIFT_MASK), "Shift keeps it open");
+        assert!(stickers_stay_open("false", Mod::SHIFT_MASK | Mod::CONTROL_MASK));
+        assert!(stickers_stay_open("true", Mod::SHIFT_MASK));
+    }
 
     fn until(timeout: Duration, predicate: impl Fn() -> bool) -> bool {
         let context = glib::MainContext::default();
