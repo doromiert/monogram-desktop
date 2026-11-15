@@ -80,6 +80,8 @@ mod pack_editor;
 mod picker_zoom;
 mod smoke;
 mod spoilers;
+mod stories;
+mod stories_ui;
 mod storage;
 mod transport;
 mod ui;

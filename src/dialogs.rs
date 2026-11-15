@@ -595,6 +595,7 @@ impl Ui {
         let (action, id) = key.split_once(':').unwrap_or((key, ""));
         match action {
             "story-new" => self.new_story(),
+            "story-history" => self.show_story_history(),
             "folder-edit" => self.edit_folder(id),
             "folder-new" => self.edit_folder(""),
             "folder-hide-all" => {

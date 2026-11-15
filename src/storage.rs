@@ -1,6 +1,8 @@
 use crate::model::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+#[path = "stories_store.rs"]
+mod stories_store;
 #[path = "request_store.rs"]
 mod request_store;
 #[path = "rooms/store.rs"]
@@ -90,6 +92,7 @@ impl Store {
         store.init_rooms()?;
         store.init_requests()?;
         store.init_read_markers()?;
+        store.init_stories()?;
         store.init_contact_details()?;
         store.init_link_previews()?;
         for account in store.accounts(){store.migrate_chat_defaults(&account.jid)?;}

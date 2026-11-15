@@ -402,6 +402,11 @@ impl Folder {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Story {
+    pub id: String,
+    pub jid: String,
+    pub url: String,
+    pub mime: String,
+    pub published: i64,
     pub owner: String,
     pub asset: String,
     pub caption: String,

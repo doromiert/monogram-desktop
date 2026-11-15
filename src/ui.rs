@@ -2012,10 +2012,9 @@ impl Ui {
     pub fn update_mode(&self) {
         let live = !self.state.borrow().account.is_empty();
         self.update_history_spinner();
-        self.stories.set_visible(!live);
+        self.stories.set_visible(true);
         for name in [
             "wallet",
-            "stories",
             "spaces",
             "profile",
             "developer",
@@ -2376,7 +2375,8 @@ impl Ui {
                     self.room_sync_retry.borrow_mut().clear();
                     self.sync_room_bookmarks();
                     self.remember_sign_in(owner);
-                    self.load_history(true)
+                    self.load_history(true);
+                    self.refresh_live_stories(None);
                 } else if error {
                     self.login_secret.borrow_mut().take();
                     self.notice(&text)
@@ -2406,7 +2406,9 @@ impl Ui {
                 self.apply_local_contact_names();
                 self.clear_contact_requests(&resolved);
                 self.refresh_contact_access();
+                self.refresh_live_stories(None);
             }
+            BackendEvent::StoriesChanged { owner } => self.refresh_live_stories(Some(owner)),
             BackendEvent::ContactAccessError(error) => self.notice(&error),
             BackendEvent::BlockingChanged(snapshot) => {
                 self.blocking_snapshot.replace(snapshot);
