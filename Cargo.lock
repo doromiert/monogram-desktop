@@ -2509,6 +2509,7 @@ dependencies = [
  "serde_json",
  "socket2",
  "spake2",
+ "subtle",
  "tiny-keccak",
  "url",
  "uuid",

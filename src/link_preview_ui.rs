@@ -547,7 +547,7 @@ mod tests {
         let clamp=MessageBubbleLimit::new(&bubble,false);
         let window=gtk::Window::builder().default_width(1400).default_height(300).child(&clamp).build();window.present();
         let context=glib::MainContext::default();let deadline=std::time::Instant::now()+std::time::Duration::from_millis(200);while std::time::Instant::now()<deadline {context.iteration(false);std::thread::sleep(std::time::Duration::from_millis(1));}
-        let painted=body.layout().pixel_size().0.max(card.allocated_width());
+        let painted=body.layout().pixel_size().0.max(card.width());
         eprintln!("Link-only bubble content={}, text={}, preview={}, natural={}",bubble.width(),body.layout().pixel_size().0,card.width(),bubble.measure(gtk::Orientation::Horizontal,-1).1);
         assert!(bubble.width()<=painted+2,"Unused trailing bubble space: {}px",bubble.width()-painted);
         window.close();

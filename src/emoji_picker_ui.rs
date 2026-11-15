@@ -833,7 +833,7 @@ pub(crate) fn mobile_emoji_icon(icon: &str, size: i32) -> gtk::Image {
         size,
         true,
     ) {
-        picture.set_from_pixbuf(Some(&pixbuf));
+        picture.set_paintable(Some(&crate::widgets::texture_from_pixbuf(&pixbuf)));
     }
     picture
 }

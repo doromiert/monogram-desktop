@@ -257,7 +257,7 @@ mod message_bubble_limit_imp {
                             if widget.is_visible() && widget!=body {
                                 // Wrapped preview labels request more natural width than
                                 // the card actually uses. Preserve its allocated outer edge.
-                                needed=needed.max(if widget.has_css_class("link-preview"){widget.allocated_width()}else{widget.measure(gtk::Orientation::Horizontal,-1).1});
+                                needed=needed.max(if widget.has_css_class("link-preview"){widget.width()}else{widget.measure(gtk::Orientation::Horizontal,-1).1});
                             }
                         }
                         let tight=(needed+(child_width-bubble.width()).max(0)).clamp(1,child_width);
@@ -902,7 +902,7 @@ mod media_geometry_tests {
             gtk::gdk_pixbuf::Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, true, 8, 200, 200)
                 .unwrap();
         pixels.fill(0xff0000ff);
-        round.set_paintable(Some(gdk::Texture::for_pixbuf(&pixels).upcast()));
+        round.set_paintable(Some(texture_from_pixbuf(&pixels).upcast()));
         round.allocate(200, 200, -1, None);
         let snapshot = gtk::Snapshot::new();
         round.imp().snapshot(&snapshot);
@@ -911,8 +911,43 @@ mod media_geometry_tests {
         let clip = node.downcast::<gtk::gsk::RoundedClipNode>().unwrap();
         assert_eq!(clip.clip().corner()[0].width(), 100.);
     }
+    #[test]
+    fn pixbuf_texture_keeps_size_alpha_and_pixels() {
+        use gtk::gdk_pixbuf::{Colorspace, Pixbuf};
+        // Width 5 without alpha gives a padded rowstride, which the copy must honour.
+        let opaque = Pixbuf::new(Colorspace::Rgb, false, 8, 5, 3).unwrap();
+        opaque.fill(0x00ff00ff);
+        let texture = texture_from_pixbuf(&opaque);
+        assert_eq!((texture.width(), texture.height()), (5, 3));
+        let mut bytes = vec![0u8; 5 * 3 * 4];
+        texture.download(&mut bytes, 5 * 4);
+        assert!(bytes.chunks(4).all(|p| p == [0, 255, 0, 255]), "{bytes:?}");
+        let clear = Pixbuf::new(Colorspace::Rgb, true, 8, 2, 2).unwrap();
+        clear.fill(0xff000080);
+        let texture = texture_from_pixbuf(&clear);
+        let mut bytes = vec![0u8; 2 * 2 * 4];
+        texture.download(&mut bytes, 2 * 4);
+        // Premultiplied BGRA: straight red at alpha 0x80 becomes 0x80 red.
+        assert!(bytes.chunks(4).all(|p| p == [0, 0, 128, 128]), "{bytes:?}");
+    }
 }
 
+/// Copies a pixbuf's 8-bit pixels into a texture (`gdk::Texture::for_pixbuf` is deprecated).
+pub(crate) fn texture_from_pixbuf(pixbuf: &gtk::gdk_pixbuf::Pixbuf) -> gdk::Texture {
+    let format = if pixbuf.has_alpha() {
+        gdk::MemoryFormat::R8g8b8a8
+    } else {
+        gdk::MemoryFormat::R8g8b8
+    };
+    gdk::MemoryTexture::new(
+        pixbuf.width(),
+        pixbuf.height(),
+        format,
+        &pixbuf.read_pixel_bytes(),
+        pixbuf.rowstride() as usize,
+    )
+    .upcast()
+}
 pub fn reveal_media(controls: &gtk::Box, paintable: &impl IsA<gdk::Paintable>) {
     controls.remove_css_class("media-preview-error");
     controls.set_tooltip_text(None);

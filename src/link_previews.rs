@@ -88,7 +88,7 @@ impl Privacy {
         let previous = self
             .0
             .state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 Some((state & !3).wrapping_add(4) | flags)
             })
             .unwrap();

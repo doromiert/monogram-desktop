@@ -454,12 +454,12 @@ impl AnimationReservation {
         use std::sync::atomic::Ordering;
         let pixels = usize::try_from(edge).ok()?.checked_pow(2)?;
         ANIMATION_CONTEXTS
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |contexts| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |contexts| {
                 (contexts < MAX_ANIMATION_CONTEXTS).then_some(contexts + 1)
             })
             .ok()?;
         if ANIMATION_PIXELS
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_add(pixels)
                     .filter(|total| *total <= MAX_ANIMATION_PIXELS)
             })

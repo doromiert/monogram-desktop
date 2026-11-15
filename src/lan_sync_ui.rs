@@ -272,7 +272,7 @@ fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
                 .title("Scan Monogram Pairing QR")
                 .build();
             let filter = gtk::FileFilter::new();
-            filter.add_pixbuf_formats();
+            filter.add_mime_type("image/*");
             let filters = gio::ListStore::new::<gtk::FileFilter>();
             filters.append(&filter);
             chooser.set_filters(Some(&filters));
