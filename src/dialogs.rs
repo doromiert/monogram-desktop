@@ -505,7 +505,7 @@ impl Ui {
             }
         }
     }
-    fn track_dialog(self: &Rc<Self>, dialog: &impl IsA<adw::Dialog>) {
+    pub(crate) fn track_dialog(self: &Rc<Self>, dialog: &impl IsA<adw::Dialog>) {
         let dialog = dialog.as_ref();
         self.dialogs.borrow_mut().push(dialog.clone());
         let weak = Rc::downgrade(self);

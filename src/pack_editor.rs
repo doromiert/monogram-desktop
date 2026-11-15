@@ -22,6 +22,7 @@ struct Editor {
     pack: RefCell<Option<Pack>>,
     id: i64,
     generation: u64,
+    serial: Cell<u64>,
     busy: Cell<bool>,
     job: RefCell<Option<Job>>,
     menu: glib::WeakRef<gtk::MenuButton>,
@@ -44,16 +45,18 @@ impl Editor {
             spinner.set_spinning(busy);
             spinner.set_visible(busy);
         }
+        if let Some(menu) = self.menu.upgrade() { menu.set_sensitive(!busy); }
         if let Some(body) = self.body.upgrade() {
             body.set_sensitive(!busy);
         }
     }
     fn refresh(self: &Rc<Self>) {
+        let serial=self.serial.get().wrapping_add(1);self.serial.set(serial);
         self.feedback("Loading pack…", true);
         let editor = self.clone();
         glib::spawn_future_local(async move {
             let result = editor.library.snapshot().await;
-            if editor.ui().is_none() || editor.dialog.upgrade().is_none() {
+            if editor.serial.get()!=serial || editor.ui().is_none() || editor.dialog.upgrade().is_none() {
                 return;
             }
             match result {
@@ -72,10 +75,69 @@ impl Editor {
             }
         });
     }
-    fn mutate(self: &Rc<Self>, change: Mutation) {
-        if self.busy.get() || self.ui().is_none() {
+    fn editable(self: &Rc<Self>, run: impl FnOnce(Rc<Self>) + 'static) {
+        if !self
+            .pack
+            .borrow()
+            .as_ref()
+            .is_some_and(|pack| pack.connected)
+        {
+            run(self.clone());
             return;
         }
+        let Some(ui) = self.ui() else {
+            return;
+        };
+        let dialog=adw::AlertDialog::builder().heading("Edit This Pack Locally?").body("Your changes will be kept on your devices. This disconnects the pack from automatic Telegram updates.").build();
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("edit", "Edit Locally");
+        dialog.set_response_appearance("edit", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("edit"));
+        dialog.set_close_response("cancel");
+        let editor = self.clone();
+        glib::spawn_future_local(async move {
+            if dialog.choose_future(Some(&ui.window)).await.as_str() != "edit" {
+                return;
+            }
+            editor.feedback("Making pack editable…", true);
+            match editor
+                .library
+                .mutate(Mutation::Detach { pack: editor.id })
+                .await
+            {
+                Ok(_) => {
+                    if let Some(pack) = editor.pack.borrow_mut().as_mut() {
+                        pack.connected = false;
+                        pack.auto_sync = false;
+                    }
+                    editor.feedback("", false);
+                    if let Some(page) = editor.page.upgrade() {
+                        page.refresh();
+                    }
+                    run(editor);
+                }
+                Err(e) => editor.feedback(&e.to_string(), false),
+            }
+        });
+    }
+    fn mutate(self: &Rc<Self>, change: Mutation) {
+        if self.ui().is_none() {
+            return;
+        }
+        if self.pack.borrow().as_ref().is_some_and(|p| p.connected)
+            && matches!(
+                change,
+                Mutation::Rename { .. }
+                    | Mutation::RenameItem { .. }
+                    | Mutation::Tag { .. }
+                    | Mutation::RemoveItem { .. }
+                    | Mutation::MoveItem { .. }
+            )
+        {
+            self.editable(move |editor| editor.mutate(change));
+            return;
+        }
+        self.serial.set(self.serial.get().wrapping_add(1));
         self.feedback("Saving…", true);
         let editor = self.clone();
         glib::spawn_future_local(async move {
@@ -104,18 +166,10 @@ impl Editor {
         let group = gio::SimpleActionGroup::new();
         let menu = gio::Menu::new();
         for (id, title, enabled) in [
-            ("reorder", "Reorder", !pack.connected),
-            ("rename", "Edit Name", !pack.connected),
-            (
-                "add",
-                "Add Stickers…",
-                !pack.connected && !pack.sync_pending,
-            ),
-            (
-                "import",
-                "Import Sticker Files…",
-                !pack.connected && !pack.sync_pending,
-            ),
+            ("reorder", "Reorder", !pack.sync_pending),
+            ("rename", "Edit Name", !pack.sync_pending),
+            ("add", "Add Stickers…", !pack.sync_pending),
+            ("import", "Import Sticker Files…", !pack.sync_pending),
             ("export", "Export Pack…", !pack.sync_pending),
             ("settings", "Pack Settings", true),
             ("remove", "Remove Pack", true),
@@ -125,7 +179,7 @@ impl Editor {
             let weak = Rc::downgrade(self);
             action.connect_activate(move |_, _| {
                 if let Some(editor) = weak.upgrade() {
-                    match id {
+                    let run = move |editor: Rc<Editor>| match id {
                         "reorder" => {
                             editor.reorder.set(!editor.reorder.get());
                             editor.refresh();
@@ -137,6 +191,11 @@ impl Editor {
                         "export" => editor.export(),
                         "remove" => editor.remove_pack(),
                         _ => {}
+                    };
+                    if matches!(id, "reorder" | "rename" | "add" | "import") {
+                        editor.editable(run);
+                    } else {
+                        run(editor);
                     }
                 }
             });
@@ -221,7 +280,7 @@ impl Editor {
             ] {
                 let action = gio::SimpleAction::new(name, None);
                 action.set_enabled(
-                    !pack.connected && (!matches!(name, "earlier" | "later") || to.is_some()),
+                    !pack.sync_pending && (!matches!(name, "earlier" | "later") || to.is_some()),
                 );
                 let weak = Rc::downgrade(&editor);
                 let from = *position;
@@ -259,9 +318,7 @@ impl Editor {
             more.add_css_class("osd");
             more.add_css_class("circular");
             tile.add_overlay(&more);
-            if editor.reorder.get() && !pack.connected {
-                editor.attach_item_drag(&button, item.id);
-            }
+            editor.attach_item_drag(&button, item.id);
             list_item.set_child(Some(&tile));
         });
         factory.connect_unbind(|_, object| {
@@ -455,7 +512,8 @@ impl Editor {
                 });
             }
         });
-        dialog.present(Some(&ui.window));
+        ui.track_dialog(&dialog);
+    dialog.present(Some(&ui.window));
     }
     fn settings(self: &Rc<Self>) {
         let Some(pack) = self.pack.borrow().clone() else {
@@ -470,7 +528,7 @@ impl Editor {
             .title("Pack name")
             .text(&pack.name)
             .show_apply_button(true)
-            .sensitive(!pack.connected && !pack.sync_pending)
+            .sensitive(!pack.sync_pending)
             .build();
         let weak = Rc::downgrade(self);
         name.connect_apply(move |row| {
@@ -537,7 +595,8 @@ impl Editor {
         }
         dialog.set_extra_child(Some(&settings));
         dialog.add_response("close", "Close");
-        dialog.present(Some(&ui.window));
+        ui.track_dialog(&dialog);
+    dialog.present(Some(&ui.window));
     }
     fn edit_item(self: &Rc<Self>, id: i64) {
         let Some(item) = self
@@ -627,7 +686,8 @@ impl Editor {
                 _ => {}
             }
         });
-        dialog.present(Some(&ui.window));
+        ui.track_dialog(&dialog);
+    dialog.present(Some(&ui.window));
     }
     fn choose_artwork(self: &Rc<Self>, replace: Option<i64>, images_only: bool) {
         if self.busy.get() {
@@ -763,6 +823,7 @@ pub(crate) fn open(ui: &Rc<Ui>, page: &Rc<PackLibraryPage>, library: Library, id
     let layout = gtk::Box::new(gtk::Orientation::Vertical, 0);
     layout.add_css_class("background");
     let header = adw::HeaderBar::new();
+    header.add_css_class("flat");
     let menu = gtk::MenuButton::builder()
         .icon_name("view-more-symbolic")
         .tooltip_text("Pack Actions")
@@ -806,6 +867,7 @@ pub(crate) fn open(ui: &Rc<Ui>, page: &Rc<PackLibraryPage>, library: Library, id
         pack: RefCell::new(None),
         id,
         generation: ui.generation.get(),
+        serial: Cell::new(0),
         busy: Cell::new(false),
         job: RefCell::new(None),
         menu: menu.downgrade(),
@@ -817,6 +879,7 @@ pub(crate) fn open(ui: &Rc<Ui>, page: &Rc<PackLibraryPage>, library: Library, id
             job.cancel();
         }
     });
+    ui.track_dialog(&dialog);
     dialog.present(Some(&ui.window));
     let weak = Rc::downgrade(&editor);
     let seen = Cell::new(crate::lan_sync::REVISION.load(std::sync::atomic::Ordering::Relaxed));
@@ -835,4 +898,224 @@ pub(crate) fn open(ui: &Rc<Ui>, page: &Rc<PackLibraryPage>, library: Library, id
         glib::ControlFlow::Continue
     });
     editor.refresh();
+}
+
+pub(crate) fn manage(ui: &Rc<Ui>, page: &Rc<PackLibraryPage>, library: Library, kind: packs::Kind) {
+    let dialog = adw::Dialog::builder()
+        .title("Manage Packs")
+        .content_width(520)
+        .content_height(620)
+        .build();
+    let view = adw::ToolbarView::new();
+    let header = adw::HeaderBar::new();
+    view.add_top_bar(&header);
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    crate::widgets::margins(&body, 18);
+    let status = gtk::Label::new(Some("Loading packs…"));
+    status.set_wrap(true);
+    body.append(&status);
+    let rows = gtk::ListBox::new();
+    rows.set_selection_mode(gtk::SelectionMode::None);
+    rows.add_css_class("boxed-list");
+    body.append(&rows);
+    let scroll = gtk::ScrolledWindow::builder()
+        .child(&body)
+        .vexpand(true)
+        .build();
+    view.set_content(Some(&scroll));
+    dialog.set_child(Some(&view));
+    ui.track_dialog(&dialog);
+    dialog.present(Some(&ui.window));
+    let owner = library.account().to_string();
+    let generation = ui.generation.get();
+    let weak_ui = Rc::downgrade(ui);
+    let weak_page = Rc::downgrade(page);
+    let weak_dialog = dialog.downgrade();
+    glib::spawn_future_local(async move {
+        let snapshot = library.snapshot().await;
+        let Some(ui) = weak_ui
+            .upgrade()
+            .filter(|ui| ui.generation.get() == generation && ui.state.borrow().account == owner)
+        else {
+            return;
+        };
+        if weak_dialog.upgrade().is_none() {
+            return;
+        }
+        let snapshot = match snapshot {
+            Ok(s) => s,
+            Err(e) => {
+                status.set_text(&e.to_string());
+                return;
+            }
+        };
+        status.set_text("Drag packs to reorder them. Use the pencil to edit a pack.");
+        let save: Rc<dyn Fn()> = Rc::new({
+            let library = library.clone();
+            let weak = weak_page.clone();
+            let list = rows.downgrade();
+            let status = status.downgrade();
+            move || {
+                let Some(list) = list.upgrade() else {
+                    return;
+                };
+                let mut ids = vec![];
+                let mut child = list.first_child();
+                while let Some(row) = child {
+                    child = row.next_sibling();
+                    if let Ok(id) = row.widget_name().parse::<i64>() {
+                        ids.push(id);
+                    }
+                }
+                let library = library.clone();
+                let weak = weak.clone();
+                let status = status.clone();
+                glib::spawn_future_local(async move {
+                    match library.mutate(Mutation::Reorder { kind, ids }).await {
+                        Ok(_) => {
+                            if let Some(page) = weak.upgrade() {
+                                page.refresh();
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(status) = status.upgrade() {
+                                status.set_text(&e.to_string());
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        for pack in snapshot.packs.into_iter().filter(|p| p.kind == kind) {
+            let row = adw::ActionRow::builder()
+                .title(&pack.name)
+                .subtitle(format!(
+                    "{} items{}",
+                    pack.items.len(),
+                    if pack.connected {
+                        " · Connected to Telegram"
+                    } else {
+                        ""
+                    }
+                ))
+                .build();
+            row.set_widget_name(&pack.id.to_string());
+            let edit = crate::widgets::icon_button("document-edit-symbolic", "Edit Pack");
+            edit.set_valign(gtk::Align::Center);
+            row.add_suffix(&edit);
+            let weak = weak_ui.clone();
+            let page = weak_page.clone();
+            let edit_library = library.clone();
+            let id = pack.id;
+            edit.connect_clicked(move |_| {
+                if let (Some(ui), Some(page)) = (weak.upgrade(), page.upgrade()) {
+                    open(&ui, &page, edit_library.clone(), id);
+                }
+            });
+            let installed = gtk::Switch::builder()
+                .active(pack.installed)
+                .valign(gtk::Align::Center)
+                .build();
+            installed.update_property(&[gtk::accessible::Property::Label("Installed")]);
+            row.add_suffix(&installed);
+            let library = library.clone();
+            let page = weak_page.clone();
+            let feedback = status.downgrade();
+            installed.connect_state_set(move |_, value| {
+                let library = library.clone();
+                let page = page.clone();
+                let feedback = feedback.clone();
+                glib::spawn_future_local(async move {
+                    match library
+                        .mutate(Mutation::Installed { pack: id, value })
+                        .await
+                    {
+                        Ok(_) => {
+                            if let Some(page) = page.upgrade() {
+                                page.refresh();
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(label) = feedback.upgrade() {
+                                label.set_text(&e.to_string());
+                            }
+                        }
+                    }
+                });
+                glib::Propagation::Proceed
+            });
+            let drag = gtk::DragSource::builder()
+                .actions(gtk::gdk::DragAction::MOVE)
+                .build();
+            drag.connect_prepare(move |_, _, _| {
+                Some(gtk::gdk::ContentProvider::for_value(&id.to_string().to_value()))
+            });
+            drag.connect_drag_begin(|source,_|source.set_icon(Some(&gtk::WidgetPaintable::new(gtk::Widget::NONE)),0,0));
+            row.add_controller(drag);
+            let target = gtk::DropTarget::new(String::static_type(), gtk::gdk::DragAction::MOVE);
+            target.set_preload(true);
+            target.connect_enter(|_,_,_|gtk::gdk::DragAction::MOVE);
+            let list = rows.downgrade();
+            let destination = row.downgrade();
+            target.connect_motion(move |target, _, _| {
+                if let (Some(list), Some(to), Some(from)) = (
+                    list.upgrade(),
+                    destination.upgrade(),
+                    target.value().and_then(|v|v.get::<String>().ok()).and_then(|v|v.parse::<i64>().ok()),
+                ) {
+                    let mut child = list.first_child();
+                    while let Some(widget) = child {
+                        child = widget.next_sibling();
+                        if widget.widget_name() == from.to_string() && widget != to {
+                            if let Ok(source) = widget.downcast::<gtk::ListBoxRow>() {
+                                let index = to.index();
+                                list.remove(&source);
+                                list.insert(&source, index);
+                            }
+                            break;
+                        }
+                    }
+                }
+                gtk::gdk::DragAction::MOVE
+            });
+            let drop_save = save.clone();
+            target.connect_drop(move |_, value, _, _| {
+                if value.get::<String>().ok().and_then(|v|v.parse::<i64>().ok()).is_none() {
+                    return false;
+                }
+                drop_save();
+                true
+            });
+            row.add_controller(target);
+            let keys = gtk::EventControllerKey::new();
+            let list = rows.downgrade();
+            let source = row.downgrade();
+            let save = save.clone();
+            keys.connect_key_pressed(move |_, key, _, flags| {
+                if !flags.contains(gtk::gdk::ModifierType::ALT_MASK) {
+                    return glib::Propagation::Proceed;
+                }
+                let (Some(list), Some(row)) = (list.upgrade(), source.upgrade()) else {
+                    return glib::Propagation::Proceed;
+                };
+                let to = match key {
+                    gtk::gdk::Key::Up => row.index() - 1,
+                    gtk::gdk::Key::Down => row.index() + 1,
+                    _ => return glib::Propagation::Proceed,
+                };
+                if to >= 0 && list.row_at_index(to).is_some() {
+                    list.remove(&row);
+                    list.insert(&row, to);
+                    row.grab_focus();
+                    save();
+                }
+                glib::Propagation::Stop
+            });
+            row.add_controller(keys);
+            rows.append(&row);
+        }
+        if rows.first_child().is_none() {
+            status.set_text("No packs installed. Import or create a pack to get started.");
+        }
+    });
 }

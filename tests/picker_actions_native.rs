@@ -102,6 +102,11 @@ fn physical(ui: &Ui, widget: &gtk::Widget, args: &[&str]) {
     wait(|| task.is_finished());
     task.join().unwrap();
 }
+fn drag_between(ui:&Ui,source:&gtk::Widget,target:&gtk::Widget){
+    let out=std::process::Command::new("xdotool").args(["search","--onlyvisible","--pid",&std::process::id().to_string(),"--name","Monogram Gesture Fixture"]).output().unwrap();let window=String::from_utf8(out.stdout).unwrap().lines().next().unwrap().to_string();
+    let a=source.compute_bounds(&ui.window).unwrap();let b=target.compute_bounds(&ui.window).unwrap();assert!(a.width()>0.&&a.height()>0.&&b.width()>0.&&b.height()>0.);let(tx,ty)=ui.window.surface_transform();let sx=a.x()+a.width()/2.-tx as f32;let sy=a.y()+a.height()/2.-ty as f32;let ex=b.x()+b.width()/2.-tx as f32;let ey=b.y()+b.height()/2.-ty as f32;
+    let task=std::thread::spawn(move||{let motion=|x:f32,y:f32|{assert!(std::process::Command::new("xdotool").args(["mousemove","--sync","--window",&window,&(x.round() as i32).to_string(),&(y.round() as i32).to_string()]).status().unwrap().success());};motion(sx,sy);std::process::Command::new("xdotool").args(["mousedown","1"]).status().unwrap();std::thread::sleep(Duration::from_millis(100));for n in 1..=8{motion(sx+(ex-sx)*n as f32/8.,sy+(ey-sy)*n as f32/8.);std::thread::sleep(Duration::from_millis(35));}std::thread::sleep(Duration::from_millis(150));std::process::Command::new("xdotool").args(["mouseup","1"]).status().unwrap();});wait(||task.is_finished());task.join().unwrap();
+}
 #[test]
 #[ignore = "requires private display, xdotool and Secret Service"]
 fn double_click_defaults_and_preferences_apply_to_real_messages() {
@@ -278,25 +283,7 @@ fn picker_zoom_collapse_pack_editor_and_sticker_pending_bubble() {
         .block_on(library.snapshot())
         .unwrap()
         .picker_revision;
-    physical(
-        &ui,
-        &bar("Editable fixture").unwrap().upcast(),
-        &[
-            "mousedown",
-            "1",
-            "mousemove_relative",
-            "--sync",
-            "16",
-            "0",
-            "sleep",
-            "0.1",
-        ],
-    );
-    physical(
-        &ui,
-        &bar("Other fixture").unwrap().upcast(),
-        &["sleep", "0.1", "mouseup", "1"],
-    );
+    drag_between(&ui,&bar("Editable fixture").unwrap().upcast(),&bar("Other fixture").unwrap().upcast());
     wait(|| {
         context
             .block_on(library.snapshot())
@@ -312,6 +299,17 @@ fn picker_zoom_collapse_pack_editor_and_sticker_pending_bubble() {
             .picker_revision
             > before
     );
+    crate::pack_editor::manage(&ui,&page,library.clone(),Kind::Stickers);
+    wait(||ui.window.visible_dialog().is_some_and(|dialog|dialog.title()=="Manage Packs"&&find::<adw::ActionRow>(&dialog.upcast(),&|row|row.title()=="Other fixture"&&row.is_mapped()&&row.width()>0&&row.height()>0).is_some()));
+    let manager=ui.window.visible_dialog().unwrap();
+    let first=find::<adw::ActionRow>(&manager.clone().upcast(),&|row|row.title()=="Editable fixture").unwrap();
+    let second=find::<adw::ActionRow>(&manager.clone().upcast(),&|row|row.title()=="Other fixture").unwrap();
+    assert!(find::<gtk::Switch>(&first.clone().upcast(),&|_|true).is_some());
+    drag_between(&ui,&first.clone().upcast(),&second.upcast());
+    wait(||context.block_on(library.snapshot()).unwrap().packs[0].id==other.id);
+    find::<gtk::Button>(&first.upcast(),&|b|b.tooltip_text().as_deref()==Some("Edit Pack")).unwrap().emit_clicked();
+    wait(||ui.window.visible_dialog().is_some_and(|d|d.title()=="Editable fixture"));
+    ui.window.visible_dialog().unwrap().close();manager.close();wait(||ui.window.visible_dialog().is_none());
     let baseline = std::fs::read_dir("/proc/self/fd").unwrap().count();
     let peak = Rc::new(std::cell::Cell::new(baseline));
     let gap = Rc::new(std::cell::Cell::new(Duration::ZERO));
@@ -460,6 +458,7 @@ fn picker_zoom_collapse_pack_editor_and_sticker_pending_bubble() {
     });
     dialog.close();
     wait(|| ui.window.visible_dialog().is_none());
+    wait(||bar("Renamed fixture").is_some());bar("Renamed fixture").unwrap().emit_clicked();
     wait(|| tile().is_some_and(|b| b.is_mapped() && b.width() > 0));
     ui.send_animation.remember_sticker_source(&tile().unwrap());
     {

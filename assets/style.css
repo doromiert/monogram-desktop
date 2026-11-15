@@ -280,3 +280,5 @@
 .pack-editor-grid { background: transparent; }
 .pack-editor-grid > child { padding: 3px; border-radius: 8px; }
 .pack-editor-grid button.flat { padding: 0; }
+
+.pack-editor-grid > child:hover { background-color: transparent; }
