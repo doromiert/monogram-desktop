@@ -2,11 +2,15 @@
 use crate::ui::Ui;
 use adw::prelude::*;
 use gtk::{gdk, glib};
-use std::{cell::Cell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 pub(crate) struct PickerZoom {
     pub root: gtk::Box,
     picture: gtk::Picture,
     active: Cell<bool>,
+    binding: RefCell<Option<glib::Binding>>,
 }
 impl PickerZoom {
     pub fn new() -> Rc<Self> {
@@ -25,19 +29,72 @@ impl PickerZoom {
             root,
             picture,
             active: Cell::new(false),
+            binding: RefCell::new(None),
         })
     }
     pub fn is_active(&self) -> bool {
         self.active.get()
     }
     fn show(&self, widget: &gtk::Widget) {
+        if let Some(binding) = self.binding.borrow_mut().take() {
+            binding.unbind();
+        }
+        fn source_picture(widget: &gtk::Widget) -> Option<gtk::Picture> {
+            if let Some(picture) = widget
+                .downcast_ref::<gtk::Picture>()
+                .filter(|p| p.paintable().is_some())
+            {
+                return Some(picture.clone());
+            }
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                child = current.next_sibling();
+                if let Some(p) = source_picture(&current) {
+                    return Some(p);
+                }
+            }
+            None
+        }
+        if let Some(source) = source_picture(widget) {
+            self.binding.replace(Some(
+                source
+                    .bind_property("paintable", &self.picture, "paintable")
+                    .sync_create()
+                    .build(),
+            ));
+            self.active.set(true);
+            self.root.set_visible(true);
+            return;
+        }
+
+        fn artwork(widget: &gtk::Widget) -> Option<gdk::Paintable> {
+            if let Some(picture) = widget.downcast_ref::<gtk::Picture>() {
+                return picture.paintable();
+            }
+            if let Some(image) = widget.downcast_ref::<crate::widgets::AspectImage>() {
+                return image.paintable();
+            }
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                child = current.next_sibling();
+                if let Some(paintable) = artwork(&current) {
+                    return Some(paintable);
+                }
+            }
+            None
+        }
         let content = widget.first_child().unwrap_or_else(|| widget.clone());
-        self.picture
-            .set_paintable(Some(&gtk::WidgetPaintable::new(Some(&content))));
+        self.picture.set_paintable(Some(
+            &artwork(&content)
+                .unwrap_or_else(|| gtk::WidgetPaintable::new(Some(&content)).upcast()),
+        ));
         self.active.set(true);
         self.root.set_visible(true);
     }
     pub fn hide(&self) {
+        if let Some(binding) = self.binding.borrow_mut().take() {
+            binding.unbind();
+        }
         self.active.set(false);
         self.root.set_visible(false);
         self.picture.set_paintable(gdk::Paintable::NONE);

@@ -20,6 +20,9 @@ use std::{
 };
 pub struct Ui {
     pub avatars: RefCell<crate::avatar_ui::Avatars>,
+    pub contact_load_serial: Cell<u64>,
+    pub local_contacts: RefCell<HashMap<String, crate::contact_details::LocalContact>>,
+    pub local_contact_avatars: RefCell<HashMap<String, gtk::gdk::Texture>>,
     pub images: RefCell<crate::image_ui::Images>,
     pub uploads: RefCell<crate::upload_ui::Uploads>,
     pub downloads: RefCell<crate::downloads::Downloads>,
@@ -85,6 +88,7 @@ pub struct Ui {
     pub(crate) media_search: gtk::SearchEntry,
     pub media_pane: adw::ToolbarView,
     pub media_mode: RefCell<String>,
+    pub media_tabs: adw::ToggleGroup,
     pub media_toggles: RefCell<HashMap<String, adw::Toggle>>,
     pub request_button: gtk::Button,
     pub request_badge: gtk::Label,
@@ -261,6 +265,9 @@ impl Ui {
         request_badge.set_visible(false);
         let ui = Rc::new(Self {
             avatars: RefCell::new(Default::default()),
+            contact_load_serial: Cell::new(0),
+            local_contacts: RefCell::new(HashMap::new()),
+            local_contact_avatars: RefCell::new(HashMap::new()),
             images: RefCell::new(Default::default()),
             uploads: RefCell::new(Default::default()),
             downloads: RefCell::new(Default::default()),
@@ -390,6 +397,7 @@ impl Ui {
                 .build(),
             media_pane: adw::ToolbarView::new(),
             media_mode: RefCell::new("media".into()),
+            media_tabs: adw::ToggleGroup::builder().homogeneous(false).can_shrink(false).build(),
             media_toggles: RefCell::new(HashMap::new()),
             request_button,
             request_badge,
@@ -715,9 +723,6 @@ impl Ui {
         self.action("profile", |s| {
             s.preview_form("Your Profile", &["Display name", "About", "Website"])
         });
-        self.action("developer", |s| {
-            s.preview_form("Developer Tools", &["Service address", "Command"])
-        });
         self.action("call", |s| s.call_preview());
         self.action("attach-file", |s| s.choose_files(false));
         self.action("attach-media", |s| s.choose_files(true));
@@ -784,7 +789,6 @@ impl Ui {
             ("Preferences", "preferences"),
             ("Keyboard Shortcuts", "shortcuts"),
             ("About Monogram", "about"),
-            ("Developer Tools", "developer"),
         ] {
             section.append(Some(title), Some(&format!("win.{action}")))
         }
@@ -985,7 +989,7 @@ impl Ui {
             let words = bx(true, 5);
             words.set_hexpand(true);
             let top = bx(false, 8);
-            let name = text(&chat.name, "chat-name");
+            let name = text(chat.display_name(), "chat-name");
             name.set_hexpand(true);
             name.set_ellipsize(gtk::pango::EllipsizeMode::End);
             top.append(&name);
@@ -1462,6 +1466,8 @@ impl Ui {
         clear(&self.chips);
         self.chips.set_visible(false);
         self.load_current();
+        let local_avatar=self.local_contacts.borrow().get(&self.state.borrow().current().jid).is_some_and(|contact|contact.avatar.is_some());
+        if local_avatar && !self.local_contact_avatars.borrow().contains_key(&self.state.borrow().current().jid) { self.reload_contact_details(); }
         if switched {
             match visible_sidebar.as_deref() {
                 Some("info") => self.show_info(),
@@ -1477,18 +1483,29 @@ impl Ui {
         if self.split.is_collapsed() {
             self.split.set_show_sidebar(false)
         }
-        if self.online.get() {
-            let state = self.state.borrow();
-            let chat = state.current();
-            if chat.group && !chat.room_joined {
-                self.command(Command::JoinRoom {
-                    peer: chat.jid.clone(),
-                    nick: None,
-                });
-            } else {
-                drop(state);
-                self.load_history(true)
+        self.resume_current_chat();
+    }
+    fn resume_current_chat(self: &Rc<Self>) {
+        if !self.online.get() {
+            return;
+        }
+        let state = self.state.borrow();
+        let chat = state.current();
+        if chat.group && !chat.room_joined {
+            let request = Command::JoinRoom {
+                peer: chat.jid.clone(),
+                nick: chat.room_nick.clone(),
+            };
+            drop(state);
+            if self.command(request) {
+                self.state.borrow_mut().current_mut().subtitle = "Joining…".into();
+                if self.pages.visible_child_name().as_deref() == Some("chat") {
+                    self.show_chat();
+                }
             }
+        } else {
+            drop(state);
+            self.load_history(true);
         }
     }
     pub fn load_current(self: &Rc<Self>) {
@@ -1512,13 +1529,13 @@ impl Ui {
         let state = self.state.borrow();
         let chat = state.current();
         self.composer_placeholder
-            .set_text(&format!("Message {}…", chat.name));
+            .set_text(&format!("Message {}…", chat.display_name()));
         self.composer_placeholder
             .set_visible(self.composer_text().is_empty());
         let title = bx(false, 8);
         title.append(&self.chat_avatar(chat, 28));
         let words = bx(true, 0);
-        words.append(&text(&chat.name, "chat-title"));
+        words.append(&text(chat.display_name(), "chat-title"));
         let subtitle = if self
             .typing
             .borrow()
@@ -1584,9 +1601,9 @@ impl Ui {
         let state = self.state.borrow();
         let owner = state.account.clone();
         for c in &state.chats {
-            if c.name.to_lowercase().contains(&query) {
+            if c.display_name().to_lowercase().contains(&query) {
                 let row = adw::ActionRow::builder()
-                    .title(&c.name)
+                    .title(c.display_name())
                     .subtitle(&c.subtitle)
                     .use_markup(false)
                     .activatable(true)
@@ -1941,10 +1958,9 @@ impl Ui {
     pub fn update_mode(&self) {
         let live = !self.state.borrow().account.is_empty();
         self.update_history_spinner();
-        self.stories.set_visible(!live);
+        self.stories.set_visible(true);
         for name in [
             "wallet",
-            "stories",
             "spaces",
             "profile",
             "developer",
@@ -1972,10 +1988,11 @@ impl Ui {
             t.set_enabled(
                 matches!(name.as_str(), "emoji" | "stickers")
                     || name == "gifs" && self.gif_page.borrow().is_some()
+                    || name == "monero"
                     || !live,
             )
         }
-        if live {
+        if self.media_stack.visible_child_name().as_deref().is_some_and(|name|self.media_toggles.borrow().get(name).is_none_or(|t|!t.is_enabled())) {
             self.media_stack.set_visible_child_name("emoji")
         }
     }
@@ -2072,11 +2089,14 @@ impl Ui {
         if let Some(v) = story {
             v.close()
         }
+        self.local_contacts.borrow_mut().clear();self.local_contact_avatars.borrow_mut().clear();
         self.state.replace(state);
+        self.reload_contact_details();
         self.load_favorite_orders();
         self.load_blocking_cache();
         self.rebuild_pack_library();
         self.rebuild_gif_library();
+        self.refresh_monero_sidebar();
         self.timeline_scope_changed();
         self.history_pages.borrow_mut().clear();
         self.history_pending.borrow_mut().clear();
@@ -2301,7 +2321,8 @@ impl Ui {
                     self.room_sync_retry.borrow_mut().clear();
                     self.sync_room_bookmarks();
                     self.remember_sign_in(owner);
-                    self.load_history(true)
+                    self.load_history(true);
+                    self.refresh_live_stories(None);
                 } else if error {
                     self.login_secret.borrow_mut().take();
                     self.notice(&text)
@@ -2328,9 +2349,12 @@ impl Ui {
                     c.contact = item.subscription != "remove" && !c.group && c.jid != owner;
                 }
                 drop(s);
+                self.apply_local_contact_names();
                 self.clear_contact_requests(&resolved);
                 self.refresh_contact_access();
+                self.refresh_live_stories(None);
             }
+            BackendEvent::StoriesChanged { owner } => self.refresh_live_stories(Some(owner)),
             BackendEvent::ContactAccessError(error) => self.notice(&error),
             BackendEvent::BlockingChanged(snapshot) => {
                 self.blocking_snapshot.replace(snapshot);
@@ -2359,6 +2383,10 @@ impl Ui {
                         bookmark.name
                     };
                 }
+                drop(state);
+                // Restore the visible room even when its bookmark does not autojoin.
+                // Wait for bookmark loading so imported room passwords/nicknames are available.
+                self.resume_current_chat();
             }
             BackendEvent::RoomPresence(presence) => {
                 let mut state = self.state.borrow_mut();
@@ -2748,7 +2776,7 @@ impl Ui {
         let receipt_id = message.wire_id.clone();
         let notify =
             known.is_none() && !visible && !message.own && !historical && c.notifications == "all";
-        let notification_title = c.name.clone();
+        let notification_title = c.display_name().to_string();
         let notification_body = message.preview();
         if let Some(known) = known.clone() {
             let old = c

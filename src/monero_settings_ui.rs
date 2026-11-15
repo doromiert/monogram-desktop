@@ -4,7 +4,8 @@ use gtk::glib;
 use std::rc::Rc;
 use zeroize::Zeroizing;
 pub use crate::monero_settings::{Settings,validate};
-pub fn add(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
+pub fn add(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) { dialog.add(&page(ui)); }
+pub(crate) fn page(ui: &Rc<Ui>) -> adw::PreferencesPage {
     let owner = ui.state.borrow().account.clone();
     let value: Settings =
         serde_json::from_str(&ui.store.pref(&format!("monero-settings:{owner}"), "{}"))
@@ -81,7 +82,7 @@ pub fn add(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
     let entries = choices.clone(); let node_picker = picker.clone();
     network.connect_selected_notify(move |row| { populate(row.selected(), &entries); node_picker.set_selected(entries.n_items()-1); });
     let secret = password.clone();
-    dialog.connect_closed(move |_| secret.set_text(""));
+    page.connect_unmap(move |_| secret.set_text(""));
     page.add(&node);
     page.add(&custom);
     page.add(&payments);
@@ -118,10 +119,9 @@ pub fn add(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
         );
     }
     page.add(&wallets);
-    dialog.add(&page);
     let weak = Rc::downgrade(ui);
     let generation = ui.generation.get();
-    let parent = dialog.downgrade();
+    let parent = page.downgrade();
     save.connect_clicked(move |button| {
         let Some(ui) = weak
             .upgrade()
@@ -179,12 +179,23 @@ pub fn add(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
                 "Could not save Monero settings."
             });
             button.set_sensitive(true);
+            if result.is_ok() { ui.refresh_monero_sidebar(); }
         });
     });
+    page
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore="requires private GTK display"]
+    fn configured_account_shows_monero_tab_and_account_switch_hides_it() {
+        let app=adw::Application::builder().application_id("com.negzero.MoneroTabTest").flags(gtk::gio::ApplicationFlags::NON_UNIQUE).build();app.register(gtk::gio::Cancellable::NONE).unwrap();let ui=Ui::new(&app,true);
+        let owner="wallet@fixture.invalid";ui.state.borrow_mut().account=owner.into();ui.refresh_monero_sidebar();assert!(!ui.media_toggles.borrow().contains_key("monero"));
+        let settings=Settings{enabled:true,daemon:"https://node.example".into(),..Default::default()};ui.store.set_pref(&format!("monero-settings:{owner}"),&serde_json::to_string(&settings).unwrap()).unwrap();ui.refresh_monero_sidebar();assert!(ui.media_toggles.borrow()["monero"].is_enabled());
+        ui.media_tabs.set_active_name(Some("monero"));assert_eq!(ui.media_stack.visible_child_name().as_deref(),Some("monero"));ui.refresh_monero_sidebar();assert_eq!(ui.media_stack.visible_child_name().as_deref(),Some("monero"));
+        ui.state.borrow_mut().account="other@fixture.invalid".into();ui.refresh_monero_sidebar();assert!(!ui.media_toggles.borrow().contains_key("monero"));assert!(ui.media_stack.child_by_name("monero").is_none());ui.window.close();
+    }
     #[test]
     fn node_requires_https_and_separate_credentials() {
         let mut s = Settings {

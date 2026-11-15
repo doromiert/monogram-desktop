@@ -18,6 +18,7 @@ pub struct Image {
     pub width: u32,
     pub height: u32,
     pub animated: bool,
+    pub motion: Option<crate::motion_photo::Clip>,
 }
 struct Task {
     cancel: gio::Cancellable,
@@ -337,12 +338,20 @@ impl Ui {
         if sticker {
             button.add_css_class("message-sticker-tile");
         }
-        content.append(&button);
+        let stage = gtk::Overlay::builder().child(&button).halign(gtk::Align::Start).build();
+        let motion_button = crate::motion_photo_ui::button();
+        stage.add_overlay(&motion_button);
+        content.append(&stage);
+        let motion = Rc::new(RefCell::new(None::<Rc<crate::motion_photo_ui::MotionPhoto>>));
+        let click_motion = motion.clone();
+        let badge_motion = motion.clone();
+        motion_button.connect_clicked(move |_| { if let Some(motion)=badge_motion.borrow().as_ref(){motion.play();} });
         let weak = Rc::downgrade(self);
         if !sticker {
             button.connect_clicked(move |button| {
                 if let Some(ui) = weak.upgrade() {
-                    ui.media_viewer(Some(button.clone().upcast()));
+                    if let Some(motion)=click_motion.borrow().as_ref(){motion.play();}
+                    else {ui.media_viewer(Some(button.clone().upcast()));}
                 }
             });
         }
@@ -351,6 +360,7 @@ impl Ui {
         let b = button.downgrade();
         let fallback = controls.downgrade();
         let location = content.downgrade();
+        let badge = motion_button.downgrade();
         let load = move || {
             let (Some(ui), Some(picture), Some(button)) =
                 (weak.upgrade(), p.upgrade(), b.upgrade())
@@ -395,6 +405,13 @@ impl Ui {
                         let follow = adjustment.upper() - adjustment.page_size() - old < 20.;
                         picture.set_paintable(Some(image.texture.clone().upcast()));
                         button.set_visible(true);
+                        if image.motion.is_some() && let Some(badge)=badge.upgrade() {
+                            badge.set_visible(true);
+                            button.set_tooltip_text(Some("Play motion photo"));
+                            let draw=picture.downgrade();let active=Rc::downgrade(&ui);let target=picture.downgrade();let ratio=f64::from(image.width)/f64::from(image.height);
+                            let controller=crate::motion_photo_ui::MotionPhoto::new(&ui,&file,&path,&picture,&badge,image.texture.clone().upcast(),move |paintable|{if let Some(picture)=draw.upgrade(){picture.set_paintable(Some(paintable.clone()));picture.set_ratio(ratio);}},move ||active.upgrade().zip(target.upgrade()).is_some_and(|(ui,target)|ui.active_media.borrow().is_none()&&ui.in_chat_viewport(&target)));
+                            motion.replace(Some(controller));
+                        }
                         if let Some(controls) = fallback.upgrade() {
                             crate::widgets::reveal_media(&controls, &image.texture);
                         }

@@ -126,3 +126,39 @@ fn child<'a>(xml: &'a Element, name: &str, namespace: &str) -> Result<Option<&'a
     }
     Ok(value)
 }
+
+/// A multi-session nickname may disclose one item per resource (XEP-0045 §19.2).
+/// Collapse those resources only when they agree on identity and permissions.
+fn user_item(user: &Element) -> Result<Option<&Element>> {
+    const USER: &str = "http://jabber.org/protocol/muc#user";
+    let mut items = user.children().filter(|item| item.is("item", USER));
+    let Some(first) = items.next() else {
+        return Ok(None);
+    };
+    let mut count = 1;
+    for item in items {
+        count += 1;
+        if count > 128
+            || ["role", "affiliation", "nick"]
+                .iter()
+                .any(|key| first.attr(*key) != item.attr(*key))
+        {
+            return Err(Error::Invalid);
+        }
+        let identity = |item: &Element| -> Result<String> {
+            let jid = item
+                .attr("jid")
+                .ok_or(Error::Invalid)?
+                .parse::<Jid>()
+                .map_err(|_| Error::Invalid)?;
+            if jid.node().is_none() {
+                return Err(Error::Invalid);
+            }
+            Ok(jid.to_bare().to_string())
+        };
+        if identity(first)? != identity(item)? {
+            return Err(Error::Invalid);
+        }
+    }
+    Ok(Some(first))
+}

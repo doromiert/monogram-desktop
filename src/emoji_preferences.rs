@@ -3,6 +3,15 @@ use crate::{message_actions::canonical_emoji, storage::Store};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashSet;
 
+pub(crate) fn picker_import_allowed(db:&Connection,stamp:Option<u64>)->rusqlite::Result<bool>{
+    let current:Option<String>=db.query_row("SELECT value FROM preferences WHERE key='picker:user-revision'",[],|r|r.get(0)).optional()?;
+    Ok(stamp.is_none_or(|stamp|current.and_then(|v|v.parse::<u64>().ok()).unwrap_or(0)<=stamp))
+}
+pub(crate) fn touch_picker(db:&Connection)->rusqlite::Result<()> {
+    let now=chrono::Utc::now().timestamp_millis().max(1);
+    db.execute("INSERT INTO preferences(key,value) VALUES('picker:user-revision',MAX(?1,(SELECT COALESCE(MAX(CAST(value AS INTEGER)),0)+1 FROM preferences WHERE key='picker:observed-revision'))) ON CONFLICT(key) DO UPDATE SET value=MAX(CAST(value AS INTEGER)+1,CAST(excluded.value AS INTEGER),(SELECT COALESCE(MAX(CAST(value AS INTEGER)),0)+1 FROM preferences WHERE key='picker:observed-revision'))",[now])?;Ok(())
+}
+
 const FAVORITES: &str = "emoji:favorites";
 const PINNED: &str = "emoji:pinned";
 const USAGE: &str = "emoji:usage";
@@ -99,17 +108,23 @@ impl Store {
                 .collect(),
         })
     }
-    pub(crate) fn import_synced_emoji_preferences(&self,value:&serde_json::Value)->rusqlite::Result<()> {
-        let tx=self.db.unchecked_transaction()?;
+    pub(crate) fn import_synced_emoji_preferences(&self,value:&serde_json::Value)->rusqlite::Result<()> {self.import_synced_emoji_preferences_at(value,None).map(|_|())}
+    pub(crate) fn import_synced_emoji_preferences_at(&self,value:&serde_json::Value,stamp:Option<u64>)->rusqlite::Result<bool> {
+        let tx=rusqlite::Transaction::new_unchecked(&self.db,rusqlite::TransactionBehavior::Immediate)?;
+        if !picker_import_allowed(&tx,stamp)?{return Ok(false);}
         for(field,key)in [("emoji_favorites",FAVORITES),("emoji_pinned",PINNED)] {
             if let Some(items)=value[field].as_array(){let entries=canonical_list(items.iter().filter_map(|v|v.as_str().map(str::to_owned)));let json=serde_json::to_string(&entries).map_err(|_|rusqlite::Error::InvalidQuery)?;tx.execute("INSERT INTO preferences(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![key,json])?;}
         }
         if let Some(items)=value["emoji_recent"].as_array(){let entries=canonical_list(items.iter().filter_map(|v|v.as_str().map(str::to_owned)));let count=entries.len();let entries=entries.into_iter().enumerate().map(|(i,v)|(v,(count-i)as u64)).collect::<Vec<_>>();let json=serde_json::to_string(&entries).map_err(|_|rusqlite::Error::InvalidQuery)?;tx.execute("INSERT INTO preferences(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![USAGE,json])?;}
-        tx.commit()
+        tx.commit()?;Ok(true)
+    }
+    pub(crate) fn import_picker_recent_order(&self,keys:&[String],stamp:u64)->rusqlite::Result<bool>{
+        let tx=rusqlite::Transaction::new_unchecked(&self.db,rusqlite::TransactionBehavior::Immediate)?;if !picker_import_allowed(&tx,Some(stamp))?{return Ok(false);}
+        tx.execute("INSERT INTO preferences(key,value) VALUES('picker:recent:emoji',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[serde_json::to_string(keys).map_err(|_|rusqlite::Error::InvalidQuery)?])?;tx.commit()?;Ok(true)
     }
     pub(crate) fn record_picker_recent(&self,key:&str)->rusqlite::Result<()> {
         let raw=self.pref("picker:recent:emoji","[]");let mut keys:Vec<String>=serde_json::from_str(&raw).unwrap_or_default();keys.retain(|old|old!=key);keys.insert(0,key.into());keys.truncate(512);
-        self.set_pref("picker:recent:emoji",&serde_json::to_string(&keys).map_err(|_|rusqlite::Error::InvalidQuery)?)
+        let tx=self.db.unchecked_transaction()?;tx.execute("INSERT INTO preferences(key,value) VALUES('picker:recent:emoji',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[serde_json::to_string(&keys).map_err(|_|rusqlite::Error::InvalidQuery)?])?;touch_picker(&tx)?;tx.commit()
     }
     pub fn record_emoji_recent(&self, emoji: &str) -> rusqlite::Result<()> {
         let emoji = canonical_emoji(emoji).ok_or(rusqlite::Error::InvalidQuery)?;
@@ -151,12 +166,22 @@ impl Store {
         }
         let value = serde_json::to_string(&values).map_err(|_| rusqlite::Error::InvalidQuery)?;
         transaction.execute("INSERT INTO preferences(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key,value])?;
+        touch_picker(&transaction)?;
         transaction.commit()
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_user_changes_advance_picker_revision_above_observed_imports(){
+        let store=Store::open(true).unwrap();let seen=chrono::Utc::now().timestamp_millis()+1000;
+        store.set_pref("picker:observed-revision",&seen.to_string()).unwrap();
+        store.import_synced_emoji_preferences(&serde_json::json!({"emoji_favorites":["🔥"]})).unwrap();assert_eq!(store.pref("picker:user-revision","0"),"0");
+        store.set_emoji_favorite("❤️",true).unwrap();let changed=store.pref("picker:user-revision","0").parse::<i64>().unwrap();assert!(changed>seen);
+        assert!(!store.import_synced_emoji_preferences_at(&serde_json::json!({"emoji_favorites":["😂"]}),Some((changed-1)as u64)).unwrap());assert!(store.emoji_preferences().unwrap().favorites.contains(&"❤️".to_string()));
+        assert!(store.import_synced_emoji_preferences_at(&serde_json::json!({"emoji_favorites":["😂"]}),Some((changed+1)as u64)).unwrap());assert_eq!(store.pref("picker:user-revision","0"),changed.to_string());
+    }
     #[test]
     fn synced_preferences_preserve_order_and_optional_fields() {
         let store=Store::open(true).unwrap();store.set_emoji_pinned("🔥",true).unwrap();

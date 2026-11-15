@@ -105,7 +105,7 @@ impl Registry {
         let Some(state) = self.rooms.get_mut(room) else {
             return;
         };
-        let parsed = child(user, "item", "http://jabber.org/protocol/muc#user");
+        let parsed = user_item(user);
         let item = parsed.as_ref().ok().and_then(|item| *item);
         let removed = xml.attr("type") == Some("unavailable");
         let author = item.and_then(|item| item.attr("jid")).and_then(|real| {
@@ -169,10 +169,9 @@ impl Registry {
             || !snapshot.affiliations.contains_key(owner)
             || state.occupants.values().any(|(author, affiliation)| {
                 author.as_ref().is_none_or(|jid| {
-                    snapshot
-                        .affiliations
-                        .get(jid)
-                        .is_none_or(|listed| listed.name() != affiliation)
+                    snapshot.affiliations.get(jid).is_none_or(|_| {
+                        !matches!(affiliation.as_str(), "member" | "admin" | "owner")
+                    })
                 })
             })
         {
@@ -274,6 +273,132 @@ pub async fn fetch(iq: &iq::Client, room: &str) -> Result<MemberSnapshot> {
 mod tests {
     use super::*;
     #[test]
+    fn admitted_affiliation_changes_keep_complete_recipients_but_revocation_blocks() {
+        let room = "room@conference.example.org";
+        let owner = "owner@example.org";
+        for presence_affiliation in ["member", "admin", "owner", "none", "outcast"] {
+            for listed in [Affiliation::Member, Affiliation::Admin, Affiliation::Owner] {
+                let mut rooms = Rooms::new(owner.into());
+                rooms.join(room, Some("own")).unwrap();
+                let own: Element = format!("<presence xmlns='jabber:client' from='{room}/own'><x xmlns='http://jabber.org/protocol/muc#user'><item jid='{owner}/desktop' affiliation='member' role='participant'/><status code='110'/></x></presence>").parse().unwrap();
+                rooms.presence(&own);
+                let other: Element = format!("<presence xmlns='jabber:client' from='{room}/buddy'><x xmlns='http://jabber.org/protocol/muc#user'><item jid='buddy@example.org/phone' affiliation='{presence_affiliation}' role='participant'/></x></presence>").parse().unwrap();
+                rooms.presence(&other);
+                let revision = rooms.begin_member_refresh(room).unwrap();
+                rooms.member_refresh_finished(
+                    room,
+                    revision,
+                    Ok(MemberSnapshot {
+                        room: room.into(),
+                        affiliations: [
+                            (owner.into(), Affiliation::Member),
+                            ("buddy@example.org".into(), listed),
+                        ]
+                        .into(),
+                    }),
+                );
+                assert_eq!(
+                    rooms.recipients(room).is_ok(),
+                    matches!(presence_affiliation, "member" | "admin" | "owner")
+                );
+                // A complete list still has to contain each identified occupant.
+                let revision = rooms.recipient_revision(room).unwrap();
+                assert!(
+                    rooms
+                        .install_recipients(
+                            room,
+                            revision,
+                            MemberSnapshot {
+                                room: room.into(),
+                                affiliations: [(owner.into(), Affiliation::Member)].into()
+                            }
+                        )
+                        .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn multisession_presence_confirms_join_and_keeps_recipient_identity() {
+        let room = "room@conference.example.org";
+        let owner = "owner@example.org";
+        let mut rooms = Rooms::new(owner.into());
+        rooms.join(room, Some("own")).unwrap();
+        let presence = |nick: &str, author: &str, own: bool| -> Element {
+            format!("<presence xmlns='jabber:client' from='{room}/{nick}' to='{owner}/desktop'><x xmlns='http://jabber.org/protocol/muc#user'><status code='100'/><item jid='{author}/phone' affiliation='member' role='participant'/><item jid='{author}/desktop' affiliation='member' role='participant'/>{}</x></presence>",if own {"<status code='110'/>"} else {""}).parse().unwrap()
+        };
+        assert!(
+            rooms
+                .presence(&presence("buddy", "buddy@example.org", false))
+                .is_none()
+        );
+        let mut jobs = manage::Pending::default();
+        let (reply, mut answer) = tokio::sync::oneshot::channel();
+        jobs.insert(room.into(), rooms.join_id(room).unwrap(), reply);
+        let joined = rooms
+            .presence(&presence("own", owner, true))
+            .expect("accept consistent resource items");
+        jobs.changed(&rooms, room);
+        assert!(joined.joined && joined.can_send);
+        assert_eq!(answer.try_recv().unwrap().unwrap().nick, "own");
+        let revision = rooms
+            .begin_member_refresh(room)
+            .expect("multi-item presence must not invalidate identity");
+        rooms.member_refresh_finished(
+            room,
+            revision,
+            Ok(MemberSnapshot {
+                room: room.into(),
+                affiliations: [
+                    (owner.into(), Affiliation::Member),
+                    ("buddy@example.org".into(), Affiliation::Member),
+                ]
+                .into(),
+            }),
+        );
+        assert_eq!(rooms.recipients(room).unwrap().members.len(), 2);
+        let message: Element =
+            format!("<message xmlns='jabber:client' from='{room}/buddy' type='groupchat'/>")
+                .parse()
+                .unwrap();
+        assert_eq!(
+            rooms.sender(&message, false).unwrap().author,
+            "buddy@example.org"
+        );
+    }
+    #[test]
+    fn multisession_self_presence_rejects_conflicting_items() {
+        let room = "room@conference.example.org";
+        let owner = "owner@example.org";
+        for second in [
+            "jid='attacker@example.org/phone' affiliation='member' role='participant'",
+            "jid='owner@example.org/phone' affiliation='owner' role='participant'",
+            "jid='owner@example.org/phone' affiliation='member' role='moderator'",
+            "affiliation='member' role='participant'",
+            "jid='invalid jid' affiliation='member' role='participant'",
+            "jid='owner@example.org/phone' affiliation='member' role='participant' nick='other'",
+        ] {
+            let mut rooms = Rooms::new(owner.into());
+            rooms.join(room, Some("own")).unwrap();
+            let xml: Element = format!("<presence xmlns='jabber:client' from='{room}/own'><x xmlns='http://jabber.org/protocol/muc#user'><item jid='{owner}/desktop' affiliation='member' role='participant'/><item {second}/><status code='110'/></x></presence>").parse().unwrap();
+            assert!(
+                rooms.presence(&xml).is_none(),
+                "reject inconsistent identity/permission data"
+            );
+            assert!(!rooms.is_joined(room));
+        }
+        let xml: Element = format!(
+            "<x xmlns='http://jabber.org/protocol/muc#user'>{}</x>",
+            format!("<item jid='{owner}/resource' role='participant' affiliation='member'/>")
+                .repeat(129)
+        )
+        .parse()
+        .unwrap();
+        assert!(user_item(&xml).is_err(), "resource list must be bounded");
+    }
+
+    #[test]
     fn recipient_snapshot_tracks_prejoin_occupants_and_fences_lifecycle() {
         let room = "room@conference.example.org";
         let owner = "owner@example.org";
@@ -308,8 +433,8 @@ mod tests {
         let changed = rooms.begin_member_refresh(room).unwrap();
         rooms.member_refresh_finished(room, changed, Ok(mismatched));
         assert!(
-            rooms.recipients(room).is_err(),
-            "occupant affiliations must agree with the lists"
+            rooms.recipients(room).is_ok(),
+            "an affiliation change between admitted roles does not remove membership"
         );
         let message: Element =
             format!("<message xmlns='jabber:client' from='{room}/buddy' type='groupchat'/>")

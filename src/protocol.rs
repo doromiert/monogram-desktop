@@ -533,6 +533,7 @@ fn outgoing_content(peer: &str, message: &Message, quote: &str) -> Element {
 }
 #[derive(Debug, Clone)]
 pub enum BackendEvent {
+    StoriesChanged { owner: String },
     Read {
         peer: String,
         id: String,
@@ -672,6 +673,9 @@ pub enum RoomPreparation {
 }
 #[derive(Debug)]
 pub enum Command {
+    StoriesFetch { peer: String, reply: tokio::sync::oneshot::Sender<crate::stories::Result<Vec<crate::stories::Entry>>> },
+    StoryPublish { entry: crate::stories::Entry, reply: tokio::sync::oneshot::Sender<crate::stories::Result<crate::stories::Entry>> },
+    StoryRetract { id: String, reply: tokio::sync::oneshot::Sender<crate::stories::Result<()>> },
     CryptoReady(bool),
     LegacyReady(bool),
     PqReady(bool),
@@ -1022,6 +1026,10 @@ pub struct Session {
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
 }
 impl Session {
+    #[cfg(test)]
+    pub(crate) fn fixture_channel(tx: channel::UnboundedSender<Command>) -> Self {
+        Self { tx, cancel: None }
+    }
     pub fn start(
         config: Account,
         password: String,
@@ -1071,6 +1079,21 @@ impl Session {
                 loop{tokio::select!{
                     command=rx.recv()=>{match command{
                         None=>break,
+                        Some(Command::StoriesFetch{peer,reply})=>{
+                            if !online{let _=reply.send(Err(crate::stories::Error::Request(crate::iq::Error::Closed)));continue}
+                            let iq=crate::iq::Client::new(network.clone());
+                            tokio::spawn(async move{let mut reply=reply;let result=tokio::select!{result=crate::stories::fetch(&iq,&peer)=>result,_=reply.closed()=>return};let _=reply.send(result);});
+                        },
+                        Some(Command::StoryPublish{entry,reply})=>{
+                            if !online{let _=reply.send(Err(crate::stories::Error::Request(crate::iq::Error::Closed)));continue}
+                            let iq=crate::iq::Client::new(network.clone());let owner=owner.clone();
+                            tokio::spawn(async move{let mut reply=reply;let result=tokio::select!{result=crate::stories::publish(&iq,&owner,entry)=>result,_=reply.closed()=>return};let _=reply.send(result);});
+                        },
+                        Some(Command::StoryRetract{id,reply})=>{
+                            if !online{let _=reply.send(Err(crate::stories::Error::Request(crate::iq::Error::Closed)));continue}
+                            let iq=crate::iq::Client::new(network.clone());let owner=owner.clone();
+                            tokio::spawn(async move{let mut reply=reply;let result=tokio::select!{result=crate::stories::retract(&iq,&owner,&id)=>result,_=reply.closed()=>return};let _=reply.send(result);});
+                        },
                         Some(Command::CryptoReady(ready))=>crypto_ready=ready,
                         Some(Command::LegacyReady(ready))=>legacy_ready=ready,
                         Some(Command::PqReady(ready))=>pq_ready=ready,
@@ -1426,6 +1449,7 @@ impl Session {
                         Some(Event::Stanza(stanza))=>{
                             let root:Element=stanza.into();if let Some(reply)=blocking.push(&root){send(&mut client,reply).await;continue}if iq.receive(&root,&owner){if let Some((epoch,_,serial))=contact_queries.remove(root.attr("id").unwrap_or("")){if root.attr("type")==Some("result")&&root.children().count()==1{if let Some(query)=root.get_child("query",crate::contact_access::ROSTER){if let Err(error)=crate::contact_access::parse_roster(query,true).and_then(|update|contacts.finish_full(epoch,serial,update)){contacts.clear_full(epoch,Some(serial));if contacts.valid(epoch){contacts.error(error)}}}else{contacts.clear_full(epoch,Some(serial));}}else{contacts.clear_full(epoch,Some(serial));}}continue}let from=root.attr("from").unwrap_or("");
                             if root.is("message",NS){
+                                if let Some(story_owner)=crate::stories::changed(&root,&owner){emit(BackendEvent::StoriesChanged{owner:story_owner});}
                                 rooms.configuration_changed(&root);
                                 refresh_room_members(&mut rooms,&bare_of(from),room_epoch,&network);
                                 if crate::rooms::bookmark_changed(&root,&owner) { let _=network.send(Command::LoadRoomBookmarks); }
@@ -1542,7 +1566,7 @@ impl Session {
                                     }
                                     continue;
                                 }
-                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in [crate::packs::emoji_markup::NS,crate::legacy_inline::NS,"urn:xmpp:receipts",crate::read_markers::NS,REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT,crate::polls::NS,crate::forwarding::NS,crate::file_share::NS,crate::rooms::invitations::DIRECT]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if legacy_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),legacy::NS).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}if pq_ready {for suffix in ["",":devices+notify",":bundles+notify",":pqxdh",":spqr",":bundle-v4",":kex-auth"]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),format!("{}{suffix}",crate::crypto::pq::NS)).build());}}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
+                                if root.attr("type")==Some("get")&&root.get_child("query","http://jabber.org/protocol/disco#info").is_some(){let mut query=el("query","http://jabber.org/protocol/disco#info");for ns in [crate::stories::SOCIAL,crate::stories::NODE,"urn:xmpp:pubsub-social-feed:stories:0+notify",crate::packs::emoji_markup::NS,crate::legacy_inline::NS,"urn:xmpp:receipts",crate::read_markers::NS,REPLY,SID,"http://jabber.org/protocol/chatstates",crate::message_actions::CORRECT,crate::message_actions::REACTIONS,crate::message_actions::RETRACT,crate::polls::NS,crate::forwarding::NS,crate::file_share::NS,crate::rooms::invitations::DIRECT]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().expect("static XML attribute"),ns).build());}if legacy_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),legacy::NS).build());}if crypto_ready{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),"urn:xmpp:omemo:2").build());}if pq_ready {for suffix in ["",":devices+notify",":bundles+notify",":pqxdh",":spqr",":bundle-v4",":kex-auth"]{query.append_child(Element::builder("feature","http://jabber.org/protocol/disco#info").attr("var".try_into().unwrap(),format!("{}{suffix}",crate::crypto::pq::NS)).build());}}send(&mut client,Element::builder("iq",NS).attr("to".try_into().expect("static XML attribute"),from).attr("type".try_into().expect("static XML attribute"),"result").attr("id".try_into().expect("static XML attribute"),id).append(query).build()).await;}
                             }
                         }
                     }},

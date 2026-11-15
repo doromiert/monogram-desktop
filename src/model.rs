@@ -220,14 +220,14 @@ impl Message {
     pub fn preview(&self) -> String {
         if let Some(upload) = &self.upload {
             return if self.text.is_empty() {
-                format!("📎 {}", upload.name)
+                if upload.sticker { "Sticker".into() } else { format!("📎 {}", upload.name) }
             } else {
                 crate::formatting::preview(self)
             };
         }
         if let Some(file) = &self.attachment {
             return if self.text.is_empty() {
-                format!("📎 {}", file.name)
+                if file.sticker { "Sticker".into() } else { format!("📎 {}", file.name) }
             } else {
                 crate::formatting::preview(self)
             };
@@ -285,6 +285,8 @@ pub struct Chat {
     pub automatic_encryption: Option<Selection>,
     pub id: String,
     pub name: String,
+    #[serde(skip)]
+    pub local_name: String,
     pub subtitle: String,
     pub avatar: String,
     pub color: String,
@@ -314,6 +316,7 @@ pub struct Chat {
     pub draft_formatting: Option<crate::formatting::Markup>,
 }
 impl Chat {
+    pub fn display_name(&self) -> &str { if self.local_name.is_empty() { &self.name } else { &self.local_name } }
     pub fn encryption_preference(&self) -> Preference {
         self.sending_preference.unwrap_or(if self.encryption {
             Preference::Omemo2
@@ -399,6 +402,11 @@ impl Folder {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Story {
+    pub id: String,
+    pub jid: String,
+    pub url: String,
+    pub mime: String,
+    pub published: i64,
     pub owner: String,
     pub asset: String,
     pub caption: String,

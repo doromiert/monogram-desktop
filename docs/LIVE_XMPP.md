@@ -149,3 +149,44 @@ native fixtures remain a separate acceptance check.
 An attempted HTTP/1.1-only media workaround was reverted: four consecutive cold
 HTTP/1.1 requests alternated successful headers (217/319 ms) and 10-second
 pre-header timeouts. It did not resolve the external response-header stalls.
+
+
+### Multi-session group joining
+
+A real existing-room managed join reproduced a 22-second timeout even though
+discovery succeeded. The room's self presence contained two `muc#user` item
+elements for the same bare account, one per connected resource. The former
+single-child parser discarded that confirmation. XEP-0045's
+[section 19.2 schema](https://xmpp.org/extensions/xep-0045.html#schemas-user)
+allows repeated item elements.
+
+The parser now accepts at most 128 matching resource items, requiring identical
+bare identities, roles, affiliations and replacement nicknames. Ambiguous data
+still fails closed. The same normalization feeds live recipient identity and
+historical author validation. Existing sender, account, status-110 and stale
+presence checks remain in force.
+
+After this change, the same production discovery/keyring/managed join sequence
+confirmed self presence in 1.14 seconds. The diagnostic used a unique resource,
+sent no chat messages, and left that resource's room session afterward. Permanent
+regressions cover the managed join waiter, recipient lists, conflicting identity
+and permissions, missing identity, invalid addresses and bounded resource lists.
+
+The visible group also resumes after reconnect once bookmark credentials and
+nicknames have loaded, including bookmarks with autojoin disabled. A private
+native GTK fixture checks immediate Joining feedback, no premature room MAM,
+and archive loading only after verified self presence.
+
+
+### Complete recipient lists after affiliation changes
+
+The subsequent send failure was reproduced without sending chat text: discovery
+and all three affiliation IQs succeeded, the complete list included the current
+account and every online occupant, but one cached presence said owner while the
+fresh list said member. Both are admitted affiliations. Desktop required exact
+affiliation equality whereas mobile validates membership in the complete list.
+The desktop check now accepts such role changes while retaining complete-list,
+identity, revision and revocation checks. A bounded live preflight installed all
+18 recipients in 1.33 seconds. Regression coverage includes all combinations of
+admitted affiliations plus none/outcast, absent recipients and earlier stale
+membership protections.

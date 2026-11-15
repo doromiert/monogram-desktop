@@ -17,6 +17,8 @@ mod action_store;
 mod avatar;
 #[path = "../src/blocking.rs"]
 mod blocking;
+#[path = "../src/contact_details.rs"]
+mod contact_details;
 #[path = "../src/contact_access.rs"]
 mod contact_access;
 #[path = "../src/credentials.rs"]
@@ -57,6 +59,8 @@ mod read_markers;
 mod rooms;
 #[path = "../src/spoilers.rs"]
 mod spoilers;
+#[path = "../src/stories.rs"]
+mod stories;
 #[path = "../src/storage.rs"]
 mod storage;
 #[path = "../src/transport.rs"]

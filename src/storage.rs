@@ -1,6 +1,8 @@
 use crate::model::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+#[path = "stories_store.rs"]
+mod stories_store;
 #[path = "request_store.rs"]
 mod request_store;
 #[path = "rooms/store.rs"]
@@ -90,6 +92,8 @@ impl Store {
         store.init_rooms()?;
         store.init_requests()?;
         store.init_read_markers()?;
+        store.init_stories()?;
+        store.init_contact_details()?;
         store.init_link_previews()?;
         for account in store.accounts(){store.migrate_chat_defaults(&account.jid)?;}
         store.db.execute_batch("CREATE INDEX IF NOT EXISTS queued_outbox ON messages(account,timestamp,id) WHERE json_extract(body,'$.outbox_pending')=1;")?;
@@ -143,10 +147,9 @@ impl Store {
             )
             .optional()
             .map(|value| value.unwrap_or_else(|| {
-                // Direct conversations default to blind trust; rooms retain their
-                // separate opt-in, and explicit contact choices remain authoritative.
+                // Both direct chats and rooms default to automatic fingerprint trust.
+                // Explicit choices after the one-time upgrade remain authoritative.
                 !owner.is_empty() && crate::protocol::bare(peer).is_ok()
-                    && !self.db.query_row("SELECT COALESCE(json_extract(body,'$.group'),0) FROM chats WHERE account=? AND peer=?",params![owner,peer],|r|r.get::<_,bool>(0)).unwrap_or(false)
             }))
     }
     pub(crate) fn blind_trust_for(

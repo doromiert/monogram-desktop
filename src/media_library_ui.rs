@@ -896,6 +896,7 @@ pub(crate) enum PackLibraryAction {
     ImportTelegram,
     Create,
     Manage,
+    Edit,
 }
 
 #[derive(Clone, Debug)]
@@ -1408,6 +1409,7 @@ impl PackLibraryPage {
                 group = Some(button.clone());
             }
             button.set_active(pack.id == selected);
+            self.attach_pack_drag(&button, pack.id);
             let weak = Rc::downgrade(self);
             let preview = button.downgrade();
             let library = self.library.clone();
@@ -1602,6 +1604,54 @@ impl PackLibraryPage {
         self.model.splice(0, self.model.n_items(), &rows);
     }
 
+    fn attach_pack_drag(self: &Rc<Self>, button: &gtk::ToggleButton, id: i64) {
+        let source = gtk::DragSource::builder().actions(gtk::gdk::DragAction::MOVE).build();
+        source.connect_prepare(move |_, _, _| {Some(gtk::gdk::ContentProvider::for_value(&id.to_string().to_value()))});
+        source.connect_drag_begin(|source,_|source.set_icon(Some(&gtk::WidgetPaintable::new(gtk::Widget::NONE)),0,0));
+        button.add_controller(source);
+        let target = gtk::DropTarget::new(String::static_type(), gtk::gdk::DragAction::MOVE);
+        target.set_preload(true);
+        target.connect_enter(|_, _, _| gtk::gdk::DragAction::MOVE);
+        let hovered = Rc::new(Cell::new(None));
+        let hover = hovered.clone();
+        let weak = Rc::downgrade(self);
+        target.connect_motion(move |target, _, _| {
+            let Some(page) = weak.upgrade() else { return gtk::gdk::DragAction::empty(); };
+            if let Some(from) = target.value().and_then(|v| v.get::<String>().ok()).and_then(|v|v.parse::<i64>().ok()) {
+                if hover.replace(Some(from)) != Some(from) { page.move_pack_tab(from, id); }
+            }
+            gtk::gdk::DragAction::MOVE
+        });
+        let weak = Rc::downgrade(self);
+        target.connect_drop(move |_, value, _, _| {
+            let (Some(page), Some(from)) = (weak.upgrade(), value.get::<String>().ok().and_then(|v|v.parse::<i64>().ok())) else { return false; };
+            if hovered.get() != Some(from) {page.move_pack_tab(from, id);}
+            page.save_pack_bar_order();
+            true
+        });
+        button.add_controller(target);
+        button.update_property(&[gtk::accessible::Property::Description("Drag or use Alt+Left and Alt+Right to reorder packs")]);
+        let keys=gtk::EventControllerKey::new();let weak=Rc::downgrade(self);let source=button.downgrade();keys.connect_key_pressed(move|_,key,_,modifiers|{
+            if !modifiers.contains(gtk::gdk::ModifierType::ALT_MASK)||!matches!(key,gtk::gdk::Key::Left|gtk::gdk::Key::Right){return glib::Propagation::Proceed;}
+            let(Some(page),Some(source))=(weak.upgrade(),source.upgrade())else{return glib::Propagation::Proceed;};let mut ordered=Vec::new();let buttons=page.section_buttons.borrow();let mut child=page.selector.first_child();while let Some(widget)=child{child=widget.next_sibling();if buttons.iter().any(|(id,b)|*id>=0&&b.upcast_ref::<gtk::Widget>()==&widget){ordered.push(widget);}}drop(buttons);
+            let Some(from)=ordered.iter().position(|w|w==source.upcast_ref::<gtk::Widget>())else{return glib::Propagation::Proceed;};let to=if key==gtk::gdk::Key::Left{from.checked_sub(1)}else{from.checked_add(1).filter(|to|*to<ordered.len())};if let Some(to)=to{if from<to{page.selector.reorder_child_after(&source,Some(&ordered[to]));}else{page.selector.reorder_child_after(&source,ordered[to].prev_sibling().as_ref());}page.save_pack_bar_order();}glib::Propagation::Stop
+        });button.add_controller(keys);
+    }
+    fn move_pack_tab(&self, from: i64, to: i64) {
+        if from == to { return; }
+        let buttons = self.section_buttons.borrow();
+        let (Some(source), Some(target)) = (buttons.get(&from), buttons.get(&to)) else { return; };
+        let mut order = Vec::new(); let mut child = self.selector.first_child();
+        while let Some(widget) = child { child = widget.next_sibling(); order.push(widget); }
+        let (Some(from), Some(to)) = (order.iter().position(|w| w == source.upcast_ref::<gtk::Widget>()), order.iter().position(|w| w == target.upcast_ref::<gtk::Widget>())) else { return; };
+        if from < to { self.selector.reorder_child_after(source, Some(target)); }
+        else { self.selector.reorder_child_after(source, target.prev_sibling().as_ref()); }
+    }
+    fn save_pack_bar_order(self:&Rc<Self>){
+        let page=self.clone();
+let mut ids=Vec::new();let buttons=page.section_buttons.borrow();let mut child=page.selector.first_child();while let Some(widget)=child{child=widget.next_sibling();if let Some((id,_))=buttons.iter().find(|(id,b)|**id>=0&&b.upcast_ref::<gtk::Widget>()==&widget){ids.push(*id);}}drop(buttons);
+            page.status.set_label("Saving pack order…");page.status.set_visible(true);let library=page.library.clone();let kind=page.kind;glib::spawn_future_local(async move{match library.mutate(crate::packs::Mutation::Reorder{kind,ids}).await{Ok(_)=>page.refresh(),Err(error)=>page.status.set_label(&error.to_string())}});
+    }
     fn collapsed_key(&self,id:i64)->String {format!("picker:collapsed:{}:{id}",if self.kind==Kind::Emoji{"emoji"}else{"stickers"})}
     fn section_collapsed(&self,id:i64)->bool {self.ui.upgrade().is_some_and(|ui|ui.store.pref(&self.collapsed_key(id),"false")=="true")}
     fn push_heading(&self, rows: &mut Vec<glib::BoxedAnyObject>, id: i64, title: &str) {
@@ -1671,6 +1721,16 @@ impl PackLibraryPage {
                 let collapsed=self.section_collapsed(*id);body.append(&gtk::Image::from_icon_name(if collapsed{"pan-end-symbolic"}else{"pan-down-symbolic"}));button.set_child(Some(&body));
                 button.update_state(&[gtk::accessible::State::Expanded(Some(!collapsed))]);
                 let weak=Rc::downgrade(self);let id=*id;button.connect_clicked(move|_|{if let Some(page)=weak.upgrade(){if let Some(ui)=page.ui.upgrade(){let _=ui.store.set_pref(&page.collapsed_key(id),if page.section_collapsed(id){"false"}else{"true"});page.rebuild_rows();}}});button.upcast()
+            }
+            PickerRow::Heading(id, title) if *id >= 0 => {
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                let label = crate::widgets::text(title, "picker-section-heading");
+                label.set_hexpand(true); label.set_xalign(0.);
+                let edit = crate::widgets::icon_button("document-edit-symbolic", "Edit Pack");
+                edit.add_css_class("flat");
+                let weak=Rc::downgrade(self); let id=*id;
+                edit.connect_clicked(move |_| { if let Some(page)=weak.upgrade() { (page.on_manage)(&page, PackLibraryAction::Edit, Some(id)); } });
+                row.append(&label);row.append(&edit);row.upcast()
             }
             PickerRow::Heading(_,title) | PickerRow::Empty(title) => {
                 let label = crate::widgets::text(
@@ -2123,7 +2183,8 @@ impl Ui {
                 });
                 dialog.present(Some(&self.window));
             }
-            PackLibraryAction::Manage => {
+            PackLibraryAction::Manage => crate::pack_editor::manage(self, page, library, kind),
+            PackLibraryAction::Edit => {
                 let Some(pack) = selected.filter(|id| *id >= 0) else {
                     self.notice("Select a pack first");
                     return;

@@ -1094,6 +1094,9 @@ impl Ui {
         }
     }
     fn capture_scroll_position(&self) -> ScrollTarget {
+        self.capture_scroll_position_excluding(&[])
+    }
+    fn capture_scroll_position_excluding(&self, removed: &[String]) -> ScrollTarget {
         let value = self.scroll.vadjustment().value();
         let mut row = self
             .timeline
@@ -1102,7 +1105,8 @@ impl Ui {
         let mut anchor = None;
         while let Some(widget) = row {
             let id = widget.widget_name();
-            if let Some(bubble) = self.bubbles.borrow().get(id.as_str()) {
+            if !removed.iter().any(|removed| removed == id.as_str())
+                && let Some(bubble) = self.bubbles.borrow().get(id.as_str()) {
                 if let Some(bounds) = bubble.compute_bounds(&self.timeline) {
                     anchor = Some((id.to_string(), f64::from(bounds.y()) - value));
                     break;
@@ -1375,6 +1379,11 @@ impl Ui {
         });
     }
     pub fn delete_messages(self: &Rc<Self>, ids: &[String]) {
+        let position = if self.at_message_end() {
+            ScrollTarget::Bottom
+        } else {
+            self.capture_scroll_position_excluding(ids)
+        };
         let mut s = self.state.borrow_mut();
         let peer = s.current().jid.clone();
         let Ok(ids) = self.store.deletion_targets(&s.account, &peer, ids) else {
@@ -1421,7 +1430,7 @@ impl Ui {
         }
         self.clear_selection();
         self.persist();
-        self.render_messages(false);
+        self.render_messages_at(position);
         self.refresh_chats(None);
     }
     pub fn react(self: &Rc<Self>, id: &str, emoji: &str) {

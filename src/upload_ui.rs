@@ -569,14 +569,22 @@ impl Ui {
         true
     }
     pub(crate) fn pending_sticker_content(self:&Rc<Self>,message:&Message)->gtk::Box {
-        let content=bx(true,0);let picture=AspectImage::thumbnail(168,true);content.append(&picture);
-        let Some(item)=message.upload.as_ref().and_then(|draft|draft.local_sticker)else{return content;};
+        if let Some(item)=message.upload.as_ref().and_then(|draft|draft.local_sticker){self.pack_item_preview(item,168,false)}else{bx(true,0)}
+    }
+    pub(crate) fn pack_item_preview(self:&Rc<Self>,item:i64,edge:i32,loading:bool)->gtk::Box {
+        let content=bx(true,0);let picture=AspectImage::thumbnail(edge,true);let overlay=gtk::Overlay::new();overlay.set_child(Some(&picture));let spinner=gtk::Spinner::new();spinner.set_spinning(loading);spinner.set_visible(loading);spinner.set_halign(gtk::Align::Center);spinner.set_valign(gtk::Align::Center);overlay.add_overlay(&spinner);content.append(&overlay);let indicator=spinner.downgrade();
         let owner=self.state.borrow().account.clone();let generation=self.generation.get();let weak=Rc::downgrade(self);let image=picture.downgrade();
         glib::spawn_future_local(async move {
             let result=async {
                 let library=crate::packs::Library::open(&owner).await.map_err(|e|e.to_string())?;
-                let (asset,input)=library.verified_asset(item,crate::packs::Job::new()).await.map_err(|e|e.to_string())?;
+                loop {
+                    let Some(picture)=image.upgrade()else{return Err("Preview closed".into());};
+                    let visible=picture.is_mapped()&&picture.ancestor(gtk::ScrolledWindow::static_type()).and_then(|w|w.downcast::<gtk::ScrolledWindow>().ok()).is_some_and(|scroll|picture.compute_bounds(&scroll).is_some_and(|bounds|bounds.y()+bounds.height()>0.&&bounds.y()<scroll.height()as f32));
+                    if visible{break;}glib::timeout_future(Duration::from_millis(50)).await;
+                }
                 let _permit=crate::media_library_ui::lottie_permit().await;
+                if image.upgrade().is_none(){return Err("Preview closed".into());}
+                let (asset,input)=library.verified_asset(item,crate::packs::Job::new()).await.map_err(|e|e.to_string())?;
                 gtk::gio::spawn_blocking(move||{
                     let cancel=gtk::gio::Cancellable::new();
                     if asset.item.mime=="video/webm" {
@@ -589,6 +597,7 @@ impl Ui {
             }.await;
             let(Some(ui),Some(picture))=(weak.upgrade(),image.upgrade())else{return;};
             if ui.generation.get()!=generation||ui.state.borrow().account!=owner{return;}
+            if let Some(spinner)=indicator.upgrade(){spinner.stop();spinner.set_visible(false);}
             match result {Ok(texture)=>picture.set_paintable(Some(texture.upcast())),Err(error)=>picture.set_tooltip_text(Some(&error))}
         });content
     }

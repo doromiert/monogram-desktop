@@ -205,6 +205,8 @@ impl SourceStamp {
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PreviewMetadata {
+    format: u8,
+    motion: Option<crate::motion_photo::Clip>,
     source: SourceStamp,
     mime: String,
     width: u32,
@@ -240,7 +242,7 @@ fn cached_preview(
     let split = bytes.iter().take(2048).position(|byte| *byte == b'\n')?;
     let metadata: PreviewMetadata = serde_json::from_slice(&bytes[..split]).ok()?;
     let png = &bytes[split + 1..];
-    if &metadata.source != source
+    if metadata.format != 2 || &metadata.source != source
         || metadata.width == 0
         || metadata.height == 0
         || !(metadata.mime.starts_with("image/")
@@ -257,6 +259,7 @@ fn cached_preview(
         width: metadata.width,
         height: metadata.height,
         animated: metadata.animated,
+        motion: metadata.motion,
     })
 }
 fn save_preview(
@@ -275,6 +278,8 @@ fn save_preview(
     }
     let png = image.texture.save_to_png_bytes();
     let metadata = PreviewMetadata {
+        format: 2,
+        motion: image.motion,
         source,
         mime: image.mime.clone(),
         width: image.width,
@@ -381,7 +386,8 @@ pub fn preview(
     if !allow_decode {
         return Err("Preview not cached");
     }
-    let input = crate::downloads::verified_input(path, file, stopped)?;
+    let mut input = crate::downloads::verified_input(path, file, stopped)?;
+    let motion = if file.sticker { None } else { crate::motion_photo::inspect(&mut input.0) };
     let stamp = input
         .0
         .metadata()
@@ -402,6 +408,7 @@ pub fn preview(
         width: decoder.width,
         height: decoder.height,
         animated: frame.delay.is_some(),
+        motion,
     };
     if let (Some(path), Some(stamp)) = (cached, stamp) {
         save_preview(&path, stamp, &image, cancel);

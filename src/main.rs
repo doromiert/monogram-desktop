@@ -8,6 +8,8 @@ mod blocking_ui;
 mod clipboard_upload;
 mod chat_states;
 mod contact_access;
+mod contact_details;
+mod contact_details_ui;
 mod contact_access_ui;
 mod composer_attachments_ui;
 mod credentials;
@@ -56,6 +58,8 @@ mod media;
 mod media_caption;
 mod media_library_ui;
 mod media_store;
+mod motion_photo;
+mod motion_photo_ui;
 mod message_actions;
 mod messages;
 mod model;
@@ -78,6 +82,8 @@ mod pack_editor;
 mod picker_zoom;
 mod smoke;
 mod spoilers;
+mod stories;
+mod stories_ui;
 mod storage;
 mod transport;
 mod ui;
@@ -440,3 +446,7 @@ thread_local! {static ROOT:std::cell::RefCell<Option<std::rc::Rc<ui::Ui>>>=const
 #[cfg(test)]
 #[path = "../tests/picker_actions_native.rs"]
 mod picker_actions_native;
+
+#[cfg(test)]
+#[path = "../tests/room_restore_native.rs"]
+mod room_restore_native;

@@ -384,3 +384,26 @@ fn pointer_reactions_keep_viewport_and_keyboard_focus() {
     app.run_with_args::<&str>(&[]);
     assert!(passed.get(), "actual pointer reaction changed viewport");
 }
+
+#[test]
+#[ignore = "requires private GTK display"]
+fn deletion_preserves_bottom_and_surviving_visible_anchor() {
+    let app=adw::Application::builder().application_id("com.negzero.DeleteScrollTest").flags(gio::ApplicationFlags::NON_UNIQUE).build();
+    let passed=Rc::new(Cell::new(false));let result=passed.clone();
+    app.connect_activate(move|app|{
+        let ui=ui::Ui::new(app,true);let mut state=model::State::live("",vec![]);let peer="peer@fixture.invalid";
+        for n in 0..50{state.chat_for(peer).messages.push(model::Message{id:format!("delete-{n:02}"),text:format!("Message{n}\n{}","A line\n".repeat(5)),kind:"text".into(),timestamp:format!("2026-11-15T10:{n:02}:00Z"),..Default::default()});}
+        state.active=state.chat_for(peer).id.clone();ui.activate_state(state);ui.window.set_default_size(1000,700);ui.window.present();
+        let app=app.clone();let passed=result.clone();glib::spawn_future_local(async move{
+            settle(&ui).await;ui.queue_message_scroll(ScrollTarget::Bottom);settle(&ui).await;
+            assert!(ui.at_message_end());ui.select_message("delete-49",false);ui.delete_messages(&["delete-49".into()]);settle(&ui).await;
+            assert!(ui.at_message_end(),"deleting at bottom must remain at bottom");
+            let adjustment=ui.scroll.vadjustment();adjustment.set_value((adjustment.upper()-adjustment.page_size())*0.5);settle(&ui).await;
+            let value=adjustment.value();let mut visible=ui.bubbles.borrow().iter().filter_map(|(id,w)|w.compute_bounds(&ui.timeline).map(|b|(id.clone(),b.y() as f64-value))).filter(|(_,y)|*y>=0.).collect::<Vec<_>>();visible.sort_by(|a,b|a.1.total_cmp(&b.1));
+            let removed=ui.timeline.row_at_y(value as i32).unwrap().widget_name().to_string();let surviving=visible[0].0.clone();assert_ne!(removed,surviving);let before=position(&ui,&surviving);
+            ui.select_message(&removed,false);ui.delete_messages(&[removed]);settle(&ui).await;
+            assert!((position(&ui,&surviving)-before).abs()<3.,"deletion moved surviving anchor:before={before},after={},value={},anchor={surviving}",position(&ui,&surviving),adjustment.value());
+            passed.set(true);ui.window.close();app.quit();
+        });
+    });app.run_with_args(&["delete-scroll-test"]);assert!(passed.get());
+}
