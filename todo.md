@@ -75,4 +75,4 @@
 
 - [x] Cap bubbles at 40% of the clamp maximum (432px), shrinking to available width on narrow windows.
 - [x] Keep fitting URLs whole; prefer `/`, `&`, `?` breaks otherwise, preserving text/copy/style and safe oversized-segment fallback.
-- [ ] Verify raw/rich links, selection, formatting and full app layout; update package.
+- [x] Verify raw/rich links, selection, formatting and full app layout; update package (native geometry/selection/formatting passed; final packaged smoke 254ms maximum heartbeat gap; ZenPkgs d57d97c9 installed and running).
