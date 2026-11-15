@@ -524,6 +524,24 @@ impl Ui {
             ui.poll_uploads();
             glib::ControlFlow::Continue
         });
+        if !smoke {
+            // Telegram packs are checked after startup and then every half hour; each pack
+            // is only re-imported once its own six-hour interval has passed.
+            let updates = Rc::downgrade(&ui);
+            glib::timeout_add_seconds_local(30 * 60, move || {
+                let Some(ui) = updates.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                ui.update_due_packs();
+                glib::ControlFlow::Continue
+            });
+            let first = Rc::downgrade(&ui);
+            glib::timeout_add_seconds_local_once(90, move || {
+                if let Some(ui) = first.upgrade() {
+                    ui.update_due_packs();
+                }
+            });
+        }
         let weak = Rc::downgrade(&ui);
         let typing_ui = Rc::downgrade(&ui);
         glib::timeout_add_local(Duration::from_secs(1), move || {

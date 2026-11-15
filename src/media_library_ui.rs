@@ -2070,6 +2070,52 @@ impl Drop for PackLibraryPage {
 }
 
 impl Ui {
+    /// Re-imports connected Telegram packs whose last check is older than six hours
+    /// (`Library::due_updates`). Failures are recorded on the pack by `import_telegram`.
+    pub(crate) fn update_due_packs(self: &Rc<Self>) {
+        static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let owner = self.state.borrow().account.clone();
+        if owner.is_empty() || RUNNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
+        let generation = self.generation.get();
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let mut updated = false;
+            if let Ok(library) = Library::open(&owner).await
+                && let Ok(due) = library.due_updates().await
+                && !due.is_empty()
+                && library.telegram_enabled().await.unwrap_or(false)
+            {
+                for id in due {
+                    let current = weak
+                        .upgrade()
+                        .is_some_and(|ui| ui.generation.get() == generation && ui.state.borrow().account == owner);
+                    if !current {
+                        break;
+                    }
+                    let source = library
+                        .snapshot()
+                        .await
+                        .ok()
+                        .and_then(|s| s.packs.into_iter().find(|p| p.id == id))
+                        .map(|p| p.source);
+                    if let Some(source) = source
+                        && library.import_telegram(source, Some(id), Job::new()).await.is_ok()
+                    {
+                        updated = true;
+                    }
+                }
+            }
+            RUNNING.store(false, std::sync::atomic::Ordering::Release);
+            if updated && let Some(ui) = weak.upgrade() {
+                for page in ui.pack_pages.borrow().clone() {
+                    page.refresh();
+                }
+            }
+        });
+    }
+
     pub(crate) fn refresh_favorite_views(self: &Rc<Self>) {
         for page in self.pack_pages.borrow().clone() {
             if page.kind == Kind::Stickers {
