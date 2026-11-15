@@ -58,6 +58,8 @@ mod media;
 mod media_caption;
 mod media_library_ui;
 mod media_store;
+mod motion_photo;
+mod motion_photo_ui;
 mod message_actions;
 mod messages;
 mod model;

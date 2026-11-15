@@ -56,6 +56,11 @@ static void refresh (MonogramVideo *self) {
   gboolean ended = state == CLAPPER_PLAYER_STATE_STOPPED ||
       (state == CLAPPER_PLAYER_STATE_PAUSED && duration > 0 &&
        clapper_player_get_position (self->player) >= duration - .05);
+  /* Expose Clapper's EOS to still-first motion photos and GTK replay callers. */
+  if (ended && self->has_played && !self->starting &&
+      !gtk_media_stream_get_loop (stream) && gtk_media_stream_is_prepared (stream) &&
+      !gtk_media_stream_get_ended (stream))
+    gtk_media_stream_stream_ended (stream);
   if (self->replay) gtk_widget_set_visible (self->replay,
       ended && self->has_played && !gtk_media_stream_get_loop (stream));
   if (item) g_object_unref (item);

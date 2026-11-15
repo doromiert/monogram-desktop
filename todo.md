@@ -48,3 +48,9 @@
 
 - [x] Add local contact nickname/avatar/notes and suggest-avatar controls in Conversation Info; sync contact overrides with mobile.
 - [x] Mark focused bottom-of-chat MUC messages read, including after dialogs close.
+
+## Motion photos
+
+- [x] Preserve JPEG still and embedded MP4 through the existing XMPP encrypted file path on both clients.
+- [x] Desktop: still-first inline/viewer playback, keyboard-accessible play/stop, one-shot playback returning to still.
+- [ ] Verify malformed containers, persistence/retry, native playback/lifecycle and UI responsiveness; build fresh mobile APK.

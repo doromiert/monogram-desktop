@@ -751,6 +751,8 @@ pub struct MediaViewer {
     video_controls: gtk::Revealer,
     controls_mount: gtk::Box,
     replay_mount: gtk::Box,
+    motion_button: gtk::Button,
+    motions: RefCell<HashMap<String,Rc<crate::motion_photo_ui::MotionPhoto>>>,
     active_video: RefCell<Option<Rc<crate::video_ui::Playback>>>,
     playbacks: RefCell<HashMap<String, Rc<crate::video_ui::Playback>>>,
     progress: Cell<f64>,
@@ -876,6 +878,8 @@ impl MediaViewer {
         download.set_visible(!ui.state.borrow().account.is_empty());
         let fullscreen = icon_button("view-fullscreen-symbolic", "Fullscreen");
         let end_controls = bx(false, 0);
+        let motion_button=crate::motion_photo_ui::button();
+        end_controls.append(&motion_button);
         end_controls.append(&download);
         end_controls.append(&fullscreen);
         header.pack_end(&end_controls);
@@ -974,6 +978,8 @@ impl MediaViewer {
             video_controls,
             controls_mount,
             replay_mount,
+            motion_button,
+            motions: RefCell::new(HashMap::new()),
             active_video: RefCell::new(None),
             playbacks: RefCell::new(HashMap::new()),
             progress: Cell::new(0.),
@@ -1111,10 +1117,19 @@ impl MediaViewer {
             if !inside {
                 viewer.close();
             } else {
+                let id=viewer.items.borrow()[viewer.index.get()].id.clone();
+                if let Some(motion)=viewer.motions.borrow().get(&id){motion.play();}
                 viewer.reveal_controls();
             }
         });
         viewer.root.add_controller(click);
+        let weak=Rc::downgrade(&viewer);
+        viewer.motion_button.connect_clicked(move |_|{
+            if let Some(viewer)=weak.upgrade(){
+                let id=viewer.items.borrow()[viewer.index.get()].id.clone();
+                if let Some(motion)=viewer.motions.borrow().get(&id){motion.play();}
+            }
+        });
         let context = gtk::GestureClick::new();
         context.set_button(gdk::BUTTON_SECONDARY);
         context.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -1467,6 +1482,7 @@ impl MediaViewer {
                 return glib::ControlFlow::Continue;
             }
             let current = index == active;
+            if current {viewer.motion_button.set_visible(viewer.motions.borrow().contains_key(&id));}
             let edge = if current { 4096 } else { 384 };
             let Some(message) = ui
                 .store
@@ -1577,21 +1593,15 @@ impl MediaViewer {
             if let Some(path) = ui.cached_image_source(&file) {
                 match ui.image(&file, &path, edge) {
                     Some(Ok(image)) => {
-                        if ui
-                            .store
-                            .remember_image(
-                                &viewer.owner,
-                                &viewer.peer,
-                                &id,
-                                &file,
-                                &image.mime,
-                                image.width,
-                                image.height,
-                                image.animated,
-                            )
-                            .unwrap_or(false)
                         {
+                            ui.remember_media_metadata(&viewer.owner,&viewer.peer,&id,&file,&image.mime,image.width,image.height,image.animated);
                             picture.set_paintable(Some(&image.texture));
+                            if image.motion.is_some() && !viewer.motions.borrow().contains_key(&id) {
+                                let draw=picture.downgrade();let active=Rc::downgrade(&viewer);let target_id=id.clone();
+                                let controller=crate::motion_photo_ui::MotionPhoto::new(&ui,&file,&path,&picture,&viewer.motion_button,image.texture.clone().upcast(),move |paintable|{if let Some(picture)=draw.upgrade(){picture.set_paintable(Some(paintable));}},move ||active.upgrade().is_some_and(|viewer|!viewer.closing.get()&&viewer.items.borrow()[viewer.index.get()].id==target_id));
+                                viewer.motions.borrow_mut().insert(id.clone(),controller);
+                                if current {viewer.motion_button.set_visible(true);}
+                            }
                             if current && image.animated && !playing {
                                 playing = true;
                                 let weak = Rc::downgrade(&viewer);
