@@ -167,13 +167,14 @@ mod message_bubble_limit_imp {
             };
             if orientation == gtk::Orientation::Horizontal {
                 let (minimum, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
-                return (minimum, natural.max(minimum), -1, -1);
+                // The outer clamp owns width; an unbroken URL must not enlarge its minimum.
+                return (minimum.min(320), natural.max(minimum), -1, -1);
             }
             let (minimum, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
             let child_width = if for_size < 0 {
                 natural.max(minimum).max(1)
             } else {
-                let cap=for_size.saturating_mul(2)/5;
+                let cap=for_size.max(1);
                 if child.has_css_class("message-editing"){cap.max(1)}else{natural.min(cap).max(1)}
             };
             let (minimum,natural,base,natural_base)=child.measure(gtk::Orientation::Vertical, child_width);
@@ -192,7 +193,7 @@ mod message_bubble_limit_imp {
                     text.set_compact(false);
                 }
             }
-            let cap = width.max(0).saturating_mul(2) / 5;
+            let cap = width.max(1);
             let (_, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
             let child_width = if child.has_css_class("message-editing"){cap.max(1)}else{natural.min(cap).max(1)};
             let x = if self.own.get() {
@@ -326,7 +327,7 @@ fn link_markup(source: &str, suffix: &str, links: &[crate::link_previews::Clicka
         markup.push_str(&glib::markup_escape_text(&source[cursor..link.range.start]));
         markup.push_str("<a href=\"");
         markup.push_str(&glib::markup_escape_text(&link.uri));
-        markup.push_str("\"><span allow_breaks=\"false\">");
+        markup.push_str("\"><span segment=\"word\">");
         markup.push_str(&glib::markup_escape_text(&source[link.range.clone()]));
         markup.push_str("</span></a>");
         cursor = link.range.end;
@@ -391,6 +392,8 @@ impl MessageText {
         links: Vec<crate::link_previews::ClickableUrl>,
     ) -> Self {
         let widget: Self = glib::Object::new();
+        // Media captions use one character to let the media choose their width.
+        if body.max_width_chars()>1 {body.set_max_width_chars(-1);}
         let source = body.text().to_string();
         let layout = body.create_pango_layout(Some(&source));
         let rtl = layout.line_readonly(0).is_some_and(|line| {
@@ -845,6 +848,46 @@ impl AspectImage {
 #[cfg(test)]
 mod media_geometry_tests {
     use super::*;
+
+    #[test]
+    #[ignore="requires private native display"]
+    fn message_bubbles_use_full_clamp_and_short_messages_stay_tight() {
+        adw::init().unwrap();
+        let css=gtk::CssProvider::new();css.load_from_path(asset("style.css"));
+        gtk::style_context_add_provider_for_display(&gdk::Display::default().unwrap(),&css,gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        let rows=bx(true,8);
+        let body=wrap(&"A longer message can use the full readable conversation column. ".repeat(12),"message-text");
+        let long=MessageText::new(&body,&bx(false,0));
+        rows.append(&MessageBubbleLimit::new(&long,false));
+        let short=MessageText::new(&wrap("meow","message-text"),&bx(false,0));
+        rows.append(&MessageBubbleLimit::new(&short,true));
+        let editing=bx(true,0);editing.add_css_class("message-editing");editing.append(&gtk::TextView::new());
+        rows.append(&MessageBubbleLimit::new(&editing,true));
+        let link=wrap("https://github.com/doromiert/monogram-desktop/pull/2?expanded-message-width=full-conversation-clamp","message-text");
+        let mut rich=crate::markdown::RichText::plain(&link.text());rich.links.push(crate::markdown::Link{start:0,end:link.text().len(),uri:link.text().into()});
+        let link_text=MessageText::with_rich(&link,&bx(false,0),rich);
+        rows.append(&MessageBubbleLimit::new(&link_text,false));
+        let clamp=adw::Clamp::builder().child(&rows).maximum_size(1080).tightening_threshold(840).build();
+        let window=gtk::Window::builder().default_width(1000).default_height(700).child(&clamp).build();window.present();
+        let context=glib::MainContext::default();
+        let settle=||{let until=std::time::Instant::now()+std::time::Duration::from_millis(160);while std::time::Instant::now()<until{context.iteration(false);std::thread::sleep(std::time::Duration::from_millis(1));}};
+        settle();
+        assert!(long.width()>rows.width()*9/10,"long message {}px should use the {}px clamp",long.width(),rows.width());
+        assert_eq!(editing.width(),rows.width());
+        assert!(short.width()<160,"short bubbles still fit content");
+        let bounds=short.compute_bounds(&rows).unwrap();assert!((bounds.x()+bounds.width()-rows.width() as f32).abs()<2.,"outgoing bubble keeps right alignment");
+        assert!(link.width()>rows.width()*2/5,"the reported URL no longer squeezes into 40%");
+        assert!(link.layout().pixel_size().0<=link.width(),"URL fits the expanded bubble");
+        window.set_default_size(400,700);settle();
+        assert!(long.width()<=rows.width());assert_eq!(editing.width(),rows.width());
+        assert!(body.layout().pixel_size().0<=body.width());
+        assert!(link.layout().pixel_size().0<=link.width(),"oversized URL wraps within a narrow column");
+        let prefix="A short introduction before this link: ";let source=format!("{prefix}https://github.com/doromiert/monogram-desktop/pull/2");
+        let preferred=wrap(&source,"message-text");let links=crate::link_previews::clickable_urls(&source,None);linkify_message_label(&preferred,&source,&links);
+        let layout=preferred.layout();let width=preferred.create_pango_layout(Some(&source[prefix.len()..])).pixel_size().0+10;layout.set_width(width*gtk::pango::SCALE);
+        assert_eq!(layout.line_readonly(1).unwrap().start_index(),prefix.len() as i32,"a URL that fits stays whole on its next line");
+        window.close();
+    }
 
     #[test]
     fn inline_media_fits_caps_and_narrow_widths() {

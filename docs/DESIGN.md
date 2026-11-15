@@ -86,3 +86,10 @@ and reaction-stretched timestamps reach the right edge; the reported wrapped
 body leaves under 4 px of unused line width. Real header-focused Enter/Escape,
 Shift+Enter and dialog key isolation pass. The reply truncation unit check
 covers complete text, whole words and an oversized Unicode word.
+
+Message bubbles use the full available timeline clamp (maximum 1080 logical
+pixels) as their width limit, with short bubbles still fitted to content and
+outgoing bubbles aligned to the right. Text messages have no extra 40% or
+character-count width cap; editors can use the same available width. Links are
+kept together as words when they fit, with character wrapping only when a URL
+itself exceeds the available column. Media retains its own natural-size limits.

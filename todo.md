@@ -65,3 +65,8 @@
 
 - [x] Add compositor scale/slide and fade on story entry/exit, honoring reduced motion and interrupted dismissal.
 - [x] Verify intermediate animation frames and native Stories keyboard/background controls.
+
+## Message clamp width
+
+- [x] Use the full existing chat clamp for message maximum width, fit short bubbles to content, and remove the message-body natural-width character cap.
+- [ ] Verify long text/links, incoming/outgoing alignment, editing and narrow-window sizing; update the desktop package.

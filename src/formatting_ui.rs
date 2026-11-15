@@ -304,7 +304,7 @@ fn markup(rich: &RichText, revealed: &BTreeSet<usize>, suffix: &str) -> String {
             out.push_str(&format!("<a href=\"monogram-spoiler:{index}\"><span foreground=\"#77777700\" background=\"#777777\" underline=\"none\">"));
         } else if let Some(link) = link {
             out.push_str(&format!(
-                "<a href=\"{}\"><span allow_breaks=\"false\">",
+                "<a href=\"{}\"><span segment=\"word\">",
                 glib::markup_escape_text(&link.uri)
             ));
         }
