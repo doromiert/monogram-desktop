@@ -85,6 +85,7 @@ pub struct Ui {
     pub(crate) media_search: gtk::SearchEntry,
     pub media_pane: adw::ToolbarView,
     pub media_mode: RefCell<String>,
+    pub media_tabs: adw::ToggleGroup,
     pub media_toggles: RefCell<HashMap<String, adw::Toggle>>,
     pub request_button: gtk::Button,
     pub request_badge: gtk::Label,
@@ -390,6 +391,7 @@ impl Ui {
                 .build(),
             media_pane: adw::ToolbarView::new(),
             media_mode: RefCell::new("media".into()),
+            media_tabs: adw::ToggleGroup::builder().homogeneous(false).can_shrink(false).build(),
             media_toggles: RefCell::new(HashMap::new()),
             request_button,
             request_badge,
@@ -2033,10 +2035,11 @@ impl Ui {
             t.set_enabled(
                 matches!(name.as_str(), "emoji" | "stickers")
                     || name == "gifs" && self.gif_page.borrow().is_some()
+                    || name == "monero"
                     || !live,
             )
         }
-        if live {
+        if self.media_stack.visible_child_name().as_deref().is_some_and(|name|self.media_toggles.borrow().get(name).is_none_or(|t|!t.is_enabled())) {
             self.media_stack.set_visible_child_name("emoji")
         }
     }
@@ -2138,6 +2141,7 @@ impl Ui {
         self.load_blocking_cache();
         self.rebuild_pack_library();
         self.rebuild_gif_library();
+        self.refresh_monero_sidebar();
         self.timeline_scope_changed();
         self.history_pages.borrow_mut().clear();
         self.history_pending.borrow_mut().clear();

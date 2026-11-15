@@ -87,6 +87,7 @@ pub fn install(ui: &Rc<Ui>) {
         let revision = lan_sync::REVISION.load(std::sync::atomic::Ordering::Relaxed);
         if seen.replace(revision) != revision {
             ui.rebuild_pack_library();
+            ui.refresh_monero_sidebar();
             ui.load_favorite_orders();
             crate::emoji_picker_ui::refresh_emoji_surfaces(&ui);
             ui.rebuild_gif_library();

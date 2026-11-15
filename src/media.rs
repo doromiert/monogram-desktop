@@ -35,10 +35,7 @@ impl Ui {
             }
         });
         header.pack_start(&close);
-        let toggle = adw::ToggleGroup::builder()
-            .homogeneous(false)
-            .can_shrink(false)
-            .build();
+        let toggle = self.media_tabs.clone();
         toggle.add_css_class("media-mode-tabs");
         toggle.add_css_class("round");
         for (name, title) in [
@@ -57,7 +54,7 @@ impl Ui {
                 if previous.as_deref() == Some(name.as_str()) {
                     return;
                 }
-                let tabs = ["emoji", "stickers", "gifs"];
+                let tabs = ["emoji", "stickers", "gifs", "monero"];
                 let index = |name: &str| tabs.iter().position(|tab| *tab == name).unwrap_or(0);
                 stack.set_visible_child_full(
                     &name,
@@ -94,6 +91,7 @@ impl Ui {
         );
         self.rebuild_pack_library();
         self.rebuild_gif_library();
+        self.refresh_monero_sidebar();
         let t = toggle.downgrade();
         let search_weak = search.downgrade();
         self.media_stack
@@ -118,6 +116,21 @@ impl Ui {
                 }
             }
         });
+    }
+    pub(crate) fn refresh_monero_sidebar(self: &Rc<Self>) {
+        let owner=self.state.borrow().account.clone();
+        let settings:crate::monero_settings::Settings=serde_json::from_str(&self.store.pref(&format!("monero-settings:{owner}"),"{}")).unwrap_or_default();
+        let visible=!owner.is_empty()&&settings.enabled;
+        let selected=self.media_stack.visible_child_name().as_deref()==Some("monero");
+        if let Some(old)=self.media_toggles.borrow_mut().remove("monero"){self.media_tabs.remove(&old);}
+        if let Some(old)=self.media_stack.child_by_name("monero"){self.media_stack.remove(&old);}
+        if visible {
+            let tab=adw::Toggle::builder().name("monero").label("Monero").icon_name("monogram-monero-symbolic").build();
+            self.media_tabs.add(tab.clone());self.media_toggles.borrow_mut().insert("monero".into(),tab);
+            self.media_stack.add_named(&crate::monero_settings_ui::page(self),Some("monero"));
+            if selected { self.media_stack.set_visible_child_name("monero"); }
+        }
+        self.update_mode();
     }
     pub fn toggle_media(&self) {
         if self.media_mode.borrow().as_str() != "media" {
