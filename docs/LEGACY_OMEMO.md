@@ -12,7 +12,7 @@ OMEMO second. The checks discard their ciphertext. A failed connection, timeout
 or storage operation does not select plaintext. The per-conversation result
 expires after 24 hours or when its trust or sending policy changes.
 
-Each protocol has its own fingerprint review. Direct-contact blind trust is on by default after the one-time upgrade; room blind trust stays opt-in. Blind trust applies to
+Each protocol has its own fingerprint review. Contact and room blind trust are on by default after their account-scoped one-time upgrades; later opt-outs remain in force. Blind trust applies to
 both standard versions for the selected contact. It keeps explicit blocks and
 never approves other devices on your own account. Compare and approve those
 fingerprints on each device to read encrypted copies of sent messages.

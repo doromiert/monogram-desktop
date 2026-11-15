@@ -143,10 +143,9 @@ impl Store {
             )
             .optional()
             .map(|value| value.unwrap_or_else(|| {
-                // Direct conversations default to blind trust; rooms retain their
-                // separate opt-in, and explicit contact choices remain authoritative.
+                // Both direct chats and rooms default to automatic fingerprint trust.
+                // Explicit choices after the one-time upgrade remain authoritative.
                 !owner.is_empty() && crate::protocol::bare(peer).is_ok()
-                    && !self.db.query_row("SELECT COALESCE(json_extract(body,'$.group'),0) FROM chats WHERE account=? AND peer=?",params![owner,peer],|r|r.get::<_,bool>(0)).unwrap_or(false)
             }))
     }
     pub(crate) fn blind_trust_for(
