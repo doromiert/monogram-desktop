@@ -57,7 +57,7 @@ build() {
     cmake --build "$srcdir/math-build"
     export PKG_CONFIG_PATH="$srcdir/native/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
     export MONOGRAM_BWRAP=/usr/bin/bwrap MONOGRAM_MATH_HELPER=/usr/lib/monogram-desktop/monogram-math-renderer
-    cargo build --release --frozen --bin monogram-desktop --bin monogram-sticker-renderer
+    cargo build --release --frozen --bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-media-author
 }
 
 check() {
@@ -71,6 +71,7 @@ package() {
     cd "$srcdir/monogram-desktop"
     install -Dm755 target/release/monogram-desktop "$pkgdir/usr/lib/monogram-desktop/monogram-desktop"
     install -Dm755 target/release/monogram-sticker-renderer "$pkgdir/usr/lib/monogram-desktop/monogram-sticker-renderer"
+    install -Dm755 target/release/monogram-media-author "$pkgdir/usr/lib/monogram-desktop/monogram-media-author"
     install -Dm755 "$srcdir/math-build/monogram-math-renderer" "$pkgdir/usr/lib/monogram-desktop/monogram-math-renderer"
     install -d "$pkgdir/usr/share/monogram-math"
     cp -a "$srcdir/MicroTeX-$_microtex_rev/res/." "$pkgdir/usr/share/monogram-math/"
