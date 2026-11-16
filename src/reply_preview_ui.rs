@@ -188,7 +188,7 @@ pub fn attach(ui: &Rc<Ui>, reply: &Message, row: &gtk::Box) {
                 slot.set_visible(false);
                 return glib::ControlFlow::Break;
             }
-            let allow_auto = crate::attachment_ui::automatic_media_allowed(ui.smoke, auto_flags.0, auto_flags.1, state.current());
+            let allow_auto = ui.auto_download_enabled.get() && crate::attachment_ui::automatic_media_allowed(ui.smoke, auto_flags.0, auto_flags.1, state.current());
             drop(state);
             if picture.paintable().is_some() || !ui.in_chat_prefetch(&slot) {
                 return glib::ControlFlow::Continue;
@@ -206,7 +206,7 @@ pub fn attach(ui: &Rc<Ui>, reply: &Message, row: &gtk::Box) {
             } else if allow_auto && ui.in_chat_viewport(&slot) {
                 ui.downloads
                     .borrow_mut()
-                    .start_automatic(&owner, file.clone());
+                    .start_automatic(&owner, file.clone(), if ui.auto_download_enabled.get(){ui.auto_download_limit.get()}else{0});
             }
             glib::ControlFlow::Continue
         };

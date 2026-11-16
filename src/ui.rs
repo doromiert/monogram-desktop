@@ -120,6 +120,8 @@ pub struct Ui {
     pub loading: Cell<bool>,
     pub draft_timer: RefCell<Option<glib::SourceId>>,
     pub big_emoji: Cell<bool>,
+    pub auto_download_enabled: Cell<bool>,
+    pub auto_download_limit: Cell<u64>,
     pub typing: RefCell<HashMap<String, Instant>>,
     pub last_typing: Cell<Option<Instant>>,
     pub typing_input: RefCell<Option<(String, Instant, bool)>>,
@@ -430,6 +432,8 @@ impl Ui {
             loading: Cell::new(false),
             draft_timer: RefCell::new(None),
             big_emoji: Cell::new(true),
+            auto_download_enabled: Cell::new(true),
+            auto_download_limit: Cell::new(crate::downloads::DEFAULT_AUTO_MAX),
             typing: RefCell::new(HashMap::new()),
             last_typing: Cell::new(None),
             typing_input: RefCell::new(None),
@@ -482,6 +486,8 @@ impl Ui {
                 ui.mark_visible_chat_read();
             }
         });
+        ui.auto_download_enabled.set(ui.store.pref("auto_download_files","true")=="true");
+        ui.auto_download_limit.set(ui.store.pref("auto_download_limit_mb","15").parse::<u64>().ok().filter(|n|(1..=4000).contains(n)).unwrap_or(15)*1024*1024);
         ui.big_emoji
             .set(ui.store.pref("big_emoji", "true") == "true");
         crate::emoji_completion::set_discord_style(
@@ -3154,6 +3160,10 @@ mod folder_empty_tests {
         ui.search.set_text("no-such-conversation-fixture");ui.refresh_chats(Some(true));
         let empty=ui.chat_stack.visible_child().unwrap().downcast::<adw::StatusPage>().unwrap();assert_eq!(empty.title(),"No Results");settle(300);
         assert_eq!(ui.chat_stack.pages().n_items(),1,"old transition pages are released");
-        ui.window.close();
+        ui.preferences();settle(100);
+        fn descendants(widget:&gtk::Widget,out:&mut Vec<gtk::Widget>){out.push(widget.clone());let mut child=widget.first_child();while let Some(w)=child {child=w.next_sibling();descendants(&w,out);}}
+        let dialog=ui.window.visible_dialog().unwrap();let mut widgets=Vec::new();descendants(dialog.upcast_ref(),&mut widgets);
+        let size=widgets.iter().find_map(|w|w.downcast_ref::<adw::SpinRow>().filter(|r|r.title()=="Maximum file size")).unwrap();assert_eq!(size.value(),15.);size.set_value(23.);assert_eq!(ui.auto_download_limit.get(),23*1024*1024);assert_eq!(ui.store.pref("auto_download_limit_mb",""),"23");
+        let toggle=widgets.iter().find_map(|w|w.downcast_ref::<adw::SwitchRow>().filter(|r|r.title()=="Automatically download files")).unwrap();assert!(toggle.is_active());toggle.set_active(false);assert!(!ui.auto_download_enabled.get());assert!(!size.is_sensitive());assert_eq!(ui.store.pref("auto_download_files",""),"false");dialog.close();ui.window.close();
     }
 }
