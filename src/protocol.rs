@@ -1276,13 +1276,26 @@ impl Session {
                                 },
                                 Err(error)=>{
                                     let text=error.to_string();
+                                    // Send and Probe already tell the user through their own reply.
+                                    let mut report=true;
                                     match purpose {
-                                        RoomPreparation::Send{message,..}=>emit(BackendEvent::Failed{peer:peer.clone(),id:message.wire_id,reason:text.clone()}),
-                                        RoomPreparation::Probe{reply}=>{let _=reply.send(Err(crate::crypto::Error::Unavailable("Could not establish complete room recipients. Join a nonanonymous members-only room and check its member permissions.")));},
+                                        RoomPreparation::Send{message,..}=>{report=false;emit(BackendEvent::Failed{peer:peer.clone(),id:message.wire_id,reason:text.clone()})},
+                                        RoomPreparation::Probe{reply}=>{
+                                            report=false;
+                                            // The server said the room has no complete member list (a public or
+                                            // anonymous room), so end-to-end encryption cannot exist there: send plain.
+                                            // Timeouts and other failures must never downgrade an encrypted room.
+                                            let _=reply.send(match error {
+                                                crate::rooms::Error::RecipientsUnavailable=>Ok(Mode::Plain),
+                                                crate::rooms::Error::Request(crate::iq::Error::Timeout)=>Err(crate::crypto::Error::Unavailable("The room did not answer. Try again.")),
+                                                crate::rooms::Error::NotJoined|crate::rooms::Error::Joining=>Err(crate::crypto::Error::Unavailable("Join the room before sending.")),
+                                                _=>Err(crate::crypto::Error::Unavailable("Could not read the room's member list. Try again.")),
+                                            });
+                                        },
                                         RoomPreparation::Review=>emit(BackendEvent::LegacyReview{peer:peer.clone(),rows:vec![],errors:vec![text.clone()]}),
                                         RoomPreparation::PqReview=>emit(BackendEvent::PqDevices{peer:peer.clone(),devices:vec![]}),
                                     }
-                                    emit(BackendEvent::RoomError(text));
+                                    if report {emit(BackendEvent::RoomError(text));}
                                 },
                             }
                         },
