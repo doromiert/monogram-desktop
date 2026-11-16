@@ -27,6 +27,7 @@ fn lottie_visible(picture: &gtk::Picture, scroll: &glib::WeakRef<gtk::ScrolledWi
     scroll.upgrade().is_some_and(|scroll| {
         picture.compute_bounds(&scroll).is_some_and(|bounds| {
             bounds.y() + bounds.height() >= 0. && bounds.y() <= scroll.height() as f32
+                && bounds.x() + bounds.width() >= 0. && bounds.x() <= scroll.width() as f32
         })
     })
 }
@@ -1439,6 +1440,7 @@ impl PackLibraryPage {
                 let downloading=gtk::Spinner::new();downloading.start();downloading.set_size_request(22,22);button.set_child(Some(&downloading));button.set_tooltip_text(Some(&format!("{} · Downloading…",pack.name)));
             } else if let Some(item) = pack.items.first() {
                 let item = item.id;
+                let icon_page=weak.clone();
                 glib::spawn_future_local(async move {
                     let Ok((asset, verified)) = library.verified_asset(item, Job::new()).await
                     else {
@@ -1447,24 +1449,58 @@ impl PackLibraryPage {
                     let Some(button) = preview.upgrade() else {
                         return;
                     };
+                    let picture = gtk::Picture::new();
+                    picture.set_size_request(24, 24);
+                    picture.set_can_shrink(true);
+                    picture.set_content_fit(gtk::ContentFit::Contain);
+                    let overlay = gtk::Overlay::builder().child(&picture).build();
+                    let spinner = gtk::Spinner::new();
+                    spinner.start();
+                    overlay.add_overlay(&spinner);
+                    button.set_child(Some(&overlay));
+                    let Some(page) = icon_page.upgrade() else { return; };
+                    let viewport = page.selector.ancestor(gtk::ScrolledWindow::static_type())
+                        .and_downcast::<gtk::ScrolledWindow>()
+                        .unwrap_or_else(|| page.scroll.clone());
                     let mime = asset.item.mime.clone();
-                    let texture = gio::spawn_blocking(move || {
-                        let cancel = gio::Cancellable::new();
-                        if mime == "application/x-tgsticker" {
-                            return crate::lottie::Decoder::open(verified.reopen()?, 32, &cancel)?
-                                .frame()
-                                .map(|frame| frame.texture);
+                    let library = page.library.clone();
+                    if mime == "application/x-tgsticker" {
+                        drop(verified);
+                        install_lottie_reopenable(&picture, &spinner, &viewport,
+                            move || library.reopen_preview(&asset));
+                    } else if mime.starts_with("image/") {
+                        drop(verified);
+                        let visible = viewport.downgrade();
+                        let busy = spinner.downgrade();
+                        crate::image_loader::play_input(&picture, 32,
+                            move |p| lottie_visible(p, &visible),
+                            move |p, texture| {
+                                p.set_paintable(Some(&texture));
+                                if let Some(s) = busy.upgrade() { s.stop(); s.set_visible(false); }
+                            }, true, move || library.reopen_preview(&asset));
+                    } else if mime == "video/webm"
+                        && gio::spawn_blocking(crate::video_ui::initialize).await.unwrap_or(false)
+                    {
+                        if let Some(player) = crate::video_ui::Playback::new(verified) {
+                            picture.set_paintable(Some(&player.media));
+                            spinner.stop();
+                            spinner.set_visible(false);
+                            let visible = viewport.downgrade();
+                            let playing = Rc::new(Cell::new(false));
+                            let state = playing.clone();
+                            let keep = player.clone();
+                            picture.connect_unmap(move |_| {
+                                keep.media.pause();
+                                state.set(false);
+                            });
+                            picture.add_tick_callback(move |p, _| {
+                                let active = lottie_visible(p, &visible);
+                                if playing.replace(active) != active {
+                                    if active { player.media.play(); } else { player.media.pause(); }
+                                }
+                                glib::ControlFlow::Continue
+                            });
                         }
-                        crate::image_loader::Decoder::open_sticker(verified, &cancel)?
-                            .frame(32)
-                            .map(|frame| frame.texture)
-                    })
-                    .await;
-                    if let Ok(Ok(texture)) = texture {
-                        let picture = gtk::Image::from_paintable(Some(&texture));
-                        picture.set_pixel_size(24);
-                        picture.set_size_request(24, 24);
-                        button.set_child(Some(&picture));
                     }
                 });
             }
@@ -2617,6 +2653,9 @@ mod tests {
         let(p,g,l)=(peak.clone(),gap.clone(),last.clone());let heartbeat=glib::timeout_add_local(Duration::from_millis(16),move||{p.set(p.get().max(descriptors()));g.set(g.get().max(l.replace(std::time::Instant::now()).elapsed()));glib::ControlFlow::Continue});
         window.present();page.refresh();
         assert!(until(Duration::from_secs(12),||page.model.n_items()>0&&page.preview_active.get()==0&&page.preview_queue.borrow().len()<48));
+        let icon=page.section_buttons.borrow()[&pack.id].child().unwrap().downcast::<gtk::Overlay>().unwrap().child().unwrap().downcast::<gtk::Picture>().unwrap();
+        assert!(until(Duration::from_secs(4),||icon.paintable().is_some()),"animated pack icon loads its playback stream");
+        assert!(icon.paintable().unwrap().is::<gtk::MediaStream>(),"video pack icon is live rather than a first-frame texture");
         assert!(page.video_preview.borrow().is_none(),"A tile must not keep a full video player alive");
         let poster=gtk::gdk::MemoryTexture::new(1,1,gtk::gdk::MemoryFormat::R8g8b8a8,&glib::Bytes::from_owned(vec![0u8;4]),4).upcast::<gtk::gdk::Texture>();
         for _ in 0..8 {page.start_video_preview(pack.items[0].id,&image,&poster);assert!(until(Duration::from_secs(4),||page.video_preview.borrow().is_some()));page.stop_video_preview();let _=until(Duration::from_millis(100),||false);}

@@ -244,9 +244,11 @@ edit and order controls; each picker section has its own edit button. Connected
 packs offer explicit local editing instead of disabled actions. Native pointer
 tests cover category-bar drag, manager drag, sticker drag/rename and700-item
 resource bounds (maxGTKgap82ms); high-contrast run passes. Editor toolbar uses
-flat native styling and only one hover background. Monero settings appear in the
-side panel when enabled for the account, with correct account-switch cleanup;
-this does not add desktop wallet spending. Local contact UI and paired transfer
+flat native styling and only one hover background. The text-only Monero tab opens
+the existing interactive 3D wallet card with real synced wallet names and receiving
+addresses; configuration remains in Preferences. Unavailable balances are explicit,
+and account switches remove the old card.
+This does not add desktop wallet spending. Local contact UI and paired transfer
 are documented in [LOCAL_CONTACTS.md](LOCAL_CONTACTS.md). Allreportedfollow-up
 flows have controls and sub400ms feedback checks; actual user-account Stories
 publication and manualphone↔desktop contact editing were not performed.
@@ -262,3 +264,31 @@ accepted-object confirmation over HTTPS. The intermittent real-network initial
 stall remains unresolved; desktop real-world reproduction and matching recovery
 behavior require further evidence. Track this explicitly rather than claiming
 that faster retries establish cross-client root-cause parity.
+
+
+Desktop pack-selector artwork now uses looping raster/TGS/WebM playback rather
+than first-frame textures, with offscreen/unmapped playback paused. The native
+WebM pack-bar test verifies a live MediaStream and a 48-sticker grid remains
+responsive (maximum heartbeat gap41ms); offscreen TGS reopen coverage passes.
+The native sync adapter imports mobile-format sticker favorites/recents by
+stable UUID and preserves them in the desktop library. Physical phone↔PC
+favorites/recents transfer is now verified: phone revision1794843209272 imported
+10 favorite stickers and3 recent stickers into the running packaged desktop.
+The booted firewall omitted45950TCP/UDP; restoring those rules unblocked the
+transfer. The permanent Monogram system-module selection still requires system
+activation to survive reboot. No phone control was used after the user asked
+to stop. Desktop wallet scanning/spending remains absent.
+
+
+Android's upload acknowledgement recovery now waits one second after the complete
+wire body is flushed (including closing the output stream), then immediately
+requests a fresh single-use slot for one replay of the same ciphertext. The last
+acknowledgement is bounded to five seconds; final size/header checks can confirm
+either stored object, and failures/certificate/cancellation guards remain. The
+26 core transfer checks pass, including the one-second retry, stream-close wait,
+final deadline, immutable bytes and original-object fallback. Physical AndroidAPI37 acceptance passed: the first upload lost its ACK;
+the fresh-slot retry returned successfully (396ms response phase), with no
+subsequent upload/send failure in the captured interval. Desktop already uses
+fresh slots but still has a30-second
+acknowledgement window and lacks this final stored-object fallback; that narrower
+recovery behavior remains a desktop parity task.

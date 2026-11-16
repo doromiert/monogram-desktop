@@ -101,6 +101,16 @@
 
 - [ ] Make the media sidebar scroll viewport and its edge shadow span the full sidebar width; retain content padding inside it (reference: /tmp/codex-clipboard-7816YI.png).
 - [ ] Make sticker-pack drag reordering show continuously interpolated real-time positions like folder reordering, without inconsistent snapping (references: /tmp/codex-clipboard-geVbGd.png, /tmp/codex-clipboard-gNurVs.png).
-- [ ] Remove icons from the media sidebar tab switcher; use text-only labels (reference: /tmp/codex-clipboard-l6MfI7.png).
-- [ ] Restore the correct Monero wallet sidebar with the 3D card, locating/reusing the existing implementation or version history; keep wallet settings in Preferences (reference: /tmp/codex-clipboard-8gw0a6.png).
+- [x] Remove icons from the media sidebar tab switcher; use text-only labels (reference: /tmp/codex-clipboard-l6MfI7.png).
+- [x] Restore the correct Monero wallet sidebar with the 3D card, locating/reusing the existing implementation or version history; keep wallet settings in Preferences (reference: /tmp/codex-clipboard-8gw0a6.png).
 - [ ] Verify pack deletion/import and horizontal pack-bar order update promptly on paired clients; distinguish persisted sync state from stale visible picker state.
+
+## Current picker/wallet/sync fixes
+
+- [x] Animate pack selector icons using the existing visibility-aware decoders.
+- [x] Restore the wallet card sidebar and text-only Monero toggle; retain real wallet metadata without demo funds.
+- [x] Verify live phone sticker favorites/recents reach desktop: after restoring TCP/UDP45950 and restarting the updated desktop, phone revision1794843209272 imported10 favorite stickers and3 recent stickers. No further phone control was used.
+- [ ] Activate the already-configured Monogram system firewall module so TCP/UDP45950 survives reboot; the booted generation predates it.
+- [x] Review PR2 head32c1b77 first: GTK-thread cache I/O/PNG work remains a freeze blocker; no merge.
+
+- [ ] Port Android's fast post-body acknowledgement recovery to desktop uploads: one-second first ACK window, one fresh slot, five-second last ACK window, final stored-object confirmation; desktop currently waits30seconds per ACK.
