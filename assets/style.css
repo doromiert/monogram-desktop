@@ -227,6 +227,7 @@
 .message-menu-panel .picker-menu-row { min-height: 20px; padding: 4px 8px; }
 .gif-library-page { padding: 2px; }
 .sticker-sidebar { padding: 0; }
+.sticker-sidebar .pack-selector { padding: 0 10px; }
 .sticker-sidebar .picker-section-list > row { padding-left: 12px; padding-right: 12px; }
 .message-bubble.emoji-only { background: transparent; border: none; box-shadow: none; padding: 0; }
 .favorite-dragging { opacity: .45; }
