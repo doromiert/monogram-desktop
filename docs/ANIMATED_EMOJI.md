@@ -55,9 +55,14 @@ arrives.
 
 ## Licence
 
-Noto Emoji animations are Google's and are understood to be CC BY 4.0, which requires the
-attribution in `assets/NOTICE.md`. That was **not confirmed against an upstream licence file**, so
-confirm it before a release.
+Noto Emoji animations are Google's and are licensed under **CC BY 4.0**. Google's announcement says
+"The artwork is available under the CC BY 4.0 license" and links the legal code
+([source](https://developers.googleblog.com/en/updates-to-emoji-new-characters-new-animation-new-color-customization-and-more/),
+checked 2026-11-16). The animation site itself shows no licence text, so that announcement is the
+statement relied on. CC BY 4.0 requires credit, a link to the licence and a note of changes; all
+three are in `assets/NOTICE.md` and in About > Legal. The only change is repackaging (minified,
+gzip-compressed Lottie in one pack); the artwork is untouched. The full set (`--all`) is the same
+artwork under the same licence.
 
 ## Tests
 
