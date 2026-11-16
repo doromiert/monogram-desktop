@@ -943,6 +943,19 @@ impl Ui {
                         bubble.append(&crate::formatting_ui::article_widget(&document,&meta));
                     } else {
                         let preview=self.link_preview_for_message(&m);
+                        // Exactly one bundled emoji and nothing else: play its Noto animation.
+                        // Anything else (more emoji, text, links, formatting, custom emoji,
+                        // emoji outside the packs) keeps the ordinary rendering below.
+                        let animation=(css=="large-emoji"
+                            && preview.is_none()
+                            && m.inline_emoji.is_none()
+                            && m.formatting.is_none()
+                            && display.removed.is_empty())
+                            .then(||crate::noto_emoji::animation_for(&display.body))
+                            .flatten();
+                        if let Some(animation)=animation {
+                            bubble.append(&crate::animated_emoji_ui::widget(display.body.trim(),animation));
+                        } else {
                         let links=crate::link_previews::clickable_urls(&display.body,None);
                         let inline=m.inline_emoji.as_ref().and_then(|emoji|emoji.without(&display.removed).ok()).filter(|emoji|emoji.body==display.body).map(|emoji|self.inline_message_text_formatted(&display.body,&emoji,preview.is_none().then_some(&meta),&links,Some(&rich)));
                         let l=wrap(&display.body,css);
@@ -951,6 +964,7 @@ impl Ui {
                             if let Some(inline)=inline.as_ref(){bubble.append(inline);}else{crate::formatting_ui::FormattedLabel::new(&l,rich.clone());bubble.append(&l);}
                             bubble.append(&crate::link_preview_ui::link_preview_card(&preview));
                         }else if let Some(inline)=inline{bubble.append(&inline);}else{bubble.append(&MessageText::with_rich(&l,&meta,rich.clone()));}
+                        }
                     }
                 }
                 _ => {}
