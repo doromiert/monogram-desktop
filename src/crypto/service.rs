@@ -949,7 +949,8 @@ impl Worker {
                 match self.send_message(&peer, &message, &quote).await {
                     Ok(()) => self.emit(BackendEvent::Sent { peer, id }),
                     Err(error) => {
-                        self.emit(if matches!(error, Error::Uncertain) {
+                        let uncertain = matches!(error, Error::Uncertain);
+                        self.emit(if uncertain {
                             BackendEvent::Uncertain {
                                 peer: peer.clone(),
                                 id,
@@ -958,12 +959,16 @@ impl Worker {
                             BackendEvent::Failed {
                                 peer: peer.clone(),
                                 id,
+                                reason: error.to_string(),
                             }
                         });
-                        self.emit(BackendEvent::CryptoError {
-                            peer,
-                            text: error.to_string(),
-                        });
+                        // A failed send already carries its reason in the toast.
+                        if uncertain {
+                            self.emit(BackendEvent::CryptoError {
+                                peer,
+                                text: error.to_string(),
+                            });
+                        }
                     }
                 }
             }

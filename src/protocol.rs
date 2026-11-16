@@ -22,6 +22,28 @@ pub fn bare(value: &str) -> Result<String, String> {
     }
     Ok(jid.to_string())
 }
+/// The server's error condition and text from an error stanza, for example
+/// "service unavailable: Remote server not found".
+fn stanza_error_reason(root: &Element) -> String {
+    let Some(error) = root.children().find(|child| child.name() == "error") else {
+        return String::new();
+    };
+    let condition = error
+        .children()
+        .find(|child| child.name() != "text")
+        .map(|child| child.name().replace('-', " "))
+        .unwrap_or_default();
+    let detail = error
+        .children()
+        .find(|child| child.name() == "text")
+        .map(|child| child.text())
+        .unwrap_or_default();
+    match (condition.is_empty(), detail.trim().is_empty()) {
+        (true, _) => detail,
+        (false, true) => condition,
+        (false, false) => format!("{condition}: {}", detail.trim()),
+    }
+}
 fn bare_of(value: &str) -> String {
     value.split('/').next().unwrap_or("").to_string()
 }
@@ -648,6 +670,8 @@ pub enum BackendEvent {
     Failed {
         peer: String,
         id: String,
+        /// Short human-readable cause, shown in the toast. Empty when unknown.
+        reason: String,
     },
     History {
         peer: String,
@@ -1253,7 +1277,7 @@ impl Session {
                                 Err(error)=>{
                                     let text=error.to_string();
                                     match purpose {
-                                        RoomPreparation::Send{message,..}=>emit(BackendEvent::Failed{peer:peer.clone(),id:message.wire_id}),
+                                        RoomPreparation::Send{message,..}=>emit(BackendEvent::Failed{peer:peer.clone(),id:message.wire_id,reason:text.clone()}),
                                         RoomPreparation::Probe{reply}=>{let _=reply.send(Err(crate::crypto::Error::Unavailable("Could not establish complete room recipients. Join a nonanonymous members-only room and check its member permissions.")));},
                                         RoomPreparation::Review=>emit(BackendEvent::LegacyReview{peer:peer.clone(),rows:vec![],errors:vec![text.clone()]}),
                                         RoomPreparation::PqReview=>emit(BackendEvent::PqDevices{peer:peer.clone(),devices:vec![]}),
@@ -1322,16 +1346,16 @@ impl Session {
                             let to=if payload.is("query","http://jabber.org/protocol/disco#info") {contacts.available_resource(&to).unwrap_or(to)} else {to};if let Some(root)=iq.start(to,kind,payload,reply){let id=root.attr("id").unwrap().to_string();if !send(&mut client,root).await{iq.fail(&id)}}
                         },
                         Some(Command::Send{peer,message,quote})=>{
-                            if blocking.blocked(&peer){emit(BackendEvent::ContactAccessError("Unblock this address before sending messages".into()));emit(BackendEvent::Failed{peer,id:message.wire_id});continue}
-                            if !online || message.unavailable || message.upload.is_some() || message.attachment.as_ref().is_some_and(|file|!file.valid_outgoing(message.encrypted)||message.poll.is_some()||message.action.is_some()){emit(BackendEvent::Failed{peer,id:message.wire_id});continue}
+                            if blocking.blocked(&peer){emit(BackendEvent::Failed{peer,id:message.wire_id,reason:"Unblock this address before sending messages".into()});continue}
+                            if !online || message.unavailable || message.upload.is_some() || message.attachment.as_ref().is_some_and(|file|!file.valid_outgoing(message.encrypted)||message.poll.is_some()||message.action.is_some()){emit(BackendEvent::Failed{peer,id:message.wire_id,reason:if !online{"you are offline".into()}else if message.unavailable{"the message is unavailable".into()}else if message.upload.is_some(){"the attachment is still uploading".into()}else{"the attachment or message is not valid to send".into()}});continue}
                             if rooms.known(&peer) {
                                 if matches!(message.mode(),Mode::Legacy|Mode::Pq) {
                                     prepare_room(&rooms,peer,room_epoch,RoomPreparation::Send{message,quote},&network);
                                     continue;
                                 }
                                 match rooms.outgoing(&peer,&message,&quote){
-                                    Ok(root)=>{let ok=send(&mut client,root).await;emit(if ok{BackendEvent::Sent{peer,id:message.wire_id}}else{BackendEvent::Failed{peer,id:message.wire_id}});}
-                                    Err(error)=>{emit(BackendEvent::RoomError(error.to_string()));emit(BackendEvent::Failed{peer,id:message.wire_id});}
+                                    Ok(root)=>{let ok=send(&mut client,root).await;emit(if ok{BackendEvent::Sent{peer,id:message.wire_id}}else{BackendEvent::Failed{peer,id:message.wire_id,reason:"the server connection dropped".into()}});}
+                                    Err(error)=>{emit(BackendEvent::Failed{peer,id:message.wire_id,reason:error.to_string()});}
                                 }
                                 continue;
                             }
@@ -1342,7 +1366,7 @@ impl Session {
                                 Mode::Plain => {},
                             }
                             let root=outgoing(&peer,&message,&quote);
-                            let ok=send(&mut client,root).await;emit(if ok{BackendEvent::Sent{peer,id:message.wire_id}}else{BackendEvent::Failed{peer,id:message.wire_id}});
+                            let ok=send(&mut client,root).await;emit(if ok{BackendEvent::Sent{peer,id:message.wire_id}}else{BackendEvent::Failed{peer,id:message.wire_id,reason:"the server connection dropped".into()}});
                         },
                         Some(Command::PreviewHistory{peer,start,end,reply})=>{
                             if reply.is_closed(){continue}
@@ -1497,7 +1521,7 @@ impl Session {
                                 if crate::avatar::pep_changed(&root) && bare(from).ok().as_deref()==Some(from) {
                                     emit(BackendEvent::AvatarChanged{peer:from.into(),hint:None});
                                 }
-                                if root.attr("type")==Some("error"){emit(BackendEvent::Failed{peer:bare_of(from),id:root.attr("id").unwrap_or("").into()});continue}
+                                if root.attr("type")==Some("error"){emit(BackendEvent::Failed{peer:bare_of(from),id:root.attr("id").unwrap_or("").into(),reason:stanza_error_reason(&root)});continue}
                                 if let Some(notice)=crate::read_markers::incoming_receipt(&root,&owner).filter(|n|!rooms.known(&n.peer)){emit(BackendEvent::Receipt{peer:notice.peer,id:notice.id});}
                                 if let Some(notice)=crate::read_markers::incoming(&root,&owner).filter(|n|!rooms.known(&n.peer)){emit(BackendEvent::Read{peer:notice.peer,id:notice.id});}
                                 let mut carbon_wrappers=root.children().filter(|c|c.is("received","urn:xmpp:carbons:2")||c.is("sent","urn:xmpp:carbons:2"));

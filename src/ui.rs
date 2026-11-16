@@ -2692,9 +2692,19 @@ impl Ui {
             BackendEvent::Read { peer, id } => self.receive_read_marker(owner, &peer, &id, false),
             BackendEvent::OwnRead { peer, id } => self.receive_read_marker(owner, &peer, &id, true),
             BackendEvent::Receipt { peer, id } => self.delivery(&peer, &id, "delivered"),
-            BackendEvent::Failed { peer, id } => {
+            BackendEvent::Failed { peer, id, reason } => {
                 self.delivery(&peer, &id, "failed");
-                self.notice("Message could not be sent. Retry from its menu.");
+                let reason = reason.trim();
+                if reason.is_empty() {
+                    self.notice("Message could not be sent. Retry from its menu.");
+                } else {
+                    let reason = if reason.chars().count() > 100 {
+                        format!("{}…", reason.chars().take(100).collect::<String>())
+                    } else {
+                        reason.to_owned()
+                    };
+                    self.notice(&format!("Message not sent: {reason}"));
+                }
             }
             BackendEvent::History {
                 peer,
