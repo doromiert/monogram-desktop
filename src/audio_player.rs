@@ -396,6 +396,55 @@ mod tests {
         assert!(player.take_finished(), "and played to its end");
     }
 
+    /// A long track on the real output (silent): the position keeps real time while playing, holds
+    /// while paused, and a seek far into the file lands there. Short clips cannot show a drifting or
+    /// stalling clock.
+    #[test]
+    #[ignore = "uses the real audio output (silently) for about 15 seconds; requires the built helper and bubblewrap"]
+    fn a_long_track_on_the_real_output_keeps_time_pauses_and_seeks() {
+        let seconds = 40usize;
+        let data = seconds * 8_000 * 2;
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&(36 + data as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        for v in [1u16, 1] { wav.extend_from_slice(&v.to_le_bytes()); }
+        wav.extend_from_slice(&8_000u32.to_le_bytes());
+        wav.extend_from_slice(&16_000u32.to_le_bytes());
+        for v in [2u16, 16] { wav.extend_from_slice(&v.to_le_bytes()); }
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data as u32).to_le_bytes());
+        wav.resize(wav.len() + data, 0);
+        let path = std::env::temp_dir().join(format!("silence-long-{}.wav", uuid::Uuid::new_v4()));
+        std::fs::write(&path, &wav).unwrap();
+        let player = AudioPlayer::new(File::open(&path).unwrap(), Container::Wav, seconds as u64 * 1000);
+        std::fs::remove_file(&path).unwrap();
+
+        player.play_from(0);
+        assert!(wait(Duration::from_secs(15), || player.state() == PlayState::Playing));
+        let began = Instant::now();
+        wait(Duration::from_secs(4), || false);
+        let (elapsed, position) = (began.elapsed().as_millis() as i64, player.position_ms() as i64);
+        assert!((position - elapsed).abs() < 900, "after {elapsed} ms of wall time the position is {position} ms");
+
+        player.pause();
+        let held = player.position_ms();
+        wait(Duration::from_secs(1), || false);
+        assert!(player.position_ms().abs_diff(held) < 150, "paused at {held}, now {}", player.position_ms());
+        player.resume();
+        wait(Duration::from_secs(1), || false);
+        assert!(player.position_ms() > held + 500, "it continues after resuming");
+
+        // Far into the file.
+        player.play_from(30_000);
+        assert!(wait(Duration::from_secs(15), || player.state() == PlayState::Playing));
+        wait(Duration::from_secs(2), || false);
+        let position = player.position_ms();
+        assert!((31_500..=33_500).contains(&position), "two seconds after seeking to 30 s the position is {position} ms");
+        assert!(player.take_error().is_none(), "no playback error");
+        player.stop();
+    }
+
     #[test]
     #[ignore = "requires the built audio helper, GStreamer plugins and bubblewrap"]
     fn pausing_holds_the_position_resuming_continues_and_seeking_restarts_the_helper() {

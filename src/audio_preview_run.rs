@@ -38,6 +38,7 @@ const PLUGINS: &[&str] = &[
     "libgstvorbis.so",
     "libgstopus.so",
     "libgstaudioparsers.so",
+    "libgstid3demux.so",
     "libgstmpg123.so",
     "libgstfaad.so",
     "libgstwavparse.so",
@@ -122,6 +123,10 @@ fn plugin_names(dirs: &[PathBuf]) -> Vec<&'static str> {
 /// other formats' decoders come with GStreamer's base plugins, and the helper reports them (exit
 /// code 8) if they are absent too.
 fn missing_decoder(container: Container, dirs: &[PathBuf]) -> Option<&'static str> {
+    // Tagged MP3s need the ID3 demuxer, or the tag is decoded as audio.
+    if container == Container::Mp3 && !have_plugin(dirs, "libgstid3demux.so") {
+        return Some("the GStreamer id3demux plugin (gst-plugins-good)");
+    }
     let (small, hint) = match container {
         Container::Mp3 => ("libgstmpg123.so", "the GStreamer mpg123 plugin or FFmpeg (gst-libav)"),
         Container::M4a => ("libgstfaad.so", "the GStreamer faad plugin or FFmpeg (gst-libav)"),
@@ -213,6 +218,8 @@ pub fn probe(file: &File, name: &str, cancel: &dyn Fn() -> bool) -> Result<Previ
     let reply = reader.join().map_err(|_| Error::Failed)?;
     match status.code() {
         Some(8) => return Err(Error::MissingDecoder(SOME_DECODER)),
+        // Video, a second track, or a codec outside the allowed list (ALAC, for example).
+        Some(7) => return Err(Error::Refused(audio_check::Error::Unsupported)),
         _ if !status.success() => return Err(Error::Failed),
         _ => {}
     }
@@ -334,7 +341,10 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let dirs = [root.clone()];
         let say = |container| missing_decoder(container, &dirs);
-        // Nothing installed: MP3 and M4A name what is missing, and FFmpeg is one of the answers.
+        // Without the ID3 demuxer a tagged MP3 would decode its tag as audio, so it is required first.
+        assert!(say(Container::Mp3).is_some_and(|hint| hint.contains("id3demux")));
+        std::fs::write(root.join("libgstid3demux.so"), b"x").unwrap();
+        // Nothing else installed: MP3 and M4A name what is missing, and FFmpeg is one of the answers.
         let mp3 = say(Container::Mp3).expect("MP3 needs a decoder");
         assert!(mp3.contains("mpg123") && mp3.contains("FFmpeg"), "{mp3}");
         assert!(say(Container::M4a).is_some_and(|hint| hint.contains("faad") && hint.contains("FFmpeg")));
@@ -400,6 +410,67 @@ mod tests {
         }
     }
 
+    /// Run any files you have through the whole pipeline and report what comes out. Set
+    /// `MONOGRAM_AUDIO_SAMPLES` to a newline-separated list of paths; it does nothing otherwise, and
+    /// nothing is copied anywhere. Fails if a file is refused, decodes to silence, or its played
+    /// length disagrees with the length reported.
+    #[test]
+    #[ignore = "set MONOGRAM_AUDIO_SAMPLES to a newline-separated list of audio files"]
+    fn real_audio_files_from_the_environment_decode_to_real_sound() {
+        let Some(list) = std::env::var_os("MONOGRAM_AUDIO_SAMPLES") else { return };
+        let mut problems = Vec::new();
+        for path in list.to_string_lossy().lines().map(str::trim).filter(|line| !line.is_empty()) {
+            let name = std::path::Path::new(path).file_name().unwrap().to_string_lossy().into_owned();
+            let file = File::open(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            let started = Instant::now();
+            let preview = match probe(&file, &name, NEVER) {
+                Ok(preview) => preview,
+                Err(error) => {
+                    eprintln!("SAMPLE {name}: REFUSED {error:?} ({error})");
+                    problems.push(format!("{name}: {error:?}"));
+                    continue;
+                }
+            };
+            let mut bytes = Vec::new();
+            PcmStream::start(&file, preview.container, 0).unwrap().read_to_end(&mut bytes).unwrap();
+            let samples: Vec<i16> = bytes.chunks_exact(2).map(|s| i16::from_le_bytes([s[0], s[1]])).collect();
+            let peak = samples.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+            let rms = (samples.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / samples.len().max(1) as f64).sqrt();
+            let played_ms = bytes.len() as u64 / PCM_BYTES_PER_MS;
+            let bars_loud = preview.peaks.iter().filter(|p| **p > 64).count();
+            eprintln!(
+                "SAMPLE {name}: {:?}, reported {} ms, played {} ms, peak {peak}, rms {rms:.0}, {bars_loud}/{} waveform bars loud, took {:?}",
+                preview.container, preview.duration_ms, played_ms, preview.peaks.len(), started.elapsed()
+            );
+            if peak < 1000 || rms < 50. {
+                problems.push(format!("{name}: decoded to near silence (peak {peak}, rms {rms:.0})"));
+            }
+            if played_ms.abs_diff(preview.duration_ms) > 200 {
+                problems.push(format!("{name}: reported {} ms but played {played_ms} ms", preview.duration_ms));
+            }
+        }
+        assert!(problems.is_empty(), "problems: {problems:#?}");
+    }
+
+    /// Real music files almost always begin with a large ID3v2 tag (cover art, titles). The decoder
+    /// must not be fed the tag as if it were audio: that gave a wrong length and a flat, silent
+    /// waveform. This file is the tone plus a 150 KB tag whose "cover art" is full of bytes that
+    /// look like MP3 frame sync.
+    #[test]
+    #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
+    fn a_tagged_mp3_decodes_its_audio_not_its_cover_art() {
+        let plain = probe(&fixture("tone.mp3"), "tone.mp3", NEVER).unwrap();
+        let tagged = probe(&fixture("tone-id3-art.mp3"), "tone-id3-art.mp3", NEVER).unwrap();
+        assert!(tagged.duration_ms.abs_diff(plain.duration_ms) <= 150, "the tag adds no audio: {} ms tagged vs {} ms untagged", tagged.duration_ms, plain.duration_ms);
+        assert!(tagged.peaks.iter().any(|p| *p > 200), "the tone is audible, not a flat line: {:?}", tagged.peaks);
+        // And the PCM that plays is the tone too.
+        let mut bytes = Vec::new();
+        PcmStream::start(&fixture("tone-id3-art.mp3"), Container::Mp3, 0).unwrap().read_to_end(&mut bytes).unwrap();
+        let loud = bytes.chunks_exact(2).map(|s| i16::from_le_bytes([s[0], s[1]]).unsigned_abs()).max().unwrap();
+        assert!(loud > 3000, "the played audio carries the tone, peak {loud}");
+        assert!(bytes.len().abs_diff(plain.duration_ms as usize * PCM_BYTES_PER_MS as usize) <= 160 * PCM_BYTES_PER_MS as usize, "and has the tone's length, {} bytes", bytes.len());
+    }
+
     #[test]
     #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
     fn pcm_is_the_fixed_format_starts_where_asked_and_carries_the_signal() {
@@ -428,7 +499,7 @@ mod tests {
             assert!(matches!(probe(&fixture(file), file, NEVER), Err(Error::Refused(_))), "{file}: {why}");
         }
         // WebM with only video passes the container check and is refused by the helper.
-        assert_eq!(probe(&fixture("video-only.webm"), "video-only.webm", NEVER), Err(Error::Failed), "WebM without audio");
+        assert_eq!(probe(&fixture("video-only.webm"), "video-only.webm", NEVER), Err(Error::Refused(audio_check::Error::Unsupported)), "WebM without audio");
         // The name must agree with the bytes.
         assert_eq!(probe(&fixture("tone.mp3"), "tone.wav", NEVER), Err(Error::Refused(audio_check::Error::ExtensionMismatch)));
     }
@@ -617,7 +688,7 @@ mod tests {
         let (helper, bwrap) = (confined::helper(HELPER, "MONOGRAM_AUDIO_PREVIEW_HELPER").unwrap(), confined::bwrap().unwrap());
         let dirs = confined::plugin_dirs();
         // Everything an MP3 probe needs except the decoders (no mpg123, no libav).
-        let names = ["libgstcoreelements.so", "libgstapp.so", "libgstaudioparsers.so", "libgstaudioconvert.so", "libgstaudioresample.so"];
+        let names = ["libgstcoreelements.so", "libgstapp.so", "libgstaudioparsers.so", "libgstid3demux.so", "libgstaudioconvert.so", "libgstaudioresample.so"];
         let plugins = confined::plugin_files(&names, &dirs);
         assert_eq!(plugins.len(), names.len(), "this machine has the base plugins");
         let input = fixture("tone.mp3");
@@ -663,3 +734,4 @@ mod tests {
         assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists(), "the helper (pid {pid}) is gone");
     }
 }
+
