@@ -413,9 +413,10 @@ async fn apply(store: &Store, meta: &Meta, path: &std::path::Path) -> Result<Opt
         "pack-order" => {
             let library=Library::open(&meta.owner).await.map_err(error)?;
             let local_revision=library.snapshot().await.map_err(error)?.picker_revision.max(store.pref("picker:user-revision","0").parse().unwrap_or(0));
+            eprintln!("Monogram picker sync received remote={} local={} favorites={} recent={}",meta.stamp,local_revision,value["favorites"].as_array().map_or(0,Vec::len),value["recent"].as_array().map_or(0,Vec::len));
             if local_revision>meta.stamp{return Ok(Some(digest(&serde_json::to_vec(&value).map_err(error)?)));}
             let observed=store.pref("picker:observed-revision","0").parse::<u64>().unwrap_or(0).max(meta.stamp);store.set_pref("picker:observed-revision",&observed.to_string()).map_err(error)?;
-            if !library.apply_sync_order_at(value.clone(),Some(meta.stamp)).await.map_err(error)? {return Ok(None);}
+            if !library.apply_sync_order_at(value.clone(),Some(meta.stamp)).await.map_err(error)? {eprintln!("Monogram picker sync waiting for referenced pack items");return Ok(None);}
             let snapshot=library.snapshot().await.map_err(error)?;
             let local_keys=|field:&str|->Option<Vec<String>>{value.get(field)?.as_array()?.iter().map(|key|{let key=key.as_str()?;if let Some(emoji)=key.strip_prefix("unicode:"){Some(crate::ui::favorite_order::emoji_key(emoji))}else{let id=key.strip_prefix("item:")?;snapshot.packs.iter().flat_map(|p|p.items.iter()).find(|item|item.sync_id==id).map(|item|crate::ui::favorite_order::pack_key(&meta.owner,item.id))}}).collect()};
             for field in ["emoji_favorite_order","emoji_recent_order"]{if value.get(field).is_some()&&local_keys(field).is_none(){return Ok(None);}}
@@ -549,6 +550,20 @@ mod native_tests {
             let library_state=json!({"emojis":[],"stickers":[],"favorites":[],"recent":[],"emoji_favorites":["☠","❤"],"emoji_recent":["🐢","😂"],"emoji_favorite_order":["unicode:☠","unicode:❤"],"emoji_recent_order":["unicode:🐢","unicode:😂"]});
             meta.kind="pack-order".into();meta.id="order".into();std::fs::write(&path,library_state.to_string()).unwrap();assert!(apply(&store,&meta,&path).await.unwrap().is_some());
             let preferences=store.emoji_preferences().unwrap();assert_eq!(preferences.favorites,["☠","❤️"]);assert_eq!(preferences.recent,["🐢","😂"]);assert!(store.pref("picker:recent:emoji","").contains("emoji:🐢"));
+            // Mobile exports stable UUIDs; desktop resolves them to its own local IDs.
+            let library = Library::open(owner).await.unwrap();
+            let archive = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/device-sync/mobile.xmsp");
+            let pack = library.import_sync_xmsp(archive, Job::new(), "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into()).await.unwrap();
+            let item = &pack.items[0];
+            let mut mobile_order = library_state.clone();
+            mobile_order["favorites"] = json!([item.sync_id]);
+            mobile_order["recent"] = json!([item.sync_id]);
+            meta.stamp = 2;
+            std::fs::write(&path, mobile_order.to_string()).unwrap();
+            assert!(apply(&store, &meta, &path).await.unwrap().is_some());
+            let received = library.snapshot().await.unwrap();
+            assert_eq!(received.favorites, [item.id]);
+            assert_eq!(received.recent, [item.id]);
             store.forget(owner).unwrap();meta.kind="account".into();meta.id="login".into();std::fs::write(&path,account.to_string()).unwrap();assert!(apply(&store,&meta,&path).await.is_err());assert!(store.accounts().is_empty());
             let first=start().await.unwrap();let id=first.store.lock().unwrap().state.id.clone();stop();drop(first);gtk::glib::timeout_future(Duration::from_millis(800)).await;
             let again=start().await.unwrap();assert_eq!(again.store.lock().unwrap().state.id,id);stop();drop(again);
