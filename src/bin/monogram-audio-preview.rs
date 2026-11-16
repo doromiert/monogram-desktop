@@ -16,7 +16,8 @@
 //! The file is re-checked here with the same `audio_check` the main process used, then limits that
 //! need decoding are enforced: at most two channels, 8 to 96 kHz, 30 minutes, no video or second
 //! stream. Exit codes: 2 hardening failed, 3 bad arguments, 4 file refused by the strict check,
-//! 5 pipeline failure or stall, 6 limit exceeded, 7 unsupported stream (video or extra tracks).
+//! 5 pipeline failure or stall, 6 limit exceeded, 7 unsupported stream (video or extra tracks),
+//! 8 a needed GStreamer plugin (demuxer, parser or decoder) is not installed.
 #[path = "../audio_check.rs"]
 #[allow(dead_code)]
 mod audio_check;
@@ -78,10 +79,16 @@ fn identify(expected: Container) -> Result<u64, i32> {
 fn make(factory: &str) -> Result<gst::Element, i32> {
     gst::ElementFactory::make(factory).build().map_err(|_| 5)
 }
+/// A demuxer, parser or decoder. If it cannot be created the plugin is not installed (or was not
+/// mounted), which is reported as its own failure so the user can be told what is missing.
+fn make_codec(factory: &str) -> Result<gst::Element, i32> {
+    gst::ElementFactory::make(factory).build().map_err(|_| MISSING)
+}
 /// The first of `factories` that exists (a distribution may ship one decoder and not the other).
 fn make_first(factories: &[&str]) -> Result<gst::Element, i32> {
-    factories.iter().find_map(|name| gst::ElementFactory::make(name).build().ok()).ok_or(5)
+    factories.iter().find_map(|name| gst::ElementFactory::make(name).build().ok()).ok_or(MISSING)
 }
+const MISSING: i32 = 8;
 
 struct Built {
     pipeline: gst::Pipeline,
@@ -89,6 +96,14 @@ struct Built {
     convert: gst::Element,
     /// Set when a demuxer offers a stream we do not accept (video, a second track, text...).
     rejected: Arc<AtomicBool>,
+    /// Set when the stream is acceptable but its decoder plugin is not installed.
+    missing: Arc<AtomicBool>,
+}
+
+/// Why no decoder chain was made for a demuxed stream.
+enum Why {
+    Unsupported,
+    Missing,
 }
 
 fn output_caps() -> gst::Caps {
@@ -101,21 +116,23 @@ fn output_caps() -> gst::Caps {
 }
 
 /// The decoder for a demuxed stream, by its caps, from a fixed list. Anything else is refused.
-fn decoder_for(caps: &gst::CapsRef) -> Result<Vec<gst::Element>, ()> {
-    let structure = caps.structure(0).ok_or(())?;
+fn decoder_for(caps: &gst::CapsRef) -> Result<Vec<gst::Element>, Why> {
+    let structure = caps.structure(0).ok_or(Why::Unsupported)?;
+    let missing = |_| Why::Missing;
     match structure.name().as_str() {
-        "audio/x-opus" => Ok(vec![make("opusdec").map_err(|_| ())?]),
-        "audio/x-vorbis" => Ok(vec![make("vorbisdec").map_err(|_| ())?]),
+        "audio/x-opus" => Ok(vec![make_codec("opusdec").map_err(missing)?]),
+        "audio/x-vorbis" => Ok(vec![make_codec("vorbisdec").map_err(missing)?]),
         "audio/mpeg" if structure.get::<i32>("mpegversion") == Ok(4) => {
-            Ok(vec![make("aacparse").map_err(|_| ())?, make_first(&["faad", "avdec_aac"]).map_err(|_| ())?])
+            Ok(vec![make_codec("aacparse").map_err(missing)?, make_first(&["faad", "avdec_aac"]).map_err(missing)?])
         }
-        _ => Err(()),
+        _ => Err(Why::Unsupported),
     }
 }
 
 fn build(container: Container) -> Result<Built, i32> {
     let pipeline = gst::Pipeline::new();
     let rejected = Arc::new(AtomicBool::new(false));
+    let missing = Arc::new(AtomicBool::new(false));
     let source = make("filesrc")?;
     source.set_property("location", SOURCE);
     let convert = make("audioconvert")?;
@@ -135,9 +152,9 @@ fn build(container: Container) -> Result<Built, i32> {
     match container {
         Container::Wav | Container::Mp3 => {
             let chain: Vec<gst::Element> = if container == Container::Wav {
-                vec![make("wavparse")?]
+                vec![make_codec("wavparse")?]
             } else {
-                vec![make("mpegaudioparse")?, make_first(&["mpg123audiodec", "avdec_mp3float", "avdec_mp3"])?]
+                vec![make_codec("mpegaudioparse")?, make_first(&["mpg123audiodec", "avdec_mp3float", "avdec_mp3"])?]
             };
             let refs: Vec<&gst::Element> = chain.iter().collect();
             pipeline.add_many(refs.iter().copied()).map_err(|_| 5)?;
@@ -147,7 +164,7 @@ fn build(container: Container) -> Result<Built, i32> {
             gst::Element::link_many(line).map_err(|_| 5)?;
         }
         Container::Ogg | Container::M4a | Container::Webm => {
-            let demux = make(match container {
+            let demux = make_codec(match container {
                 Container::Ogg => "oggdemux",
                 Container::M4a => "qtdemux",
                 _ => "matroskademux",
@@ -155,7 +172,7 @@ fn build(container: Container) -> Result<Built, i32> {
             pipeline.add(&demux).map_err(|_| 5)?;
             source.link(&demux).map_err(|_| 5)?;
             let pads = Arc::new(AtomicU32::new(0));
-            let (weak, flag, convert_weak) = (pipeline.downgrade(), rejected.clone(), convert.downgrade());
+            let (weak, flag, absent, convert_weak) = (pipeline.downgrade(), rejected.clone(), missing.clone(), convert.downgrade());
             demux.connect_pad_added(move |_, pad| {
                 // Exactly one stream, and it must be audio we have a decoder for.
                 if pads.fetch_add(1, Ordering::SeqCst) > 0 {
@@ -163,7 +180,11 @@ fn build(container: Container) -> Result<Built, i32> {
                     return;
                 }
                 let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
-                let (Some(pipeline), Some(convert), Ok(chain)) = (weak.upgrade(), convert_weak.upgrade(), decoder_for(&caps)) else {
+                let chain = decoder_for(&caps);
+                if matches!(chain, Err(Why::Missing)) {
+                    absent.store(true, Ordering::SeqCst);
+                }
+                let (Some(pipeline), Some(convert), Ok(chain)) = (weak.upgrade(), convert_weak.upgrade(), chain) else {
                     flag.store(true, Ordering::SeqCst);
                     return;
                 };
@@ -188,7 +209,7 @@ fn build(container: Container) -> Result<Built, i32> {
             });
         }
     }
-    Ok(Built { pipeline, sink, convert, rejected })
+    Ok(Built { pipeline, sink, convert, rejected, missing })
 }
 
 /// Pull decoded samples, calling `consume` with each buffer's bytes, until the end of the stream.
@@ -199,11 +220,20 @@ fn run(built: &Built, mut consume: impl FnMut(&[u8]) -> Result<(), i32>) -> Resu
     let max_frames = MAX_DURATION_MS * RATE as u64 / 1000;
     let result = loop {
         if built.rejected.load(Ordering::SeqCst) {
-            break Err(7);
+            // Acceptable audio whose decoder is not installed is reported as that, not as refused.
+            break Err(if built.missing.load(Ordering::SeqCst) { MISSING } else { 7 });
         }
         // A stalled pipeline (a demuxer waiting for data that never comes) is a failure, not a hang.
         let Some(sample) = built.sink.try_pull_sample(gst::ClockTime::from_seconds(12)) else {
-            break if built.sink.is_eos() { Ok(()) } else { Err(5) };
+            // No more samples: the reason a stream was refused or a decoder is missing wins over a
+            // generic failure, so the caller can say what is wrong.
+            break if built.rejected.load(Ordering::SeqCst) {
+                Err(if built.missing.load(Ordering::SeqCst) { MISSING } else { 7 })
+            } else if built.sink.is_eos() {
+                Ok(())
+            } else {
+                Err(5)
+            };
         };
         if !checked {
             // The caps the decoder actually produced, before conversion to our fixed format.

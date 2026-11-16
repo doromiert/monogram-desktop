@@ -48,6 +48,24 @@ const PLUGINS: &[&str] = &[
 ];
 const FALLBACK_DECODERS: &str = "libgstlibav.so";
 
+/// At most this many files are prepared at once. Preparing decodes a whole file in its own helper
+/// process (CPU, and a memory copy of the file), and the work runs on the shared I/O thread pool,
+/// so a flood of audio messages scrolling into view must queue rather than start a crowd.
+const PREPARE_AT_ONCE: usize = 2;
+
+/// Wait for one of the preparation places. Hold the permit for as long as the helper runs, and wait
+/// for it *before* taking a pool thread, so queued files do not occupy the pool.
+pub(crate) async fn preparation_permit() -> tokio::sync::OwnedSemaphorePermit {
+    use std::sync::{Arc, OnceLock};
+    static PLACES: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    PLACES
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(PREPARE_AT_ONCE)))
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("the preparation semaphore stays open")
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     /// The helper or bubblewrap is not installed.
@@ -60,6 +78,9 @@ pub enum Error {
     Cancelled,
     /// The helper's reply was malformed or out of range.
     BadOutput,
+    /// A GStreamer plugin this format needs is not installed. FFmpeg (gst-libav) is used only when
+    /// the system already has it; nothing is bundled for this.
+    MissingDecoder(&'static str),
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -67,6 +88,7 @@ impl std::fmt::Display for Error {
             Self::Unavailable => f.write_str("Audio preview is unavailable"),
             Self::Refused(error) => error.fmt(f),
             Self::Failed | Self::BadOutput => f.write_str("This audio file could not be played"),
+            Self::MissingDecoder(needs) => write!(f, "Can't play this: it needs {needs}, which is not installed"),
             Self::TimedOut => f.write_str("Preparing this audio took too long"),
             Self::Cancelled => f.write_str("Audio preparation was cancelled"),
         }
@@ -83,14 +105,32 @@ pub struct Preview {
     pub peaks: Vec<u8>,
 }
 
+fn have_plugin(dirs: &[PathBuf], name: &str) -> bool {
+    dirs.iter().any(|dir| dir.join(name).is_file())
+}
+
 fn plugin_names(dirs: &[PathBuf]) -> Vec<&'static str> {
     let mut names = PLUGINS.to_vec();
-    let have = |name: &str| dirs.iter().any(|dir| dir.join(name).is_file());
-    if !(have("libgstmpg123.so") && have("libgstfaad.so")) {
+    if !(have_plugin(dirs, "libgstmpg123.so") && have_plugin(dirs, "libgstfaad.so")) {
         names.push(FALLBACK_DECODERS);
     }
     names
 }
+
+/// What is missing for this container, if anything. MP3 and AAC have a small decoder and an FFmpeg
+/// one; FFmpeg is used only if the system has it installed, and nothing is bundled for audio. The
+/// other formats' decoders come with GStreamer's base plugins, and the helper reports them (exit
+/// code 8) if they are absent too.
+fn missing_decoder(container: Container, dirs: &[PathBuf]) -> Option<&'static str> {
+    let (small, hint) = match container {
+        Container::Mp3 => ("libgstmpg123.so", "the GStreamer mpg123 plugin or FFmpeg (gst-libav)"),
+        Container::M4a => ("libgstfaad.so", "the GStreamer faad plugin or FFmpeg (gst-libav)"),
+        _ => return None,
+    };
+    (!have_plugin(dirs, small) && !have_plugin(dirs, FALLBACK_DECODERS)).then_some(hint)
+}
+/// What the helper means by exit code 8 when the container is one with no pre-check.
+const SOME_DECODER: &str = "a GStreamer audio decoder";
 
 /// Read the start of the file without moving its offset.
 fn head(file: &File) -> Result<(Vec<u8>, u64), Error> {
@@ -113,14 +153,20 @@ fn spawn(file: &File, args: &[&str]) -> Result<Child, Error> {
     let (Some(helper), Some(bwrap)) = (confined::helper(HELPER, "MONOGRAM_AUDIO_PREVIEW_HELPER"), confined::bwrap()) else {
         return Err(Error::Unavailable);
     };
-    // A duplicate at offset 0: bubblewrap reads the copy from wherever the descriptor is.
-    let copy = file.try_clone().map_err(|_| Error::Unavailable)?;
-    copy.read_at(&mut [0u8; 0], 0).map_err(|_| Error::Unavailable)?;
+    // Each launch gets its own open file description at offset 0. A `try_clone` would share the
+    // read offset with every other launch, and two helpers started together would each receive
+    // only part of the file. Reopening through /proc/self/fd gives an independent description of
+    // the same, already verified inode.
+    let copy = File::open(format!("/proc/self/fd/{}", file.as_raw_fd()))
+        .or_else(|_| {
+            let clone = file.try_clone()?;
+            rewind(&clone).map_err(|_| std::io::Error::other("rewind failed"))?;
+            Ok::<_, std::io::Error>(clone)
+        })
+        .map_err(|_| Error::Unavailable)?;
     let dirs = confined::plugin_dirs();
     let plugins = confined::plugin_files(&plugin_names(&dirs), &dirs);
     let mut command = confined::sandbox_command(&bwrap, &helper, Input::Fd(copy.as_raw_fd()), None, &plugins, args);
-    // Reading starts at the descriptor's offset, which `try_clone` shares with `file`: rewind it.
-    rewind(&copy)?;
     command.spawn().map_err(|_| Error::Unavailable)
 }
 fn rewind(file: &File) -> Result<(), Error> {
@@ -132,6 +178,10 @@ fn rewind(file: &File) -> Result<(), Error> {
 pub fn probe(file: &File, name: &str, cancel: &dyn Fn() -> bool) -> Result<Preview, Error> {
     let (head, length) = head(file)?;
     let container = audio_check::check(name, &head, length).map_err(Error::Refused)?;
+    // Say what is missing before starting anything.
+    if let Some(needs) = missing_decoder(container, &confined::plugin_dirs()) {
+        return Err(Error::MissingDecoder(needs));
+    }
     let mut child = spawn(file, &["probe", container.name()])?;
     drop(child.stdin.take());
     let mut stdout = child.stdout.take().ok_or(Error::Failed)?;
@@ -142,9 +192,9 @@ pub fn probe(file: &File, name: &str, cancel: &dyn Fn() -> bool) -> Result<Previ
         reply
     });
     let started = Instant::now();
-    let success = loop {
+    let status = loop {
         if let Some(status) = child.try_wait().map_err(|_| Error::Failed)? {
-            break status.success();
+            break status;
         }
         let stop = if cancel() {
             Some(Error::Cancelled)
@@ -161,8 +211,10 @@ pub fn probe(file: &File, name: &str, cancel: &dyn Fn() -> bool) -> Result<Previ
         std::thread::sleep(Duration::from_millis(20));
     };
     let reply = reader.join().map_err(|_| Error::Failed)?;
-    if !success {
-        return Err(Error::Failed);
+    match status.code() {
+        Some(8) => return Err(Error::MissingDecoder(SOME_DECODER)),
+        _ if !status.success() => return Err(Error::Failed),
+        _ => {}
     }
     parse_probe(&reply, container)
 }
@@ -274,6 +326,34 @@ mod tests {
         std::fs::write(root.join("libgstfaad.so"), b"x").unwrap();
         assert!(!plugin_names(&dirs).contains(&FALLBACK_DECODERS), "both small decoders present");
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn mp3_and_aac_need_a_decoder_but_ffmpeg_is_only_used_when_it_is_already_installed() {
+        let root = std::env::temp_dir().join(format!("audio-decoders-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let dirs = [root.clone()];
+        let say = |container| missing_decoder(container, &dirs);
+        // Nothing installed: MP3 and M4A name what is missing, and FFmpeg is one of the answers.
+        let mp3 = say(Container::Mp3).expect("MP3 needs a decoder");
+        assert!(mp3.contains("mpg123") && mp3.contains("FFmpeg"), "{mp3}");
+        assert!(say(Container::M4a).is_some_and(|hint| hint.contains("faad") && hint.contains("FFmpeg")));
+        // Ogg, WAV and WebM need no FFmpeg or MP3 decoder.
+        for container in [Container::Ogg, Container::Wav, Container::Webm] {
+            assert_eq!(say(container), None, "{container:?}");
+        }
+        // The small decoder alone is enough for its own format, not for the other.
+        std::fs::write(root.join("libgstmpg123.so"), b"x").unwrap();
+        assert_eq!((say(Container::Mp3), say(Container::M4a).is_some()), (None, true));
+        // FFmpeg, if the system has it, covers both.
+        std::fs::write(root.join("libgstlibav.so"), b"x").unwrap();
+        assert_eq!((say(Container::Mp3), say(Container::M4a)), (None, None));
+        std::fs::remove_dir_all(&root).unwrap();
+        // The message names the missing piece in plain words.
+        assert_eq!(
+            Error::MissingDecoder("FFmpeg (gst-libav)").to_string(),
+            "Can't play this: it needs FFmpeg (gst-libav), which is not installed"
+        );
     }
 
     #[test]
@@ -501,6 +581,73 @@ mod tests {
             assert!(report.contains(&format!("{call}: refused")), "{call} must be refused:\n{report}");
         }
         assert!(report.contains("ordinary calls and threads: work"), "{report}");
+    }
+
+    /// Helpers started at the same moment on one file each get the whole file. A duplicated
+    /// descriptor shares its read offset with the original, so two launches reading the copy at once
+    /// would each receive part of it.
+    #[test]
+    #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
+    fn helpers_started_together_on_one_file_each_get_all_of_it() {
+        let file = std::sync::Arc::new(fixture("tone.wav"));
+        let lengths: Vec<usize> = (0..6)
+            .map(|_| {
+                let file = file.clone();
+                std::thread::spawn(move || {
+                    let mut bytes = Vec::new();
+                    let mut stream = PcmStream::start(&file, Container::Wav, 0).expect("starts");
+                    stream.read_to_end(&mut bytes).expect("reads");
+                    bytes.len()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert!(lengths.iter().all(|len| *len > 40_000), "every helper produced the whole 0.3 s: {lengths:?}");
+        assert!(lengths.windows(2).all(|pair| pair[0] == pair[1]), "and the same amount: {lengths:?}");
+    }
+
+    /// A format whose decoder plugin is not available inside the sandbox is reported as a missing
+    /// decoder (exit code 8), not as a corrupt file. Here MP3 gets every plugin except a decoder.
+    #[test]
+    #[ignore = "requires the built helper and real bubblewrap namespaces"]
+    fn a_missing_decoder_plugin_is_reported_as_missing_not_as_a_bad_file() {
+        use std::os::fd::AsRawFd;
+        let (helper, bwrap) = (confined::helper(HELPER, "MONOGRAM_AUDIO_PREVIEW_HELPER").unwrap(), confined::bwrap().unwrap());
+        let dirs = confined::plugin_dirs();
+        // Everything an MP3 probe needs except the decoders (no mpg123, no libav).
+        let names = ["libgstcoreelements.so", "libgstapp.so", "libgstaudioparsers.so", "libgstaudioconvert.so", "libgstaudioresample.so"];
+        let plugins = confined::plugin_files(&names, &dirs);
+        assert_eq!(plugins.len(), names.len(), "this machine has the base plugins");
+        let input = fixture("tone.mp3");
+        let output = confined::sandbox_command(&bwrap, &helper, Input::Fd(input.as_raw_fd()), None, &plugins, &["probe", "mp3"]).output().unwrap();
+        assert_eq!(output.status.code(), Some(8), "no MP3 decoder available: exit code 8");
+        // With the decoder mounted the same file is fine, so the code really means "missing".
+        let mut with_decoder = names.to_vec();
+        with_decoder.push("libgstmpg123.so");
+        let plugins = confined::plugin_files(&with_decoder, &dirs);
+        let input = fixture("tone.mp3");
+        let output = confined::sandbox_command(&bwrap, &helper, Input::Fd(input.as_raw_fd()), None, &plugins, &["probe", "mp3"]).output().unwrap();
+        assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stdout));
+    }
+
+    /// bubblewrap does not close descriptors it inherits: a file opened without close-on-exec in
+    /// this process is readable inside the sandbox unless the launcher marks it close-on-exec.
+    #[test]
+    #[ignore = "requires the built helper and real bubblewrap namespaces"]
+    fn a_descriptor_leaked_in_this_process_does_not_reach_the_sandbox() {
+        use std::os::fd::AsRawFd;
+        // Open a file the way a careless library would: no O_CLOEXEC.
+        let leaked = unsafe { libc::open(c"/etc/hostname".as_ptr(), libc::O_RDONLY) };
+        assert!(leaked > 2 && unsafe { libc::fcntl(leaked, libc::F_GETFD) } & libc::FD_CLOEXEC == 0, "the test leaks a descriptor on purpose");
+        let (helper, bwrap) = (confined::helper(HELPER, "MONOGRAM_AUDIO_PREVIEW_HELPER").unwrap(), confined::bwrap().unwrap());
+        let input = fixture("tone.wav");
+        let output = confined::sandbox_command(&bwrap, &helper, Input::Fd(input.as_raw_fd()), None, &[], &["selftest"]).output().unwrap();
+        unsafe { libc::close(leaked) };
+        let report = String::from_utf8_lossy(&output.stdout);
+        assert!(report.contains("ordinary calls and threads: work"), "the selftest ran in the sandbox:\n{report}");
+        assert!(report.contains("inherited descriptors: none"), "a leaked descriptor reached the sandbox:\n{report}");
     }
 
     #[test]
