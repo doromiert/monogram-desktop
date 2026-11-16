@@ -100,6 +100,18 @@ impl Ui {
         std::fs::write(&path,b"not a pack").unwrap();ui.open_pack_file(gio::File::for_path(&path));
         wait(||ui.window.visible_dialog().is_none());
         assert_eq!(glib::MainContext::default().block_on(library.snapshot()).unwrap().packs.len(),before);
+        // One click on a not-yet-restored chat attachment opens it after cached verification.
+        let archive=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/device-sync/mobile.xmsp");
+        let attachment:crate::file_share::Attachment=serde_json::from_value(serde_json::json!({
+            "name":"friends.pack","mime":"application/vnd.monogram.sticker-pack",
+            "wire_url":"https://files.fixture.invalid/friends.pack","size":std::fs::metadata(&archive).unwrap().len(),"hashes":{},"manual":false,"sticker":false
+        })).unwrap();
+        let root=crate::downloads::account_root(library.account()).unwrap();std::fs::create_dir_all(&root).unwrap();std::fs::copy(archive,root.join(attachment.key())).unwrap();
+        let message=crate::model::Message{attachment:Some(attachment),..Default::default()};
+        let content=ui.attachment_content(&message);ui.timeline.append(&content);
+        find_button(content.upcast_ref(),"Download").unwrap().emit_clicked();
+        wait(||ui.window.visible_dialog().is_some_and(|d|find_button(d.upcast_ref(),"Add Pack").is_some()));
+        ui.window.visible_dialog().unwrap().close();
         ui.window.close();let _=std::fs::remove_file(path);
     }
     #[test] fn recognizes_pack_aliases_without_claiming_other_documents(){

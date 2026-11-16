@@ -120,5 +120,5 @@
 - [x] Open `.pack`, `.nzsp`, and `.xmsp` chat attachments in the existing pack dialog on desktop and the sticker sheet on mobile.
 - [x] Register native file-manager associations, including desktop launch arguments and Android content-URI permissions.
 - [x] Preview before installation; keep Add Pack explicit and validate archives off the UI thread with cancellation and account fencing.
-- [x] Verify cold library startup, installation, malformed input, and continued GTK responsiveness.
+- [x] Verify cold library startup, installation, malformed input, single-click download/open, and continued GTK responsiveness.
 - [x] Move PR #2 raster-preview cache reads, PNG encoding, writes and pruning off GTK before merging.

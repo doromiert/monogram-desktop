@@ -67,6 +67,8 @@ impl Ui {
         let weak = Rc::downgrade(self);
         let source = file.clone();
         let account = owner.clone();
+        let open_requested=Rc::new(Cell::new(false));
+        let pending_open=open_requested.clone();
         action.connect_clicked(move |_| {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -91,12 +93,13 @@ impl Ui {
                 Some(Status::Running { .. })
             );
             if running {
+                pending_open.set(false);
                 ui.downloads.borrow_mut().cancel(&account, &source);
             } else {
                 let result = ui.downloads.borrow_mut().start(&account, source.clone());
                 if let Err(reason) = result {
                     ui.notice(reason);
-                }
+                } else if pack {pending_open.set(true);}
             }
         });
         let weak = Rc::downgrade(self);
@@ -119,6 +122,14 @@ impl Ui {
             };
             let allow_auto = ui.auto_download_enabled.get() && automatic_media_allowed(ui.smoke, auto_flags.0, auto_flags.1, ui.state.borrow().current());
             let status = ui.downloads.borrow().status(&owner, &file);
+            if open_requested.get() {
+                match &status {
+                    Some(Status::Ready(path))=>{open_requested.set(false);ui.open_pack_file(gio::File::for_path(path));}
+                    Some(Status::Failed(_) | Status::Cancelled)=>open_requested.set(false),
+                    _=>{}
+                }
+            }
+
             if status.is_none()
                 && allow_auto
                 && !file.manual
