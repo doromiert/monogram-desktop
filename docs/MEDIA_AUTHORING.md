@@ -14,12 +14,28 @@ media: it never runs in the main process.
 - Hard limits (`Limits`): 512 MiB input, 64 megapixels and 16384 px per edge, 1 hour of video,
   4096 px output edge, 256 MiB output, 16 KiB job description. Job and plan JSON reject unknown
   fields.
-- The helper (next step) is a bubblewrap-confined process like the math and sticker helpers:
-  `--unshare-all`, read-only input, one writable output directory, no network, and it deletes its
-  output if it passes `max_output_bytes`. Probe results come back as `SourceInfo` and are
-  validated again by the main process.
+- The helper is `monogram-media-author`, started by `src/media_author_run.rs` inside bubblewrap:
+  `--unshare-all` (no network), `--cap-drop ALL`, source mounted read-only at `/in/source`, one
+  fresh `0700` output directory at `/out`, a private `/tmp`, a cleared environment. Only the
+  GStreamer plugin files the picture chain needs are mounted (`coreelements`, `png`, `jpeg`,
+  `jpegformat`, `webp`, `videoconvertscale`, `videocrop`, `videofilter`), and the plugin scanner
+  process is disabled, so no other plugin or codec can load.
+- Inside, the helper applies `RLIMIT_AS`, `RLIMIT_FSIZE` (the kernel enforces the output cap),
+  `RLIMIT_NOFILE`, no core dumps, `no_new_privs`, a seccomp deny-list (exec, fork, sockets,
+  ptrace, mount, namespace calls; threads stay allowed because GStreamer needs them) and an alarm.
+  The runner also kills it after 40 seconds or when the user cancels.
+- Only JPEG, PNG and WebP are accepted. The format and pixel size are read from the file header
+  (`sniff_image`) and bounded *before* any decoder runs, so a tiny file claiming a huge canvas is
+  refused up front. The decoder is chosen explicitly (no `decodebin`).
+- The helper re-validates the plan it receives (`Plan::check`). After it exits, the main process
+  accepts the result only if it is a regular, non-symlink file within the size cap whose own
+  header is PNG or JPEG with exactly the planned dimensions.
 - Pipelines are built element by element from the validated `Plan`, never from a string that
-  contains user input.
+  contains user input. EXIF orientation is applied first, so crop coordinates are in the picture
+  as the user sees it. JPEG stays JPEG (quality 90); PNG and WebP become PNG, keeping transparency.
+- Tests: header and plan logic run everywhere. `cargo test -- --ignored media_author_run` runs the
+  real helper in bubblewrap (needs `cargo build --bins` first), including exact pixel checks for
+  crop and rotation and hostile files (text, GIF, 60000x60000 header, truncated, empty).
 
 ## Order of operations
 
@@ -30,7 +46,8 @@ geometry is rounded to even values. Trims apply to the source timeline and must 
 ## Steps
 
 1. Plan model, validation and limits (done, unit tested).
-2. Sandboxed GStreamer helper: probe and image crop/rotate/scale.
+2. Sandboxed GStreamer helper: probe and image crop/rotate/scale (done, tested in the real
+   sandbox).
 3. Native editor dialog (`adw::Dialog`, keyboard operable, accessible names) for crop and rotate.
 4. Video trim and compression with progress and cancel off the main thread.
 5. Albums: multi-select, ordering, shared caption.

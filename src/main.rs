@@ -72,7 +72,9 @@ mod pq_security_ui;
 mod read_markers;
 mod read_state;
 mod request_logic;
-#[allow(dead_code)] // Used by the sandboxed GStreamer helper added in the next authoring step.
+#[allow(dead_code)] // Reached from the editor dialog in the next authoring step.
+mod media_author_run;
+#[allow(dead_code)] // Reached from the editor dialog in the next authoring step.
 mod media_authoring;
 mod room_members_ui;
 mod room_ui;

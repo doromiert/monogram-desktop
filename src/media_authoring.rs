@@ -115,6 +115,7 @@ pub enum Error {
     TrimOnImage,
     TrimRange,
     OutputEdge,
+    UnsupportedFormat,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -128,10 +129,95 @@ impl fmt::Display for Error {
             Self::TrimOnImage => "Pictures cannot be trimmed",
             Self::TrimRange => "Choose a longer part of the video to keep",
             Self::OutputEdge => "The requested size is not supported",
+            Self::UnsupportedFormat => "Only JPEG, PNG and WebP pictures can be edited",
         })
     }
 }
 impl std::error::Error for Error {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Format {
+    Png,
+    Jpeg,
+    Webp,
+}
+
+/// How much of a file `sniff_image` needs: enough for a large EXIF block before the JPEG frame
+/// header. The helper reads this much and never trusts a decoder to size its own allocations.
+pub const SNIFF_BYTES: usize = 1024 * 1024;
+
+fn be16(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from(u16::from_be_bytes(bytes.get(at..at + 2)?.try_into().ok()?)))
+}
+fn be32(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+}
+fn le24(bytes: &[u8], at: usize) -> Option<u32> {
+    let b = bytes.get(at..at + 3)?;
+    Some(u32::from(b[0]) | u32::from(b[1]) << 8 | u32::from(b[2]) << 16)
+}
+
+/// Identify a picture from its magic bytes and read its pixel size from the header alone, so a
+/// tiny file that claims a huge canvas is refused before any decoder allocates for it. Only
+/// formats with an explicit decoder in the helper are accepted; everything else is refused.
+pub fn sniff_image(head: &[u8]) -> Result<(Format, u32, u32), Error> {
+    let bad = Error::UnsupportedFormat;
+    if head.starts_with(b"\x89PNG\r\n\x1a\n") {
+        // The first chunk must be IHDR, 13 bytes long.
+        if head.get(12..16) != Some(b"IHDR") || be32(head, 8) != Some(13) {
+            return Err(bad);
+        }
+        return Ok((Format::Png, be32(head, 16).ok_or(bad)?, be32(head, 20).ok_or(bad)?));
+    }
+    if head.starts_with(&[0xff, 0xd8, 0xff]) {
+        let mut at = 2;
+        // Walk the marker segments up to the first frame header.
+        for _ in 0..512 {
+            while head.get(at) == Some(&0xff) && head.get(at + 1) == Some(&0xff) {
+                at += 1;
+            }
+            if head.get(at) != Some(&0xff) {
+                return Err(bad);
+            }
+            let marker = *head.get(at + 1).ok_or(bad)?;
+            match marker {
+                0xd8 | 0x01 | 0xd0..=0xd7 => at += 2,
+                // SOFn except DHT (c4), JPG (c8) and DAC (cc): precision, height, width.
+                0xc0..=0xcf if !matches!(marker, 0xc4 | 0xc8 | 0xcc) => {
+                    return Ok((Format::Jpeg, be16(head, at + 7).ok_or(bad)?, be16(head, at + 5).ok_or(bad)?));
+                }
+                0xd9 | 0xda => return Err(bad),
+                _ => {
+                    let length = be16(head, at + 2).ok_or(bad)? as usize;
+                    if length < 2 {
+                        return Err(bad);
+                    }
+                    at += 2 + length;
+                }
+            }
+        }
+        return Err(bad);
+    }
+    if head.len() >= 30 && &head[..4] == b"RIFF" && &head[8..12] == b"WEBP" {
+        let (width, height) = match &head[12..16] {
+            // Lossy: 14-bit sizes after the 3-byte frame tag and start code.
+            b"VP8 " if head[23..26] == [0x9d, 0x01, 0x2a] => (
+                u32::from(u16::from_le_bytes([head[26], head[27]]) & 0x3fff),
+                u32::from(u16::from_le_bytes([head[28], head[29]]) & 0x3fff),
+            ),
+            // Lossless: signature byte, then 14-bit width-1 and height-1.
+            b"VP8L" if head[20] == 0x2f => {
+                let bits = u32::from_le_bytes(head[21..25].try_into().unwrap());
+                ((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1)
+            }
+            // Extended: 24-bit canvas width-1 and height-1.
+            b"VP8X" => (le24(head, 24).ok_or(bad)? + 1, le24(head, 27).ok_or(bad)? + 1),
+            _ => return Err(bad),
+        };
+        return Ok((Format::Webp, width, height));
+    }
+    Err(bad)
+}
 
 /// A fully resolved, bounds-checked set of operations: everything the helper needs, with no
 /// remaining choices that could go out of range.
@@ -150,6 +236,36 @@ pub struct Plan {
 
 fn even(value: u32) -> u32 {
     value & !1
+}
+
+impl Plan {
+    /// Re-check a plan the helper received over a pipe. It was validated by the sender, but the
+    /// helper does not trust its caller: every geometry value is range-checked again.
+    pub fn check(&self, source: &SourceInfo, limits: &Limits) -> Result<(), Error> {
+        let right = self.crop.x.checked_add(self.crop.width).ok_or(Error::CropOutside)?;
+        let bottom = self.crop.y.checked_add(self.crop.height).ok_or(Error::CropOutside)?;
+        if self.kind != source.kind
+            || source.width > limits.max_source_edge
+            || source.height > limits.max_source_edge
+            || u64::from(source.width) * u64::from(source.height) > limits.max_source_pixels
+        {
+            return Err(Error::SourceDimensions);
+        }
+        if right > source.width || bottom > source.height || self.crop.width == 0 || self.crop.height == 0 {
+            return Err(Error::CropOutside);
+        }
+        let valid = |edge: u32| (1..=limits.max_output_edge).contains(&edge);
+        if !valid(self.output_width) || !valid(self.output_height) {
+            return Err(Error::OutputEdge);
+        }
+        if self.trim.is_some() && self.kind == Kind::Image {
+            return Err(Error::TrimOnImage);
+        }
+        if self.max_output_bytes == 0 || self.max_output_bytes > limits.max_output_bytes {
+            return Err(Error::OutputEdge);
+        }
+        Ok(())
+    }
 }
 
 /// Validate `job` against what the helper found in the file and produce the plan to run.
@@ -375,6 +491,99 @@ mod tests {
         assert_eq!(Job::from_json(b"not json", &LIMITS), Err(Error::MalformedJob));
         let padding = format!(r#"{{"max_edge":1,"pad":"{}"}}"#, "x".repeat(LIMITS.max_job_json));
         assert_eq!(Job::from_json(padding.as_bytes(), &LIMITS), Err(Error::JobTooLarge));
+    }
+
+    fn png_header(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn sniffing_reads_png_jpeg_and_webp_sizes_from_headers_only() {
+        assert_eq!(sniff_image(&png_header(640, 480)), Ok((Format::Png, 640, 480)));
+        // JPEG: SOI, an APP1 (EXIF-like) block that must be skipped, then SOF0 (h=300, w=500).
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1, 0x00, 0x08, 1, 2, 3, 4, 5, 6];
+        jpeg.extend_from_slice(&[0xff, 0xc0, 0x00, 0x11, 8, 0x01, 0x2c, 0x01, 0xf4, 3]);
+        assert_eq!(sniff_image(&jpeg), Ok((Format::Jpeg, 500, 300)));
+        let riff = |chunk: &[u8; 4], payload: &[u8]| {
+            let mut bytes = b"RIFF\0\0\0\0WEBP".to_vec();
+            bytes.extend_from_slice(chunk);
+            bytes.extend_from_slice(&[0; 4]);
+            bytes.extend_from_slice(payload);
+            bytes.resize(bytes.len().max(40), 0);
+            bytes
+        };
+        let mut extended = vec![0; 4];
+        extended.extend_from_slice(&[99, 0, 0, 49, 0, 0]); // 100 x 50
+        assert_eq!(sniff_image(&riff(b"VP8X", &extended)), Ok((Format::Webp, 100, 50)));
+        let mut lossy = vec![0, 0, 0, 0x9d, 0x01, 0x2a];
+        lossy.extend_from_slice(&[0x40, 0x01, 0xc8, 0x00]); // 320 x 200
+        assert_eq!(sniff_image(&riff(b"VP8 ", &lossy)), Ok((Format::Webp, 320, 200)));
+        let lossless = [0x2f, 0x3f, 0x80, 0x00, 0x00]; // (63+1) wide, (2+1) tall
+        assert_eq!(sniff_image(&riff(b"VP8L", &lossless)), Ok((Format::Webp, 64, 3)));
+    }
+
+    #[test]
+    fn sniffing_refuses_other_formats_and_malformed_headers() {
+        for head in [
+            &b""[..],
+            b"GIF89a\x01\x00\x01\x00",
+            b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+            b"\x00\x00\x00\x18ftypmp42",
+            &png_header(1, 1)[..20],
+            b"\xff\xd8\xff",
+        ] {
+            assert_eq!(sniff_image(head), Err(Error::UnsupportedFormat), "{head:?}");
+        }
+        // The first PNG chunk must be IHDR.
+        let mut wrong = png_header(10, 10);
+        wrong[12..16].copy_from_slice(b"IDAT");
+        assert_eq!(sniff_image(&wrong), Err(Error::UnsupportedFormat));
+        // A JPEG whose segment length points past the data, or loops, is refused, not followed.
+        let truncated = [0xff, 0xd8, 0xff, 0xe0, 0xff, 0xff, 0, 0];
+        assert_eq!(sniff_image(&truncated), Err(Error::UnsupportedFormat));
+        let mut endless = vec![0xff, 0xd8];
+        for _ in 0..600 {
+            endless.extend_from_slice(&[0xff, 0xe0, 0x00, 0x02]);
+        }
+        assert_eq!(sniff_image(&endless), Err(Error::UnsupportedFormat));
+    }
+
+    #[test]
+    fn a_tiny_file_claiming_a_huge_canvas_is_refused_by_the_plan() {
+        let (_, width, height) = sniff_image(&png_header(60_000, 60_000)).unwrap();
+        let source = SourceInfo { kind: Kind::Image, width, height, duration_ms: None, bytes: 100 };
+        assert_eq!(plan(&Job::default(), &source, &LIMITS), Err(Error::SourceDimensions));
+    }
+
+    #[test]
+    fn the_helper_rechecks_plans_it_receives() {
+        let source = image(400, 300);
+        let good = plan(&Job::default(), &source, &LIMITS).unwrap();
+        assert_eq!(good.check(&source, &LIMITS), Ok(()));
+        let mut outside = good.clone();
+        outside.crop.width = 401;
+        assert_eq!(outside.check(&source, &LIMITS), Err(Error::CropOutside));
+        let mut overflow = good.clone();
+        overflow.crop.x = u32::MAX;
+        assert_eq!(overflow.check(&source, &LIMITS), Err(Error::CropOutside));
+        let mut huge = good.clone();
+        huge.output_width = LIMITS.max_output_edge + 1;
+        assert_eq!(huge.check(&source, &LIMITS), Err(Error::OutputEdge));
+        let mut zero = good.clone();
+        zero.output_height = 0;
+        assert_eq!(zero.check(&source, &LIMITS), Err(Error::OutputEdge));
+        let mut unbounded = good.clone();
+        unbounded.max_output_bytes = u64::MAX;
+        assert_eq!(unbounded.check(&source, &LIMITS), Err(Error::OutputEdge));
+        let mut video_plan = good.clone();
+        video_plan.kind = Kind::Video;
+        assert_eq!(video_plan.check(&source, &LIMITS), Err(Error::SourceDimensions));
+        assert_eq!(good.check(&image(20_000, 10), &LIMITS), Err(Error::SourceDimensions));
     }
 
     #[test]
