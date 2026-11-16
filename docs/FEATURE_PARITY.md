@@ -245,7 +245,7 @@ flat native styling and only one hover background. The text-only Monero tab open
 the existing interactive 3D wallet card with real synced wallet names and receiving
 addresses; configuration remains in Preferences. Unavailable balances are explicit,
 and account switches remove the old card.
-this does not add desktop wallet spending. Local contact UI and paired transfer
+This does not add desktop wallet spending. Local contact UI and paired transfer
 are documented in [LOCAL_CONTACTS.md](LOCAL_CONTACTS.md). Allreportedfollow-up
 flows have controls and sub400ms feedback checks; actual user-account Stories
 publication and manualphone↔desktop contact editing were not performed.
@@ -269,7 +269,9 @@ WebM pack-bar test verifies a live MediaStream and a 48-sticker grid remains
 responsive (maximum heartbeat gap41ms); offscreen TGS reopen coverage passes.
 The native sync adapter imports mobile-format sticker favorites/recents by
 stable UUID and preserves them in the desktop library. Physical phone↔PC
-favorites acceptance remains pending: desktop's booted firewall omitted45950
-TCP/UDP; runtime rules were restored, while the existing permanent Monogram
-system-module selection still requires system activation. Phone control is
-paused at the user's request. Desktop wallet scanning/spending remains absent.
+favorites/recents transfer is now verified: phone revision1794843209272 imported
+10 favorite stickers and3 recent stickers into the running packaged desktop.
+The booted firewall omitted45950TCP/UDP; restoring those rules unblocked the
+transfer. The permanent Monogram system-module selection still requires system
+activation to survive reboot. No phone control was used after the user asked
+to stop. Desktop wallet scanning/spending remains absent.

@@ -109,5 +109,6 @@
 
 - [x] Animate pack selector icons using the existing visibility-aware decoders.
 - [x] Restore the wallet card sidebar and text-only Monero toggle; retain real wallet metadata without demo funds.
-- [ ] Verify live phone sticker favorites/recents reach desktop. Desktop import of mobile UUID favorites/recents passes; current PC firewall was missing TCP/UDP45950 after reboot and its runtime rules are restored. Phone interaction is paused at the user’s request. Permanent system-module configuration exists but is not active in the booted generation.
+- [x] Verify live phone sticker favorites/recents reach desktop: after restoring TCP/UDP45950 and restarting the updated desktop, phone revision1794843209272 imported10 favorite stickers and3 recent stickers. No further phone control was used.
+- [ ] Activate the already-configured Monogram system firewall module so TCP/UDP45950 survives reboot; the booted generation predates it.
 - [x] Review PR2 head32c1b77 first: GTK-thread cache I/O/PNG work remains a freeze blocker; no merge.
