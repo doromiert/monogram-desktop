@@ -103,6 +103,7 @@ pub struct Ui {
     pub encryption_revision: Cell<u64>,
     pub room_syncing: RefCell<Option<(u64, String, u64)>>,
     pub room_sync_retry: RefCell<HashMap<String, (Instant, u8)>>,
+    pub(crate) requests_revision: Cell<u64>,
     pub request_secrets: RefCell<crate::request_logic::SecretJobs>,
     pub security_widgets: RefCell<Option<crate::dialogs::SecurityControls>>,
     pub link_preview_jobs: RefCell<crate::link_preview_logic::Jobs>,
@@ -423,6 +424,7 @@ impl Ui {
             encryption_revision: Cell::new(0),
             room_syncing: RefCell::new(None),
             room_sync_retry: RefCell::new(HashMap::new()),
+            requests_revision: Cell::new(0),
             request_secrets: RefCell::new(Default::default()),
             security_widgets: RefCell::new(None),
             contact_access_widgets: RefCell::new(None),
@@ -2786,6 +2788,7 @@ impl Ui {
                 self.clear_contact_request(&peer);
                 self.refresh_contact_access();
             }
+            BackendEvent::RoomInvitationsAccepted(rooms) => self.resolve_room_invitations(&rooms),
             BackendEvent::RoomInvitation(invitation) => {
                 self.receive_room_invitation(invitation);
             }

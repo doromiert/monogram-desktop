@@ -691,6 +691,7 @@ pub enum BackendEvent {
     Request(String),
     RequestCancelled(String),
     RoomInvitation(crate::rooms::invitations::Incoming),
+    RoomInvitationsAccepted(Vec<String>),
 }
 #[derive(Debug)]
 pub enum RoomPreparation {
@@ -1238,7 +1239,9 @@ impl Session {
                             loading_rooms=false;
                             match result {
                                 Ok(bookmarks)=>{
+                                    let accepted=bookmarks.iter().filter(|bookmark|bookmark.info().autojoin).map(|bookmark|bookmark.info().jid.clone()).collect();
                                     emit(BackendEvent::RoomBookmarks(rooms.import(bookmarks)));
+                                    emit(BackendEvent::RoomInvitationsAccepted(accepted));
                                     for peer in rooms.autojoin(){ let _=network.send(Command::JoinRoom{peer,nick:None}); }
                                 }
                                 Err(error)=>{
