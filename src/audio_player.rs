@@ -63,6 +63,8 @@ struct Shared {
     changed: RefCell<Option<Box<dyn Fn()>>>,
     /// Set when the last session ended by reaching the end of the audio.
     finished: Cell<bool>,
+    /// Why the last session ended abnormally (no sound device, a failed sink...), if it did.
+    error: RefCell<Option<String>>,
 }
 
 #[derive(Clone)]
@@ -85,6 +87,7 @@ impl AudioPlayer {
             generation: Cell::new(0),
             changed: RefCell::new(None),
             finished: Cell::new(false),
+            error: RefCell::new(None),
         }))
     }
 
@@ -97,6 +100,10 @@ impl AudioPlayer {
     /// True once, right after the audio played to its end.
     pub fn take_finished(&self) -> bool {
         self.0.finished.replace(false)
+    }
+    /// Why playback stopped on its own, once: for example that no audio output could be opened.
+    pub fn take_error(&self) -> Option<String> {
+        self.0.error.take()
     }
     pub fn connect_changed(&self, callback: impl Fn() + 'static) {
         self.0.changed.replace(Some(Box::new(callback)));
@@ -198,8 +205,11 @@ impl AudioPlayer {
                         }
                         glib::ControlFlow::Break
                     }
-                    MessageView::Error(_) => {
-                        if weak.upgrade().is_some_and(|shared| shared.generation.get() == generation) {
+                    MessageView::Error(error) => {
+                        if let Some(shared) = weak.upgrade().filter(|shared| shared.generation.get() == generation) {
+                            let reason = format!("{}", error.error());
+                            eprintln!("Monogram audio playback error: {reason} ({})", error.debug().unwrap_or_default());
+                            shared.error.replace(Some(reason));
                             player.stop();
                         }
                         glib::ControlFlow::Break
@@ -350,6 +360,40 @@ mod tests {
         assert!(began.elapsed() > Duration::from_millis(500), "it ran in real time ({:?})", began.elapsed());
         assert_eq!(player.position_ms(), 0, "back at the start");
         assert_eq!(*seen.borrow(), [PlayState::Starting, PlayState::Playing, PlayState::Idle]);
+    }
+
+    /// Silent audio through the real sound system (`autoaudiosink`), not `fakesink`: the only place a
+    /// missing or unusable output shows up. Silence, so nothing is heard.
+    #[test]
+    #[ignore = "uses the real audio output (silently); requires the built helper and bubblewrap"]
+    fn playing_through_the_real_audio_output_starts_and_ends_cleanly() {
+        let mut wav = b"RIFF".to_vec();
+        let data = 8_000 * 2 / 2; // 0.5 s of 8 kHz mono 16-bit silence
+        wav.extend_from_slice(&(36 + data as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        for v in [1u16, 1] { wav.extend_from_slice(&v.to_le_bytes()); }
+        wav.extend_from_slice(&8_000u32.to_le_bytes());
+        wav.extend_from_slice(&16_000u32.to_le_bytes());
+        for v in [2u16, 16] { wav.extend_from_slice(&v.to_le_bytes()); }
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data as u32).to_le_bytes());
+        wav.resize(wav.len() + data, 0);
+        let path = std::env::temp_dir().join(format!("silence-{}.wav", uuid::Uuid::new_v4()));
+        std::fs::write(&path, &wav).unwrap();
+        let player = AudioPlayer::new(File::open(&path).unwrap(), Container::Wav, 500);
+        std::fs::remove_file(&path).unwrap();
+        player.play_from(0);
+        assert!(wait(Duration::from_secs(10), || player.state() != PlayState::Starting), "it left the starting state");
+        let mut saw_playing = player.state() == PlayState::Playing;
+        wait(Duration::from_secs(5), || {
+            saw_playing |= player.state() == PlayState::Playing;
+            player.state() == PlayState::Idle
+        });
+        let error = player.take_error();
+        assert!(error.is_none(), "playback through the real output failed: {error:?}");
+        assert!(saw_playing, "it reached Playing");
+        assert!(player.take_finished(), "and played to its end");
     }
 
     #[test]
