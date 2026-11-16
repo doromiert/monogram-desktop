@@ -61,6 +61,59 @@ mod tests {
         }
     }
 
+    fn find<T: IsA<gtk::Widget>>(widget: &gtk::Widget, test: &dyn Fn(&gtk::Widget) -> bool) -> Option<T> {
+        if test(widget) {
+            if let Ok(found) = widget.clone().downcast::<T>() {
+                return Some(found);
+            }
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            if let Some(found) = find::<T>(&current, test) {
+                return Some(found);
+            }
+            child = current.next_sibling();
+        }
+        None
+    }
+
+    /// A sent code block must be as wide as its content (up to the bubble limit), not as wide as
+    /// its "Code" caption: the bubble used to shrink to the labels and hide every value.
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_sent_report_code_block_shows_its_values_not_just_the_first_column() {
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id("com.negzero.CodeBlockWidthFixture")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gio::Cancellable>).unwrap();
+        let ui = Ui::new(&app, true);
+        ui.window.set_default_size(1380, 900);
+        ui.window.present();
+        settle(300);
+        ui.composer.buffer().set_text("/neofetch");
+        ui.send();
+        settle(500);
+        ui.send();
+        settle(1200);
+        let id = ui.state.borrow().current().messages.last().unwrap().id.clone();
+        let bubble = ui.bubbles.borrow().get(&id).cloned().expect("the message was rendered");
+        let label = find::<gtk::Label>(&bubble, &|w| w.has_css_class("monospace") && w.is::<gtk::Label>()).expect("the code block");
+        let scroll = find::<gtk::ScrolledWindow>(&bubble, &|w| w.is::<gtk::ScrolledWindow>()).expect("its scroller");
+        let wanted = label.measure(gtk::Orientation::Horizontal, -1).1;
+        let longest_row = label.text().lines().map(|l| l.chars().count()).max().unwrap_or(0);
+        eprintln!("code block: scroller {} px, content wants {wanted} px, longest row {longest_row} chars", scroll.width());
+        // "Monogram" is 8 characters; the values start after the label column and must be visible.
+        let label_column = 8 * (wanted / longest_row.max(1) as i32);
+        assert!(
+            scroll.width() >= (label_column * 2).min(wanted),
+            "the code block is {} px wide but its content needs {wanted} px: values are cut off",
+            scroll.width()
+        );
+        ui.window.close();
+    }
+
     #[test]
     #[ignore = "requires a private GTK display and D-Bus"]
     fn neofetch_becomes_an_editable_code_block_that_is_sent_only_when_the_user_sends_it() {
