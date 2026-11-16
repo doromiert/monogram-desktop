@@ -1878,6 +1878,10 @@ impl Ui {
         if value.trim().is_empty() && self.attachments.borrow().is_empty() {
             return;
         }
+        // Client commands such as /neofetch are handled here and never queued or sent.
+        if self.attachments.borrow().is_empty() && self.run_client_command(&value) {
+            return;
+        }
         if !self.state.borrow().account.is_empty() {
             let files = self.attachments.borrow().clone();
             if files.is_empty() {
