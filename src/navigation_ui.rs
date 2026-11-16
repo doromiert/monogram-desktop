@@ -74,6 +74,15 @@ impl Ui {
             "Source code",
             "https://github.com/doromiert/monogram-desktop",
         );
+        // CC BY 4.0 asks for credit, a link to the licence and a note of any changes.
+        dialog.add_legal_section(
+            "Animated emoji",
+            Some("© Google LLC"),
+            gtk::License::Custom,
+            Some(
+                "Noto Emoji animations by Google, licensed under Creative Commons Attribution 4.0 International: https://creativecommons.org/licenses/by/4.0/\n\nChanges: the Lottie files were repackaged as minified, gzip-compressed JSON. The artwork is unchanged.",
+            ),
+        );
         dialog.present(Some(&self.window));
     }
 }
