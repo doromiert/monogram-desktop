@@ -296,3 +296,9 @@
 .presence-dot { min-width: 12px; min-height: 12px; border-radius: 999px; border: 2px solid @window_bg_color; background: @success_color; }
 .presence-dot.presence-away { background: @warning_color; }
 .presence-dot.presence-busy { background: @error_color; }
+
+.profile-target { padding: 0; min-width: 0; min-height: 0; }
+.profile-card-banner { background: color-mix(in srgb, var(--accent-bg-color) 60%, var(--window-bg-color)); border-radius: 6px; }
+
+.profile-card, .profile-card > contents { padding: 0; border: none; background: transparent; box-shadow: none; }
+.profile-card-panel { padding: 8px; border-radius: 14px; background: @popover_bg_color; box-shadow: 0 2px 8px alpha(black,.2); }

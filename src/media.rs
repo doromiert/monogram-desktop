@@ -169,7 +169,8 @@ impl Ui {
         margins(&body, 12);
         body.set_width_request(0);
         body.set_hexpand(true);
-        body.append(&self.chat_avatar(&chat, 76));
+        let avatar=self.chat_avatar(&chat,76);
+        if chat.group{body.append(&avatar);}else{body.append(&self.profile_button(&avatar,&chat.jid,chat.display_name()));}
         let title = wrap(chat.display_name(), "title-2");
         title.set_width_chars(1);
         title.set_max_width_chars(34);

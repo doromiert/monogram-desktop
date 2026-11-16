@@ -707,6 +707,7 @@ pub enum RoomPreparation {
 }
 #[derive(Debug)]
 pub enum Command {
+    Profile {peer:String,reply:tokio::sync::oneshot::Sender<Result<crate::profiles::Profile,&'static str>>},
     StoriesFetch { peer: String, reply: tokio::sync::oneshot::Sender<crate::stories::Result<Vec<crate::stories::Entry>>> },
     StoryPublish { entry: crate::stories::Entry, reply: tokio::sync::oneshot::Sender<crate::stories::Result<crate::stories::Entry>> },
     StoryRetract { id: String, reply: tokio::sync::oneshot::Sender<crate::stories::Result<()>> },
@@ -1331,6 +1332,10 @@ impl Session {
                                 let result=crate::rooms::manage::join(&network,&owner,epoch,&peer,&nick,None,imported,&ticket).await;
                                 let _=network.send(Command::RoomJoinFinished{epoch,peer,ticket,result:result.map(|_|())});
                             });
+                        },
+                        Some(Command::Profile{peer,reply})=>{
+                            let client=crate::iq::Client::new(network.clone());
+                            tokio::spawn(async move{let result=if online{crate::profiles::fetch(&client,&peer).await}else{Err("Connect to load profile details.")};let _=reply.send(result);});
                         },
                         Some(Command::Avatar { peer, source, reply })=>{
                             let client = crate::iq::Client::new(network.clone());

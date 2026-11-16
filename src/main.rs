@@ -68,6 +68,8 @@ mod preview_cache;
 mod polls;
 mod polls_ui;
 mod protocol;
+mod profiles;
+mod profile_ui;
 mod pq_security_ui;
 mod read_markers;
 mod read_state;
