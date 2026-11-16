@@ -1,78 +1,55 @@
-//! Client-side slash commands: typed in the composer, handled locally and never sent.
+//! Client-side slash commands: typed in the composer, handled locally and never sent as typed.
 //!
-//! `/neofetch` opens a dialog with this machine's model, processor, memory, disk, uptime and
-//! distribution plus the Monogram version and commit (see `sysinfo`), with a Copy button for bug
-//! reports. It contains no user name or host name.
-use crate::{sysinfo, ui::Ui, widgets::*};
+//! A command generates message content. `/neofetch` replaces itself with this machine's model,
+//! processor, memory, total disk, uptime and distribution plus the Monogram version and commit
+//! (see `sysinfo`), as a code block so the columns stay aligned. It is left in the composer for
+//! the user to read, edit and send: nothing about their machine leaves it without that step. The
+//! report contains no user name or host name.
+use crate::{formatting::Style, sysinfo, ui::Ui};
 use adw::prelude::*;
-use gtk::{gdk, gio};
+use gtk::{gio, glib};
 use std::rc::Rc;
 
 impl Ui {
     /// Handle `text` if it is a client command. Returns true when it was one, in which case the
-    /// composer has been cleared and nothing must be sent.
+    /// caller must not send it; the generated content arrives in the composer a moment later.
     pub fn run_client_command(self: &Rc<Self>, text: &str) -> bool {
         if !sysinfo::is_neofetch(text) {
             return false;
         }
-        self.composer.buffer().set_text("");
-        let weak = Rc::downgrade(self);
-        gtk::glib::spawn_future_local(async move {
+        let (weak, typed) = (Rc::downgrade(self), self.composer_text());
+        glib::spawn_future_local(async move {
             // Reading /proc and /sys is quick, but it stays off the GTK thread like other I/O.
             let Ok(report) = gio::spawn_blocking(|| sysinfo::collect().render()).await else {
                 return;
             };
             if let Some(ui) = weak.upgrade() {
-                ui.show_system_info(&report);
+                ui.fill_composer_with_code(&typed, &report);
             }
         });
         true
     }
 
-    fn show_system_info(self: &Rc<Self>, report: &str) {
-        let output = gtk::Label::builder()
-            .label(report)
-            .selectable(true)
-            .xalign(0.)
-            .css_classes(["monospace"])
-            .margin_top(18)
-            .margin_bottom(18)
-            .margin_start(18)
-            .margin_end(18)
-            .build();
-        output.update_property(&[gtk::accessible::Property::Label("System information")]);
-        let toasts = adw::ToastOverlay::new();
-        let header = adw::HeaderBar::new();
-        let copy = icon_button("edit-copy-symbolic", "Copy system information");
-        header.pack_start(&copy);
-        let view = adw::ToolbarView::new();
-        view.add_top_bar(&header);
-        toasts.set_child(Some(&scroll(&output)));
-        view.set_content(Some(&toasts));
-        let dialog = adw::Dialog::builder()
-            .title("System Information")
-            .content_width(520)
-            .child(&view)
-            .build();
-        let report = report.to_owned();
-        let toasts = toasts.downgrade();
-        copy.connect_clicked(move |button| {
-            if let Some(display) = gdk::Display::default() {
-                display.clipboard().set_text(&report);
-            }
-            if let Some(toasts) = toasts.upgrade() {
-                toasts.add_toast(adw::Toast::new("System information copied"));
-            }
-            let _ = button;
-        });
-        dialog.present(Some(&self.window));
+    /// Replace the command in the composer with `content` as a code block. If the user changed
+    /// the composer while it was being generated, their text wins and nothing is replaced.
+    fn fill_composer_with_code(self: &Rc<Self>, expected: &str, content: &str) {
+        if self.composer_text() != expected {
+            return;
+        }
+        let buffer = self.composer.buffer();
+        buffer.set_text(content);
+        if let Some(tag) = buffer.tag_table().lookup("format-pre") {
+            buffer.apply_tag(&tag, &buffer.start_iter(), &buffer.end_iter());
+        }
+        buffer.place_cursor(&buffer.end_iter());
+        self.composer.grab_focus();
+        self.save_draft();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gtk::glib;
     use std::time::{Duration, Instant};
 
     fn settle(milliseconds: u64) {
@@ -86,7 +63,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires a private GTK display and D-Bus"]
-    fn neofetch_is_handled_locally_and_ordinary_text_is_still_sent() {
+    fn neofetch_becomes_an_editable_code_block_that_is_sent_only_when_the_user_sends_it() {
         adw::init().unwrap();
         let app = adw::Application::builder()
             .application_id("com.negzero.ClientCommandFixture")
@@ -102,18 +79,34 @@ mod tests {
         ui.composer.buffer().set_text("/neofetch");
         ui.send();
         settle(500);
-        assert_eq!(ui.composer_text(), "", "the command is consumed");
-        assert_eq!(sent(&ui), before, "a client command is never sent");
-        let dialog = ui.window.visible_dialog().expect("the report opens in a dialog");
-        assert_eq!(dialog.downcast_ref::<adw::Dialog>().unwrap().title(), "System Information");
-        dialog.downcast_ref::<adw::Dialog>().unwrap().close();
-        settle(300);
+        // Sending the command generated the content; it did not send anything.
+        assert_eq!(sent(&ui), before, "the command itself is never sent");
+        let report = ui.composer_text();
+        assert!(report.starts_with("Model") || report.starts_with("Motherboard"), "{report}");
+        assert!(report.lines().count() == 7 && report.contains("Monogram"), "{report}");
+        assert!(!report.contains("/neofetch"));
+        let markup = ui.composer_formatting();
+        let length = report.chars().count();
+        assert!(
+            markup.ranges.iter().any(|r| r.has(Style::Pre) && r.start == 0 && r.end == length),
+            "the whole report is a code block so the columns stay aligned"
+        );
 
-        ui.composer.buffer().set_text("hello there");
+        // The user reviews it and sends it; now it is an ordinary message with that body.
         ui.send();
         settle(300);
-        assert_eq!(sent(&ui), before + 1, "ordinary text is unaffected");
-        assert!(ui.window.visible_dialog().is_none());
+        assert_eq!(sent(&ui), before + 1);
+        let message = ui.state.borrow().current().messages.last().cloned().unwrap();
+        // Code blocks are stored with XEP-0393 fences so other clients show them monospaced.
+        assert_eq!(message.text, format!("```\n{report}\n```"));
+        assert!(message.formatting.as_ref().is_some_and(|m| m.ranges.iter().any(|r| r.has(Style::Pre))));
+
+        // Text typed while a command is being generated is never overwritten.
+        ui.composer.buffer().set_text("/neofetch");
+        ui.send();
+        ui.composer.buffer().set_text("changed my mind");
+        settle(500);
+        assert_eq!(ui.composer_text(), "changed my mind");
         ui.window.close();
     }
 }
