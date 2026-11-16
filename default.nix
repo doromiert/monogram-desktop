@@ -33,14 +33,14 @@ let
   cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
   cargoArtifacts = craneLib.buildDepsOnly ((builtins.removeAttrs commonArgs [ "src" ]) // {
     inherit dummySrc cargoVendorDir;
-    cargoCheckExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-media-author";
-    cargoBuildExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-media-author";
+    cargoCheckExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-media-author --bin monogram-audio-preview";
+    cargoBuildExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-media-author --bin monogram-audio-preview";
   });
 in craneLib.buildPackage (commonArgs // {
   MONOGRAM_MATH_HELPER = "${mathRenderer}/bin/monogram-math-renderer";
   MONOGRAM_BWRAP = "${bubblewrap}/bin/bwrap";
   inherit cargoArtifacts cargoVendorDir;
-  cargoBuildExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-media-author";
+  cargoBuildExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-media-author --bin monogram-audio-preview";
   passthru = { inherit cargoArtifacts gtk4Fixed mathRenderer; };
   nativeCheckInputs = [ xorg-server dbus prosody openssl python3 gnome-keyring ];
   postCheck = ''
@@ -87,11 +87,13 @@ in craneLib.buildPackage (commonArgs // {
     mkdir -p $out/libexec
     mv $out/bin/monogram-sticker-renderer $out/libexec/monogram-sticker-renderer
     mv $out/bin/monogram-media-author $out/libexec/monogram-media-author
+    mv $out/bin/monogram-audio-preview $out/libexec/monogram-audio-preview
     gappsWrapperArgs+=(
       --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ gtk4Fixed ]}
       --set MONOGRAM_MATH_HELPER ${mathRenderer}/bin/monogram-math-renderer
       --set MONOGRAM_LOTTIE_HELPER $out/libexec/monogram-sticker-renderer
       --set MONOGRAM_MEDIA_AUTHOR_HELPER $out/libexec/monogram-media-author
+      --set MONOGRAM_AUDIO_PREVIEW_HELPER $out/libexec/monogram-audio-preview
       --set MONOGRAM_BWRAP ${bubblewrap}/bin/bwrap
       --prefix XDG_DATA_DIRS : $out/share
       --set MONOGRAM_ASSET_DIR $out/share/monogram-desktop
