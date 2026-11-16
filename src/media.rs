@@ -128,8 +128,8 @@ impl Ui {
         if let Some(old)=old{self.media_tabs.remove(&old);}
         if let Some(old)=self.media_stack.child_by_name("monero"){self.media_stack.remove(&old);}
         if visible {
-            let tab=adw::Toggle::builder().name("monero").label("Monero").icon_name("monogram-monero-symbolic").build();
-            self.media_stack.add_named(&crate::monero_settings_ui::page(self),Some("monero"));
+            let tab=adw::Toggle::builder().name("monero").label("Monero").build();
+            self.media_stack.add_named(&crate::monero_settings_ui::wallet_sidebar(self),Some("monero"));
             self.media_tabs.add(tab.clone());self.media_toggles.borrow_mut().insert("monero".into(),tab);
             if selected { self.media_stack.set_visible_child_name("monero"); }
         }

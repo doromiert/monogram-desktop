@@ -116,7 +116,7 @@ fn content(d: &CardData, width: i32) -> cairo::ImageSurface {
         c.move_to(x, y);
         let _ = c.show_text(value);
     };
-    let balance = if d.precise {
+    let balance = if d.precise && d.balance != "—" {
         format!("{}12345678", d.balance)
     } else {
         d.balance.clone()
@@ -124,7 +124,7 @@ fn content(d: &CardData, width: i32) -> cairo::ImageSurface {
     if d.compact {
         txt(24., 45., &d.name, 14., 1., true);
         txt(24., 98., &format!("{balance} XMR"), 26., 1., true);
-        txt(24., 125., "≈ €248.60", 16., 0.85, false)
+        txt(24., 125., if d.balance=="—" {"Balance unavailable"}else{"≈ €248.60"}, 16., 0.85, false)
     } else {
         txt(24., 32., &d.name, 12., 1., true);
         txt(
@@ -135,11 +135,11 @@ fn content(d: &CardData, width: i32) -> cairo::ImageSurface {
             1.,
             true,
         );
-        txt(24., 115., "≈ €248.60", 14., 0.85, false);
+        txt(24., 115., if d.balance=="—" {"Balance unavailable"}else{"≈ €248.60"}, 14., 0.85, false);
         rounded(&c, 32., 135., 272., 30., 15.);
         c.set_source_rgba(1., 1., 1., 0.1);
         let _ = c.fill();
-        let title = if d.precise {
+        let title = if d.balance=="—" {"Receiving address"}else if d.precise {
             "Show rounded amount"
         } else {
             "Show precise amount"
@@ -147,7 +147,7 @@ fn content(d: &CardData, width: i32) -> cairo::ImageSurface {
         c.set_font_size(12.);
         let size = c.text_extents(title).unwrap().width();
         txt((336. - size) / 2., 154., title, 12., 1., false);
-        txt(24., 187., "ALEX MORGAN", 12., 0.95, false)
+        txt(24., 187., if d.balance=="—" {&d.name}else{"ALEX MORGAN"}, 12., 0.95, false)
     }
     surface.flush();
     surface
@@ -843,6 +843,7 @@ impl WalletCard {
             precision,
             qr,
         });
+        if balance=="—" {card.precision.set_sensitive(false);}
         let weak = Rc::downgrade(&card);
         card.precision.connect_clicked(move |_| {
             if let Some(c) = weak.upgrade() {

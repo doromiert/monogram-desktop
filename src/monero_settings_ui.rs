@@ -193,6 +193,9 @@ mod tests {
         let app=adw::Application::builder().application_id("com.negzero.MoneroTabTest").flags(gtk::gio::ApplicationFlags::NON_UNIQUE).build();app.register(gtk::gio::Cancellable::NONE).unwrap();let ui=Ui::new(&app,true);
         let owner="wallet@fixture.invalid";ui.state.borrow_mut().account=owner.into();ui.refresh_monero_sidebar();assert!(!ui.media_toggles.borrow().contains_key("monero"));
         let settings=Settings{enabled:true,daemon:"https://node.example".into(),..Default::default()};ui.store.set_pref(&format!("monero-settings:{owner}"),&serde_json::to_string(&settings).unwrap()).unwrap();ui.refresh_monero_sidebar();assert!(ui.media_toggles.borrow()["monero"].is_enabled());
+        ui.store.set_pref(&format!("synced-wallet:{owner}:fixture"),r#"{"name":"Main","network":"MAINNET","address":"fixture-receiving-address"}"#).unwrap();ui.refresh_monero_sidebar();assert!(ui.sidebar_card.borrow().is_some(),"synced wallets use the real 3D card widget");
+        assert!(ui.media_toggles.borrow()["monero"].icon_name().is_none());
+        assert!(!ui.media_stack.child_by_name("monero").unwrap().is::<adw::PreferencesPage>());
         ui.media_tabs.set_active_name(Some("monero"));assert_eq!(ui.media_stack.visible_child_name().as_deref(),Some("monero"));ui.refresh_monero_sidebar();assert_eq!(ui.media_stack.visible_child_name().as_deref(),Some("monero"));
         ui.state.borrow_mut().account="other@fixture.invalid".into();ui.refresh_monero_sidebar();assert!(!ui.media_toggles.borrow().contains_key("monero"));assert!(ui.media_stack.child_by_name("monero").is_none());ui.window.close();
     }
@@ -214,4 +217,64 @@ mod tests {
             assert!(validate(&s).is_err());
         }
     }
+}
+
+pub(crate) fn wallet_sidebar(ui: &Rc<Ui>) -> gtk::Widget {
+    let body = crate::widgets::bx(true, 16);
+    crate::widgets::margins(&body, 12);
+    let owner = ui.state.borrow().account.clone();
+    let records = crate::lan_sync::public_records(&ui.store, &format!("synced-wallet:{owner}:"));
+    ui.sidebar_card.borrow_mut().take();
+    for value in &records {
+        let name = value["name"].as_str().unwrap_or("Wallet");
+        let address = value["address"].as_str().unwrap_or("").to_owned();
+        let weak = Rc::downgrade(ui);
+        let receiving = address.clone();
+        let card = crate::wallet::WalletCard::new(name, "—", false, move || {
+            if let Some(ui) = weak.upgrade() { receiving_address(&ui, &receiving); }
+        });
+        body.append(&card.root);
+        ui.sidebar_card.replace(Some(card));
+        body.append(&adw::ActionRow::builder().title("Receiving address")
+            .subtitle(&address).subtitle_selectable(true).use_markup(false).build());
+    }
+    if records.is_empty() {
+        body.append(&adw::StatusPage::builder().icon_name("wallet-symbolic")
+            .title("No Wallets").description("Pair your phone to sync a wallet.").build());
+    }
+    body.append(&crate::widgets::wrap(
+        "Balance and spending are not available on desktop yet.", "caption dim-label"));
+    let settings = gtk::Button::with_label("Wallet Settings");
+    let weak = Rc::downgrade(ui);
+    settings.connect_clicked(move |_| { if let Some(ui) = weak.upgrade() { ui.preferences(); } });
+    body.append(&settings);
+    crate::widgets::scroll(&body).upcast()
+}
+
+fn receiving_address(ui: &Rc<Ui>, address: &str) {
+    let body = crate::widgets::bx(true, 12);
+    if let Ok(code) = qrcode::QrCode::new(address.as_bytes()) {
+        let n = code.width();
+        let colors = code.to_colors();
+        let area = gtk::DrawingArea::builder().content_width(256).content_height(256)
+            .halign(gtk::Align::Center).valign(gtk::Align::Center).build();
+        area.set_draw_func(move |_, c, w, h| {
+            let size = w.min(h) as f64;
+            let scale = size / (n + 8) as f64;
+            c.translate((w as f64 - size) / 2., (h as f64 - size) / 2.);
+            c.set_source_rgb(1., 1., 1.);
+            c.rectangle(0., 0., size, size);
+            let _ = c.fill();
+            c.set_source_rgb(0., 0., 0.);
+            for y in 0..n { for x in 0..n {
+                if colors[y * n + x] == qrcode::Color::Dark {
+                    c.rectangle((x + 4) as f64 * scale, (y + 4) as f64 * scale, scale, scale);
+                }
+            }}
+            let _ = c.fill();
+        });
+        body.append(&area);
+    }
+    body.append(&gtk::Label::builder().label(address).selectable(true).wrap(true).build());
+    ui.dialog("Receiving Address", &body, 360, 380);
 }
