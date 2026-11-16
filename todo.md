@@ -101,6 +101,13 @@
 
 - [ ] Make the media sidebar scroll viewport and its edge shadow span the full sidebar width; retain content padding inside it (reference: /tmp/codex-clipboard-7816YI.png).
 - [ ] Make sticker-pack drag reordering show continuously interpolated real-time positions like folder reordering, without inconsistent snapping (references: /tmp/codex-clipboard-geVbGd.png, /tmp/codex-clipboard-gNurVs.png).
-- [ ] Remove icons from the media sidebar tab switcher; use text-only labels (reference: /tmp/codex-clipboard-l6MfI7.png).
-- [ ] Restore the correct Monero wallet sidebar with the 3D card, locating/reusing the existing implementation or version history; keep wallet settings in Preferences (reference: /tmp/codex-clipboard-8gw0a6.png).
+- [x] Remove icons from the media sidebar tab switcher; use text-only labels (reference: /tmp/codex-clipboard-l6MfI7.png).
+- [x] Restore the correct Monero wallet sidebar with the 3D card, locating/reusing the existing implementation or version history; keep wallet settings in Preferences (reference: /tmp/codex-clipboard-8gw0a6.png).
 - [ ] Verify pack deletion/import and horizontal pack-bar order update promptly on paired clients; distinguish persisted sync state from stale visible picker state.
+
+## Current picker/wallet/sync fixes
+
+- [x] Animate pack selector icons using the existing visibility-aware decoders.
+- [x] Restore the wallet card sidebar and text-only Monero toggle; retain real wallet metadata without demo funds.
+- [ ] Verify live phone sticker favorites/recents reach desktop. Desktop import of mobile UUID favorites/recents passes; current PC firewall was missing TCP/UDP45950 after reboot and its runtime rules are restored. Phone interaction is paused at the user’s request. Permanent system-module configuration exists but is not active in the booted generation.
+- [x] Review PR2 head32c1b77 first: GTK-thread cache I/O/PNG work remains a freeze blocker; no merge.

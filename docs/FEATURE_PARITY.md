@@ -241,8 +241,10 @@ edit and order controls; each picker section has its own edit button. Connected
 packs offer explicit local editing instead of disabled actions. Native pointer
 tests cover category-bar drag, manager drag, sticker drag/rename and700-item
 resource bounds (maxGTKgap82ms); high-contrast run passes. Editor toolbar uses
-flat native styling and only one hover background. Monero settings appear in the
-side panel when enabled for the account, with correct account-switch cleanup;
+flat native styling and only one hover background. The text-only Monero tab opens
+the existing interactive 3D wallet card with real synced wallet names and receiving
+addresses; configuration remains in Preferences. Unavailable balances are explicit,
+and account switches remove the old card.
 this does not add desktop wallet spending. Local contact UI and paired transfer
 are documented in [LOCAL_CONTACTS.md](LOCAL_CONTACTS.md). Allreportedfollow-up
 flows have controls and sub400ms feedback checks; actual user-account Stories
@@ -259,3 +261,15 @@ accepted-object confirmation over HTTPS. The intermittent real-network initial
 stall remains unresolved; desktop real-world reproduction and matching recovery
 behavior require further evidence. Track this explicitly rather than claiming
 that faster retries establish cross-client root-cause parity.
+
+
+Desktop pack-selector artwork now uses looping raster/TGS/WebM playback rather
+than first-frame textures, with offscreen/unmapped playback paused. The native
+WebM pack-bar test verifies a live MediaStream and a 48-sticker grid remains
+responsive (maximum heartbeat gap41ms); offscreen TGS reopen coverage passes.
+The native sync adapter imports mobile-format sticker favorites/recents by
+stable UUID and preserves them in the desktop library. Physical phone↔PC
+favorites acceptance remains pending: desktop's booted firewall omitted45950
+TCP/UDP; runtime rules were restored, while the existing permanent Monogram
+system-module selection still requires system activation. Phone control is
+paused at the user's request. Desktop wallet scanning/spending remains absent.
