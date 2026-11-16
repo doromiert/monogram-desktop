@@ -203,6 +203,10 @@ struct SharedQuickRow {
 }
 
 struct EmojiSurface {
+    /// Until the first expansion the full catalog list is not built. The reaction picker is
+    /// created on every message right-click, and rebuilding every category there made the
+    /// context menu appear late.
+    lazy: Cell<bool>,
     ui: Weak<Ui>,
     root: gtk::Box,
     categories: gtk::Box,
@@ -233,6 +237,32 @@ impl EmojiSurface {
         ui: &Rc<Ui>,
         columns: u32,
         height: Option<i32>,
+        activate: impl Fn(&Rc<Ui>, &str) + 'static,
+    ) -> Rc<Self> {
+        Self::build(ui, columns, height, false, activate)
+    }
+
+    /// Like `new`, but the catalog list is only built by `ensure_built` (first expansion).
+    fn new_lazy(
+        ui: &Rc<Ui>,
+        columns: u32,
+        height: Option<i32>,
+        activate: impl Fn(&Rc<Ui>, &str) + 'static,
+    ) -> Rc<Self> {
+        Self::build(ui, columns, height, true, activate)
+    }
+
+    fn ensure_built(self: &Rc<Self>) {
+        if self.lazy.replace(false) {
+            self.refresh();
+        }
+    }
+
+    fn build(
+        ui: &Rc<Ui>,
+        columns: u32,
+        height: Option<i32>,
+        lazy: bool,
         activate: impl Fn(&Rc<Ui>, &str) + 'static,
     ) -> Rc<Self> {
         let surface = Rc::new_cyclic(|surface: &Weak<EmojiSurface>| {
@@ -296,6 +326,7 @@ impl EmojiSurface {
             let favorite_preview = favorite_order::Preview::new(&scrolling);
             root.append(&favorite_preview);
             Self {
+                lazy: Cell::new(lazy),
                 ui: Rc::downgrade(ui),
                 root,
                 categories,
@@ -342,7 +373,9 @@ impl EmojiSurface {
             }
         });
         surface.populate_categories();
-        surface.refresh();
+        if !lazy {
+            surface.refresh();
+        }
         surface
     }
 
@@ -506,6 +539,9 @@ impl EmojiSurface {
                 shared.row.reorder_child_after(button, previous.as_ref());
                 previous = Some(button.clone());
             }
+        }
+        if self.lazy.get() {
+            return;
         }
         let mut sections = Vec::new();
         if searching {
@@ -1236,6 +1272,7 @@ impl ReactionPicker {
             animation.pause();
         }
         if expanded {
+            self.surface.ensure_built();
             self.capture_collapsed_radius();
         }
         if !expanded {
@@ -1408,7 +1445,7 @@ impl Ui {
             .collect::<Vec<_>>();
         let popup = popover.downgrade();
         let id = message.id.clone();
-        let surface = EmojiSurface::new(self, 8, Some(330), move |ui, emoji| {
+        let surface = EmojiSurface::new_lazy(self, 8, Some(330), move |ui, emoji| {
             if let Some(popup) = popup.upgrade() {
                 popup.popdown();
                 popup.unparent();
