@@ -238,6 +238,34 @@ mod tests {
         }
     }
 
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// The shipped pack must match the digest and source manifest committed beside it, so the
+    /// data cannot change without regenerating them (`tools/pack-noto-emoji.py`) in the same diff.
+    #[test]
+    fn the_bundled_pack_matches_its_committed_digest_and_source_manifest() {
+        let path = crate::widgets::asset(CURATED);
+        let bytes = std::fs::read(&path).unwrap();
+        let digest = std::fs::read_to_string(format!("{}.sha256", path.display())).expect("digest file");
+        let (expected, name) = digest.trim().split_once("  ").expect("`<sha256>  <name>`");
+        assert_eq!(name, CURATED);
+        assert_eq!(hex(&openssl::sha::sha256(&bytes)), expected, "the pack changed without its digest");
+
+        let manifest = std::fs::read_to_string(format!("{}.sources.tsv", path.display())).expect("source manifest");
+        let pack = Pack::parse(bytes).unwrap();
+        let mut listed: Vec<&str> = Vec::new();
+        for line in manifest.lines() {
+            let (key, upstream) = line.split_once('\t').expect("`<key>\t<sha256>`");
+            assert!(upstream.len() == 64 && upstream.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()), "{line}");
+            listed.push(key);
+        }
+        let mut keys: Vec<&str> = pack.keys().collect();
+        keys.sort_unstable();
+        assert_eq!(listed, keys, "the manifest lists exactly the emoji in the pack, in order");
+    }
+
     /// The pack that ships with the app: parses, has the popular emoji, and every entry is a
     /// Lottie file inside the limits the renderer enforces for emoji.
     #[test]

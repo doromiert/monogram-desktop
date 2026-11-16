@@ -41,7 +41,7 @@ async-trait = "0.1"
 rand = "=0.9.4"
 tiny-keccak = { version = "=2.0.2", features = ["kmac"] }
 pulldown-cmark = { version = "=0.13.6", default-features = false }
-gstreamer = "0.25"
+gstreamer = "=0.25.4"
 
 [build-dependencies]
 cc = "1"

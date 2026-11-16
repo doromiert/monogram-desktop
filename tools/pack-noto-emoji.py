@@ -19,7 +19,7 @@ Pack format (little endian), read by src/noto_emoji.rs:
                                                                joined by "-", FE0F/FE0E removed
     blobs: each entry is a gzip-compressed Lottie JSON (the same shape as a .tgs sticker)
 """
-import argparse, gzip, json, struct, sys, urllib.request, concurrent.futures as futures
+import argparse, gzip, hashlib, json, re, struct, sys, urllib.request, concurrent.futures as futures
 from pathlib import Path
 
 INDEX = "https://googlefonts.github.io/noto-emoji-animation/data/api.json"
@@ -28,15 +28,28 @@ ASSET = "https://fonts.gstatic.com/s/e/notoemoji/latest/{}/lottie.json"
 MAX_EDGE, MAX_FRAMES, MAX_FPS, MAX_SECONDS = 1024, 360, 60, 6.1
 MAX_BLOB = 1024 * 1024
 
+# Everything is fetched over HTTPS from these two hosts only, and the index is untrusted input:
+# a code point that is not plain hex would otherwise be pasted into a URL path.
+ALLOWED_HOSTS = ("https://googlefonts.github.io/", "https://fonts.gstatic.com/")
+CODEPOINT = re.compile(r"[0-9a-f]+(_[0-9a-f]+)*")
+MAX_DOWNLOAD = 4 * 1024 * 1024
+
 def fetch(url):
+    if not url.startswith(ALLOWED_HOSTS):
+        raise ValueError(f"refusing to fetch {url}")
     with urllib.request.urlopen(url, timeout=30) as reply:
-        return reply.read()
+        data = reply.read(MAX_DOWNLOAD + 1)
+    if len(data) > MAX_DOWNLOAD:
+        raise ValueError(f"{url} is larger than {MAX_DOWNLOAD} bytes")
+    return data
 
 def key_of(codepoint):
     parts = [p for p in codepoint.split("_") if p not in ("fe0f", "fe0e")]
     return "-".join(parts)
 
 def build(entry):
+    if not CODEPOINT.fullmatch(entry["codepoint"]):
+        raise ValueError(f"unexpected code point {entry['codepoint']!r}")
     raw = fetch(ASSET.format(entry["codepoint"]))
     animation = json.loads(raw)
     width, height, rate = animation["w"], animation["h"], animation["fr"]
@@ -47,7 +60,7 @@ def build(entry):
     blob = gzip.compress(json.dumps(animation, separators=(",", ":")).encode(), 9, mtime=0)
     if len(blob) > MAX_BLOB:
         raise ValueError(f"{len(blob)} bytes compressed")
-    return key_of(entry["codepoint"]), blob
+    return key_of(entry["codepoint"]), blob, hashlib.sha256(raw).hexdigest()
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
@@ -58,13 +71,14 @@ def main():
     icons = sorted(json.loads(fetch(INDEX))["icons"], key=lambda i: -i["popularity"])
     chosen = icons if options.all else icons[: options.count]
     out = options.out or Path("assets") / ("noto-animated-emoji-full.pack" if options.all else "noto-animated-emoji.pack")
-    entries, skipped = {}, []
+    entries, upstream, skipped = {}, {}, []
     with futures.ThreadPoolExecutor(8) as pool:
         for icon, result in zip(chosen, pool.map(lambda i: _safe(build, i), chosen)):
             if isinstance(result, Exception):
                 skipped.append((icon["codepoint"], str(result)))
             else:
                 entries[result[0]] = result[1]
+                upstream[result[0]] = result[2]
     keys = sorted(entries)
     header = 12 + sum(1 + len(k) + 8 for k in keys)
     index, blobs, offset = b"", b"", header
@@ -72,8 +86,13 @@ def main():
         index += struct.pack("<B", len(key)) + key.encode() + struct.pack("<II", offset, len(entries[key]))
         blobs += entries[key]
         offset += len(entries[key])
-    out.write_bytes(b"MGNE" + struct.pack("<II", 1, len(keys)) + index + blobs)
-    print(f"{out}: {len(keys)} emoji, {out.stat().st_size / 1e6:.2f} MB")
+    pack = b"MGNE" + struct.pack("<II", 1, len(keys)) + index + blobs
+    out.write_bytes(pack)
+    # A digest of the pack (checked by a unit test) and the SHA-256 of every upstream file it was
+    # built from, so a regeneration can be compared against what Google serves.
+    out.with_name(out.name + ".sha256").write_text(f"{hashlib.sha256(pack).hexdigest()}  {out.name}\n")
+    out.with_name(out.name + ".sources.tsv").write_text("".join(f"{key}\t{upstream[key]}\n" for key in keys))
+    print(f"{out}: {len(keys)} emoji, {out.stat().st_size / 1e6:.2f} MB, sha256 {hashlib.sha256(pack).hexdigest()}")
     for codepoint, why in skipped:
         print(f"skipped {codepoint}: {why}", file=sys.stderr)
 
