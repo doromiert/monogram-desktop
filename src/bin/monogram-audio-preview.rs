@@ -154,9 +154,7 @@ fn build(container: Container) -> Result<Built, i32> {
             let chain: Vec<gst::Element> = if container == Container::Wav {
                 vec![make_codec("wavparse")?]
             } else {
-                // Real MP3s start with an ID3v2 tag (titles, cover art). `id3demux` strips it; without
-                // it the tag is decoded as if it were audio (a wrong length and a silent waveform).
-                vec![make_codec("id3demux")?, make_codec("mpegaudioparse")?, make_first(&["mpg123audiodec", "avdec_mp3float", "avdec_mp3"])?]
+                vec![make_codec("mpegaudioparse")?, make_first(&["mpg123audiodec", "avdec_mp3float", "avdec_mp3"])?]
             };
             let refs: Vec<&gst::Element> = chain.iter().collect();
             pipeline.add_many(refs.iter().copied()).map_err(|_| 5)?;

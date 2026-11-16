@@ -219,11 +219,6 @@ fn wav(head: &[u8], file_len: u64) -> Result<(), Error> {
         }
         match id {
             b"fmt " => {
-                // The codec first: ADPCM, A-law, MP3-in-WAV and the rest are "not supported", not
-                // "not valid", even though their format chunks have other sizes.
-                if le16(head, at + 8).is_some_and(|tag| !matches!(tag, 1 | 3 | 0xfffe)) {
-                    return Err(Error::Unsupported);
-                }
                 if !matches!(size, 16 | 18 | 40) {
                     return bad("format chunk size");
                 }
@@ -395,9 +390,7 @@ fn mp3(head: &[u8], file_len: u64) -> Result<(), Error> {
         if !(2..=4).contains(&major) || size.iter().any(|b| b & 0x80 != 0) || flags & 0x0f != 0 {
             return bad("id3 header");
         }
-        // The header (10 bytes), the body, and for ID3v2.4 an optional 10-byte footer.
-        let footer = if major == 4 && flags & 0x10 != 0 { 10 } else { 0 };
-        let tag = size.iter().fold(0u64, |value, b| value << 7 | u64::from(*b)) + 10 + footer;
+        let tag = size.iter().fold(0u64, |value, b| value << 7 | u64::from(*b)) + 10;
         if tag >= file_len {
             return bad("id3 tag fills the file");
         }
@@ -406,11 +399,6 @@ fn mp3(head: &[u8], file_len: u64) -> Result<(), Error> {
             // The audio starts beyond what we read; the sandboxed decoder will judge it.
             return Ok(());
         }
-    }
-    // Raw AAC ("ADTS") has a sync word like MP3's with the layer bits zero: a different format that
-    // is not supported, rather than a broken MP3.
-    if at == 0 && head.len() >= 2 && head[0] == 0xff && head[1] & 0xf6 == 0xf0 {
-        return Err(Error::Unsupported);
     }
     // The first frame must start right here (at the start, or straight after the tag), and the
     // next one must follow exactly where its length says: a few random bytes that look like a sync
@@ -595,34 +583,6 @@ mod tests {
             assert!(ok("a.wav", &wav_file(1, 2, 44_100, 16, 64)[..cut]).is_err(), "cut at {cut}");
         }
         assert_eq!(ok("a.wav", b"RIFF\x24\x00\x00\x00AVI LIST"), Err(Error::Unsupported), "RIFF but not WAVE");
-    }
-
-    #[test]
-    fn an_id3v24_footer_is_skipped_before_the_first_frame() {
-        // Tag body of 16 bytes, flagged as having a footer: the audio starts 10 + 16 + 10 bytes in.
-        let mut with_footer = b"ID3\x04\x00\x10\x00\x00\x00\x10".to_vec();
-        with_footer.extend_from_slice(&[0u8; 16]);
-        with_footer.extend_from_slice(b"3DI\x04\x00\x10\x00\x00\x00\x10");
-        with_footer.extend(mp3_frames(3));
-        assert_eq!(ok("a.mp3", &with_footer), Ok(Container::Mp3));
-        // The same bytes without the footer flag put the frame in the wrong place.
-        let mut flagless = with_footer.clone();
-        flagless[5] = 0;
-        assert!(ok("a.mp3", &flagless).is_err());
-    }
-
-    #[test]
-    fn unsupported_codecs_are_called_unsupported_not_invalid() {
-        // Raw AAC (ADTS), found by ffmpeg-made files: both usual header forms.
-        for header in [[0xff, 0xf1, 0x50, 0x80], [0xff, 0xf9, 0x50, 0x80]] {
-            let mut bytes = header.to_vec();
-            bytes.resize(2000, 0x21);
-            assert_eq!(ok("a.aac", &bytes), Err(Error::Unsupported), "{header:02x?}");
-        }
-        // ADPCM WAV: its format chunk is 50 bytes, which used to be reported as a malformed chunk.
-        let mut adpcm = wav_file(2, 2, 44_100, 4, 64);
-        adpcm[16..20].copy_from_slice(&50u32.to_le_bytes());
-        assert_eq!(ok("a.wav", &adpcm), Err(Error::Unsupported));
     }
 
     #[test]
