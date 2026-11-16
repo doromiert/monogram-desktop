@@ -103,3 +103,10 @@ does not reserve the full bubble maximum as blank trailing space.
 The bubble height is measured at its final content-fitted width. A changed fitted
 width requests remeasurement after allocation, preventing stale wrapped-message
 heights and extra space when the window narrows.
+
+Empty folders and searches use native compact status pages inside the same expanding
+sidebar stack as populated lists, retaining directional sliding in both directions.
+Automatic file downloads include all attachment types from eligible contacts/joined
+rooms in the visible conversation. Preferences provides an enable switch and per-file
+limit, defaulting to 15 MB (15 × 1024² bytes); unknown sizes stay manual. Both declared
+size and streamed plaintext bytes are bounded, including encrypted attachments.

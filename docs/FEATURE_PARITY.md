@@ -247,3 +247,15 @@ this does not add desktop wallet spending. Local contact UI and paired transfer
 are documented in [LOCAL_CONTACTS.md](LOCAL_CONTACTS.md). Allreportedfollow-up
 flows have controls and sub400ms feedback checks; actual user-account Stories
 publication and manualphone↔desktop contact editing were not performed.
+
+Desktop file-download policy: all attachment types can download automatically while
+viewing eligible conversations, with a native Preferences switch and adjustable
+per-file size limit (default 15 MB). Mobile retains its existing network/type policy UI.
+Legacy Monocles reply fallback quotes may include a blank separator; desktop now
+accepts that separator like mobile while rejecting nonquote lines inside the range.
+
+Mobile 0.2.221 adds bounded first-attempt body/acknowledgement recovery and
+accepted-object confirmation over HTTPS. The intermittent real-network initial
+stall remains unresolved; desktop real-world reproduction and matching recovery
+behavior require further evidence. Track this explicitly rather than claiming
+that faster retries establish cross-client root-cause parity.
