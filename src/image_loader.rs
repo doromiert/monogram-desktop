@@ -454,12 +454,12 @@ impl AnimationReservation {
         use std::sync::atomic::Ordering;
         let pixels = usize::try_from(edge).ok()?.checked_pow(2)?;
         ANIMATION_CONTEXTS
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |contexts| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |contexts| {
                 (contexts < MAX_ANIMATION_CONTEXTS).then_some(contexts + 1)
             })
             .ok()?;
         if ANIMATION_PIXELS
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_add(pixels)
                     .filter(|total| *total <= MAX_ANIMATION_PIXELS)
             })
@@ -661,6 +661,20 @@ pub(crate) fn play_input<W: IsA<gtk::Widget> + Clone + 'static>(
     sticker: bool,
     open: impl Fn() -> Result<crate::downloads::VerifiedFile, &'static str> + Send + Sync + 'static,
 ) {
+    play_input_with(picture, edge, visible, move |w, t, _| draw(w, t), |_, _| {}, sticker, open);
+}
+
+/// `draw` also learns whether the image animates; `failed` runs once if it can never be drawn
+/// (decode or open error), so the caller can replace its loading indicator.
+pub(crate) fn play_input_with<W: IsA<gtk::Widget> + Clone + 'static>(
+    picture: &W,
+    edge: u32,
+    visible: impl Fn(&W) -> bool + 'static,
+    draw: impl Fn(&W, gdk::Texture, bool) + 'static,
+    failed: impl Fn(&W, &'static str) + 'static,
+    sticker: bool,
+    open: impl Fn() -> Result<crate::downloads::VerifiedFile, &'static str> + Send + Sync + 'static,
+) {
     let open = std::sync::Arc::new(open);
     let picture = picture.downgrade();
     let visible = std::rc::Rc::new(visible);
@@ -686,9 +700,10 @@ pub(crate) fn play_input<W: IsA<gtk::Widget> + Clone + 'static>(
         }
         let receive = state.pending.borrow_mut().take();
         if let Some(receive) = receive {
-            match receive.try_recv() {
+            let failure = receive.try_recv();
+            match failure {
                 Ok(Ok(frame)) => {
-                    draw(&picture, frame.texture);
+                    draw(&picture, frame.texture, frame.delay.is_some());
                     let Some(delay) = frame.delay else {
                         let _ = drop_animation_context(&state);
                         return glib::ControlFlow::Break;
@@ -705,6 +720,13 @@ pub(crate) fn play_input<W: IsA<gtk::Widget> + Clone + 'static>(
                         .set(std::time::Instant::now() + Duration::from_millis(100));
                 }
                 Ok(Err(_)) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // The draw callback never runs on failure, so say why a preview stayed blank.
+                    let reason = match &failure {
+                        Ok(Err(reason)) => *reason,
+                        _ => "The preview worker stopped",
+                    };
+                    eprintln!("Monogram preview failed: {reason}");
+                    failed(&picture, reason);
                     let _ = drop_animation_context(&state);
                     return glib::ControlFlow::Break;
                 }
@@ -1006,22 +1028,43 @@ pub(crate) fn encode_link_preview(
     }
     Ok(encode_preview_texture(decoder.frame(640)?.texture))
 }
+/// First frame of a local video. Stories and the user's own uploads use this.
 pub(crate) fn encode_video_preview(
     path: &std::path::Path,
     cancel: &gio::Cancellable,
     timeout_ms: u32,
 ) -> Result<EncodedPreview, &'static str> {
-    unsafe extern "C" {
-        fn monogram_preview_video(
-            path: *const std::ffi::c_char,
-            cancel: *mut gio::ffi::GCancellable,
-            timeout_ms: u32,
-        ) -> *mut gdk::ffi::GdkTexture;
-    }
+    encode_video_preview_with(path, cancel, timeout_ms, false)
+}
+/// Poster for a WebM sticker from a pack. Third-party data, so only the Matroska demuxer and
+/// libvpx may touch it; anything else yields the neutral placeholder instead of a decode.
+pub(crate) fn encode_webm_preview(
+    path: &std::path::Path,
+    cancel: &gio::Cancellable,
+    timeout_ms: u32,
+) -> Result<EncodedPreview, &'static str> {
+    encode_video_preview_with(path, cancel, timeout_ms, true)
+}
+unsafe extern "C" {
+    fn monogram_preview_video(
+        path: *const std::ffi::c_char,
+        cancel: *mut gio::ffi::GCancellable,
+        timeout_ms: u32,
+        strict: glib::ffi::gboolean,
+    ) -> *mut gdk::ffi::GdkTexture;
+}
+fn encode_video_preview_with(
+    path: &std::path::Path,
+    cancel: &gio::Cancellable,
+    timeout_ms: u32,
+    strict: bool,
+) -> Result<EncodedPreview, &'static str> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|_| "Preview image unavailable")?;
-    let raw = unsafe { monogram_preview_video(path.as_ptr(), cancel.to_glib_none().0, timeout_ms) };
+    let raw = unsafe {
+        monogram_preview_video(path.as_ptr(), cancel.to_glib_none().0, timeout_ms, strict.into_glib())
+    };
     if cancel.is_cancelled() {
         if !raw.is_null() {
             unsafe { glib::gobject_ffi::g_object_unref(raw.cast()) };
@@ -1045,4 +1088,32 @@ pub(crate) fn encode_video_preview(
         unsafe { from_glib_full(raw) }
     };
     Ok(encode_preview_texture(texture))
+}
+
+#[cfg(test)]
+mod video_preview_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
+    }
+    fn first_frame(name: &str, strict: bool) -> Option<gdk::Texture> {
+        let path = std::ffi::CString::new(fixture(name).to_str().unwrap()).unwrap();
+        let cancel = gio::Cancellable::new();
+        let raw = unsafe { monogram_preview_video(path.as_ptr(), cancel.to_glib_none().0, 3000, strict.into_glib()) };
+        (!raw.is_null()).then(|| unsafe { from_glib_full(raw) })
+    }
+
+    #[test]
+    #[ignore = "requires GStreamer with VP9 and H.264 decoders"]
+    fn strict_previews_decode_vp9_webm_with_and_without_alpha_and_nothing_else() {
+        for name in ["picker-video.webm", "picker-video-alpha.webm"] {
+            let texture = first_frame(name, true).unwrap_or_else(|| panic!("strict VP9 poster for {name}"));
+            assert!(texture.width() > 0 && texture.width() <= 640 && texture.height() > 0 && texture.height() <= 640);
+        }
+        // H.264 needs FFmpeg or a hardware decoder, which sticker packs must never reach.
+        assert!(first_frame("reaction-video.mp4", true).is_none(), "strict mode must refuse non-VP9 media");
+        assert!(first_frame("reaction-video.mp4", false).is_some(), "the ordinary preview still decodes H.264");
+    }
 }

@@ -153,8 +153,22 @@ fn start_lottie(
         })
         .await;
         drop(permit);
-        let (Some(picture), Ok(Ok((decoder, frame)))) = (picture_weak.upgrade(), result) else {
+        let Some(picture) = picture_weak.upgrade() else {
             return;
+        };
+        let (decoder, frame) = match result {
+            Ok(Ok(started)) => started,
+            failure => {
+                if serial.get() == expected && !cancel.is_cancelled() {
+                    let reason = match failure {
+                        Ok(Err(reason)) => reason,
+                        _ => "The preview worker stopped",
+                    };
+                    eprintln!("Monogram preview failed: {reason}");
+                    show_preview_error(&picture, reason);
+                }
+                return;
+            }
         };
         if serial.get() != expected || cancel.is_cancelled() {
             return;
@@ -176,6 +190,14 @@ fn start_lottie(
             frame.delay,
         );
     });
+}
+
+/// Replaces a tile's loading spinner with a stock GNOME icon when its artwork cannot be shown.
+fn show_preview_error(picture: &gtk::Picture, reason: &str) {
+    if let Some(button) = picture.ancestor(gtk::Button::static_type()).and_downcast::<gtk::Button>() {
+        button.set_icon_name("image-missing-symbolic");
+        button.set_tooltip_text(Some(reason));
+    }
 }
 
 type LottieSource=Arc<dyn Fn()->Result<crate::downloads::VerifiedFile,&'static str>+Send+Sync>;
@@ -1906,7 +1928,14 @@ let mut ids=Vec::new();let buttons=page.section_buttons.borrow();let mut child=p
             let (Some(page),Some(image),Ok((_,verified)))=(weak.upgrade(),image.upgrade(),result)else{return;};
             if page.hovered_video.get()!=Some(id)||page.preview_epoch.get()!=epoch||!image.is_mapped(){return;}
             if let Some(player)=crate::video_ui::Playback::new(verified){
-                image.set_paintable(Some(&player.media));player.media.play();page.video_preview.replace(Some((image.downgrade(),poster,player)));
+                // Keep the poster on screen until the stream has a decoded frame; swapping
+                // paintables immediately shows an empty picture while the video loads.
+                let swapped=Rc::new(Cell::new(false));let target=image.downgrade();
+                player.media.connect_invalidate_contents(move|media|{
+                    if swapped.get()||media.intrinsic_width()<=0{return;}
+                    if let Some(image)=target.upgrade(){swapped.set(true);image.set_paintable(Some(media));}
+                });
+                player.media.play();page.video_preview.replace(Some((image.downgrade(),poster,player)));
             }
         });
     }
@@ -1931,13 +1960,22 @@ let mut ids=Vec::new();let buttons=page.section_buttons.borrow();let mut child=p
             self.preview_active.set(self.preview_active.get() + 1);
             let weak = Rc::downgrade(self);
             let library = self.library.clone();
+            let account = library.account().to_string();
             glib::spawn_future_local(async move {
                 let result = match library.verified_asset(cell.item_id, Job::new()).await {
                     Ok((asset,verified)) if asset.item.mime=="video/webm" => gio::spawn_blocking(move||{
                         use std::os::fd::AsRawFd;
+                        // Extracting a poster decodes video, so keep it in the preview cache.
+                        let root=crate::preview_cache::account_root(&account);
+                        let key=crate::preview_cache::key("poster",1500,&asset.item.file);
+                        let modified=std::fs::metadata(&asset.path).and_then(|m|m.modified()).ok();
+                        if let Some(bytes)=root.as_deref().and_then(|root|crate::preview_cache::load(root,&key,modified)) {
+                            return Ok((asset,verified,Some(crate::image_loader::EncodedPreview{bytes,width:0,height:0})));
+                        }
                         let path=std::path::PathBuf::from(format!("/proc/self/fd/{}",verified.0.as_raw_fd()));
-                        let poster=crate::image_loader::encode_video_preview(&path,&gio::Cancellable::new(),1500)
+                        let poster=crate::image_loader::encode_webm_preview(&path,&gio::Cancellable::new(),1500)
                             .map_err(crate::packs::Error)?;
+                        if let Some(root)=&root {crate::preview_cache::store(root,&key,&poster.bytes);}
                         Ok((asset,verified,Some(poster)))
                     }).await.unwrap_or(Err(crate::packs::Error("Video preview failed"))),
                     Ok((asset,verified))=>Ok((asset,verified,None)),
@@ -2013,29 +2051,47 @@ let mut ids=Vec::new();let buttons=page.section_buttons.borrow();let mut child=p
             install_lottie_reopenable(&picture,&spinner,&self.scroll,move||library.reopen_preview(&asset));
         } else if asset.item.mime.starts_with("image/") {
             drop(verified);let library=self.library.clone();let preview_asset=asset.clone();
-            let spinner = spinner.downgrade();
-            let scroll = self.scroll.downgrade();
-            crate::image_loader::play_input(
-                &picture,
-                192,
-                move |picture| {
-                    scroll.upgrade().is_some_and(|scroll| {
-                        picture.compute_bounds(&scroll).is_some_and(|bounds| {
-                            bounds.y() + bounds.height() >= 0.
-                                && bounds.y() <= scroll.height() as f32
+            // Still frames are cached as small PNGs, so reopening the picker does not decode
+            // every sticker again. Animated artwork is never cached and keeps playing.
+            let cache_root=crate::preview_cache::account_root(self.library.account());
+            let cache_key=crate::preview_cache::key("still",192,&asset.item.file);
+            let modified=std::fs::metadata(&asset.path).and_then(|m|m.modified()).ok();
+            let cached=cache_root.as_deref()
+                .and_then(|root|crate::preview_cache::load(root,&cache_key,modified))
+                .and_then(|bytes|gtk::gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)).ok());
+            if let Some(texture)=cached {
+                picture.set_paintable(Some(&texture));
+                spinner.stop();
+                spinner.set_visible(false);
+            } else {
+                let spinner = spinner.downgrade();
+                let scroll = self.scroll.downgrade();
+                crate::image_loader::play_input_with(
+                    &picture,
+                    192,
+                    move |picture| {
+                        scroll.upgrade().is_some_and(|scroll| {
+                            picture.compute_bounds(&scroll).is_some_and(|bounds| {
+                                bounds.y() + bounds.height() >= 0.
+                                    && bounds.y() <= scroll.height() as f32
+                            })
                         })
-                    })
-                },
-                move |picture, texture| {
-                    picture.set_paintable(Some(&texture));
-                    if let Some(spinner) = spinner.upgrade() {
-                        spinner.stop();
-                        spinner.set_visible(false);
-                    }
-                },
-                true,
-                move||library.reopen_preview(&preview_asset),
-            );
+                    },
+                    move |picture, texture, animated| {
+                        picture.set_paintable(Some(&texture));
+                        if let Some(spinner) = spinner.upgrade() {
+                            spinner.stop();
+                            spinner.set_visible(false);
+                        }
+                        if !animated && let Some(root) = &cache_root {
+                            crate::preview_cache::store(root, &cache_key, &texture.save_to_png_bytes());
+                        }
+                    },
+                    show_preview_error,
+                    true,
+                    move||library.reopen_preview(&preview_asset),
+                );
+            }
         } else {
             spinner.stop();
             spinner.set_visible(false);
@@ -2050,7 +2106,74 @@ impl Drop for PackLibraryPage {
     }
 }
 
+/// Preferences → Behavior: keep the media pane open after a sticker is sent.
+pub(crate) const STICKERS_KEEP_OPEN: &str = "stickers_keep_open";
+
+/// Holding Shift while clicking a sticker always keeps the pane open, whatever the setting.
+fn stickers_stay_open(setting: &str, state: gtk::gdk::ModifierType) -> bool {
+    setting != "false" || state.contains(gtk::gdk::ModifierType::SHIFT_MASK)
+}
+
 impl Ui {
+    /// Runs inside the click that sent the sticker, so the keyboard still reports its modifiers.
+    fn after_sticker_sent(self: &Rc<Self>) {
+        let setting = self.store.pref(STICKERS_KEEP_OPEN, "true");
+        let held = gtk::gdk::Display::default()
+            .and_then(|display| display.default_seat())
+            .and_then(|seat| seat.keyboard())
+            .map(|keyboard| keyboard.modifier_state())
+            .unwrap_or_else(gtk::gdk::ModifierType::empty);
+        if !stickers_stay_open(&setting, held) {
+            self.utility.set_show_sidebar(false);
+        }
+    }
+
+    /// Re-imports connected Telegram packs whose last check is older than six hours
+    /// (`Library::due_updates`). Failures are recorded on the pack by `import_telegram`.
+    pub(crate) fn update_due_packs(self: &Rc<Self>) {
+        static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let owner = self.state.borrow().account.clone();
+        if owner.is_empty() || RUNNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
+        let generation = self.generation.get();
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let mut updated = false;
+            if let Ok(library) = Library::open(&owner).await
+                && let Ok(due) = library.due_updates().await
+                && !due.is_empty()
+                && library.telegram_enabled().await.unwrap_or(false)
+            {
+                for id in due {
+                    let current = weak
+                        .upgrade()
+                        .is_some_and(|ui| ui.generation.get() == generation && ui.state.borrow().account == owner);
+                    if !current {
+                        break;
+                    }
+                    let source = library
+                        .snapshot()
+                        .await
+                        .ok()
+                        .and_then(|s| s.packs.into_iter().find(|p| p.id == id))
+                        .map(|p| p.source);
+                    if let Some(source) = source
+                        && library.import_telegram(source, Some(id), Job::new()).await.is_ok()
+                    {
+                        updated = true;
+                    }
+                }
+            }
+            RUNNING.store(false, std::sync::atomic::Ordering::Release);
+            if updated && let Some(ui) = weak.upgrade() {
+                for page in ui.pack_pages.borrow().clone() {
+                    page.refresh();
+                }
+            }
+        });
+    }
+
     pub(crate) fn refresh_favorite_views(self: &Rc<Self>) {
         for page in self.pack_pages.borrow().clone() {
             if page.kind == Kind::Stickers {
@@ -2364,7 +2487,9 @@ impl Ui {
                         };
                         match selection {
                             PackSelection::Sticker(asset) => {
-                                ui.send_pack_sticker(&asset);
+                                if ui.send_pack_sticker(&asset) {
+                                    ui.after_sticker_sent();
+                                }
                             }
                             PackSelection::CustomEmoji { item_id, fallback } => {
                                 let weak = Rc::downgrade(&ui);
@@ -2448,6 +2573,18 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn stickers_close_after_sending_only_when_the_setting_is_off_and_shift_is_not_held() {
+        use gtk::gdk::ModifierType as Mod;
+        assert!(stickers_stay_open("true", Mod::empty()), "default keeps the tab open");
+        assert!(stickers_stay_open("", Mod::empty()), "an unset or odd value keeps the tab open");
+        assert!(!stickers_stay_open("false", Mod::empty()));
+        assert!(!stickers_stay_open("false", Mod::CONTROL_MASK | Mod::ALT_MASK), "only Shift overrides");
+        assert!(stickers_stay_open("false", Mod::SHIFT_MASK), "Shift keeps it open");
+        assert!(stickers_stay_open("false", Mod::SHIFT_MASK | Mod::CONTROL_MASK));
+        assert!(stickers_stay_open("true", Mod::SHIFT_MASK));
+    }
 
     fn until(timeout: Duration, predicate: impl Fn() -> bool) -> bool {
         let context = glib::MainContext::default();

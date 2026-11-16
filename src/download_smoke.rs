@@ -81,6 +81,8 @@ impl DownloadSmoke {
         self.chat.replace(ui.state.borrow().active.clone());
         self.stage.set(1);
     }
+    // Drives GTK's own (deprecated) GtkFileChooserDialog widget tree; there is no replacement handle.
+    #[allow(deprecated)]
     pub fn tick(&self, ui: &Rc<Ui>, encrypted: bool) -> bool {
         let Some(file) = self.file.borrow().clone() else {
             return false;

@@ -189,7 +189,7 @@ impl Ui {
         let ui = self.clone();
         let feedback = adw::Toast::new("Saving favorite order…");
         feedback.set_timeout(0);
-        self.toast.add_toast(feedback.clone());
+        self.show_toast(feedback.clone());
         glib::spawn_future_local(async move {
             let result = ui
                 .store

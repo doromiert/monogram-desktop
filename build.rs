@@ -1,4 +1,38 @@
+/// Embed the git commit this client was built from, for `/neofetch`. Builds without a git
+/// checkout (a source tarball, Nix) can pass `MONOGRAM_GIT_COMMIT` (and `MONOGRAM_GIT_DIRTY=1`);
+/// otherwise the commit is simply left out.
+fn git_commit() {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    println!("cargo:rerun-if-env-changed=MONOGRAM_GIT_COMMIT");
+    println!("cargo:rerun-if-env-changed=MONOGRAM_GIT_DIRTY");
+    let commit = std::env::var("MONOGRAM_GIT_COMMIT")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| git(&["rev-parse", "--short=7", "HEAD"]))
+        .filter(|value| value.chars().all(|c| c.is_ascii_alphanumeric()));
+    if let Some(commit) = commit {
+        println!("cargo:rustc-env=MONOGRAM_GIT_COMMIT={commit}");
+        let dirty = std::env::var("MONOGRAM_GIT_DIRTY").ok().map(|value| value == "1").unwrap_or_else(|| {
+            git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|status| !status.is_empty())
+        });
+        println!("cargo:rustc-env=MONOGRAM_GIT_DIRTY={}", u8::from(dirty));
+    }
+    // Every commit and checkout appends to the reflog; the index changes when files are staged.
+    if let Some(dir) = git(&["rev-parse", "--git-dir"]) {
+        println!("cargo:rerun-if-changed={dir}/logs/HEAD");
+        println!("cargo:rerun-if-changed={dir}/index");
+    }
+}
 fn main() {
+    git_commit();
     println!("cargo:rerun-if-env-changed=MONOGRAM_MATH_HELPER");
     println!("cargo:rustc-env=MONOGRAM_BUILT_MATH_HELPER={}", std::env::var("MONOGRAM_MATH_HELPER").unwrap_or_default());
     println!("cargo:rerun-if-env-changed=MONOGRAM_BWRAP");

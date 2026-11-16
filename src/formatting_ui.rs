@@ -457,6 +457,9 @@ fn block_widget(block: &Block) -> gtk::Widget {
                 .hscrollbar_policy(gtk::PolicyType::Automatic)
                 .vscrollbar_policy(gtk::PolicyType::Never)
                 .propagate_natural_height(true)
+                // Size the block to its code (up to the bubble limit), then scroll sideways;
+                // without this the bubble shrinks to the "Code" caption and hides the code.
+                .propagate_natural_width(true)
                 .min_content_height(0)
                 .build();
             let label = gtk::Label::new(Some(&source));

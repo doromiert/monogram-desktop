@@ -1086,6 +1086,7 @@ impl Ui {
                     (
                         crate::downloads::forget(&cleanup_owner),
                         crate::link_previews::forget(&cleanup_owner),
+                        crate::preview_cache::forget(&cleanup_owner),
                     )
                 });
                 let weak = Rc::downgrade(&ui);
@@ -1093,11 +1094,14 @@ impl Ui {
                 let cleanup = cleanup.await;
                 let Some(ui) = weak.upgrade() else { return };
                 match cleanup {
-                    Ok((attachments, previews)) => {
+                    Ok((attachments, previews, stickers)) => {
                         if let Err(reason) = attachments {
                             ui.notice(reason);
                         }
                         if let Err(reason) = previews {
+                            ui.notice(reason);
+                        }
+                        if let Err(reason) = stickers {
                             ui.notice(reason);
                         }
                     }
@@ -1672,6 +1676,25 @@ impl Ui {
             }
         });
         behavior.add(&completion);
+        let stickers = adw::PreferencesGroup::builder()
+            .title("Stickers")
+            .build();
+        let keep_open = adw::SwitchRow::builder()
+            .title("Keep stickers tab open after sending")
+            .subtitle("When off, the tab closes after a sticker is sent. Hold Shift while clicking a sticker to keep it open.")
+            .active(self.store.pref(crate::media_library_ui::STICKERS_KEEP_OPEN, "true") != "false")
+            .build();
+        let weak = Rc::downgrade(self);
+        keep_open.connect_active_notify(move |row| {
+            if let Some(ui) = weak.upgrade() {
+                let _ = ui.store.set_pref(
+                    crate::media_library_ui::STICKERS_KEEP_OPEN,
+                    if row.is_active() { "true" } else { "false" },
+                );
+            }
+        });
+        stickers.add(&keep_open);
+        behavior.add(&stickers);
         self.add_double_click_preferences(&behavior);
         dialog.add(&behavior);
         let account = adw::PreferencesPage::builder()

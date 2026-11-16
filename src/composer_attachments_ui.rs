@@ -4,6 +4,37 @@ use gtk::gio;
 use std::{collections::BTreeMap, rc::Rc};
 
 impl Ui {
+    /// Swap `old` for `new` (an edited copy) keeping its position among the attachments.
+    pub fn replace_attachment(self: &Rc<Self>, old: &gio::File, old_card: Option<gtk::Overlay>, new: gio::File) {
+        let Some(index) = self.attachments.borrow().iter().position(|file| file == old) else {
+            // The attachment was removed while the editor was open.
+            crate::picture_editor_ui::discard_edited(new.path());
+            return;
+        };
+        let before = old_card.as_ref().and_then(|card| card.prev_sibling());
+        if !self.stage_attachment_files(vec![new.clone()]) {
+            crate::picture_editor_ui::discard_edited(new.path());
+            return;
+        }
+        // The new attachment and its card were appended; move both into the old one's place.
+        let mut attachments = self.attachments.borrow_mut();
+        if let Some(position) = attachments.iter().rposition(|file| file == &new) {
+            let moved = attachments.remove(position);
+            let at = index.min(attachments.len());
+            attachments.insert(at, moved);
+        }
+        attachments.retain(|file| file != old);
+        drop(attachments);
+        if let (Some(new_card), Some(old_card)) = (self.chips.last_child(), old_card) {
+            self.chips.reorder_child_after(&new_card, before.as_ref());
+            self.chips.remove(&old_card);
+        }
+        // An edited copy that was edited again no longer needs its predecessor on disk.
+        crate::picture_editor_ui::discard_edited(old.path());
+        self.chips.set_visible(!self.attachments.borrow().is_empty());
+        self.compose_changed();
+    }
+
     pub fn stage_attachment_files(self: &Rc<Self>, files: Vec<gio::File>) -> bool {
         let available = 64usize.saturating_sub(self.attachments.borrow().len());
         let overflow = files.len() > available;
@@ -76,6 +107,25 @@ impl Ui {
             name_label.set_halign(gtk::Align::Start);
             name_label.set_valign(gtk::Align::End);
             card.add_overlay(&name_label);
+            if crate::picture_editor_ui::editable(&name) {
+                if let Some(path) = file.path() {
+                    let edit = icon_button("document-edit-symbolic", "Edit picture");
+                    edit.add_css_class("attachment-preview-remove");
+                    edit.set_halign(gtk::Align::Start);
+                    edit.set_valign(gtk::Align::Start);
+                    let (weak, card_weak, original) = (Rc::downgrade(self), card.downgrade(), file.clone());
+                    edit.connect_clicked(move |_| {
+                        let Some(ui) = weak.upgrade() else { return };
+                        let (weak, card_weak, original) = (Rc::downgrade(&ui), card_weak.clone(), original.clone());
+                        ui.open_picture_editor(path.clone(), move |edited| {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.replace_attachment(&original, card_weak.upgrade(), gio::File::for_path(edited));
+                            }
+                        });
+                    });
+                    card.add_overlay(&edit);
+                }
+            }
             let remove = icon_button("window-close-symbolic", "Remove attachment");
             remove.add_css_class("attachment-preview-remove");
             remove.set_halign(gtk::Align::End);
@@ -86,6 +136,8 @@ impl Ui {
             remove.connect_clicked(move |_| {
                 let Some(ui) = weak.upgrade() else { return };
                 ui.attachments.borrow_mut().retain(|file| file != &staged);
+                // An edited copy exists only for this attachment; the user's original never is.
+                crate::picture_editor_ui::discard_edited(staged.path());
                 if let Some(card) = card_weak.upgrade() {
                     ui.chips.remove(&card);
                 }

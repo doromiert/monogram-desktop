@@ -72,7 +72,7 @@ impl UploadSmoke {
                 true,
             )
             .unwrap();
-            gdk::Texture::for_pixbuf(&photo)
+            crate::widgets::texture_from_pixbuf(&photo)
                 .save_to_png_bytes()
                 .to_vec()
         } else {
@@ -115,6 +115,8 @@ impl UploadSmoke {
         self.received.set(true);
         true
     }
+    // Drives GTK's own (deprecated) GtkFileChooserDialog widget tree; there is no replacement handle.
+    #[allow(deprecated)]
     pub fn tick(&self, ui: &Rc<Ui>, encrypted: bool) -> bool {
         if self.printed.get() != self.stage.get() {
             self.printed.set(self.stage.get());

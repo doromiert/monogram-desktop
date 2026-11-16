@@ -33,6 +33,18 @@ pub(crate) fn now() -> u64 {
         .as_millis() as u64
 }
 pub(crate) fn constant(a: &str, b: &str) -> bool {
-    a.len() == b.len()
-        && ring::constant_time::verify_slices_are_equal(a.as_bytes(), b.as_bytes()).is_ok()
+    use subtle::ConstantTimeEq;
+    a.len() == b.len() && bool::from(a.as_bytes().ct_eq(b.as_bytes()))
+}
+#[cfg(test)]
+mod constant_tests {
+    use super::constant;
+    #[test]
+    fn constant_compares_equal_unequal_and_different_length_strings() {
+        assert!(constant("", ""));
+        assert!(constant("pairing-token", "pairing-token"));
+        assert!(!constant("pairing-token", "pairing-tokeN"));
+        assert!(!constant("pairing-token", "pairing-token-longer"));
+        assert!(!constant("pairing-token", ""));
+    }
 }

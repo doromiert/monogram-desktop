@@ -380,6 +380,15 @@ impl Ui {
                     return;
                 }
             };
+            // The server must not be able to talk an encrypted room into plaintext.
+            if selected.is_none() && ui.encryption_downgrade_blocked(&peer, mode) {
+                for mut message in messages {
+                    message.delivery = "failed".into();
+                    ui.store_queued_row(&owner, &peer, message);
+                }
+                ui.notice(crate::send_policy_ui::DOWNGRADE_NOTICE);
+                return;
+            }
             let Some(fingerprint) = ui.fingerprint_for_send(mode) else {
                 return;
             };
@@ -391,12 +400,7 @@ impl Ui {
                     .iter_mut()
                     .find(|chat| chat.jid == peer)
                 {
-                    chat.sending_preference = Some(Preference::Automatic);
-                    chat.automatic_encryption = Some(Selection {
-                        mode,
-                        time_ms: chrono::Utc::now().timestamp_millis(),
-                    });
-                    chat.encryption = mode.encrypted();
+                    chat.remember_selection(mode);
                 }
                 if !ui.persist() {
                     return;

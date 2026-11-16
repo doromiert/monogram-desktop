@@ -33,3 +33,14 @@ copyright Nikolai Kudashov 2013–2018, GPL-2.0-or-later). The generator lives a
 `tests/mobile-reference/vectors/ReactionEmojiReference.java`. This table preserves
 mobile's accepted emoji and variation-selector normalization for XEP-0444.
 Source: https://github.com/doromiert/monogram/blob/be6876c045163e32fe07a84416621770b0964b30/TMessagesProj/src/main/java/org/telegram/messenger/EmojiData.java
+
+`noto-animated-emoji.pack` bundles the 250 most popular animations from Google's Noto Emoji
+Animation set. Credit: Noto Emoji animations, copyright Google LLC
+(https://googlefonts.github.io/noto-emoji-animation/, files served from
+https://fonts.gstatic.com/s/e/notoemoji/latest/). Licence: Creative Commons Attribution 4.0
+International, https://creativecommons.org/licenses/by/4.0/ . Google's announcement states "The
+artwork is available under the CC BY 4.0 license"
+(https://developers.googleblog.com/en/updates-to-emoji-new-characters-new-animation-new-color-customization-and-more/).
+Changes: each Lottie file was minified and gzip-compressed and the files were concatenated into
+one pack; the artwork itself is unchanged. The same credit appears in About > Legal.
+`tools/pack-noto-emoji.py` regenerates the pack; see docs/ANIMATED_EMOJI.md.

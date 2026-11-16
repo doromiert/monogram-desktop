@@ -171,14 +171,25 @@ mod message_bubble_limit_imp {
             };
             if orientation == gtk::Orientation::Horizontal {
                 let (minimum, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
-                return (minimum, natural.max(minimum), -1, -1);
+                // Report only a modest minimum. The timeline scrolls with a horizontal policy of
+                // Never, which makes GTK propagate the widest child's minimum to the whole chat
+                // pane: one unbreakable link would otherwise make the window ask for more width
+                // than the breakpoint bin has (libadwaita then warns on every layout pass).
+                // size_allocate still gives the child its real minimum whenever the row has room.
+                return (minimum.min(BUBBLE_SOFT_MIN_WIDTH), natural.max(minimum), -1, -1);
             }
             let (minimum, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
             let child_width = if for_size < 0 {
                 natural.max(minimum).max(1)
             } else {
-                let cap=for_size.min(MESSAGE_MAX_WIDTH).max(1);
-                if child.has_css_class("message-editing"){cap.max(1)}else{natural.min(cap).max(1)}
+                let cap = for_size.min(MESSAGE_MAX_WIDTH).max(1);
+                if child.has_css_class("message-editing") {
+                    cap.max(1)
+                } else {
+                    // Never narrower than the child's own minimum (for example an unbreakable link),
+                    // but never wider than the row itself.
+                    natural.min(cap).max(minimum).min(for_size).max(1)
+                }
             };
             // Content fitting can choose a narrower width than the initial natural request.
             let child_width=if for_size==self.last_available.get()&&self.measured_width.get()>0 {self.measured_width.get()}else{child_width};
@@ -199,8 +210,15 @@ mod message_bubble_limit_imp {
                 }
             }
             let cap = width.min(MESSAGE_MAX_WIDTH).max(1);
-            let (_, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
-            let child_width = if child.has_css_class("message-editing"){cap.max(1)}else{natural.min(cap).max(1)};
+            let (minimum, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
+            // The cap must not squeeze a child below its minimum width: an unbreakable link
+            // would otherwise overflow its bubble. The row width is the only hard limit. A bubble
+            // being edited keeps the plain cap.
+            let child_width = if child.has_css_class("message-editing") {
+                cap.max(1)
+            } else {
+                natural.min(cap).max(minimum).min(width).max(1)
+            };
             let x = if self.own.get() {
                 width.saturating_sub(child_width)
             } else {
@@ -247,7 +265,7 @@ mod message_bubble_limit_imp {
                             if widget.is_visible() && widget!=body {
                                 // Wrapped preview labels request more natural width than
                                 // the card actually uses. Preserve its allocated outer edge.
-                                needed=needed.max(if widget.has_css_class("link-preview"){widget.allocated_width()}else{widget.measure(gtk::Orientation::Horizontal,-1).1});
+                                needed=needed.max(if widget.has_css_class("link-preview"){widget.width()}else{widget.measure(gtk::Orientation::Horizontal,-1).1});
                             }
                         }
                         let tight=(needed+(child_width-bubble.width()).max(0)).clamp(1,child_width);
@@ -280,6 +298,9 @@ mod message_bubble_limit_imp {
         }
     }
 }
+
+/// Widest minimum a message bubble reports to its parents (see `MessageBubbleLimit::measure`).
+const BUBBLE_SOFT_MIN_WIDTH: i32 = 320;
 
 glib::wrapper! {
     pub struct MessageBubbleLimit(ObjectSubclass<message_bubble_limit_imp::MessageBubbleLimit>)
@@ -939,7 +960,7 @@ mod media_geometry_tests {
         window.close();
     }
 
-    #[test]
+    #[gtk::test]
     fn inline_media_fits_caps_and_narrow_widths() {
         gtk::init().expect("GTK initializes");
         for (width, borderless, ratio, expected, narrow) in [
@@ -974,7 +995,7 @@ mod media_geometry_tests {
             gtk::gdk_pixbuf::Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, true, 8, 200, 200)
                 .unwrap();
         pixels.fill(0xff0000ff);
-        round.set_paintable(Some(gdk::Texture::for_pixbuf(&pixels).upcast()));
+        round.set_paintable(Some(texture_from_pixbuf(&pixels).upcast()));
         round.allocate(200, 200, -1, None);
         let snapshot = gtk::Snapshot::new();
         round.imp().snapshot(&snapshot);
@@ -983,8 +1004,43 @@ mod media_geometry_tests {
         let clip = node.downcast::<gtk::gsk::RoundedClipNode>().unwrap();
         assert_eq!(clip.clip().corner()[0].width(), 100.);
     }
+    #[test]
+    fn pixbuf_texture_keeps_size_alpha_and_pixels() {
+        use gtk::gdk_pixbuf::{Colorspace, Pixbuf};
+        // Width 5 without alpha gives a padded rowstride, which the copy must honour.
+        let opaque = Pixbuf::new(Colorspace::Rgb, false, 8, 5, 3).unwrap();
+        opaque.fill(0x00ff00ff);
+        let texture = texture_from_pixbuf(&opaque);
+        assert_eq!((texture.width(), texture.height()), (5, 3));
+        let mut bytes = vec![0u8; 5 * 3 * 4];
+        texture.download(&mut bytes, 5 * 4);
+        assert!(bytes.chunks(4).all(|p| p == [0, 255, 0, 255]), "{bytes:?}");
+        let clear = Pixbuf::new(Colorspace::Rgb, true, 8, 2, 2).unwrap();
+        clear.fill(0xff000080);
+        let texture = texture_from_pixbuf(&clear);
+        let mut bytes = vec![0u8; 2 * 2 * 4];
+        texture.download(&mut bytes, 2 * 4);
+        // Premultiplied BGRA: straight red at alpha 0x80 becomes 0x80 red.
+        assert!(bytes.chunks(4).all(|p| p == [0, 0, 128, 128]), "{bytes:?}");
+    }
 }
 
+/// Copies a pixbuf's 8-bit pixels into a texture (`gdk::Texture::for_pixbuf` is deprecated).
+pub(crate) fn texture_from_pixbuf(pixbuf: &gtk::gdk_pixbuf::Pixbuf) -> gdk::Texture {
+    let format = if pixbuf.has_alpha() {
+        gdk::MemoryFormat::R8g8b8a8
+    } else {
+        gdk::MemoryFormat::R8g8b8
+    };
+    gdk::MemoryTexture::new(
+        pixbuf.width(),
+        pixbuf.height(),
+        format,
+        &pixbuf.read_pixel_bytes(),
+        pixbuf.rowstride() as usize,
+    )
+    .upcast()
+}
 pub fn reveal_media(controls: &gtk::Box, paintable: &impl IsA<gdk::Paintable>) {
     controls.remove_css_class("media-preview-error");
     controls.set_tooltip_text(None);

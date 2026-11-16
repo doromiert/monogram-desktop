@@ -281,6 +281,10 @@ impl Message {
 #[serde(default)]
 pub struct Chat {
     pub encryption: bool,
+    /// Sticky: set the first time encryption is used here and never cleared by an automatic
+    /// choice. A room that has been encrypted must not silently fall back to plaintext because a
+    /// server says it no longer offers encryption.
+    pub encrypted_history: bool,
     pub sending_preference: Option<Preference>,
     pub automatic_encryption: Option<Selection>,
     pub id: String,
@@ -328,7 +332,32 @@ impl Chat {
         self.encryption_preference().forced().or_else(|| {
             self.automatic_encryption
                 .and_then(|selection| selection.current(Utc::now().timestamp_millis()))
+                // A cached "plain" must not outlive the server's say-so for a room that has used
+                // encryption: probe again instead of trusting it.
+                .filter(|mode| !(self.group && *mode == Mode::Plain && self.had_encryption()))
         })
+    }
+    /// Whether encryption was ever used in this chat: the sticky flag, the current setting, or an
+    /// own encrypted message that is loaded.
+    pub fn had_encryption(&self) -> bool {
+        self.encrypted_history
+            || self.encryption
+            || self.messages.iter().any(|m| m.own && m.mode().encrypted())
+    }
+    /// Whether the automatic choice `mode` would be a downgrade to plaintext in a room that has
+    /// used encryption. Such a send is refused; the user must choose Unencrypted explicitly.
+    pub fn downgrade_blocked(&self, mode: Mode) -> bool {
+        self.group && mode == Mode::Plain && self.had_encryption()
+    }
+    /// Record an automatic choice. Only call this for a choice that is allowed.
+    pub fn remember_selection(&mut self, mode: Mode) {
+        self.encrypted_history |= self.had_encryption() || mode.encrypted();
+        self.sending_preference = Some(Preference::Automatic);
+        self.automatic_encryption = Some(Selection {
+            mode,
+            time_ms: Utc::now().timestamp_millis(),
+        });
+        self.encryption = mode.encrypted();
     }
     pub fn latest_key(&self) -> Option<(&str, &str)> {
         let loaded = self
@@ -682,6 +711,93 @@ mod tests {
         let live = State::live("me@example.org", vec![]);
         assert_eq!(live.chats.len(), 1);
         assert!(live.stories.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod encryption_downgrade_tests {
+    use super::*;
+
+    fn room() -> Chat {
+        Chat { group: true, jid: "room@conference.example.org".into(), ..Default::default() }
+    }
+    fn own_message(mode: Mode) -> Message {
+        let mut message = Message { own: true, ..Default::default() };
+        message.set_encryption(mode, "fingerprint".into());
+        message
+    }
+
+    #[test]
+    fn a_room_that_never_used_encryption_may_be_plain_but_every_other_room_may_not_drop_to_it() {
+        assert!(!room().downgrade_blocked(Mode::Plain), "a public room is plain by nature");
+        let mut sticky = room();
+        sticky.encrypted_history = true;
+        let mut current = room();
+        current.encryption = true;
+        let mut sent = room();
+        sent.messages.push(own_message(Mode::Pq));
+        for (name, chat) in [("sticky flag", sticky), ("current setting", current), ("an own encrypted message", sent)] {
+            assert!(chat.downgrade_blocked(Mode::Plain), "{name}");
+            assert!(!chat.downgrade_blocked(Mode::Pq), "{name}: choosing encryption is never blocked");
+            assert!(!chat.downgrade_blocked(Mode::Legacy), "{name}");
+        }
+        // Someone else's encrypted message says nothing about what this user expects.
+        let mut other = room();
+        other.messages.push(Message { own: false, encrypted: true, ..Default::default() });
+        assert!(!other.downgrade_blocked(Mode::Plain));
+    }
+
+    #[test]
+    fn one_to_one_chats_keep_their_opportunistic_behaviour() {
+        let mut chat = Chat { group: false, encryption: true, encrypted_history: true, ..Default::default() };
+        assert!(!chat.downgrade_blocked(Mode::Plain), "this change is about rooms");
+        chat.automatic_encryption = Some(Selection { mode: Mode::Plain, time_ms: Utc::now().timestamp_millis() });
+        chat.sending_preference = Some(Preference::Automatic);
+        assert_eq!(chat.selected_encryption(), Some(Mode::Plain));
+    }
+
+    #[test]
+    fn the_history_flag_is_sticky_so_a_plain_send_cannot_erase_it() {
+        let mut chat = room();
+        chat.remember_selection(Mode::Pq);
+        assert!(chat.encrypted_history && chat.encryption);
+        // Even if the encryption setting is later cleared, the history stays.
+        chat.encryption = false;
+        assert!(chat.downgrade_blocked(Mode::Plain));
+        // Legacy data has no flag but an encryption setting: the first choice records it.
+        let mut legacy = room();
+        legacy.encryption = true;
+        legacy.remember_selection(Mode::Plain);
+        assert!(legacy.encrypted_history, "recorded before the setting was overwritten");
+        assert!(legacy.downgrade_blocked(Mode::Plain));
+    }
+
+    #[test]
+    fn a_cached_plain_choice_is_not_trusted_for_a_room_that_used_encryption() {
+        let cached_plain = |chat: &mut Chat| {
+            chat.sending_preference = Some(Preference::Automatic);
+            chat.automatic_encryption = Some(Selection { mode: Mode::Plain, time_ms: Utc::now().timestamp_millis() });
+        };
+        let mut never = room();
+        cached_plain(&mut never);
+        assert_eq!(never.selected_encryption(), Some(Mode::Plain), "a never-encrypted room keeps its choice");
+        let mut had = room();
+        had.encrypted_history = true;
+        cached_plain(&mut had);
+        assert_eq!(had.selected_encryption(), None, "re-check instead of trusting the cached downgrade");
+        // An explicit user choice of Unencrypted still works: that is the override.
+        had.sending_preference = Some(Preference::Plain);
+        assert_eq!(had.selected_encryption(), Some(Mode::Plain));
+    }
+
+    #[test]
+    fn the_flag_survives_saving_and_loading_and_old_data_defaults_to_false() {
+        let mut chat = room();
+        chat.remember_selection(Mode::Legacy);
+        let restored: Chat = serde_json::from_str(&serde_json::to_string(&chat).unwrap()).unwrap();
+        assert!(restored.encrypted_history);
+        let old: Chat = serde_json::from_str(r#"{"jid":"a@b","group":true}"#).unwrap();
+        assert!(!old.encrypted_history && !old.had_encryption());
     }
 }
 

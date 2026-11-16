@@ -289,7 +289,12 @@ impl Ui {
                             dialog.close();
                         }
                         ui.open_room(&info);
-                        ui.invite_room_people(&info.jid, members);
+                        ui.invite_room_people(
+                            &info.jid,
+                            members,
+                            "Group Created; Invitations Incomplete",
+                            false,
+                        );
                     }
                     result => {
                         if let Some(status) = status.upgrade() {
@@ -308,7 +313,13 @@ impl Ui {
             running.replace(Some(task));
         });
     }
-    fn invite_room_people(self: &Rc<Self>, peer: &str, members: Vec<String>) {
+    pub(crate) fn invite_room_people(
+        self: &Rc<Self>,
+        peer: &str,
+        members: Vec<String>,
+        failure_heading: &'static str,
+        confirm: bool,
+    ) {
         if members.is_empty() {
             return;
         }
@@ -330,13 +341,18 @@ impl Ui {
                 .filter(|ui| ui.generation.get() == generation)
             {
                 let message = match result {
-                    Ok(Ok(failed)) if failed.is_empty() => return,
+                    Ok(Ok(failed)) if failed.is_empty() => {
+                        if confirm {
+                            ui.notice("Invitations sent");
+                        }
+                        return;
+                    }
                     Ok(Ok(failed)) => format!("Could not invite: {}", failed.join(", ")),
                     Ok(Err(error)) => error.to_string(),
                     Err(_) => "Invitations were interrupted".into(),
                 };
                 let alert = adw::AlertDialog::builder()
-                    .heading("Group Created; Invitations Incomplete")
+                    .heading(failure_heading)
                     .body(&message)
                     .build();
                 alert.add_response("close", "Close");

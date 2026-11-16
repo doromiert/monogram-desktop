@@ -223,7 +223,64 @@ static void replay_clicked (GtkButton *button, MonogramVideo *self) {
   clapper_player_play (self->player);
 }
 
-gboolean monogram_playback_init (void) { return clapper_init_check (NULL, NULL); }
+/* Clapper only ever plays local, already verified files (/proc/self/fd/N). GStreamer will still
+ * follow network URLs that it finds *inside* a file: an HLS, DASH or Smooth Streaming manifest
+ * saved as ".mp4" makes it fetch arbitrary hosts, with no DNS pinning or private-address check.
+ * Give every network source and adaptive demuxer rank NONE so decodebin and uridecodebin never
+ * pick one. Fails closed: if this cannot be established, playback stays unavailable. */
+static const char *const blocked_elements[] = {
+  "hlsdemux", "hlsdemux2", "dashdemux", "dashdemux2", "mssdemux", "mssdemux2",
+  "souphttpsrc", "curlhttpsrc", "rtspsrc", "udpsrc", "tcpclientsrc", "srtsrc", "rtmpsrc", "rtmp2src", NULL
+};
+static gboolean network_factory (GstElementFactory *factory) {
+  const gchar *klass = gst_element_factory_get_metadata (factory, GST_ELEMENT_METADATA_KLASS);
+  const gchar *name = gst_plugin_feature_get_name (GST_PLUGIN_FEATURE (factory));
+  if (klass && (strstr (klass, "Network") || strstr (klass, "Adaptive"))) return TRUE;
+  for (const char *const *blocked = blocked_elements; *blocked; blocked++)
+    if (!strcmp (name, *blocked)) return TRUE;
+  return FALSE;
+}
+static void block_network_elements (void) {
+  GList *all = gst_registry_get_feature_list (gst_registry_get (), GST_TYPE_ELEMENT_FACTORY);
+  for (GList *l = all; l; l = l->next)
+    if (network_factory (GST_ELEMENT_FACTORY (l->data)))
+      gst_plugin_feature_set_rank (GST_PLUGIN_FEATURE (l->data), GST_RANK_NONE);
+  gst_plugin_feature_list_free (all);
+}
+/* TRUE when no network source or adaptive demuxer is selectable any more. Sources keep working
+ * for an explicit http URI (gst_element_make_from_uri ignores rank), but nothing here supplies
+ * one: only adaptive demuxers could turn file contents into a network request. */
+gboolean monogram_playback_network_blocked (void) {
+  GList *all = gst_registry_get_feature_list (gst_registry_get (), GST_TYPE_ELEMENT_FACTORY);
+  gboolean blocked = TRUE;
+  for (GList *l = all; l; l = l->next)
+    if (network_factory (GST_ELEMENT_FACTORY (l->data))
+        && gst_plugin_feature_get_rank (GST_PLUGIN_FEATURE (l->data)) != GST_RANK_NONE) blocked = FALSE;
+  gst_plugin_feature_list_free (all);
+  return blocked;
+}
+/* Plays `uri` headless for up to `ms` and returns once it errors, ends or the time is up. Used by
+ * tests to prove that a manifest saved as a media file does not start a network request. */
+void monogram_playback_probe (const char *uri, guint ms) {
+  GstElement *play = gst_element_factory_make ("playbin3", NULL);
+  GstElement *video = gst_element_factory_make ("fakesink", NULL);
+  GstElement *audio = gst_element_factory_make ("fakesink", NULL);
+  if (!play || !video || !audio) { if (play) gst_object_unref (play); return; }
+  g_object_set (play, "uri", uri, "video-sink", video, "audio-sink", audio, NULL);
+  GstBus *bus = gst_element_get_bus (play);
+  gst_element_set_state (play, GST_STATE_PLAYING);
+  GstMessage *done = gst_bus_timed_pop_filtered (bus, (GstClockTime) ms * GST_MSECOND,
+                                                 GST_MESSAGE_ERROR | GST_MESSAGE_EOS);
+  if (done) gst_message_unref (done);
+  gst_element_set_state (play, GST_STATE_NULL);
+  gst_object_unref (bus);
+  gst_object_unref (play);
+}
+gboolean monogram_playback_init (void) {
+  if (!clapper_init_check (NULL, NULL)) return FALSE;
+  block_network_elements ();
+  return monogram_playback_network_blocked ();
+}
 
 GtkMediaStream *monogram_video_new (const char *uri, GtkWidget **controls, GtkWidget **replay) {
   MonogramVideo *self = g_object_new (monogram_video_get_type (), NULL);

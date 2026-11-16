@@ -453,7 +453,7 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
-    #[test]
+    #[gtk::test]
     fn native_reaction_transition_frames_and_reduced_motion() {
         gtk::init().expect("native reaction test requires a display");
         let settings = gtk::Settings::default().expect("GTK settings");

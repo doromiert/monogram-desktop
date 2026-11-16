@@ -7,6 +7,9 @@ use std::ffi::CString;
 
 unsafe extern "C" {
     fn monogram_playback_init() -> i32;
+    fn monogram_playback_network_blocked() -> i32;
+    #[cfg(test)]
+    fn monogram_playback_probe(uri: *const std::ffi::c_char, ms: u32);
     fn monogram_video_new(
         uri: *const std::ffi::c_char,
         controls: *mut *mut gtk::ffi::GtkWidget,
@@ -156,9 +159,31 @@ pub(crate) struct Playback {
     inline_interactive: Cell<bool>,
     inline_users: Cell<usize>,
 }
+/// True when `head` starts like a binary media container. Text such as an HLS or DASH manifest,
+/// a playlist or an SDP file is refused even if the sender labelled it `video/*`.
+fn media_container(head: &[u8]) -> bool {
+    let at = |offset: usize, magic: &[u8]| head.get(offset..offset + magic.len()) == Some(magic);
+    at(0, &[0x1a, 0x45, 0xdf, 0xa3]) // Matroska and WebM
+        || [b"ftyp", b"moov", b"mdat", b"free", b"skip", b"wide", b"pnot"]
+            .iter()
+            .any(|atom| at(4, *atom)) // ISO BMFF and QuickTime
+        || (at(0, b"RIFF") && at(8, b"AVI "))
+        || at(0, b"OggS")
+        || at(0, b"FLV\x01")
+        || at(0, &[0x00, 0x00, 0x01, 0xba]) // MPEG program stream
+        || at(0, &[0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11]) // ASF and WMV
+        || (at(0, &[0x47]) && at(188, &[0x47])) // MPEG transport stream
+        || (at(4, &[0x47]) && at(196, &[0x47])) // M2TS
+}
 impl Playback {
     pub(crate) fn new(input: VerifiedFile) -> Option<Rc<Self>> {
         if PLAYBACK_READY.get()!=Some(&true) {return None;}
+        {
+            use std::os::unix::fs::FileExt;
+            let mut head = [0u8; 512];
+            let read = input.0.read_at(&mut head, 0).ok()?;
+            if !media_container(&head[..read]) {return None;}
+        }
         let file = gio::File::for_path(format!("/proc/self/fd/{}", input.0.as_raw_fd()));
         let uri = CString::new(file.uri().as_str()).ok()?;
         let mut controls = std::ptr::null_mut();
@@ -743,6 +768,37 @@ impl Ui {
 }
 
 #[cfg(test)]
+mod container_tests {
+    use super::*;
+
+    #[test]
+    fn only_binary_media_containers_are_played() {
+        let mp4 = [&[0, 0, 0, 0x18][..], b"ftypmp42", &[0; 16]].concat();
+        let quicktime = [&[0, 0, 0, 8][..], b"wide", &[0; 8]].concat();
+        let webm = [0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86, 0x81, 0x01];
+        let avi = [&b"RIFF"[..], &[0; 4], b"AVI LIST"].concat();
+        let mut transport = vec![0u8; 400];
+        transport[0] = 0x47;
+        transport[188] = 0x47;
+        for (name, bytes) in [("mp4", &mp4[..]), ("quicktime", &quicktime), ("webm", &webm), ("avi", &avi), ("ogg", b"OggS\0\x02"), ("flv", b"FLV\x01\x05"), ("ts", &transport)] {
+            assert!(media_container(bytes), "{name} is a media container");
+        }
+        // Manifests and playlists make GStreamer fetch the URLs written inside them.
+        for (name, bytes) in [
+            ("hls", &b"#EXTM3U\n#EXT-X-VERSION:3\nhttp://127.0.0.1/a.ts\n"[..]),
+            ("dash", b"<?xml version=\"1.0\"?><MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\">"),
+            ("smooth", b"<SmoothStreamingMedia MajorVersion=\"2\">"),
+            ("sdp", b"v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\n"),
+            ("asx", b"<asx version=\"3.0\"><entry><ref href=\"http://127.0.0.1/a\"/>"),
+            ("html", b"<html><video src=http://127.0.0.1/>"),
+            ("empty", b""),
+            ("short", b"ftyp"),
+        ] {
+            assert!(!media_container(bytes), "{name} must not be played");
+        }
+    }
+}
+#[cfg(test)]
 mod cold_playback_tests {
     use super::*;
     #[test]
@@ -754,6 +810,19 @@ mod cold_playback_tests {
         assert!(Playback::new(input()).is_none(),"Cold callers must not enter uninitialized Clapper");
         glib::MainContext::default().block_on(async {
             assert!(gio::spawn_blocking(initialize).await.unwrap());
+            assert_eq!(unsafe { monogram_playback_network_blocked() }, 1, "HLS, DASH and network sources must stay disabled");
+            // End to end: a manifest saved as an .mp4 must not make GStreamer contact the address inside it.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let dir = std::env::temp_dir().join(format!("monogram-manifest-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let manifest = dir.join("not-a-video.mp4");
+            std::fs::write(&manifest, format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nhttp://127.0.0.1:{port}/probe.ts\n#EXT-X-ENDLIST\n")).unwrap();
+            let uri = std::ffi::CString::new(format!("file://{}", manifest.display())).unwrap();
+            gio::spawn_blocking(move || unsafe { monogram_playback_probe(uri.as_ptr(), 4000) }).await.unwrap();
+            assert!(listener.accept().is_err(), "GStreamer followed a URL found inside a media file");
+            let _ = std::fs::remove_dir_all(dir);
             let player=Playback::new(input()).expect("First sticker/video player must construct after worker initialization");
             player.media.play();glib::timeout_future(Duration::from_millis(300)).await;player.media.pause();
             assert!(player.media.error().is_none(),"Native media pipeline failed: {:?}",player.media.error());

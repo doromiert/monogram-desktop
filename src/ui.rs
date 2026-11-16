@@ -127,6 +127,13 @@ pub struct Ui {
     pub typing_input: RefCell<Option<(String, Instant, bool)>>,
     pub history_pages: RefCell<HashMap<String, (String, bool)>>,
     pub history_pending: RefCell<HashSet<String>>,
+    /// Latest occupant list per joined room, and the open participants panel, if any.
+    pub room_rosters: RefCell<HashMap<String, Vec<crate::rooms::members::Participant>>>,
+    pub participants: RefCell<Option<Rc<crate::room_members_ui::ParticipantsView>>>,
+    /// The open participants pane was shown automatically (so it may also hide automatically).
+    pub participants_auto: Cell<bool>,
+    /// Cached "open participants by itself on wide windows" choice; None until first read.
+    pub participants_pref: Cell<Option<bool>>,
     pub cards: RefCell<Vec<Rc<crate::wallet::WalletCard>>>,
     pub dialogs: RefCell<Vec<adw::Dialog>>,
     pub smoke: bool,
@@ -372,7 +379,7 @@ impl Ui {
             input_scroll: gtk::ScrolledWindow::builder()
                 .min_content_height(32)
                 .max_content_height(108)
-                .propagate_natural_height(false)
+                .propagate_natural_height(true)
                 .hexpand(true)
                 .build(),
             reply_bar: gtk::Revealer::new(),
@@ -439,6 +446,10 @@ impl Ui {
             typing_input: RefCell::new(None),
             history_pages: RefCell::new(HashMap::new()),
             history_pending: RefCell::new(HashSet::new()),
+            room_rosters: RefCell::new(HashMap::new()),
+            participants: RefCell::new(None),
+            participants_auto: Cell::new(false),
+            participants_pref: Cell::new(None),
             cards: RefCell::new(vec![]),
             dialogs: RefCell::new(vec![]),
             smoke,
@@ -521,7 +532,7 @@ impl Ui {
                 let kind = std::mem::discriminant(&e);
                 let started = Instant::now();
                 ui.backend_event(g, &a, e);
-                if started.elapsed() >= Duration::from_millis(50) {
+                if started.elapsed() >= Duration::from_millis(250) {
                     eprintln!(
                         "Monogram slow backend event {kind:?}: {} ms",
                         started.elapsed().as_millis()
@@ -531,6 +542,24 @@ impl Ui {
             ui.poll_uploads();
             glib::ControlFlow::Continue
         });
+        if !smoke {
+            // Telegram packs are checked after startup and then every half hour; each pack
+            // is only re-imported once its own six-hour interval has passed.
+            let updates = Rc::downgrade(&ui);
+            glib::timeout_add_seconds_local(30 * 60, move || {
+                let Some(ui) = updates.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                ui.update_due_packs();
+                glib::ControlFlow::Continue
+            });
+            let first = Rc::downgrade(&ui);
+            glib::timeout_add_seconds_local_once(90, move || {
+                if let Some(ui) = first.upgrade() {
+                    ui.update_due_packs();
+                }
+            });
+        }
         let weak = Rc::downgrade(&ui);
         let typing_ui = Rc::downgrade(&ui);
         glib::timeout_add_local(Duration::from_secs(1), move || {
@@ -659,7 +688,11 @@ impl Ui {
         });
     }
     pub fn notice(&self, message: &str) {
-        self.toast.add_toast(adw::Toast::new(message));
+        self.show_toast(adw::Toast::new(message));
+    }
+    /// Show a toast where it is visible: above any open dialog rather than behind it.
+    pub fn show_toast(&self, toast: adw::Toast) {
+        crate::toast_routing::show(&self.window, &self.toast, toast);
     }
     fn queue_chat_refresh(self: &Rc<Self>) {
         if self.chat_refresh_pending.replace(true) {
@@ -711,6 +744,7 @@ impl Ui {
         self.action("shortcuts", |s| s.shortcuts());
         self.action("security", |s| s.security());
         self.action("info", |s| s.show_info());
+        self.action("participants", |s| s.show_participants());
         self.action("blocked-contacts", |s| s.blocked_contacts());
         self.action("requests", |s| s.requests());
         self.action("sync-history", |s| {
@@ -1139,6 +1173,13 @@ impl Ui {
                 b.set_visible(s.is_collapsed())
             }
         });
+        // The utility pane is pinned from 1240sp up: show the participants there by itself.
+        let weak = Rc::downgrade(self);
+        self.utility.connect_collapsed_notify(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.sync_participants();
+            }
+        });
         self.title.add_css_class("flat");
         self.title.add_css_class("conversation-title");
         self.weak_button(&self.title, |s| s.show_info());
@@ -1151,6 +1192,7 @@ impl Ui {
         for (t, a) in [
             ("Conversation Security", "security"),
             ("Conversation Info", "info"),
+            ("Participants", "participants"),
         ] {
             menu.append(Some(t), Some(&format!("win.{a}")))
         }
@@ -1329,12 +1371,6 @@ impl Ui {
         self.input_scroll.set_child(Some(&self.composer));
         self.input_scroll
             .set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-        let weak = Rc::downgrade(self);
-        self.input_scroll.vadjustment().connect_changed(move |_| {
-            if let Some(s) = weak.upgrade() {
-                s.queue_composer_height();
-            }
-        });
         let input = gtk::Overlay::builder()
             .child(&self.input_scroll)
             .hexpand(true)
@@ -1408,58 +1444,10 @@ impl Ui {
         let b = self.composer.buffer();
         b.text(&b.start_iter(), &b.end_iter(), true).into()
     }
-    fn queue_composer_height(self: &Rc<Self>) {
-        let weak = Rc::downgrade(self);
-        glib::idle_add_local_once(move || {
-            if let Some(s) = weak.upgrade() {
-                s.sync_composer_height();
-                let weak = Rc::downgrade(&s);
-                // GTK scrolls the insertion mark after layout; settle on the next frame.
-                s.input_scroll.add_tick_callback(move |_, _| {
-                    if let Some(s) = weak.upgrade() {
-                        s.sync_composer_height();
-                    }
-                    glib::ControlFlow::Break
-                });
-            }
-        });
-    }
-    fn sync_composer_height(&self) {
-        let end = self.composer.buffer().end_iter();
-        let last_line = self.composer.iter_location(&end);
-        let content_height = last_line
-            .y()
-            .saturating_add(last_line.height())
-            .saturating_add(self.composer.top_margin())
-            .saturating_add(self.composer.bottom_margin());
-        let viewport_height = content_height.clamp(32, 108);
-        if self.input_scroll.min_content_height() != viewport_height {
-            self.input_scroll.set_min_content_height(viewport_height);
-        }
-        let policy = if content_height > 108 {
-            gtk::PolicyType::Automatic
-        } else {
-            gtk::PolicyType::Never
-        };
-        if self.input_scroll.vscrollbar_policy() != policy {
-            self.input_scroll.set_vscrollbar_policy(policy);
-        }
-        if content_height <= 108 {
-            // Compact composers show every line; only capped composers follow the caret.
-            let adjustment = self.input_scroll.vadjustment();
-            if adjustment.value() != adjustment.lower() {
-                adjustment.set_value(adjustment.lower());
-            }
-            let mut start = self.composer.buffer().start_iter();
-            self.composer
-                .scroll_to_iter(&mut start, 0.0, true, 0.0, 0.0);
-        }
-    }
     pub fn compose_changed(self: &Rc<Self>) {
         let composer_text = self.composer_text();
         self.composer_placeholder
             .set_visible(composer_text.is_empty());
-        self.queue_composer_height();
         self.update_send_button();
         if self.loading.get() {
             return;
@@ -1517,7 +1505,8 @@ impl Ui {
             .shows_sidebar()
             .then(|| {
                 let mode = self.media_mode.borrow();
-                matches!(mode.as_str(), "info" | "shared-media").then(|| mode.clone())
+                matches!(mode.as_str(), "info" | "shared-media" | "participants")
+                    .then(|| mode.clone())
             })
             .flatten();
         self.save_draft();
@@ -1543,6 +1532,18 @@ impl Ui {
             match visible_sidebar.as_deref() {
                 Some("info") => self.show_info(),
                 Some("shared-media") => self.shared_media(),
+                Some("participants") => {
+                    let auto = self.participants_auto.get();
+                    if self.state.borrow().current().group {
+                        self.open_participants(auto)
+                    } else if auto {
+                        // Shown automatically for a room; a non-room chat has nothing to list.
+                        self.participants_auto.set(false);
+                        self.utility.set_show_sidebar(false);
+                    } else {
+                        self.show_info()
+                    }
+                }
                 _ => {}
             }
         }
@@ -1554,6 +1555,7 @@ impl Ui {
         if self.split.is_collapsed() {
             self.split.set_show_sidebar(false)
         }
+        self.sync_participants();
         self.resume_current_chat();
     }
     fn resume_current_chat(self: &Rc<Self>) {
@@ -1880,6 +1882,10 @@ impl Ui {
         if value.trim().is_empty() && self.attachments.borrow().is_empty() {
             return;
         }
+        // Client commands such as /neofetch are handled here and never queued or sent.
+        if self.attachments.borrow().is_empty() && self.run_client_command(&value) {
+            return;
+        }
         if !self.state.borrow().account.is_empty() {
             let files = self.attachments.borrow().clone();
             if files.is_empty() {
@@ -2095,6 +2101,13 @@ impl Ui {
             .set_label(if error { "Try Again" } else { "Sign In" });
     }
     pub fn activate_state(self: &Rc<Self>, mut state: State) {
+        // Rosters belong to the previous account's rooms.
+        self.room_rosters.borrow_mut().clear();
+        if self.participants.take().is_some()
+            && self.media_mode.borrow().as_str() == "participants"
+        {
+            self.utility.set_show_sidebar(false);
+        }
         let visible_sidebar = self
             .utility
             .shows_sidebar()
@@ -2474,10 +2487,14 @@ impl Ui {
                     if presence.joined {
                         self.load_history(true);
                     }
+                    self.sync_participants();
                 }
                 if presence.joined {
                     self.release_upload_captions();
                 }
+            }
+            BackendEvent::RoomRoster { room, participants } => {
+                self.room_roster_changed(&room, participants)
             }
             BackendEvent::RoomError(error) => self.notice(&error),
             BackendEvent::CryptoStatus(status) => {
@@ -2728,9 +2745,20 @@ impl Ui {
             BackendEvent::Read { peer, id } => self.receive_read_marker(owner, &peer, &id, false),
             BackendEvent::OwnRead { peer, id } => self.receive_read_marker(owner, &peer, &id, true),
             BackendEvent::Receipt { peer, id } => self.delivery(&peer, &id, "delivered"),
-            BackendEvent::Failed { peer, id } => {
+            BackendEvent::Failed { peer, id, reason } => {
+                // Bounced typing, receipt and marker stanzas also arrive here; only one of our own
+                // messages is worth a toast (edits, reactions and removals toast in `delivery`).
+                let ours = self
+                    .store
+                    .own_wire_id(owner, &peer, &id)
+                    .ok()
+                    .flatten()
+                    .is_some();
                 self.delivery(&peer, &id, "failed");
-                self.notice("Message could not be sent. Retry from its menu.");
+                if !ours {
+                    return;
+                }
+                self.notice(&crate::text_safety::failed_send_toast(&reason));
             }
             BackendEvent::History {
                 peer,
@@ -3137,6 +3165,64 @@ impl Ui {
             &format!("{key}:{}", self.state.borrow().account),
             if default { "true" } else { "false" },
         ) == "true"
+    }
+}
+
+#[cfg(test)]
+mod composer_tests {
+    use super::*;
+
+    /// The composer is sized by its scroll window from its content in the same layout pass
+    /// (propagate_natural_height). Hand-syncing the height from an idle callback let GTK paint a
+    /// frame where the text had grown but the viewport had not, and fought GTK's scroll-to-caret.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn composer_height_follows_its_content_and_caps_without_manual_syncing() {
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id("com.negzero.ComposerHeightFixture")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let ui = Ui::new(&app, true);
+        let css = gtk::CssProvider::new();
+        css.load_from_path(crate::widgets::asset("style.css"));
+        gtk::style_context_add_provider_for_display(
+            &gtk::gdk::Display::default().unwrap(),
+            &css,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        ui.window.set_default_size(900, 700);
+        ui.window.present();
+        let context = glib::MainContext::default();
+        let settle = |ms: u64| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            while std::time::Instant::now() < deadline {
+                context.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        };
+        settle(400);
+        let sentence = "The quick brown fox jumps over the lazy dog while the rest of the sentence keeps going on and on so that it wraps over several visual lines. ";
+        let height = |ui: &Rc<Ui>| ui.input_scroll.measure(gtk::Orientation::Vertical, ui.composer.width()).1;
+        let content = |ui: &Rc<Ui>| ui.composer.measure(gtk::Orientation::Vertical, ui.composer.width()).1;
+        // A one-line (or empty) composer must stay compact: the vertical scrollbar's own minimum
+        // height used to inflate it to ~58px.
+        assert!(height(&ui) <= 34, "empty composer is {}px tall", height(&ui));
+        let mut lines_seen = std::collections::BTreeSet::new();
+        let long = sentence.repeat(8);
+        for length in [10, 70, 140, 210, 280, 360, 500, 700] {
+            let text = &long[..length];
+            ui.composer.buffer().set_text(text);
+            settle(120);
+            let expected = content(&ui).clamp(32, 108);
+            assert_eq!(height(&ui), expected, "{} chars: composer height must follow its content, capped at 108", text.len());
+            lines_seen.insert(expected);
+        }
+        assert!(lines_seen.len() >= 4 && lines_seen.contains(&108), "heights seen: {lines_seen:?}");
+        ui.composer.buffer().set_text("");
+        settle(120);
+        assert!(height(&ui) <= 34, "cleared composer is {}px tall", height(&ui));
     }
 }
 

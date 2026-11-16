@@ -106,7 +106,7 @@ pub fn attach(ui: &Rc<Ui>) {
         }
         let progress = adw::Toast::new("Preparing pasted image…");
         progress.set_timeout(0);
-        ui.toast.add_toast(progress.clone());
+        ui.show_toast(progress.clone());
         let weak = Rc::downgrade(&ui);
         let busy = busy.clone();
         glib::MainContext::default().spawn_local(async move {

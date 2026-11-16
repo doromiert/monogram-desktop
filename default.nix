@@ -33,14 +33,14 @@ let
   cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
   cargoArtifacts = craneLib.buildDepsOnly ((builtins.removeAttrs commonArgs [ "src" ]) // {
     inherit dummySrc cargoVendorDir;
-    cargoCheckExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer";
-    cargoBuildExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer";
+    cargoCheckExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-media-author";
+    cargoBuildExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-media-author";
   });
 in craneLib.buildPackage (commonArgs // {
   MONOGRAM_MATH_HELPER = "${mathRenderer}/bin/monogram-math-renderer";
   MONOGRAM_BWRAP = "${bubblewrap}/bin/bwrap";
   inherit cargoArtifacts cargoVendorDir;
-  cargoBuildExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer";
+  cargoBuildExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-media-author";
   passthru = { inherit cargoArtifacts gtk4Fixed mathRenderer; };
   nativeCheckInputs = [ xorg-server dbus prosody openssl python3 gnome-keyring ];
   postCheck = ''
@@ -84,10 +84,12 @@ in craneLib.buildPackage (commonArgs // {
     cp native/gtk-gpu-clip-restore.patch $out/share/doc/monogram-desktop/
     mkdir -p $out/libexec
     mv $out/bin/monogram-sticker-renderer $out/libexec/monogram-sticker-renderer
+    mv $out/bin/monogram-media-author $out/libexec/monogram-media-author
     gappsWrapperArgs+=(
       --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ gtk4Fixed ]}
       --set MONOGRAM_MATH_HELPER ${mathRenderer}/bin/monogram-math-renderer
       --set MONOGRAM_LOTTIE_HELPER $out/libexec/monogram-sticker-renderer
+      --set MONOGRAM_MEDIA_AUTHOR_HELPER $out/libexec/monogram-media-author
       --set MONOGRAM_BWRAP ${bubblewrap}/bin/bwrap
       --prefix XDG_DATA_DIRS : $out/share
       --set MONOGRAM_ASSET_DIR $out/share/monogram-desktop

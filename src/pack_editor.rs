@@ -484,7 +484,7 @@ impl Editor {
                                 }
                             });
                         });
-                        ui.toast.add_toast(toast);
+                        ui.show_toast(toast);
                     }
                 }
                 Err(error) => editor.feedback(&error.to_string(), false),

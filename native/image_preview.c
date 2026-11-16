@@ -6,9 +6,20 @@
 #include <gst/app/gstappsink.h>
 #include <gst/video/video.h>
 
+/* Strict previews (WebM stickers) may only use libvpx and the Matroska demuxer. Everything else,
+ * including gst-libav (FFmpeg) and hardware decoders, is skipped: a sticker pack is third-party
+ * data and a VP9 poster needs nothing more. */
+static gboolean strict_allowed(const gchar *name) {
+    static const char *const allowed[] = {
+        "matroskademux", "vp9parse", "vp9dec", "vp8dec", "vp9alphadecodebin", "vp8alphadecodebin", NULL
+    };
+    for (const char *const *item = allowed; *item; item++)
+        if (!strcmp(name, *item)) return TRUE;
+    return FALSE;
+}
 static gint preview_autoplug(GstElement *decode, GstPad *pad, GstCaps *caps,
-                            GstElementFactory *factory, gpointer unused) {
-    (void)decode; (void)pad; (void)unused;
+                            GstElementFactory *factory, gpointer strict) {
+    (void)decode; (void)pad;
     if (gst_caps_get_size(caps)) {
         const GstStructure *format = gst_caps_get_structure(caps, 0);
         gint width, height;
@@ -17,6 +28,7 @@ static gint preview_autoplug(GstElement *decode, GstPad *pad, GstCaps *caps,
     }
     const gchar *name = gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory));
     const gchar *kind = gst_element_factory_get_metadata(factory, GST_ELEMENT_METADATA_KLASS);
+    if (GPOINTER_TO_INT(strict) && !strict_allowed(name)) return 2;
     // A local prefix must never become a playlist, URI redirect or adaptive network source.
     if (!kind || strstr(kind, "Source") || strstr(kind, "Network") || strstr(kind, "Adaptive")) return 2;
     if (strstr(kind, "Demuxer")) return !strcmp(name, "qtdemux") || !strcmp(name, "matroskademux") ? 0 : 2;
@@ -33,7 +45,7 @@ static void preview_pad(GstElement *decode, GstPad *pad, gpointer output) {
     }
     gst_caps_unref(caps);
 }
-GdkTexture *monogram_preview_video(const char *path, GCancellable *cancel, guint timeout_ms) {
+GdkTexture *monogram_preview_video(const char *path, GCancellable *cancel, guint timeout_ms, gboolean strict) {
     if (g_cancellable_is_cancelled(cancel) || !gst_init_check(NULL, NULL, NULL)) return NULL;
     GstElement *pipeline = gst_pipeline_new(NULL);
     GstElement *source = gst_element_factory_make("filesrc", NULL);
@@ -49,7 +61,7 @@ GdkTexture *monogram_preview_video(const char *path, GCancellable *cancel, guint
     gst_caps_unref(caps);
     g_object_set(source, "location", path, NULL);
     g_object_set(sink, "max-buffers", 1u, "drop", TRUE, "sync", FALSE, NULL);
-    g_signal_connect(decode, "autoplug-select", G_CALLBACK(preview_autoplug), NULL);
+    g_signal_connect(decode, "autoplug-select", G_CALLBACK(preview_autoplug), GINT_TO_POINTER(strict));
     g_signal_connect(decode, "pad-added", G_CALLBACK(preview_pad), convert);
     gst_bin_add_many(GST_BIN(pipeline), source, decode, convert, scale, sink, NULL);
     added = TRUE;

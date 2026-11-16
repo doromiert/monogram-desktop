@@ -64,6 +64,7 @@ mod message_actions;
 mod messages;
 mod model;
 mod packs;
+mod preview_cache;
 mod polls;
 mod polls_ui;
 mod protocol;
@@ -71,6 +72,20 @@ mod pq_security_ui;
 mod read_markers;
 mod read_state;
 mod request_logic;
+#[allow(dead_code)] // Reached from the editor dialog in the next authoring step.
+mod media_author_run;
+#[allow(dead_code)] // Reached from the editor dialog in the next authoring step.
+mod media_authoring;
+mod animated_emoji_ui;
+mod client_commands_ui;
+mod crop_area;
+mod noto_emoji;
+mod picture_editor;
+mod picture_editor_ui;
+mod sysinfo;
+mod text_safety;
+mod toast_routing;
+mod room_members_ui;
 mod room_ui;
 mod rooms;
 mod send_policy_ui;
