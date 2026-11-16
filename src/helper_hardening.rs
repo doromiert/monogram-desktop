@@ -108,6 +108,22 @@ pub fn selftest() -> Result<(), i32> {
         println!("{name}: {}", if refused { "refused".to_owned() } else { format!("NOT REFUSED ({result}, errno {errno:?})") });
         failed |= !refused;
     }
+    // What this process inherited: nothing above stdio may be open. (Informational here; the
+    // sandbox tests assert it, because a test harness legitimately holds descriptors.)
+    let names: Vec<String> = std::fs::read_dir("/proc/self/fd")
+        .map(|dir| dir.flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect())
+        .unwrap_or_default();
+    // The directory handle used for the listing is closed by now, so it is skipped here.
+    let inherited: Vec<i32> = names
+        .iter()
+        .filter_map(|name| name.parse::<i32>().ok())
+        .filter(|fd| *fd > 2 && unsafe { libc::fcntl(*fd, libc::F_GETFD) } >= 0)
+        .collect();
+    if inherited.is_empty() {
+        println!("inherited descriptors: none");
+    } else {
+        println!("INHERITED DESCRIPTORS: {inherited:?}");
+    }
     // The filter must not be a blanket ban: ordinary calls and threads still work.
     let alive = unsafe { libc::getpid() } > 0 && std::thread::spawn(|| 7).join().ok() == Some(7);
     println!("ordinary calls and threads: {}", if alive { "work" } else { "BROKEN" });

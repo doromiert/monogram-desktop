@@ -61,6 +61,36 @@ pub fn plugin_files(names: &[&str], dirs: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Runs in the forked child just before the exec. bubblewrap does not close descriptors it
+/// inherits, so anything this process holds open without close-on-exec (a socket, a database, a
+/// file a library opened carelessly) would be readable inside the sandbox. Every descriptor above
+/// stdio is marked close-on-exec so it vanishes at the exec, then `keep` (the one the helper
+/// should receive) is switched back. Marking instead of closing leaves Rust's own exec-error pipe
+/// working. Only async-signal-safe calls are used.
+fn confine_descriptors(keep: Option<RawFd>) -> std::io::Result<()> {
+    // Linux 5.11 and later: the whole range in one call.
+    const CLOSE_RANGE_CLOEXEC: libc::c_uint = 4;
+    let marked = unsafe { libc::syscall(libc::SYS_close_range, 3 as libc::c_uint, libc::c_uint::MAX, CLOSE_RANGE_CLOEXEC) } == 0;
+    if !marked {
+        // Older kernels: one by one, up to the descriptor limit.
+        let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        let top = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 { limit.rlim_cur.min(65_536) as i32 } else { 1024 };
+        for fd in 3..top {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            if flags >= 0 {
+                unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+            }
+        }
+    }
+    if let Some(fd) = keep {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 /// What the helper reads, mounted at `/in/source`.
 pub enum Input<'a> {
     Path(&'a Path),
@@ -104,17 +134,15 @@ pub fn sandbox_command(
         }
         Input::Fd(fd) => {
             command.arg("--ro-bind-data").arg(fd.to_string()).arg("/in/source");
-            // Rust opens descriptors close-on-exec; bubblewrap needs this one to survive the exec.
-            unsafe {
-                command.pre_exec(move || {
-                    let flags = libc::fcntl(fd, libc::F_GETFD);
-                    if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
         }
+    }
+    // Nothing but the input descriptor (when there is one) may reach the sandbox.
+    let keep = match input {
+        Input::Fd(fd) => Some(fd),
+        Input::Path(_) => None,
+    };
+    unsafe {
+        command.pre_exec(move || confine_descriptors(keep));
     }
     if let Some(out_dir) = out_dir {
         command.arg("--bind").arg(out_dir).arg("/out");
@@ -168,6 +196,49 @@ mod tests {
         let b = args(&by_path);
         assert!(b.windows(3).any(|w| w == ["--ro-bind", "/home/me/a.png", "/in/source"]));
         assert!(b.windows(3).any(|w| w == ["--bind", "/tmp/out", "/out"]));
+    }
+
+    /// Closing every descriptor in the child would also close Rust's exec-error pipe and make a
+    /// failed exec look like success. Marking them close-on-exec keeps the error visible.
+    #[test]
+    fn a_missing_launcher_is_still_reported_as_a_spawn_error() {
+        for input in [Input::Fd(-1), Input::Path(Path::new("/nonexistent"))] {
+            let mut command = sandbox_command(Path::new("/nonexistent/bwrap"), Path::new("/opt/h"), input, None, &[], &["probe"]);
+            let error = command.spawn().expect_err("a launcher that does not exist must not spawn");
+            // The input descriptor may itself be invalid (-1): either way it is an error, not a child.
+            assert!(matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput | std::io::ErrorKind::Other) || error.raw_os_error().is_some(), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn descriptors_above_stdio_are_marked_close_on_exec_except_the_one_kept() {
+        // Run the same routine in a forked child so this process is untouched, and report back.
+        let plain = unsafe { libc::open(c"/etc/hostname".as_ptr(), libc::O_RDONLY) };
+        let kept = unsafe { libc::open(c"/etc/hostname".as_ptr(), libc::O_RDONLY) };
+        assert!(plain > 2 && kept > 2);
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        match unsafe { libc::fork() } {
+            0 => unsafe {
+                let ok = confine_descriptors(Some(kept)).is_ok();
+                let cloexec = |fd| libc::fcntl(fd, libc::F_GETFD) & libc::FD_CLOEXEC != 0;
+                let result = [ok, cloexec(plain), !cloexec(kept)].iter().all(|v| *v);
+                libc::write(fds[1], &[u8::from(result)] as *const u8 as *const libc::c_void, 1);
+                libc::_exit(0)
+            },
+            pid if pid > 0 => {
+                unsafe { libc::close(fds[1]) };
+                let mut answer = [0u8; 1];
+                let read = unsafe { libc::read(fds[0], answer.as_mut_ptr() as *mut libc::c_void, 1) };
+                let mut status = 0;
+                unsafe { libc::waitpid(pid, &mut status, 0) };
+                for fd in [plain, kept, fds[0]] {
+                    unsafe { libc::close(fd) };
+                }
+                assert_eq!((read, answer[0]), (1, 1), "a stray descriptor is close-on-exec and the kept one is inheritable");
+            }
+            _ => panic!("fork failed"),
+        }
     }
 
     #[test]
