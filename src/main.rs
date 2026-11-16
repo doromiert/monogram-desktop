@@ -78,6 +78,7 @@ mod media_author_run;
 mod media_authoring;
 mod animated_emoji_ui;
 mod client_commands_ui;
+mod confined;
 mod crop_area;
 mod noto_emoji;
 mod picture_editor;
