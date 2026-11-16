@@ -1130,10 +1130,14 @@ pub fn run(ui: Rc<Ui>) {
                 layout(&ui);
                 assert!(ui.split.is_collapsed() && ui.utility.is_collapsed());
                 ui.window.set_default_size(1380, 900);
+                for chat in &mut ui.state.borrow_mut().chats {chat.unread=0;chat.unread_mark=false;}
                 ui.set_folder("Unread");
+                assert!(ui.chat_stack.visible_child().unwrap().is::<adw::StatusPage>(),"empty folders show a native status page");
+                assert!(ui.chat_stack.height()>100,"empty folder retains usable height");
             }
             4 => {
                 ui.set_folder("All");
+                assert!(ui.chat_stack.is_transition_running(),"switching out of an empty folder still slides");
                 // Nine real fixture messages exercise all grid positions.
                 let mut s = ui.state.borrow_mut();
                 let template = s

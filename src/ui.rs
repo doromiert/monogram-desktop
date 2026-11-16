@@ -298,6 +298,7 @@ impl Ui {
             store,
             folder_bar: FolderBar::new(),
             chat_stack: gtk::Stack::builder()
+                .vexpand(true)
                 .transition_duration(220)
                 .vhomogeneous(false)
                 .hhomogeneous(true)
@@ -1080,6 +1081,15 @@ impl Ui {
                 ui.select_chat(row.widget_name().as_str())
             }
         });
+        let page:gtk::Widget=if list.first_child().is_none() {
+            let searching=!self.search.text().trim().is_empty();
+            let empty=adw::StatusPage::builder()
+                .icon_name(if searching {"system-search-symbolic"}else{"folder-symbolic"})
+                .title(if searching {"No Results"}else{"No Conversations"})
+                .description(if searching {"Try a different search."}else{"Conversations in this folder will appear here."})
+                .vexpand(true).build();
+            empty.add_css_class("compact");empty.upcast()
+        }else{list.upcast()};
         let serial = self.folder_serial.get() + 1;
         self.folder_serial.set(serial);
         self.chat_stack.set_transition_type(match direction {
@@ -1088,13 +1098,13 @@ impl Ui {
             None => gtk::StackTransitionType::None,
         });
         self.chat_stack
-            .add_named(&list, Some(&format!("list-{serial}")));
-        self.chat_stack.set_visible_child(&list);
+            .add_named(&page, Some(&format!("list-{serial}")));
+        self.chat_stack.set_visible_child(&page);
         if !self.chat_stack.is_transition_running() {
             let pages = self.chat_stack.pages();
             for i in (0..pages.n_items()).rev() {
                 if let Some(page) = pages.item(i).and_downcast::<gtk::StackPage>() {
-                    if page.child() != list {
+                    if Some(page.child()) != self.chat_stack.visible_child() {
                         self.chat_stack.remove(&page.child());
                     }
                 }
@@ -3121,5 +3131,29 @@ impl Ui {
             &format!("{key}:{}", self.state.borrow().account),
             if default { "true" } else { "false" },
         ) == "true"
+    }
+}
+
+#[cfg(test)]
+mod folder_empty_tests {
+    use super::*;
+    #[test]
+    #[ignore="requires private native display/keyring"]
+    fn empty_folder_and_search_pages_keep_sliding() {
+        adw::init().unwrap();
+        let app=adw::Application::builder().application_id("com.negzero.MonogramDesktop.EmptyFolderFixture").flags(gio::ApplicationFlags::NON_UNIQUE).build();app.register(None::<&gio::Cancellable>).unwrap();
+        let ui=Ui::new(&app,true);ui.window.set_default_size(1380,900);ui.window.present();
+        let context=glib::MainContext::default();let settle=|ms|{let until=std::time::Instant::now()+std::time::Duration::from_millis(ms);while std::time::Instant::now()<until{context.iteration(false);std::thread::sleep(std::time::Duration::from_millis(1));}};
+        settle(300);
+        assert!(ui.chat_stack.is_mapped());
+        for chat in &mut ui.state.borrow_mut().chats {chat.unread=0;chat.unread_mark=false;}
+        ui.set_folder("Unread");
+        let empty=ui.chat_stack.visible_child().unwrap().downcast::<adw::StatusPage>().unwrap();assert_eq!(empty.title(),"No Conversations");
+        assert!(ui.chat_stack.is_transition_running(),"empty destinations still slide");settle(300);assert!(empty.height()>100);
+        ui.set_folder("All");assert!(ui.chat_stack.is_transition_running(),"leaving an empty folder still slides");settle(300);
+        ui.search.set_text("no-such-conversation-fixture");ui.refresh_chats(Some(true));
+        let empty=ui.chat_stack.visible_child().unwrap().downcast::<adw::StatusPage>().unwrap();assert_eq!(empty.title(),"No Results");settle(300);
+        assert_eq!(ui.chat_stack.pages().n_items(),1,"old transition pages are released");
+        ui.window.close();
     }
 }
