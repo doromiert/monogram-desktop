@@ -33,11 +33,18 @@ enum Phase {
     /// Not downloaded and not started.
     Waiting,
     Downloading(Option<f64>),
-    /// Downloaded; the helper is decoding it.
+    /// Downloaded and untouched: nothing has parsed or decoded it, and nothing will until the user
+    /// presses play.
+    Downloaded(std::path::PathBuf),
+    /// The helper is decoding it.
     Preparing,
     Ready,
     Failed(String),
 }
+
+/// Helpers running right now and the most there have been at once; the second is only read by tests.
+static RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 thread_local! {
     /// The player that is currently playing, so starting another stops it.
@@ -131,6 +138,7 @@ impl Bubble {
         let (icon, label, tooltip) = match &phase {
             Phase::Waiting => ("folder-download-symbolic", "Download audio", None),
             Phase::Downloading(_) => ("process-stop-symbolic", "Cancel download", None),
+            Phase::Downloaded(_) => ("media-playback-start-symbolic", "Play audio", None),
             Phase::Preparing => ("content-loading-symbolic", "Preparing audio", None),
             Phase::Ready => (self.play_icon(), self.play_label(), None),
             Phase::Failed(reason) => ("view-refresh-symbolic", "Try again", Some(reason.clone())),
@@ -164,7 +172,7 @@ impl Bubble {
     /// while playing, and the reason when something went wrong.
     fn refresh_time(&self, phase: &Phase) {
         let text = match phase {
-            Phase::Waiting | Phase::Downloading(None) => self.file.size.map(|s| glib::format_size(s).to_string()).unwrap_or_default(),
+            Phase::Waiting | Phase::Downloading(None) | Phase::Downloaded(_) => self.file.size.map(|s| glib::format_size(s).to_string()).unwrap_or_default(),
             Phase::Downloading(Some(fraction)) => format!("{:.0}%", fraction * 100.),
             Phase::Preparing => "Preparing…".into(),
             Phase::Failed(reason) => reason.clone(),
@@ -199,20 +207,48 @@ impl Bubble {
         }
     }
 
-    /// Open the downloaded file and have the sandboxed helper prepare it.
-    fn prepare(self: &Rc<Self>, path: std::path::PathBuf) {
+    /// Follow what the download manager says. A finished download only makes the file available:
+    /// nothing parses or decodes it until the user presses play.
+    fn apply_status(&self, status: Option<Status>, phase: &Phase) {
+        match status {
+            Some(Status::Ready(path)) if path.is_file() => self.set_phase(Phase::Downloaded(path)),
+            Some(Status::Running { bytes, total, .. }) => {
+                let fraction = total.filter(|total| *total > 0 && bytes > 0).map(|total| (bytes as f64 / total as f64).min(1.));
+                if *self.phase.borrow() != Phase::Downloading(fraction) {
+                    self.set_phase(Phase::Downloading(fraction));
+                }
+            }
+            Some(Status::Failed(reason) | Status::Deferred { reason, .. }) => self.set_phase(Phase::Failed(reason.into())),
+            Some(Status::Cancelled) | None if *phase != Phase::Waiting => self.set_phase(Phase::Waiting),
+            _ => {}
+        }
+    }
+
+    /// Open the downloaded file and have the sandboxed helper prepare it, then play it if the user
+    /// asked to (a click on the play button prepares and plays in one step).
+    fn prepare(self: &Rc<Self>, path: std::path::PathBuf, play_when_ready: bool) {
         self.set_phase(Phase::Preparing);
         let (file, name) = (self.file.clone(), self.file.name.clone());
-        let work = gio::spawn_blocking(move || -> Result<(File, Preview), String> {
-            let stopped = AtomicBool::new(false);
-            let verified = crate::downloads::verified_input(&path, &file, &stopped).map_err(str::to_owned)?;
-            let file = verified.0;
-            let preview = audio_preview_run::probe(&file, &name, &|| false).map_err(|error| error.to_string())?;
-            Ok((file, preview))
-        });
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
+            // Queue here, not on a pool thread: only two helpers run at once.
+            let permit = audio_preview_run::preparation_permit().await;
+            let work = gio::spawn_blocking(move || -> Result<(File, Preview), String> {
+                use std::sync::atomic::Ordering::SeqCst;
+                let running = RUNNING.fetch_add(1, SeqCst) + 1;
+                PEAK.fetch_max(running, SeqCst);
+                let stopped = AtomicBool::new(false);
+                let result = crate::downloads::verified_input(&path, &file, &stopped)
+                    .map_err(str::to_owned)
+                    .and_then(|verified| {
+                        let file = verified.0;
+                        audio_preview_run::probe(&file, &name, &|| false).map(|preview| (file, preview)).map_err(|error| error.to_string())
+                    });
+                RUNNING.fetch_sub(1, SeqCst);
+                result
+            });
             let result = work.await.unwrap_or_else(|_| Err("Audio preparation was interrupted".into()));
+            drop(permit);
             let Some(bubble) = weak.upgrade() else { return };
             match result {
                 Ok((file, preview)) => {
@@ -227,6 +263,11 @@ impl Bubble {
                     });
                     bubble.player.replace(Some(player));
                     bubble.set_phase(Phase::Ready);
+                    if play_when_ready {
+                        if let Some(player) = bubble.player.borrow().as_ref() {
+                            player.play_from(0);
+                        }
+                    }
                 }
                 Err(reason) => bubble.set_phase(Phase::Failed(reason)),
             }
@@ -361,10 +402,12 @@ fn install(bubble: &Rc<Bubble>) {
                 bubble.set_phase(Phase::Waiting);
             }
             Phase::Preparing => {}
+            // The user asked to play: this click is what starts decoding.
+            Phase::Downloaded(path) => bubble.prepare(path, true),
             Phase::Waiting | Phase::Failed(_) => {
-                // A file that is already here is prepared again; otherwise it is downloaded.
+                // A file that is already here is prepared (on this click); otherwise it is downloaded.
                 match ui.downloads.borrow().status(&bubble.owner, &bubble.file) {
-                    Some(Status::Ready(path)) if path.is_file() => bubble.prepare(path),
+                    Some(Status::Ready(path)) if path.is_file() => bubble.prepare(path, true),
                     _ => {
                         ui.downloads.borrow_mut().invalidate(&bubble.owner, &bubble.file);
                         match ui.downloads.borrow_mut().start(&bubble.owner, bubble.file.clone()) {
@@ -388,7 +431,7 @@ fn install(bubble: &Rc<Bubble>) {
         let phase = bubble.phase.borrow().clone();
         match phase {
             Phase::Ready => bubble.update_playback(),
-            Phase::Preparing | Phase::Failed(_) => {}
+            Phase::Preparing | Phase::Failed(_) | Phase::Downloaded(_) => {}
             Phase::Waiting | Phase::Downloading(_) => {
                 if !ui.in_chat_viewport(&bubble.wave) {
                     return glib::ControlFlow::Continue;
@@ -407,18 +450,7 @@ fn install(bubble: &Rc<Bubble>) {
                     ui.downloads.borrow_mut().start_automatic(&bubble.owner, bubble.file.clone(), limit);
                     status = ui.downloads.borrow().status(&bubble.owner, &bubble.file);
                 }
-                match status {
-                    Some(Status::Ready(path)) if path.is_file() => bubble.prepare(path),
-                    Some(Status::Running { bytes, total, .. }) => {
-                        let fraction = total.filter(|total| *total > 0 && bytes > 0).map(|total| (bytes as f64 / total as f64).min(1.));
-                        if *bubble.phase.borrow() != Phase::Downloading(fraction) {
-                            bubble.set_phase(Phase::Downloading(fraction));
-                        }
-                    }
-                    Some(Status::Failed(reason) | Status::Deferred { reason, .. }) => bubble.set_phase(Phase::Failed(reason.into())),
-                    Some(Status::Cancelled) | None if phase != Phase::Waiting => bubble.set_phase(Phase::Waiting),
-                    _ => {}
-                }
+                bubble.apply_status(status, &phase);
             }
         }
         glib::ControlFlow::Continue
@@ -504,7 +536,7 @@ mod tests {
         assert_eq!(bubble.button.tooltip_text().as_deref(), Some("Download audio"), "not downloaded yet");
 
         // Downloaded: the helper prepares it and the player appears with its length and waveform.
-        bubble.prepare(fixture("tone.mp3"));
+        bubble.prepare(fixture("tone.mp3"), false);
         assert_eq!(*bubble.phase.borrow(), Phase::Preparing);
         assert!(wait(Duration::from_secs(20), || *bubble.phase.borrow() == Phase::Ready), "prepared: {:?}", bubble.phase.borrow());
         assert_eq!(bubble.time.label(), clock(bubble.duration_ms.get()));
@@ -549,7 +581,7 @@ mod tests {
             std::fs::write(&path, bytes).unwrap();
             let root = ui.audio_attachment(&message(name, mime));
             let bad = bubble_of(&root);
-            bad.prepare(path);
+            bad.prepare(path, false);
             assert!(wait(Duration::from_secs(20), || matches!(*bad.phase.borrow(), Phase::Failed(_))), "{name} must fail, was {:?}", bad.phase.borrow());
             assert!(bad.player.borrow().is_none(), "{name}: no player is created");
             assert!(!bad.time.label().is_empty(), "{name}: the reason is shown under the waveform");
@@ -604,6 +636,73 @@ mod tests {
             let bubble = bubbles.get(id).unwrap_or_else(|| panic!("{name} was rendered"));
             assert_eq!(has_class(bubble, "audio-bubble"), *audio, "{name} ({mime})");
         }
+    }
+
+    /// The point of "decoding waits for a click": a finished download makes the file available and
+    /// nothing more. No helper starts, no file is opened for decoding, until the user presses play,
+    /// and that single press then prepares and plays.
+    #[gtk::test]
+    #[ignore = "requires a display (use tools/headless-gtk-test.sh), the built helpers and bubblewrap"]
+    fn a_finished_download_is_not_decoded_until_the_user_presses_play() {
+        adw::init().unwrap();
+        let app = adw::Application::builder().application_id("com.negzero.AudioClickFixture").flags(gio::ApplicationFlags::NON_UNIQUE).build();
+        app.register(None::<&gio::Cancellable>).unwrap();
+        let ui = Ui::new(&app, true);
+        ui.window.present();
+        wait(Duration::from_millis(300), || false);
+        let root = ui.audio_attachment(&Message { own: true, attachment: Some(attachment("tone.mp3", "audio/mpeg")), ..Default::default() });
+        let window = gtk::Window::builder().default_width(420).default_height(200).child(&root).build();
+        window.present();
+        let bubble = bubble_of(&root);
+        bubble.sink.set("fakesink");
+        PEAK.store(0, std::sync::atomic::Ordering::SeqCst);
+
+        // The download finishes (as the download manager reports it).
+        bubble.apply_status(Some(Status::Ready(fixture("tone.mp3"))), &Phase::Downloading(None));
+        assert_eq!(*bubble.phase.borrow(), Phase::Downloaded(fixture("tone.mp3")));
+        assert_eq!(bubble.button.tooltip_text().as_deref(), Some("Play audio"), "it offers play, not a spinner");
+        // Give any automatic preparation every chance to start.
+        wait(Duration::from_millis(2500), || false);
+        assert_eq!(PEAK.load(std::sync::atomic::Ordering::SeqCst), 0, "no helper was started by the download finishing");
+        assert!(bubble.player.borrow().is_none(), "and nothing was opened for decoding");
+        assert_eq!(*bubble.phase.borrow(), Phase::Downloaded(fixture("tone.mp3")));
+
+        // One press prepares and plays.
+        bubble.button.emit_clicked();
+        assert_eq!(*bubble.phase.borrow(), Phase::Preparing);
+        assert!(wait(Duration::from_secs(20), || *bubble.phase.borrow() == Phase::Ready), "prepared");
+        assert!(wait(Duration::from_secs(10), || bubble.player.borrow().as_ref().is_some_and(|p| p.state() == PlayState::Playing)), "and playing, without a second click");
+        assert_eq!(PEAK.load(std::sync::atomic::Ordering::SeqCst), 1);
+        bubble.player.borrow().as_ref().unwrap().stop();
+        window.close();
+        ui.window.close();
+    }
+
+    /// Eight audio messages appear at once (as in a flood from a room): all get prepared, but never
+    /// more than two helpers run at the same time.
+    #[gtk::test]
+    #[ignore = "requires a display (use tools/headless-gtk-test.sh), the built helpers and bubblewrap"]
+    fn many_audio_messages_are_prepared_two_at_a_time() {
+        adw::init().unwrap();
+        let app = adw::Application::builder().application_id("com.negzero.AudioFloodFixture").flags(gio::ApplicationFlags::NON_UNIQUE).build();
+        app.register(None::<&gio::Cancellable>).unwrap();
+        let ui = Ui::new(&app, true);
+        ui.window.present();
+        wait(Duration::from_millis(300), || false);
+        let roots: Vec<gtk::Box> = (0..8)
+            .map(|_| ui.audio_attachment(&Message { own: true, attachment: Some(attachment("tone.wav", "audio/x-wav")), ..Default::default() }))
+            .collect();
+        let bubbles: Vec<Rc<Bubble>> = roots.iter().map(bubble_of).collect();
+        PEAK.store(0, std::sync::atomic::Ordering::SeqCst);
+        for bubble in &bubbles {
+            bubble.sink.set("fakesink");
+            bubble.prepare(fixture("tone.wav"), false);
+        }
+        assert!(wait(Duration::from_secs(60), || bubbles.iter().all(|b| *b.phase.borrow() == Phase::Ready)), "all eight were prepared");
+        let peak = PEAK.load(std::sync::atomic::Ordering::SeqCst);
+        assert!((1..=2).contains(&peak), "{peak} helpers ran at once; the limit is two");
+        assert_eq!(RUNNING.load(std::sync::atomic::Ordering::SeqCst), 0, "none left running");
+        ui.window.close();
     }
 
     #[test]
