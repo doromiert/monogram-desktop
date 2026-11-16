@@ -12,7 +12,7 @@ off (`gtk-enable-animations`): then nothing is decoded and the ordinary emoji st
 
 - `assets/noto-animated-emoji.pack` is the curated set: the **250 most popular** Noto animations
   (about 2.1 MB), committed and shipped with the app. It works offline and sends nothing anywhere.
-- `tools/pack-noto-emoji.py` builds it from Google's published animations. `--count N` changes the
+- `tools/pack-noto-emoji.py` builds it from Google's published animations. It fetches over HTTPS from two fixed hosts only, treats the index as untrusted (code points must be plain hex before they reach a URL), caps each download, and writes `noto-animated-emoji.pack.sha256` and `noto-animated-emoji.pack.sources.tsv` (the SHA-256 of every upstream file used). A unit test ties the committed pack to both, and the build is reproducible: regenerating from upstream gave a byte-identical pack. `--count N` changes the
   size; every animation is checked against the renderer limits and skipped if outside them.
 - Skin-tone and other multi-person variants are only included if they rank in the top 250.
 
@@ -47,6 +47,9 @@ Frames are rendered by the existing bubblewrap-confined tlottie helper
 `MGE1`, with larger limits than stickers need: square up to 1024 px, 360 frames and 6.1 seconds.
 Stickers (`MGT1`) keep their exact 512x512, 180 frame, 3 second limits. The bundled bytes reach the
 helper through an anonymous in-memory file, so nothing is written to disk.
+
+At most four animations play at once (each is a confined helper process), so a flood of
+single-emoji messages cannot start a crowd of them; the rest wait their turn.
 
 Playback follows the animation's own clock: a slow frame makes the next one skip ahead, frames do
 not queue, and the sandbox process ends when the animation does or the row goes away or off screen.

@@ -44,8 +44,17 @@ APIs and avoid deprecated ones.
   destructive actions offer Undo instead of asking for confirmation first.
 - Persistent state (offline, degraded, sign-in needed): `adw::Banner`.
 - A decision is needed, or the problem blocks the user: `adw::AlertDialog`.
+- Text that other people or servers control (nicknames, server error messages) goes through
+  `text_safety` before it is shown: it strips control, bidi-override and zero-width characters,
+  caps the length, and keeps another person's name from imitating the app's own "(You)" mark or a
+  server's words from passing as the app's.
 - Escalate toast, then banner, then dialog. Do not show more than one for the
   same event.
+- Raise toasts with `Ui::notice` or `Ui::show_toast`, never `ui.toast.add_toast`. The window's
+  overlay sits under every dialog, so a toast added there while a dialog is open is invisible.
+  `show_toast` shows it inside the open dialog (adding an overlay on demand), through the
+  preferences dialog's own toast, or, for alerts and About whose content is fixed, as soon as the
+  dialog closes.
 - Dialog buttons: Cancel first, action last. Use specific verbs ("Delete",
   "Save"), never "OK", "Yes" or "Submit". Use `destructive-action` for
   destructive responses and `suggested-action` for the primary one, at most one
