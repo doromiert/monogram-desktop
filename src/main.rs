@@ -72,6 +72,7 @@ mod pq_security_ui;
 mod read_markers;
 mod read_state;
 mod request_logic;
+mod room_members_ui;
 mod room_ui;
 mod rooms;
 mod send_policy_ui;

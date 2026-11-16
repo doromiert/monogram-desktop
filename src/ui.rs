@@ -127,6 +127,9 @@ pub struct Ui {
     pub typing_input: RefCell<Option<(String, Instant, bool)>>,
     pub history_pages: RefCell<HashMap<String, (String, bool)>>,
     pub history_pending: RefCell<HashSet<String>>,
+    /// Latest occupant list per joined room, and the open participants panel, if any.
+    pub room_rosters: RefCell<HashMap<String, Vec<crate::rooms::members::Participant>>>,
+    pub participants: RefCell<Option<Rc<crate::room_members_ui::ParticipantsView>>>,
     pub cards: RefCell<Vec<Rc<crate::wallet::WalletCard>>>,
     pub dialogs: RefCell<Vec<adw::Dialog>>,
     pub smoke: bool,
@@ -439,6 +442,8 @@ impl Ui {
             typing_input: RefCell::new(None),
             history_pages: RefCell::new(HashMap::new()),
             history_pending: RefCell::new(HashSet::new()),
+            room_rosters: RefCell::new(HashMap::new()),
+            participants: RefCell::new(None),
             cards: RefCell::new(vec![]),
             dialogs: RefCell::new(vec![]),
             smoke,
@@ -729,6 +734,7 @@ impl Ui {
         self.action("shortcuts", |s| s.shortcuts());
         self.action("security", |s| s.security());
         self.action("info", |s| s.show_info());
+        self.action("participants", |s| s.show_participants());
         self.action("blocked-contacts", |s| s.blocked_contacts());
         self.action("requests", |s| s.requests());
         self.action("sync-history", |s| {
@@ -1169,6 +1175,7 @@ impl Ui {
         for (t, a) in [
             ("Conversation Security", "security"),
             ("Conversation Info", "info"),
+            ("Participants", "participants"),
         ] {
             menu.append(Some(t), Some(&format!("win.{a}")))
         }
@@ -1481,7 +1488,8 @@ impl Ui {
             .shows_sidebar()
             .then(|| {
                 let mode = self.media_mode.borrow();
-                matches!(mode.as_str(), "info" | "shared-media").then(|| mode.clone())
+                matches!(mode.as_str(), "info" | "shared-media" | "participants")
+                    .then(|| mode.clone())
             })
             .flatten();
         self.save_draft();
@@ -1507,6 +1515,13 @@ impl Ui {
             match visible_sidebar.as_deref() {
                 Some("info") => self.show_info(),
                 Some("shared-media") => self.shared_media(),
+                Some("participants") => {
+                    if self.state.borrow().current().group {
+                        self.show_participants()
+                    } else {
+                        self.show_info()
+                    }
+                }
                 _ => {}
             }
         }
@@ -2059,6 +2074,13 @@ impl Ui {
             .set_label(if error { "Try Again" } else { "Sign In" });
     }
     pub fn activate_state(self: &Rc<Self>, mut state: State) {
+        // Rosters belong to the previous account's rooms.
+        self.room_rosters.borrow_mut().clear();
+        if self.participants.take().is_some()
+            && self.media_mode.borrow().as_str() == "participants"
+        {
+            self.utility.set_show_sidebar(false);
+        }
         let visible_sidebar = self
             .utility
             .shows_sidebar()
@@ -2442,6 +2464,9 @@ impl Ui {
                 if presence.joined {
                     self.release_upload_captions();
                 }
+            }
+            BackendEvent::RoomRoster { room, participants } => {
+                self.room_roster_changed(&room, participants)
             }
             BackendEvent::RoomError(error) => self.notice(&error),
             BackendEvent::CryptoStatus(status) => {

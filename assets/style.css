@@ -286,3 +286,13 @@
 .pack-editor-grid button.flat { padding: 0; }
 
 .pack-editor-grid > child:hover { background-color: transparent; }
+
+/* Participants panel: availability dot on a participant's avatar. */
+.presence-dot { min-width: 12px; min-height: 12px; border-radius: 999px; border: 2px solid @window_bg_color; background: @success_color; }
+.presence-dot.presence-away { background: @warning_color; }
+.presence-dot.presence-busy { background: @error_color; }
+
+/* Participants panel: availability dot on a participant's avatar. */
+.presence-dot { min-width: 12px; min-height: 12px; border-radius: 999px; border: 2px solid @window_bg_color; background: @success_color; }
+.presence-dot.presence-away { background: @warning_color; }
+.presence-dot.presence-busy { background: @error_color; }

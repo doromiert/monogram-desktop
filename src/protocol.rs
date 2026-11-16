@@ -639,6 +639,11 @@ pub enum BackendEvent {
     BlockingChanged(crate::blocking::Snapshot),
     RoomBookmarks(Vec<crate::rooms::BookmarkInfo>),
     RoomPresence(crate::rooms::Presence),
+    /// The complete occupant list of a room; empty once the room is left.
+    RoomRoster {
+        room: String,
+        participants: Vec<crate::rooms::members::Participant>,
+    },
     RoomError(String),
     Presence {
         peer: String,
@@ -1607,7 +1612,7 @@ impl Session {
                             }
                         }
                     }},
-                    _=timer.tick()=>{if online&&displayed_policy.enabled&&marker_tick.elapsed()>=Duration::from_secs(5){marker_tick=std::time::Instant::now();let _=network.send(Command::FlushDisplayed);}iq.expire();contact_queries.retain(|_,(epoch,started,serial)|{let keep=contacts.valid(*epoch)&&started.elapsed()<Duration::from_secs(25);if !keep{contacts.clear_full(*epoch,Some(*serial));}keep});for stanza in room_jobs.expire(&mut rooms){let peer=bare_of(stanza.attr("to").unwrap_or(""));send(&mut client,stanza).await;emit(BackendEvent::RoomPresence(rooms.status(&peer)));}for presence in rooms.expire(){emit(BackendEvent::RoomPresence(presence));}if !online&&handshake.elapsed()>Duration::from_secs(45){emit(BackendEvent::Status{online:false,error:true,text:"Connection timed out. Check the account settings.".into()});break}mam.retain(|id,page| {
+                    _=timer.tick()=>{if online&&displayed_policy.enabled&&marker_tick.elapsed()>=Duration::from_secs(5){marker_tick=std::time::Instant::now();let _=network.send(Command::FlushDisplayed);}iq.expire();contact_queries.retain(|_,(epoch,started,serial)|{let keep=contacts.valid(*epoch)&&started.elapsed()<Duration::from_secs(25);if !keep{contacts.clear_full(*epoch,Some(*serial));}keep});for stanza in room_jobs.expire(&mut rooms){let peer=bare_of(stanza.attr("to").unwrap_or(""));send(&mut client,stanza).await;emit(BackendEvent::RoomPresence(rooms.status(&peer)));}for presence in rooms.expire(){emit(BackendEvent::RoomPresence(presence));}for (room,participants) in rooms.take_roster_changes(){emit(BackendEvent::RoomRoster{room,participants});}if !online&&handshake.elapsed()>Duration::from_secs(45){emit(BackendEvent::Status{online:false,error:true,text:"Connection timed out. Check the account settings.".into()});break}mam.retain(|id,page| {
                         let context_expired=preview_jobs.get(id).is_some_and(|job|job.reply.is_closed()||job.epoch!=room_epoch||job.deadline<=std::time::Instant::now());
                         let expired=page.started.elapsed()>Duration::from_secs(20)||context_expired;
                         if expired {if let Some(job)=preview_jobs.remove(id){finish_preview_history(&mut preview_active,job,false);}else{emit(archive::failed(page.peer.clone()));}}
@@ -1858,6 +1863,26 @@ async fn send(client: &mut Client, root: Element) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_sends_name_the_servers_error_condition_and_text() {
+        let error = |inner: &str| -> Element {
+            format!("<message xmlns='jabber:client' type='error' id='m1'>{inner}</message>").parse().unwrap()
+        };
+        let stanzas = "urn:ietf:params:xml:ns:xmpp-stanzas";
+        assert_eq!(
+            stanza_error_reason(&error(&format!("<error type='cancel'><service-unavailable xmlns='{stanzas}'/><text xmlns='{stanzas}'>Remote server not found</text></error>"))),
+            "service unavailable: Remote server not found"
+        );
+        assert_eq!(
+            stanza_error_reason(&error(&format!("<error type='auth'><forbidden xmlns='{stanzas}'/></error>"))),
+            "forbidden"
+        );
+        assert_eq!(
+            stanza_error_reason(&error(&format!("<error><text xmlns='{stanzas}'>Only text</text></error>"))),
+            "Only text"
+        );
+        assert_eq!(stanza_error_reason(&error("")), "", "no error element means no reason");
+    }
     #[test]
     fn pq_messages_are_visible_without_trusting_outside_content() {
         for body in ["", "<body>Untrusted outside text</body><x xmlns='jabber:x:oob'><url>https://example.org/fake.png</url></x>"] {

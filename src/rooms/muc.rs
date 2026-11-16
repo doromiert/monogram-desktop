@@ -395,6 +395,9 @@ impl Rooms {
         }
         Some(self.status(&jid))
     }
+    pub fn take_roster_changes(&mut self) -> Vec<(String, Vec<members::Participant>)> {
+        self.identities.take_roster_changes()
+    }
     pub fn is_joined(&self, jid: &str) -> bool {
         matches!(self.membership.get(jid), Some(Membership::Joined { .. }))
     }

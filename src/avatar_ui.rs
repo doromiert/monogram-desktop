@@ -146,7 +146,7 @@ fn trim_disk_cache(dir: &Path) {
 #[derive(Default)]
 pub struct Avatars {
     widgets: HashMap<String, (Source, Vec<glib::WeakRef<adw::Avatar>>)>,
-    cache: HashMap<String, (Instant, Option<gdk::Texture>)>,
+    pub(crate) cache: HashMap<String, (Instant, Option<gdk::Texture>)>,
     fetching: HashMap<String, (u64, gio::Cancellable)>,
     hints: HashMap<String, String>,
     invalidated: HashSet<String>,
