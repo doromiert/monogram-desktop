@@ -445,21 +445,15 @@ impl Store {
         id: &str,
         reply: crate::crypto::legacy::service::LegacyReply,
     ) -> rusqlite::Result<()> {
-        let original = if reply.quote.is_empty() {
-            reply.text.clone()
-        } else {
-            format!("> {}\n{}", reply.quote.replace('\n', "\n> "), reply.text)
-        };
-        if !self.message(account, peer, id).is_some_and(|m| {
-            m.mode() == crate::encryption_policy::Mode::Legacy
-                && !m.retracted
-                && !m.unavailable
-                && !m.edited
-                && m.reply_id.is_empty()
-                && m.text == original
-        }) {
-            return Ok(());
-        }
+        let original=reply.original.clone();
+        let Some(message)=self.message(account,peer,id).filter(|m| {
+            m.mode()==crate::encryption_policy::Mode::Legacy && !m.retracted && !m.unavailable && !m.edited
+                && (m.reply_id.is_empty() || m.reply_id==reply.id && (m.reply_to.is_empty() || m.reply_to==reply.to))
+                && m.text==original
+        })else{return Ok(());};
+        let removed=[(0,original.chars().count().saturating_sub(reply.text.chars().count()))];
+        let formatting=message.formatting.as_ref().and_then(|m|m.without(&removed)).filter(|m|m.body==reply.text);
+        let inline=message.inline_emoji.as_ref().and_then(|m|m.without(&removed).ok()).filter(|m|m.body==reply.text);
         let quote = self
             .resolve_reply(account, peer, &reply.to, &reply.id)
             .filter(|target| !target.retracted)
@@ -468,8 +462,8 @@ impl Store {
         let tx = self.db.unchecked_transaction()?;
         for table in ["messages", "message_bases"] {
             tx.execute(
-                &format!("UPDATE {table} SET body=json_set(body,'$.reply_id',?1,'$.reply_to',?2,'$.reply',?3,'$.text',?4) WHERE account=?5 AND peer=?6 AND id=?7 AND json_extract(body,'$.text')=?8 AND COALESCE(json_extract(body,'$.retracted'),0)=0"),
-                params![reply.id, reply.to, quote, reply.text, account, peer, id, original],
+                &format!("UPDATE {table} SET body=json_set(body,'$.reply_id',?1,'$.reply_to',?2,'$.reply',?3,'$.text',?4,'$.formatting',json(?9),'$.inline_emoji',json(?10)) WHERE account=?5 AND peer=?6 AND id=?7 AND json_extract(body,'$.text')=?8 AND COALESCE(json_extract(body,'$.retracted'),0)=0"),
+                params![reply.id, reply.to, quote, reply.text, account, peer, id, original,serde_json::to_string(&formatting).unwrap(),serde_json::to_string(&inline).unwrap()],
             )?;
         }
         tx.commit()

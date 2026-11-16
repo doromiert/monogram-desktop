@@ -453,8 +453,9 @@ mod tests {
             Some((0, source.chars().count() as i32))
         );
         message.refresh_shape();
+        // Markup attributes remain GTK-owned; explicit attributes only retain custom shapes.
         assert!(
-            body.attributes()
+            body.layout().attributes()
                 .is_some_and(|attrs| attrs.attributes().len() >= 3)
         );
 
@@ -490,7 +491,7 @@ mod tests {
         assert!(inline_labels[0].label().contains("<a href="));
         assert!(
             inline_labels[0]
-                .attributes()
+                .layout().attributes()
                 .is_some_and(|attrs| attrs.attributes().len() >= 4)
         );
         let mut inline_pictures = Vec::new();
@@ -544,12 +545,27 @@ mod tests {
         let card=link_preview_card(&preview);
         let bubble=bx(true,0);bubble.add_css_class("message-bubble");bubble.append(&body);bubble.append(&card);
         let meta=label("14:25","message-meta");meta.set_halign(gtk::Align::End);bubble.append(&meta);
-        let clamp=MessageBubbleLimit::new(&bubble,false);
+        let clamp=MessageBubbleLimit::new(&bubble,false);clamp.set_valign(gtk::Align::Start);
         let window=gtk::Window::builder().default_width(1400).default_height(300).child(&clamp).build();window.present();
         let context=glib::MainContext::default();let deadline=std::time::Instant::now()+std::time::Duration::from_millis(200);while std::time::Instant::now()<deadline {context.iteration(false);std::thread::sleep(std::time::Duration::from_millis(1));}
         let painted=body.layout().pixel_size().0.max(card.width());
         eprintln!("Link-only bubble content={}, text={}, preview={}, natural={}",bubble.width(),body.layout().pixel_size().0,card.width(),bubble.measure(gtk::Orientation::Horizontal,-1).1);
         assert!(bubble.width()<=painted+2,"Unused trailing bubble space: {}px",bubble.width()-painted);
+        let source="https://x.com/NyxieonLmao/status/2121897437790945370?a=1cpwWZJOz21HzYAYEQs&s=19";
+        let wrapped=wrap(source,"message-text");
+        linkify_message_label(&wrapped,source,&crate::link_previews::clickable_urls(source,None));
+        bubble.remove(&body);bubble.prepend(&wrapped);
+        bubble.remove(&card);
+        let card=link_preview_card(&Preview {url:source.into(),display_url:source.into(),site_name:"X (formerly Twitter)".into(),title:"SmugMonke (@NyxieonLmao) on X".into(),description:"Nice n quiet".into(),thumbnail:Some(Thumbnail {path:asset("icons/mobile-emoji/emoji_tabs_faves.png"),width:88,height:88}),..preview.clone()});
+        bubble.insert_child_after(&card,Some(&wrapped));
+        let settle=||{let until=std::time::Instant::now()+std::time::Duration::from_millis(200);while std::time::Instant::now()<until {context.iteration(false);std::thread::sleep(std::time::Duration::from_millis(1));}};
+        settle();
+        assert!(wrapped.layout().line_count()>1);
+        let painted=wrapped.layout().pixel_size().0.max(card.allocated_width());
+        assert!(bubble.width()<=painted+2,"Wrapped link left unused trailing bubble space: {}px (text {}, card {})",bubble.width()-painted,wrapped.layout().pixel_size().0,card.allocated_width());
+        assert_eq!(clamp.height(),clamp.measure(gtk::Orientation::Vertical,clamp.width()).1,"wrapped preview height uses its fitted width");
+        let stable=(bubble.width(),bubble.height(),wrapped.layout().line_count());settle();assert_eq!(stable,(bubble.width(),bubble.height(),wrapped.layout().line_count()),"fitting converges without width/height oscillation");
+        window.set_default_size(280,400);settle();assert!(clamp.width()<=280);assert!(wrapped.layout().pixel_size().0<=wrapped.width());
         window.close();
     }
 

@@ -114,17 +114,16 @@ impl Ui {
             let Some(controls) = visible.upgrade().filter(|controls| controls.is_visible()) else {
                 return glib::ControlFlow::Break;
             };
-            let allow_auto = automatic_media_allowed(ui.smoke, auto_flags.0, auto_flags.1, ui.state.borrow().current());
+            let allow_auto = ui.auto_download_enabled.get() && automatic_media_allowed(ui.smoke, auto_flags.0, auto_flags.1, ui.state.borrow().current());
             let status = ui.downloads.borrow().status(&owner, &file);
             if status.is_none()
                 && allow_auto
-                && media
                 && !file.manual
                 && ui.in_chat_viewport(&controls)
             {
                 ui.downloads
                     .borrow_mut()
-                    .start_automatic(&owner, file.clone());
+                    .start_automatic(&owner, file.clone(), if ui.auto_download_enabled.get(){ui.auto_download_limit.get()}else{0});
             }
             action.set_visible(!media || !matches!(status, Some(Status::Ready(_))));
             progress.set_visible(matches!(status, Some(Status::Running { .. })));
@@ -302,7 +301,7 @@ impl Ui {
                 }
                 return;
             }
-            let allow_auto = !source.manual && automatic_media_allowed(ui.smoke, auto_flags.0, auto_flags.1, ui.state.borrow().current());
+            let allow_auto = ui.auto_download_enabled.get() && !source.manual && automatic_media_allowed(ui.smoke, auto_flags.0, auto_flags.1, ui.state.borrow().current());
             let state = ui.downloads.borrow().status(&account, &source);
             if matches!(state, Some(Status::Running { .. } | Status::Ready(_)))
                 || state.is_none() && allow_auto && !cancelled_action.get()
@@ -351,11 +350,11 @@ impl Ui {
             } else {
                 ui.downloads.borrow().status(&owner, &file)
             };
-            let allow_auto = !file.manual && automatic_media_allowed(ui.smoke, auto_flags.0, auto_flags.1, ui.state.borrow().current());
+            let allow_auto = ui.auto_download_enabled.get() && !file.manual && automatic_media_allowed(ui.smoke, auto_flags.0, auto_flags.1, ui.state.borrow().current());
             if state.is_none() && allow_auto {
                 ui.downloads
                     .borrow_mut()
-                    .start_automatic(&owner, file.clone());
+                    .start_automatic(&owner, file.clone(), if ui.auto_download_enabled.get(){ui.auto_download_limit.get()}else{0});
                 state = ui.downloads.borrow().status(&owner, &file);
             }
             let preview_error = controls.has_css_class("media-preview-error");

@@ -946,6 +946,7 @@ impl Ui {
                         let links=crate::link_previews::clickable_urls(&display.body,None);
                         let inline=m.inline_emoji.as_ref().and_then(|emoji|emoji.without(&display.removed).ok()).filter(|emoji|emoji.body==display.body).map(|emoji|self.inline_message_text_formatted(&display.body,&emoji,preview.is_none().then_some(&meta),&links,Some(&rich)));
                         let l=wrap(&display.body,css);
+                        l.set_max_width_chars(-1);
                         if let Some(preview)=preview {
                             if let Some(inline)=inline.as_ref(){bubble.append(inline);}else{crate::formatting_ui::FormattedLabel::new(&l,rich.clone());bubble.append(&l);}
                             bubble.append(&crate::link_preview_ui::link_preview_card(&preview));

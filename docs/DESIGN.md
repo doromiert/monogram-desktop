@@ -89,3 +89,27 @@ and reaction-stretched timestamps reach the right edge; the reported wrapped
 body leaves under 4 px of unused line width. Real header-focused Enter/Escape,
 Shift+Enter and dialog key isolation pass. The reply truncation unit check
 covers complete text, whole words and an oversized Unicode word.
+
+Message bubble maximums are 40% of the conversation clamp's configured maximum:
+1080 × 0.4 = 432 logical pixels, or the available row width if smaller. The
+percentage is never applied to the live row or the main window. Short bubbles
+fit content, outgoing bubbles align right, and editors use the full bubble limit.
+The character-count natural width cap stays removed; media keeps its own caps.
+URLs stay whole when they fit on a fresh line. If a URL exceeds the rendered
+label width, it gains preferred breaks at `/`, `&`, and `?`; an oversized single
+segment still has grapheme fallback. Native markup adds no hidden text characters.
+URL break attributes are recalculated when the label width/font context changes;
+custom emoji/timestamp shapes survive without preserving stale break attributes.
+Wrapped links still fit their painted line edges and the preview card; wrapping
+does not reserve the full bubble maximum as blank trailing space.
+
+The bubble height is measured at its final content-fitted width. A changed fitted
+width requests remeasurement after allocation, preventing stale wrapped-message
+heights and extra space when the window narrows.
+
+Empty folders and searches use native compact status pages inside the same expanding
+sidebar stack as populated lists, retaining directional sliding in both directions.
+Automatic file downloads include all attachment types from eligible contacts/joined
+rooms in the visible conversation. Preferences provides an enable switch and per-file
+limit, defaulting to 15 MB (15 × 1024² bytes); unknown sizes stay manual. Both declared
+size and streamed plaintext bytes are bounded, including encrypted attachments.

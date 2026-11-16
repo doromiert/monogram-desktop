@@ -1476,6 +1476,13 @@ impl Ui {
         });
         appearance.add(&emoji);
         general.add(&appearance);
+        let downloads=adw::PreferencesGroup::builder().title("Automatic Downloads").description("Download files from contacts and joined groups while viewing the conversation.").build();
+        let enabled=adw::SwitchRow::builder().title("Automatically download files").subtitle("Includes photos, videos, stickers and documents").active(self.auto_download_enabled.get()).build();
+        let size=adw::SpinRow::with_range(1.,4000.,1.);size.set_title("Maximum file size");size.set_subtitle("MB per file");size.set_value((self.auto_download_limit.get()/1024/1024) as f64);size.set_sensitive(enabled.is_active());
+        let weak=Rc::downgrade(self);enabled.connect_active_notify(move|row|{if let Some(ui)=weak.upgrade(){ui.auto_download_enabled.set(row.is_active());ui.downloads.borrow_mut().reset_automatic();let _=ui.store.set_pref("auto_download_files",if row.is_active(){"true"}else{"false"});}});
+        enabled.bind_property("active",&size,"sensitive").sync_create().build();
+        let weak=Rc::downgrade(self);size.connect_value_notify(move|row|{if let Some(ui)=weak.upgrade(){let mb=row.value() as u64;ui.auto_download_limit.set(mb*1024*1024);ui.downloads.borrow_mut().reset_automatic();let _=ui.store.set_pref("auto_download_limit_mb",&mb.to_string());}});
+        downloads.add(&enabled);downloads.add(&size);general.add(&downloads);
         let owner = self.state.borrow().account.clone();
         let privacy = adw::PreferencesGroup::builder()
             .title("Privacy and Notifications")

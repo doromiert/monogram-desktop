@@ -120,6 +120,8 @@ pub struct Ui {
     pub loading: Cell<bool>,
     pub draft_timer: RefCell<Option<glib::SourceId>>,
     pub big_emoji: Cell<bool>,
+    pub auto_download_enabled: Cell<bool>,
+    pub auto_download_limit: Cell<u64>,
     pub typing: RefCell<HashMap<String, Instant>>,
     pub last_typing: Cell<Option<Instant>>,
     pub typing_input: RefCell<Option<(String, Instant, bool)>>,
@@ -298,6 +300,7 @@ impl Ui {
             store,
             folder_bar: FolderBar::new(),
             chat_stack: gtk::Stack::builder()
+                .vexpand(true)
                 .transition_duration(220)
                 .vhomogeneous(false)
                 .hhomogeneous(true)
@@ -429,6 +432,8 @@ impl Ui {
             loading: Cell::new(false),
             draft_timer: RefCell::new(None),
             big_emoji: Cell::new(true),
+            auto_download_enabled: Cell::new(true),
+            auto_download_limit: Cell::new(crate::downloads::DEFAULT_AUTO_MAX),
             typing: RefCell::new(HashMap::new()),
             last_typing: Cell::new(None),
             typing_input: RefCell::new(None),
@@ -481,6 +486,8 @@ impl Ui {
                 ui.mark_visible_chat_read();
             }
         });
+        ui.auto_download_enabled.set(ui.store.pref("auto_download_files","true")=="true");
+        ui.auto_download_limit.set(ui.store.pref("auto_download_limit_mb","15").parse::<u64>().ok().filter(|n|(1..=4000).contains(n)).unwrap_or(15)*1024*1024);
         ui.big_emoji
             .set(ui.store.pref("big_emoji", "true") == "true");
         crate::emoji_completion::set_discord_style(
@@ -1098,6 +1105,15 @@ impl Ui {
                 ui.select_chat(row.widget_name().as_str())
             }
         });
+        let page:gtk::Widget=if list.first_child().is_none() {
+            let searching=!self.search.text().trim().is_empty();
+            let empty=adw::StatusPage::builder()
+                .icon_name(if searching {"system-search-symbolic"}else{"folder-symbolic"})
+                .title(if searching {"No Results"}else{"No Conversations"})
+                .description(if searching {"Try a different search."}else{"Conversations in this folder will appear here."})
+                .vexpand(true).build();
+            empty.add_css_class("compact");empty.upcast()
+        }else{list.upcast()};
         let serial = self.folder_serial.get() + 1;
         self.folder_serial.set(serial);
         self.chat_stack.set_transition_type(match direction {
@@ -1106,13 +1122,13 @@ impl Ui {
             None => gtk::StackTransitionType::None,
         });
         self.chat_stack
-            .add_named(&list, Some(&format!("list-{serial}")));
-        self.chat_stack.set_visible_child(&list);
+            .add_named(&page, Some(&format!("list-{serial}")));
+        self.chat_stack.set_visible_child(&page);
         if !self.chat_stack.is_transition_running() {
             let pages = self.chat_stack.pages();
             for i in (0..pages.n_items()).rev() {
                 if let Some(page) = pages.item(i).and_downcast::<gtk::StackPage>() {
-                    if page.child() != list {
+                    if Some(page.child()) != self.chat_stack.visible_child() {
                         self.chat_stack.remove(&page.child());
                     }
                 }
@@ -1190,7 +1206,7 @@ impl Ui {
         self.timeline.add_css_class("message-list");
         let timeline_clamp = adw::Clamp::builder()
             .child(&self.timeline)
-            .maximum_size(1080)
+            .maximum_size(TIMELINE_MAX_WIDTH)
             .tightening_threshold(840)
             .build();
         timeline_clamp.add_css_class("timeline-clamp");
@@ -3143,5 +3159,33 @@ mod composer_tests {
         ui.composer.buffer().set_text("");
         settle(120);
         assert!(height(&ui) <= 34, "cleared composer is {}px tall", height(&ui));
+    }
+}
+
+#[cfg(test)]
+mod folder_empty_tests {
+    use super::*;
+    #[test]
+    #[ignore="requires private native display/keyring"]
+    fn empty_folder_and_search_pages_keep_sliding() {
+        adw::init().unwrap();
+        let app=adw::Application::builder().application_id("com.negzero.MonogramDesktop.EmptyFolderFixture").flags(gio::ApplicationFlags::NON_UNIQUE).build();app.register(None::<&gio::Cancellable>).unwrap();
+        let ui=Ui::new(&app,true);ui.window.set_default_size(1380,900);ui.window.present();
+        let context=glib::MainContext::default();let settle=|ms|{let until=std::time::Instant::now()+std::time::Duration::from_millis(ms);while std::time::Instant::now()<until{context.iteration(false);std::thread::sleep(std::time::Duration::from_millis(1));}};
+        settle(300);
+        assert!(ui.chat_stack.is_mapped());
+        for chat in &mut ui.state.borrow_mut().chats {chat.unread=0;chat.unread_mark=false;}
+        ui.set_folder("Unread");
+        let empty=ui.chat_stack.visible_child().unwrap().downcast::<adw::StatusPage>().unwrap();assert_eq!(empty.title(),"No Conversations");
+        assert!(ui.chat_stack.is_transition_running(),"empty destinations still slide");settle(300);assert!(empty.height()>100);
+        ui.set_folder("All");assert!(ui.chat_stack.is_transition_running(),"leaving an empty folder still slides");settle(300);
+        ui.search.set_text("no-such-conversation-fixture");ui.refresh_chats(Some(true));
+        let empty=ui.chat_stack.visible_child().unwrap().downcast::<adw::StatusPage>().unwrap();assert_eq!(empty.title(),"No Results");settle(300);
+        assert_eq!(ui.chat_stack.pages().n_items(),1,"old transition pages are released");
+        ui.preferences();settle(100);
+        fn descendants(widget:&gtk::Widget,out:&mut Vec<gtk::Widget>){out.push(widget.clone());let mut child=widget.first_child();while let Some(w)=child {child=w.next_sibling();descendants(&w,out);}}
+        let dialog=ui.window.visible_dialog().unwrap();let mut widgets=Vec::new();descendants(dialog.upcast_ref(),&mut widgets);
+        let size=widgets.iter().find_map(|w|w.downcast_ref::<adw::SpinRow>().filter(|r|r.title()=="Maximum file size")).unwrap();assert_eq!(size.value(),15.);size.set_value(23.);assert_eq!(ui.auto_download_limit.get(),23*1024*1024);assert_eq!(ui.store.pref("auto_download_limit_mb",""),"23");
+        let toggle=widgets.iter().find_map(|w|w.downcast_ref::<adw::SwitchRow>().filter(|r|r.title()=="Automatically download files")).unwrap();assert!(toggle.is_active());toggle.set_active(false);assert!(!ui.auto_download_enabled.get());assert!(!size.is_sensitive());assert_eq!(ui.store.pref("auto_download_files",""),"false");dialog.close();ui.window.close();
     }
 }

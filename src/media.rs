@@ -593,6 +593,7 @@ mod fly_imp {
     #[derive(Default)]
     pub struct FlyFrame {
         pub progress: Cell<f64>,
+        pub story_transition: Cell<bool>,
         pub zoom: Cell<f64>,
         pub pan: Cell<(f64, f64)>,
         pub clip_radii: Cell<[f32; 4]>,
@@ -620,6 +621,13 @@ mod fly_imp {
             let p = self.progress.get();
             let mut clipped = false;
             s.save();
+            if self.story_transition.get() && p < 1. {
+                let scale=(0.94+0.06*p) as f32;
+                let cx=obj.width() as f32/2.;let cy=obj.height() as f32/2.;
+                s.translate(&graphene::Point::new(cx,cy+16.*(1.-p) as f32));
+                s.scale(scale,scale);
+                s.translate(&graphene::Point::new(-cx,-cy));
+            }
             if p < 1. {
                 if let (Some(origin), Some(overlay)) =
                     (*self.origin.borrow(), self.overlay.upgrade())
@@ -1905,6 +1913,7 @@ pub struct StoryViewer {
     ui: Weak<Ui>,
     index: Cell<usize>,
     picture: gtk::Picture,
+    card: FlyFrame,
     caption: gtk::Label,
     owner: gtk::Label,
     avatar: adw::Avatar,
@@ -1995,7 +2004,11 @@ impl StoryViewer {
             .hexpand(true)
             .vexpand(true)
             .build();
-        root.set_child(Some(&frame));
+        let card:FlyFrame=glib::Object::new();
+        card.set_hexpand(true);card.set_vexpand(true);
+        card.imp().story_transition.set(true);card.imp().zoom.set(1.);
+        card.append(&frame);
+        root.set_child(Some(&card));
         let picture = gtk::Picture::builder()
             .can_shrink(true)
             .content_fit(gtk::ContentFit::Cover)
@@ -2068,6 +2081,7 @@ impl StoryViewer {
             ui: Rc::downgrade(ui),
             index: Cell::new(index),
             picture,
+            card,
             caption,
             owner,
             avatar,
@@ -2247,6 +2261,7 @@ impl StoryViewer {
     }
     pub fn open(self: &Rc<Self>) {
         self.root.set_opacity(0.);
+        self.card.imp().progress.set(0.);self.card.queue_draw();
         self.root.grab_focus();
         let weak = Rc::downgrade(self);
         let a = adw::TimedAnimation::new(
@@ -2256,7 +2271,8 @@ impl StoryViewer {
             200,
             adw::CallbackAnimationTarget::new(move |p| {
                 if let Some(v) = weak.upgrade() {
-                    v.root.set_opacity(p)
+                    v.root.set_opacity(p);
+                    v.card.imp().progress.set(p);v.card.queue_draw();
                 }
             }),
         );
@@ -2358,7 +2374,8 @@ impl StoryViewer {
             180,
             adw::CallbackAnimationTarget::new(move |p| {
                 if let Some(v) = weak.upgrade() {
-                    v.root.set_opacity(p)
+                    v.root.set_opacity(p);
+                    v.card.imp().progress.set(p);v.card.queue_draw();
                 }
             }),
         );
@@ -2393,17 +2410,25 @@ impl StoryViewer {
         let windows=std::process::Command::new("xdotool").args(["search","--onlyvisible","--pid",&std::process::id().to_string(),"--name","^Monogram$"]).output().unwrap();let window=String::from_utf8(windows.stdout).unwrap().lines().next().unwrap().to_owned();assert!(std::process::Command::new("xdotool").args(["windowfocus","--sync",&window]).status().unwrap().success());wait(||ui.reading_current_chat());
         let image=gdk::MemoryTexture::new(64,64,gdk::MemoryFormat::R8g8b8a8,&glib::Bytes::from_owned(vec![255;64*64*4]),64*4);let path=std::env::temp_dir().join(format!("monogram-story-fixture-{}.png",new_id()));std::fs::write(&path,image.save_to_png_bytes()).unwrap();
         let entry=crate::stories::Entry{id:"media-fixture".into(),owner:owner.into(),url:"https://example.invalid/story.png".into(),mime:"image/png".into(),caption:"Media fixture".into(),published:chrono::Utc::now().timestamp_millis()};ui.store.stories_replace(owner,owner,&[entry.clone()],entry.published).unwrap();
+        gtk::Settings::default().unwrap().set_property("gtk-enable-animations",true);
         let started=Instant::now();ui.open_story_item(Story{owner:"You".into(),id:entry.id.clone(),jid:owner.into(),url:entry.url,mime:entry.mime,published:entry.published,caption:entry.caption,asset:path.to_string_lossy().into_owned(),own:true,..Default::default()});assert!(started.elapsed()<Duration::from_millis(400));let viewer=ui.active_story.borrow().as_ref().unwrap().clone();assert!(viewer.loading.get());
+        let frames=Rc::new(RefCell::new(Vec::new()));let samples=frames.clone();let card=viewer.card.downgrade();let clock=ui.window.frame_clock().unwrap();
+        let animation_signal=clock.connect_after_paint(move |_|{if let Some(card)=card.upgrade(){samples.borrow_mut().push(card.imp().progress.get());}});
+        wait(||viewer.card.imp().progress.get()>=0.999);
+        assert!(frames.borrow().iter().any(|p|*p>0.&&*p<1.),"entry needs rendered intermediate transform frames");
         wait(||!viewer.loading.get()&&viewer.picture.paintable().is_some());wait(||ui.store.stories_seen(owner,owner,&entry.id).unwrap());assert!(viewer.edit.is_visible()&&viewer.delete.is_visible());assert!(!ui.reading_current_chat(),"story overlay suspends underlying-chat reads");
         ui.receive_message(owner,peer.into(),Message{id:"behind-story".into(),wire_id:"behind-story".into(),sender:peer.into(),text:"Arrived behind story".into(),timestamp:"2026-11-15T11:00:00Z".into(),..Default::default()},false,None);assert_eq!(ui.state.borrow().current().unread,1);
         let bounds=viewer.root.compute_bounds(&ui.window).unwrap();
         assert!(std::process::Command::new("xdotool").args(["mousemove","--sync","--window",&window,&(bounds.x()+2.).round().to_string(),&(bounds.y()+bounds.height()-4.).round().to_string(),"click","1"]).status().unwrap().success());
-        wait(||ui.active_story.borrow().is_none());wait(||ui.state.borrow().current().unread==0&&ui.store.unread_count(owner,peer)==0);
+        wait(||ui.active_story.borrow().is_none());
+        assert!(frames.borrow().windows(2).any(|p|p[1]>0.&&p[1]<p[0]),"exit needs rendered intermediate transform frames");clock.disconnect(animation_signal);
+        wait(||ui.state.borrow().current().unread==0&&ui.store.unread_count(owner,peer)==0);
         let video_path=std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reaction-video.mp4");let video_entry=crate::stories::Entry{id:"video-fixture".into(),owner:owner.into(),url:"https://example.invalid/story.mp4".into(),mime:"video/mp4".into(),caption:"Video fixture".into(),published:chrono::Utc::now().timestamp_millis()};ui.store.stories_replace(owner,owner,&[video_entry.clone()],video_entry.published).unwrap();
         ui.open_story_item(Story{owner:"You".into(),id:video_entry.id.clone(),jid:owner.into(),url:video_entry.url,mime:video_entry.mime,published:video_entry.published,caption:video_entry.caption,asset:video_path.to_string_lossy().into_owned(),own:true,..Default::default()});let video=ui.active_story.borrow().as_ref().unwrap().clone();video.pause.set_active(true);wait(||!video.loading.get()&&video.player.borrow().is_some());assert!(video.picture.paintable().is_some());ui.composer.buffer().set_text("Keep this draft");
         let again=video.current.borrow().clone().unwrap();video.root.grab_focus();
         assert!(std::process::Command::new("xdotool").args(["key","Escape"]).status().unwrap().success());wait(||ui.active_story.borrow().is_none());assert_eq!(ui.composer_text(),"Keep this draft");
-        ui.open_story_item(again);let video=ui.active_story.borrow().as_ref().unwrap().clone();video.pause.set_active(true);wait(||!video.loading.get());video.reply.grab_focus();video.reply.set_text("Unsent reply");
+        gtk::Settings::default().unwrap().set_property("gtk-enable-animations",false);
+        ui.open_story_item(again);let video=ui.active_story.borrow().as_ref().unwrap().clone();assert_eq!(video.card.imp().progress.get(),1.);video.pause.set_active(true);wait(||!video.loading.get());video.reply.grab_focus();video.reply.set_text("Unsent reply");
         assert!(std::process::Command::new("xdotool").args(["key","Escape"]).status().unwrap().success());wait(||ui.active_story.borrow().is_none());assert_eq!(ui.composer_text(),"Keep this draft");assert!(video.player.borrow().is_none());ui.window.close();std::fs::remove_file(path).unwrap();
     }
 }
