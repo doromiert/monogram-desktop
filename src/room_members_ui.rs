@@ -244,8 +244,100 @@ fn factory(ui: Weak<Ui>) -> gtk::SignalListItemFactory {
     factory
 }
 
+/// What the automatic participants pane should do given the window and chat state.
+#[derive(Debug, PartialEq, Eq)]
+enum Auto {
+    Open,
+    Close,
+    Keep,
+}
+#[derive(Default)]
+struct AutoState {
+    /// The utility pane is pinned beside the chat (window wide enough), not an overlay.
+    wide: bool,
+    group: bool,
+    joined: bool,
+    live: bool,
+    /// The user has not closed the panel; they can bring it back from the menu.
+    enabled: bool,
+    sidebar_shown: bool,
+    showing_participants: bool,
+    showing_auto: bool,
+    /// The pane lists a different room than the one in view.
+    other_room: bool,
+}
+fn auto_action(state: &AutoState) -> Auto {
+    if !state.wide || !state.group {
+        return if state.showing_participants && state.showing_auto {
+            Auto::Close
+        } else {
+            Auto::Keep
+        };
+    }
+    if !state.live || !state.joined || !state.enabled {
+        return Auto::Keep;
+    }
+    // Never replace Conversation Info, Shared Media or the media pickers.
+    if !state.sidebar_shown || (state.showing_participants && state.other_room) {
+        Auto::Open
+    } else {
+        Auto::Keep
+    }
+}
+
 impl Ui {
+    fn participants_auto_enabled(&self) -> bool {
+        self.participants_pref.get().unwrap_or_else(|| {
+            let on = self.store.pref("participants-auto", "true") != "false";
+            self.participants_pref.set(Some(on));
+            on
+        })
+    }
+    fn set_participants_auto(&self, on: bool) {
+        self.participants_pref.set(Some(on));
+        let _ = self.store.set_pref("participants-auto", if on { "true" } else { "false" });
+    }
+
+    /// Show the participants beside a joined room when the window is wide enough, and hide the
+    /// automatic pane again when it is not or the chat is not a room.
+    pub fn sync_participants(self: &Rc<Self>) {
+        let state = self.state.borrow();
+        let chat = state.current();
+        let showing_participants =
+            self.utility.shows_sidebar() && self.media_mode.borrow().as_str() == "participants";
+        let current = AutoState {
+            wide: !self.utility.is_collapsed(),
+            group: chat.group,
+            joined: chat.room_joined,
+            live: !state.account.is_empty() && !self.on_welcome(),
+            enabled: self.participants_auto_enabled(),
+            sidebar_shown: self.utility.shows_sidebar(),
+            showing_participants,
+            showing_auto: self.participants_auto.get(),
+            other_room: self
+                .participants
+                .borrow()
+                .as_ref()
+                .is_some_and(|view| view.room != chat.jid),
+        };
+        drop(state);
+        match auto_action(&current) {
+            Auto::Open => self.open_participants(true),
+            Auto::Close => {
+                self.participants_auto.set(false);
+                self.utility.set_show_sidebar(false);
+            }
+            Auto::Keep => {}
+        }
+    }
+
+    /// Opened by the user (menu): it also turns automatic showing back on.
     pub fn show_participants(self: &Rc<Self>) {
+        self.set_participants_auto(true);
+        self.open_participants(false);
+    }
+
+    pub(crate) fn open_participants(self: &Rc<Self>, auto: bool) {
         let chat = self.state.borrow().current().clone();
         if !chat.group || chat.jid.is_empty() {
             return;
@@ -293,10 +385,13 @@ impl Ui {
             .title_widget(&label("Participants", "heading"))
             .build();
         let close = icon_button("sidebar-show-symbolic", "Close participants");
-        let utility = self.utility.downgrade();
+        let weak = Rc::downgrade(self);
         close.connect_clicked(move |_| {
-            if let Some(utility) = utility.upgrade() {
-                utility.set_show_sidebar(false)
+            if let Some(ui) = weak.upgrade() {
+                // Closing is a choice: do not reopen by itself until asked from the menu.
+                ui.set_participants_auto(false);
+                ui.participants_auto.set(false);
+                ui.utility.set_show_sidebar(false);
             }
         });
         header.pack_start(&close);
@@ -327,6 +422,7 @@ impl Ui {
         });
         view.rebuild();
         self.participants.replace(Some(view));
+        self.participants_auto.set(auto);
 
         self.track_sidebar(&pane);
         self.utility.set_sidebar(gtk::Widget::NONE);
@@ -433,6 +529,44 @@ mod tests {
                 "zed"
             ]
         );
+    }
+
+    fn ready() -> AutoState {
+        AutoState { wide: true, group: true, joined: true, live: true, enabled: true, ..Default::default() }
+    }
+
+    #[test]
+    fn the_pane_opens_by_itself_for_a_joined_room_on_a_wide_window() {
+        assert_eq!(auto_action(&ready()), Auto::Open);
+        for (name, state) in [
+            ("narrow window", AutoState { wide: false, ..ready() }),
+            ("not a room", AutoState { group: false, ..ready() }),
+            ("not joined yet", AutoState { joined: false, ..ready() }),
+            ("signed out", AutoState { live: false, ..ready() }),
+            ("closed by the user", AutoState { enabled: false, ..ready() }),
+        ] {
+            assert_eq!(auto_action(&state), Auto::Keep, "{name}");
+        }
+    }
+
+    #[test]
+    fn other_panes_are_never_replaced_but_a_stale_room_list_is_refreshed() {
+        let busy = AutoState { sidebar_shown: true, ..ready() };
+        assert_eq!(auto_action(&busy), Auto::Keep, "Conversation Info or Shared Media stays open");
+        let same_room = AutoState { showing_participants: true, ..busy };
+        assert_eq!(auto_action(&same_room), Auto::Keep);
+        let other_room = AutoState { sidebar_shown: true, showing_participants: true, other_room: true, ..ready() };
+        assert_eq!(auto_action(&other_room), Auto::Open, "follow the chat to the new room");
+    }
+
+    #[test]
+    fn only_an_automatic_pane_hides_when_the_window_narrows_or_the_chat_is_not_a_room() {
+        let shown = |auto| AutoState { sidebar_shown: true, showing_participants: true, showing_auto: auto, ..ready() };
+        assert_eq!(auto_action(&AutoState { wide: false, ..shown(true) }), Auto::Close);
+        assert_eq!(auto_action(&AutoState { group: false, ..shown(true) }), Auto::Close);
+        assert_eq!(auto_action(&AutoState { wide: false, ..shown(false) }), Auto::Keep, "the user opened it");
+        let other = AutoState { wide: false, sidebar_shown: true, showing_auto: true, ..ready() };
+        assert_eq!(auto_action(&other), Auto::Keep, "a different pane is not ours to close");
     }
 
     #[test]

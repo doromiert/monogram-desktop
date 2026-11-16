@@ -130,6 +130,10 @@ pub struct Ui {
     /// Latest occupant list per joined room, and the open participants panel, if any.
     pub room_rosters: RefCell<HashMap<String, Vec<crate::rooms::members::Participant>>>,
     pub participants: RefCell<Option<Rc<crate::room_members_ui::ParticipantsView>>>,
+    /// The open participants pane was shown automatically (so it may also hide automatically).
+    pub participants_auto: Cell<bool>,
+    /// Cached "open participants by itself on wide windows" choice; None until first read.
+    pub participants_pref: Cell<Option<bool>>,
     pub cards: RefCell<Vec<Rc<crate::wallet::WalletCard>>>,
     pub dialogs: RefCell<Vec<adw::Dialog>>,
     pub smoke: bool,
@@ -444,6 +448,8 @@ impl Ui {
             history_pending: RefCell::new(HashSet::new()),
             room_rosters: RefCell::new(HashMap::new()),
             participants: RefCell::new(None),
+            participants_auto: Cell::new(false),
+            participants_pref: Cell::new(None),
             cards: RefCell::new(vec![]),
             dialogs: RefCell::new(vec![]),
             smoke,
@@ -1163,6 +1169,13 @@ impl Ui {
                 b.set_visible(s.is_collapsed())
             }
         });
+        // The utility pane is pinned from 1240sp up: show the participants there by itself.
+        let weak = Rc::downgrade(self);
+        self.utility.connect_collapsed_notify(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.sync_participants();
+            }
+        });
         self.title.add_css_class("flat");
         self.title.add_css_class("conversation-title");
         self.weak_button(&self.title, |s| s.show_info());
@@ -1516,8 +1529,13 @@ impl Ui {
                 Some("info") => self.show_info(),
                 Some("shared-media") => self.shared_media(),
                 Some("participants") => {
+                    let auto = self.participants_auto.get();
                     if self.state.borrow().current().group {
-                        self.show_participants()
+                        self.open_participants(auto)
+                    } else if auto {
+                        // Shown automatically for a room; a non-room chat has nothing to list.
+                        self.participants_auto.set(false);
+                        self.utility.set_show_sidebar(false);
                     } else {
                         self.show_info()
                     }
@@ -1533,6 +1551,7 @@ impl Ui {
         if self.split.is_collapsed() {
             self.split.set_show_sidebar(false)
         }
+        self.sync_participants();
         self.resume_current_chat();
     }
     fn resume_current_chat(self: &Rc<Self>) {
@@ -2460,6 +2479,7 @@ impl Ui {
                     if presence.joined {
                         self.load_history(true);
                     }
+                    self.sync_participants();
                 }
                 if presence.joined {
                     self.release_upload_captions();
