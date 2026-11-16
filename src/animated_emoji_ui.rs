@@ -113,9 +113,17 @@ fn play(state: &Rc<State>) {
         })
         .await;
         drop(permit);
-        let Ok(Ok((decoder, first))) = opened else {
-            state.playing.set(false);
-            return;
+        let (decoder, first) = match opened {
+            Ok(Ok(started)) => started,
+            failed => {
+                // The ordinary emoji stays; say why, so a stale or missing renderer is findable.
+                eprintln!(
+                    "Monogram animated emoji unavailable: {}",
+                    failed.err().map_or("renderer failed", |_| "worker stopped")
+                );
+                state.playing.set(false);
+                return;
+            }
         };
         if state.picture.root().is_none() {
             state.playing.set(false);
@@ -227,6 +235,66 @@ mod tests {
         click(&emoji);
         assert!(wait(Duration::from_secs(3), || changes.get() > before + 10), "a click replays the animation");
         window.close();
+    }
+
+    fn has_class(widget: &gtk::Widget, class: &str) -> bool {
+        widget.has_css_class(class) || {
+            let mut child = widget.first_child();
+            let mut found = false;
+            while let Some(current) = child {
+                found |= has_class(&current, class);
+                child = current.next_sibling();
+            }
+            found
+        }
+    }
+
+    /// The path the app really takes: send from the composer, render the timeline, look at the
+    /// bubble. A widget that works alone proves nothing if messages never reach it.
+    #[gtk::test]
+    #[ignore = "requires a native display, the built sandboxed renderer and bubblewrap"]
+    fn only_messages_that_are_exactly_one_bundled_emoji_get_the_animated_widget() {
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id("com.negzero.AnimatedEmojiMessageFixture")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gio::Cancellable>).unwrap();
+        let ui = crate::ui::Ui::new(&app, true);
+        ui.window.present();
+        let unbundled = "🪿";
+        assert!(crate::noto_emoji::animation_for(unbundled).is_none(), "fixture must be outside the pack");
+        let texts = ["😄", "😄😄", "hi 😄", unbundled, "👍"];
+        for text in texts {
+            ui.composer.buffer().set_text(text);
+            ui.send();
+            wait(Duration::from_millis(300), || false);
+        }
+        wait(Duration::from_millis(1200), || false);
+        let result = {
+            let (state, bubbles) = (ui.state.borrow(), ui.bubbles.borrow());
+            state
+                .current()
+                .messages
+                .iter()
+                .filter(|m| texts.contains(&m.text.as_str()))
+                .map(|m| {
+                    let bubble = bubbles.get(&m.id).unwrap_or_else(|| panic!("{:?} was rendered", m.text));
+                    (m.text.clone(), has_class(bubble, "animated-emoji"))
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            result,
+            [
+                ("😄".to_string(), true),
+                ("😄😄".to_string(), false),
+                ("hi 😄".to_string(), false),
+                (unbundled.to_string(), false),
+                ("👍".to_string(), true),
+            ]
+        );
+        ui.window.close();
     }
 
     fn click(widget: &gtk::Widget) {

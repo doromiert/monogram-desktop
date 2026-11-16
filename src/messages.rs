@@ -949,7 +949,8 @@ impl Ui {
                         let animation=(css=="large-emoji"
                             && preview.is_none()
                             && m.inline_emoji.is_none()
-                            && m.formatting.is_none()
+                            // Sent messages always carry a formatting record; only styled text opts out.
+                            && m.formatting.as_ref().is_none_or(|markup|markup.ranges.is_empty())
                             && display.removed.is_empty())
                             .then(||crate::noto_emoji::animation_for(&display.body))
                             .flatten();
