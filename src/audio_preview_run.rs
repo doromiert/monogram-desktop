@@ -81,6 +81,8 @@ pub enum Error {
     /// A GStreamer plugin this format needs is not installed. FFmpeg (gst-libav) is used only when
     /// the system already has it; nothing is bundled for this.
     MissingDecoder(&'static str),
+    /// The helper was built from different code than the app (an old `target/` after a checkout).
+    HelperOutOfDate,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -89,6 +91,7 @@ impl std::fmt::Display for Error {
             Self::Refused(error) => error.fmt(f),
             Self::Failed | Self::BadOutput => f.write_str("This audio file could not be played"),
             Self::MissingDecoder(needs) => write!(f, "Can't play this: it needs {needs}, which is not installed"),
+            Self::HelperOutOfDate => f.write_str("The audio helper is out of date. Rebuild it with `cargo build --bins`"),
             Self::TimedOut => f.write_str("Preparing this audio took too long"),
             Self::Cancelled => f.write_str("Audio preparation was cancelled"),
         }
@@ -212,11 +215,31 @@ pub fn probe(file: &File, name: &str, cancel: &dyn Fn() -> bool) -> Result<Previ
     };
     let reply = reader.join().map_err(|_| Error::Failed)?;
     match status.code() {
+        // A helper from other code may ask for plugins this app does not provide; say so.
+        Some(8) if helper_is_out_of_date() => return Err(Error::HelperOutOfDate),
         Some(8) => return Err(Error::MissingDecoder(SOME_DECODER)),
         _ if !status.success() => return Err(Error::Failed),
         _ => {}
     }
     parse_probe(&reply, container)
+}
+
+/// This app's build, in the form the helper prints for `build`.
+fn own_build() -> String {
+    env!("CARGO_PKG_VERSION").to_owned() + option_env!("MONOGRAM_GIT_COMMIT").unwrap_or("") + option_env!("MONOGRAM_GIT_DIRTY").unwrap_or("")
+}
+/// Ask the helper which build it is (it prints one line and touches nothing) and compare.
+fn helper_is_out_of_date() -> bool {
+    confined::helper(HELPER, "MONOGRAM_AUDIO_PREVIEW_HELPER").is_some_and(|helper| build_differs(&helper))
+}
+fn build_differs(helper: &std::path::Path) -> bool {
+    std::process::Command::new(helper)
+        .arg("build")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .is_some_and(|output| output.stdout.trim_ascii() != own_build().as_bytes())
 }
 
 /// Validate the helper's reply. It is untrusted data: bounded, no unknown fields, every number
@@ -376,6 +399,23 @@ mod tests {
     const NEVER: &dyn Fn() -> bool = &|| false;
     fn fixture(name: &str) -> File {
         File::open(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/audio").join(name)).unwrap()
+    }
+
+    /// A helper built from other code than the app (a stale `target/` after switching commits) must
+    /// be named as such, not blamed on a missing decoder.
+    #[test]
+    #[ignore = "requires the built helper"]
+    fn the_built_helper_matches_this_app_and_a_stale_one_is_recognised() {
+        assert!(!helper_is_out_of_date(), "a helper built together with the app has the same build");
+        let dir = std::env::temp_dir().join(format!("stale-helper-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("monogram-audio-preview");
+        std::fs::write(&fake, "#!/bin/sh\necho 0.0.0old\n").unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let stale = build_differs(&fake);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(stale, "a helper reporting another build is out of date");
+        assert!(Error::HelperOutOfDate.to_string().contains("cargo build --bins"));
     }
 
     #[test]

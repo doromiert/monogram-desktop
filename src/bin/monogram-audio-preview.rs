@@ -333,6 +333,11 @@ fn pcm(container: Container, start_ms: u64) -> Result<(), i32> {
 fn main() {
     const MIB: libc::rlim_t = 1024 * 1024;
     let mode = std::env::args().nth(1).unwrap_or_default();
+    // Which build this is, so the app can tell when it is paired with an out-of-date helper.
+    if mode == "build" {
+        println!("{}", env!("CARGO_PKG_VERSION").to_owned() + option_env!("MONOGRAM_GIT_COMMIT").unwrap_or("") + option_env!("MONOGRAM_GIT_DIRTY").unwrap_or(""));
+        return;
+    }
     // Address space for GStreamer and its plugins; the kernel enforces the rest. No file may be
     // written beyond a small registry, and a probe is bounded in wall-clock time as well as CPU.
     if !helper_hardening::harden(4 * 1024 * MIB, 128, 16 * MIB) {
