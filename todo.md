@@ -130,3 +130,9 @@
 - [x] Add inline audio-file and voice-message playback with download, seeking, duration and cancellation.
 - [x] Bound pack category strip height and restore full-width sidebar scroll shadows while keeping inner row padding.
 - [x] Check profile keyboard access, narrow cards, loading/error feedback, account fencing and native screenshots.
+
+## Oversized animated pack icon regression
+
+- [x] Bound animated pack icon measurement independently of source media dimensions; the previous 64px fixture missed a 512px video expanding the bar to 518px.
+- [x] Verify realistic animated icons and native responsiveness: 12×512px WebM packs keep the strip at 30px and icons at 24px; 48-video grid/hover test maximum UI gap57ms.
+- [ ] Publish and update the installed ZenOS package with the corrected icon measurement.

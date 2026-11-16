@@ -181,21 +181,28 @@ fn accepted_invites_profile_cards_audio_and_compact_pack_strip() {
         .is_some()
     });
     let library = ui.pack_library.borrow().clone().unwrap();
-    glib::MainContext::default()
-        .block_on(
-            library.create(
-                "Video icon".into(),
-                crate::packs::Kind::Stickers,
-                vec![crate::packs::Input {
-                    path: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .join("tests/fixtures/picker-video.webm"),
-                    name: "Video".into(),
-                    emoji: "🙂".into(),
-                }],
-                crate::packs::Job::new(),
-            ),
-        )
-        .unwrap();
+    glib::MainContext::default().block_on(async {
+        for index in 0..12 {
+            library
+                .create(
+                    if index == 0 {
+                        "Video icon".into()
+                    } else {
+                        format!("Video pack {index}")
+                    },
+                    crate::packs::Kind::Stickers,
+                    vec![crate::packs::Input {
+                        path: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .join("tests/fixtures/picker-video-large.webm"),
+                        name: "Video".into(),
+                        emoji: "🙂".into(),
+                    }],
+                    crate::packs::Job::new(),
+                )
+                .await
+                .unwrap();
+        }
+    });
     ui.pack_pages.borrow()[0].refresh();
     wait(|| {
         find::<gtk::ToggleButton>(ui.window.upcast_ref(), &|b| {
@@ -208,11 +215,44 @@ fn accepted_invites_profile_cards_audio_and_compact_pack_strip() {
             .is_some()
         })
     });
+    let settle = Instant::now();
+    wait(|| settle.elapsed() > Duration::from_millis(500));
     let bar = find::<gtk::Box>(ui.window.upcast_ref(), &|b| {
         b.has_css_class("pack-selector") && b.is_mapped()
     })
     .unwrap();
-    assert!(bar.height() < 64, "pack bar expanded to {}", bar.height());
+    assert!(bar.height() <= 36, "pack bar expanded to {}", bar.height());
+    let icon = find::<gtk::Picture>(bar.upcast_ref(), &|p| {
+        p.paintable().is_some_and(|p| p.intrinsic_height() == 512)
+    })
+    .unwrap();
+    assert_eq!((icon.width(), icon.height()), (24, 24));
+    let strip = icon
+        .ancestor(gtk::ScrolledWindow::static_type())
+        .and_downcast::<gtk::ScrolledWindow>()
+        .unwrap();
+    assert!(
+        strip.hadjustment().upper() > strip.hadjustment().page_size(),
+        "populated category strip must scroll horizontally"
+    );
+    strip.hadjustment().set_value(strip.hadjustment().upper());
+    let settle = Instant::now();
+    wait(|| settle.elapsed() > Duration::from_millis(250));
+    assert!(bar.height() <= 36, "scroll changed compact bar height");
+    strip.hadjustment().set_value(0.);
+    eprintln!(
+        "512px video: pack bar={}px, icon={}×{}px",
+        bar.height(),
+        icon.width(),
+        icon.height()
+    );
+    assert!(
+        std::process::Command::new("import")
+            .args(["-window", "root", "/tmp/monogram-compact-pack-strip.png"])
+            .status()
+            .unwrap()
+            .success()
+    );
     let page = ui.pack_pages.borrow()[0].root.clone();
     assert_eq!(page.margin_start(), 0);
     assert_eq!(page.margin_end(), 0);

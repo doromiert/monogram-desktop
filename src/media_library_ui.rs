@@ -1457,7 +1457,11 @@ impl PackLibraryPage {
                     picture.set_size_request(24, 24);
                     picture.set_can_shrink(true);
                     picture.set_content_fit(gtk::ContentFit::Contain);
-                    let overlay = gtk::Overlay::builder().child(&picture).build();
+                    // Source media dimensions must not size the pack category strip.
+                    let icon_size = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                    icon_size.set_size_request(24, 24);
+                    let overlay = gtk::Overlay::builder().child(&icon_size).build();
+                    overlay.add_overlay(&picture);
                     let spinner = gtk::Spinner::new();
                     spinner.start();
                     overlay.add_overlay(&spinner);
@@ -2666,7 +2670,7 @@ mod tests {
         let(p,g,l)=(peak.clone(),gap.clone(),last.clone());let heartbeat=glib::timeout_add_local(Duration::from_millis(16),move||{p.set(p.get().max(descriptors()));g.set(g.get().max(l.replace(std::time::Instant::now()).elapsed()));glib::ControlFlow::Continue});
         window.present();page.refresh();
         assert!(until(Duration::from_secs(12),||page.model.n_items()>0&&page.preview_active.get()==0&&page.preview_queue.borrow().len()<48));
-        let icon=page.section_buttons.borrow()[&pack.id].child().unwrap().downcast::<gtk::Overlay>().unwrap().child().unwrap().downcast::<gtk::Picture>().unwrap();
+        let icon=page.section_buttons.borrow()[&pack.id].child().unwrap().downcast::<gtk::Overlay>().unwrap().child().unwrap().next_sibling().unwrap().downcast::<gtk::Picture>().unwrap();
         assert!(until(Duration::from_secs(4),||icon.paintable().is_some()),"animated pack icon loads its playback stream");
         assert!(icon.paintable().unwrap().is::<gtk::MediaStream>(),"video pack icon is live rather than a first-frame texture");
         assert!(page.video_preview.borrow().is_none(),"A tile must not keep a full video player alive");
