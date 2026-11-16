@@ -94,6 +94,7 @@ mod send_queue;
 mod send_animation;
 mod message_gestures;
 mod pack_editor;
+mod pack_files;
 mod picker_zoom;
 mod smoke;
 mod spoilers;
@@ -149,12 +150,19 @@ fn main() -> gtk::glib::ExitCode {
                     "--smoke-test" | "--live-smoke-test" | "--crypto-smoke-test"
                 )
             }) {
-                gtk::gio::ApplicationFlags::NON_UNIQUE
+                gtk::gio::ApplicationFlags::NON_UNIQUE | gtk::gio::ApplicationFlags::HANDLES_OPEN
             } else {
-                gtk::gio::ApplicationFlags::empty()
+                gtk::gio::ApplicationFlags::HANDLES_OPEN
             },
         )
         .build();
+    app.connect_open(|app,files,_| {
+        app.activate();
+        OPEN_FILES.with(|pending| pending.borrow_mut().extend(files.iter().take(16).cloned()));
+        ROOT.with(|root| {if let Some(ui)=root.borrow().as_ref(){
+            for file in OPEN_FILES.with(|pending|pending.take()){ui.open_pack_file(file);}
+        }});
+    });
     app.connect_activate(move |app| {
         crate::widgets::install_icons();
         if let Some(window) = app.active_window() {
@@ -275,7 +283,9 @@ fn main() -> gtk::glib::ExitCode {
                     capture.activate(None);
                 });
             }
-            ROOT.with(|root| root.replace(Some(ui)));
+            ROOT.with(|root| root.replace(Some(ui.clone())));
+            for file in OPEN_FILES.with(|pending|pending.take()){ui.open_pack_file(file);}
+
         });
         present_window(&window, monitor.as_deref(), started);
     });
@@ -465,3 +475,5 @@ mod picker_actions_native;
 #[cfg(test)]
 #[path = "../tests/room_restore_native.rs"]
 mod room_restore_native;
+
+thread_local! {static OPEN_FILES:std::cell::RefCell<Vec<gtk::gio::File>>=const{std::cell::RefCell::new(Vec::new())};}

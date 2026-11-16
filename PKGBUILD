@@ -78,6 +78,7 @@ package() {
     install -Dm755 packaging/monogram-desktop "$pkgdir/usr/bin/monogram-desktop"
     install -d "$pkgdir/usr/share/monogram-desktop" "$pkgdir/usr/share/licenses/$pkgname"
     cp -a assets/. "$pkgdir/usr/share/monogram-desktop/"
+    install -Dm644 data/com.negzero.MonogramDesktop.xml "$pkgdir/usr/share/mime/packages/com.negzero.MonogramDesktop.xml"
     install -Dm644 data/com.negzero.MonogramDesktop.desktop "$pkgdir/usr/share/applications/com.negzero.MonogramDesktop.desktop"
     install -Dm644 data/icons/com.negzero.MonogramDesktop.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.negzero.MonogramDesktop.svg"
     cp -a LICENSE LICENSES "$pkgdir/usr/share/licenses/$pkgname/"

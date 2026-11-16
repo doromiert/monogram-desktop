@@ -2,8 +2,9 @@
 Type=Application
 Name=Monogram Desktop
 Comment=Native XMPP messaging
-Exec=monogram-desktop
+Exec=monogram-desktop %F
 Icon=com.negzero.MonogramDesktop
 Categories=Network;InstantMessaging;GTK;
 StartupNotify=true
 StartupWMClass=com.negzero.MonogramDesktop
+MimeType=application/vnd.monogram.sticker-pack;

@@ -17,6 +17,7 @@ impl Ui {
         }
         let owner = self.state.borrow().account.clone();
         let id = message.id.clone();
+        let pack = crate::pack_files::is_pack(&file.name, &file.mime);
         let media = file.media_candidate();
         let content = bx(true, 4);
         let controls = bx(true, 4);
@@ -76,7 +77,9 @@ impl Ui {
             match ui.downloads.borrow().status(&account, &source) {
                 Some(Status::Running { .. }) => {}
                 Some(Status::Ready(path)) if path.is_file() => {
-                    if !media {
+                    if pack {
+                        ui.open_pack_file(gio::File::for_path(&path));
+                    } else if !media {
                         ui.save_attachment(&id, &path);
                     }
                     return;
@@ -155,6 +158,7 @@ impl Ui {
                     )
                 }
                 Some(Status::Ready(_)) if media => ("", "Preparing preview…".into()),
+                Some(Status::Ready(_)) if pack => ("Open Pack", "Downloaded".into()),
                 Some(Status::Ready(_)) => ("Save As…", "Downloaded".into()),
                 Some(Status::Deferred { reason, total }) => (
                     "Download",

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/vnd.monogram.sticker-pack">
+    <comment>Monogram sticker or emoji pack</comment>
+    <sub-class-of type="application/zip"/>
+    <glob pattern="*.pack"/>
+    <glob pattern="*.nzsp"/>
+    <glob pattern="*.xmsp"/>
+  </mime-type>
+</mime-info>

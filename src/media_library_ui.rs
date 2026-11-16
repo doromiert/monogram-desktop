@@ -1978,6 +1978,14 @@ let mut ids=Vec::new();let buttons=page.section_buttons.borrow();let mut child=p
                         if let Some(root)=&root {crate::preview_cache::store(root,&key,&poster.bytes);}
                         Ok((asset,verified,Some(poster)))
                     }).await.unwrap_or(Err(crate::packs::Error("Video preview failed"))),
+                    Ok((asset,verified)) if asset.item.mime.starts_with("image/") => gio::spawn_blocking(move||{
+                        let root=crate::preview_cache::account_root(&account);
+                        let key=crate::preview_cache::key("still",192,&asset.item.file);
+                        let modified=std::fs::metadata(&asset.path).and_then(|m|m.modified()).ok();
+                        let cached=root.as_deref().and_then(|root|crate::preview_cache::load(root,&key,modified))
+                            .map(|bytes|crate::image_loader::EncodedPreview{bytes,width:0,height:0});
+                        Ok((asset,verified,cached))
+                    }).await.unwrap_or(Err(crate::packs::Error("Image preview failed"))),
                     Ok((asset,verified))=>Ok((asset,verified,None)),
                     Err(error)=>Err(error),
                 };
@@ -2055,10 +2063,8 @@ let mut ids=Vec::new();let buttons=page.section_buttons.borrow();let mut child=p
             // every sticker again. Animated artwork is never cached and keeps playing.
             let cache_root=crate::preview_cache::account_root(self.library.account());
             let cache_key=crate::preview_cache::key("still",192,&asset.item.file);
-            let modified=std::fs::metadata(&asset.path).and_then(|m|m.modified()).ok();
-            let cached=cache_root.as_deref()
-                .and_then(|root|crate::preview_cache::load(root,&cache_key,modified))
-                .and_then(|bytes|gtk::gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)).ok());
+            let cached=poster.and_then(|preview|
+                gtk::gdk::Texture::from_bytes(&glib::Bytes::from_owned(preview.bytes)).ok());
             if let Some(texture)=cached {
                 picture.set_paintable(Some(&texture));
                 spinner.stop();
@@ -2084,7 +2090,8 @@ let mut ids=Vec::new();let buttons=page.section_buttons.borrow();let mut child=p
                             spinner.set_visible(false);
                         }
                         if !animated && let Some(root) = &cache_root {
-                            crate::preview_cache::store(root, &cache_key, &texture.save_to_png_bytes());
+                            let root=root.clone();let key=cache_key.clone();let texture=texture.clone();
+                            gio::spawn_blocking(move || crate::preview_cache::store(&root,&key,&texture.save_to_png_bytes()));
                         }
                     },
                     show_preview_error,
@@ -2204,6 +2211,7 @@ impl Ui {
                     .modal(true)
                     .build();
                 let filter = gtk::FileFilter::new();
+                filter.add_pattern("*.pack");
                 filter.add_pattern("*.nzsp");
                 filter.add_pattern("*.xmsp");
                 let filters = gio::ListStore::new::<gtk::FileFilter>();
@@ -2555,6 +2563,7 @@ impl Ui {
             crate::emoji_picker_ui::attach_custom_emoji_page(&ui, &emoji);
             ui.pack_library.replace(Some(library));
             ui.pack_pages.replace(vec![stickers, emoji]);
+            ui.open_pending_pack_files();
         });
     }
 

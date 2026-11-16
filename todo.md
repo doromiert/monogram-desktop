@@ -114,3 +114,11 @@
 - [x] Review PR2 head32c1b77 first: GTK-thread cache I/O/PNG work remains a freeze blocker; no merge.
 
 - [ ] Port Android's fast post-body acknowledgement recovery to desktop uploads: one-second first ACK window, one fresh slot, five-second last ACK window, final stored-object confirmation; desktop currently waits30seconds per ACK.
+
+## Pack file activation
+
+- [x] Open `.pack`, `.nzsp`, and `.xmsp` chat attachments in the existing pack dialog on desktop and the sticker sheet on mobile.
+- [x] Register native file-manager associations, including desktop launch arguments and Android content-URI permissions.
+- [x] Preview before installation; keep Add Pack explicit and validate archives off the UI thread with cancellation and account fencing.
+- [x] Verify cold library startup, installation, malformed input, and continued GTK responsiveness.
+- [x] Move PR #2 raster-preview cache reads, PNG encoding, writes and pruning off GTK before merging.

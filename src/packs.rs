@@ -672,9 +672,10 @@ impl Library {
         done.finish(&result);
         result
     }
-    pub async fn import_xmsp(&self, path: PathBuf, job: Job) -> Result<Pack> {self.import_paired_archive(path,job,None).await}
-    pub async fn import_sync_xmsp(&self,path:PathBuf,job:Job,id:String)->Result<Pack>{self.import_paired_archive(path,job,Some(id)).await}
-    async fn import_paired_archive(&self, path: PathBuf, job: Job, sync_id:Option<String>) -> Result<Pack> {
+    pub async fn import_xmsp(&self, path: PathBuf, job: Job) -> Result<Pack> {self.import_paired_archive(path,job,None,true).await}
+    pub async fn preview_archive(&self,path:PathBuf,job:Job)->Result<Pack>{self.import_paired_archive(path,job,None,false).await}
+    pub async fn import_sync_xmsp(&self,path:PathBuf,job:Job,id:String)->Result<Pack>{self.import_paired_archive(path,job,Some(id),true).await}
+    async fn import_paired_archive(&self, path: PathBuf, job: Job, sync_id:Option<String>, install:bool) -> Result<Pack> {
         let this = self.clone();
         let done = job.clone();
         let result = worker(move || {
@@ -687,7 +688,7 @@ impl Library {
             let existing=if let Some(id)=sync_id.as_ref(){
                 if uuid::Uuid::parse_str(id).is_err() || pack.sync_id!=*id {return Err(Error("Invalid paired pack identity."));}
                 s.packs.iter().find(|p|p.sync_id==*id).cloned()
-            }else{pack.sync_id.clear();pack.source=format!("local:{}",uuid::Uuid::new_v4());pack.installed=true;pack.private_pack=true;pack.connected=false;pack.auto_sync=false;for item in &mut pack.items{item.sync_id.clear();}None};
+            }else{pack.sync_id.clear();pack.source=format!("local:{}",uuid::Uuid::new_v4());pack.installed=install;pack.private_pack=true;pack.connected=false;pack.auto_sync=false;for item in &mut pack.items{item.sync_id.clear();}None};
             pack.id=existing.as_ref().map(|p|p.id).unwrap_or_else(new_id);
             for item in &mut pack.items{item.id=existing.as_ref().and_then(|p|p.items.iter().find(|old|!item.sync_id.is_empty()&&old.sync_id==item.sync_id)).map(|old|old.id).unwrap_or_else(new_id);}
             let position=existing.as_ref().and_then(|old|s.packs.iter().position(|p|p.id==old.id)).unwrap_or(0);

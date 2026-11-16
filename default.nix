@@ -78,6 +78,8 @@ in craneLib.buildPackage (commonArgs // {
     mkdir -p $out/share/monogram-desktop $out/share/applications $out/share/icons/hicolor/scalable/apps $out/share/doc/monogram-desktop
     cp -r assets/. $out/share/monogram-desktop/
     cp data/com.negzero.MonogramDesktop.desktop $out/share/applications/
+    mkdir -p $out/share/mime/packages
+    cp data/com.negzero.MonogramDesktop.xml $out/share/mime/packages/
     cp data/icons/com.negzero.MonogramDesktop.svg $out/share/icons/hicolor/scalable/apps/
     cp -r LICENSE LICENSES $out/share/doc/monogram-desktop/
     cp native/NOTICE.md $out/share/doc/monogram-desktop/native-NOTICE.md

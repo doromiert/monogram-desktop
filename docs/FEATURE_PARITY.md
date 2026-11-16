@@ -292,3 +292,9 @@ subsequent upload/send failure in the captured interval. Desktop already uses
 fresh slots but still has a30-second
 acknowledgement window and lacks this final stored-object fallback; that narrower
 recovery behavior remains a desktop parity task.
+
+### Pack files (desktop and Android)
+
+Both clients open `.pack` as an alias for the existing XMSP v1 portable archive; `.nzsp` and `.xmsp` remain supported. Opening a downloaded chat attachment or choosing Monogram from the file manager validates/copies the archive on a worker, then opens the existing pack UI with an explicit **Add Pack** action. Previewed packs are initially uninstalled; malformed archives preserve the library, and cancellation/account replacement fences callbacks. This does not add a new wire format. Desktop registers a shared-mime-info type and `%F` activation in Nix, Arch and AppImage packaging. Android accepts dedicated pack MIME types, extension-bearing URIs, and generic ZIP/binary content URIs after checking the provider's display name off-thread. Android requires sign-in and prompts to reopen the file afterward; desktop retains queued files through sign-in.
+
+Verification: 33 Android pack/archive tests (including actual Android intent-filter matching), desktop file classification, and an isolated native GTK cold-library/file-preview/Add Pack/invalid-input check pass. The native flow gives immediate feedback below 400 ms and completes in 1.20 seconds. PR #2's raster cache file I/O and PNG encoding/write/pruning now run on workers; 287 default desktop tests pass. Physical Android file-manager tapping remains untested in this delivery.

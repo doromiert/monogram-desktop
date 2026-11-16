@@ -221,6 +221,15 @@ impl Editor {
             label.set_wrap(true);
             body.append(&label);
         }
+        if !pack.installed {
+            let install=gtk::Button::with_label("Add Pack");
+            install.add_css_class("suggested-action");
+            let weak=Rc::downgrade(self);
+            install.connect_clicked(move |_| {if let Some(editor)=weak.upgrade(){
+                editor.mutate(Mutation::Installed{pack:editor.id,value:true});
+            }});
+            body.append(&install);
+        }
         let model = gio::ListStore::new::<glib::BoxedAnyObject>();
         for (position, item) in pack.items.iter().enumerate() {
             model.append(&glib::BoxedAnyObject::new((position, item.clone())));

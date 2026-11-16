@@ -93,6 +93,7 @@ jobs:
           install -Dm755 target/release/monogram-media-author /opt/monogram/monogram-media-author
           install -d /usr/share/monogram-desktop
           cp -a assets/. /usr/share/monogram-desktop/
+          install -Dm644 data/com.negzero.MonogramDesktop.xml /usr/share/mime/packages/com.negzero.MonogramDesktop.xml
           install -Dm644 data/com.negzero.MonogramDesktop.desktop /usr/share/applications/com.negzero.MonogramDesktop.desktop
           install -Dm644 data/icons/com.negzero.MonogramDesktop.svg /usr/share/icons/hicolor/scalable/apps/com.negzero.MonogramDesktop.svg
 
@@ -122,6 +123,7 @@ jobs:
           # Assets, the sandboxed renderer (kept unpatched) and our env hook.
           mkdir -p AppDir/share AppDir/libexec
           cp -a /usr/share/monogram-desktop AppDir/share/
+          install -Dm644 data/com.negzero.MonogramDesktop.xml AppDir/share/mime/packages/com.negzero.MonogramDesktop.xml
           install -m755 /opt/monogram/monogram-sticker-renderer AppDir/libexec/
           install -m755 /opt/monogram/monogram-media-author AppDir/libexec/
           # NOTE: the native MicroTeX math helper is not bundled yet (it needs host pangomm/cairomm/tinyxml2
