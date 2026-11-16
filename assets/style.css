@@ -299,3 +299,11 @@
 .presence-dot { min-width: 12px; min-height: 12px; border-radius: 999px; border: 2px solid @window_bg_color; background: @success_color; }
 .presence-dot.presence-away { background: @warning_color; }
 .presence-dot.presence-busy { background: @error_color; }
+
+/* Audio messages: a round play button, a waveform and the duration. The button is libadwaita's
+   circular suggested-action, so it follows the accent colour; the waveform takes the same colour. */
+.audio-bubble { min-width: 230px; padding: 2px 0; }
+.audio-bubble .audio-play { min-width: 48px; min-height: 48px; padding: 0; }
+.audio-bubble .audio-wave { color: @accent_color; }
+.audio-bubble .audio-wave:focus-visible { outline: 2px solid @accent_color; outline-offset: 2px; border-radius: 4px; }
+.audio-bubble .audio-time { font-variant-numeric: tabular-nums; }

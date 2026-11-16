@@ -77,7 +77,9 @@ mod media_author_run;
 #[allow(dead_code)] // Reached from the editor dialog in the next authoring step.
 mod media_authoring;
 mod animated_emoji_ui;
+mod audio_bubble_ui;
 mod audio_check;
+mod audio_player;
 mod audio_preview_run;
 mod client_commands_ui;
 mod confined;
