@@ -628,7 +628,7 @@ impl Ui {
                 let slot = bx(false, 0);
                 slot.set_width_request(26);
                 slot.set_valign(gtk::Align::End);
-                slot.append(&a);
+                slot.append(&self.profile_button(&a,&m.sender,&m.author));
                 outer.append(&slot);
                 avatar = Some(a);
             }
@@ -677,7 +677,7 @@ impl Ui {
             if m.pinned {
                 heading.append(&gtk::Image::from_icon_name("view-pin-symbolic"))
             }
-            heading.append(&author);
+            if !m.sender.is_empty(){heading.append(&self.profile_button(&author,&m.sender,&m.author));}else{heading.append(&author);}
             let meta = bx(false, 4);
             meta.add_css_class("message-meta");
             meta.set_valign(gtk::Align::Center);

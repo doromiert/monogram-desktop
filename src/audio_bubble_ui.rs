@@ -510,6 +510,20 @@ mod tests {
         let mut sticker = attachment("a.ogg", "audio/ogg");
         sticker.sticker = true;
         assert!(!sticker.audio_candidate());
+
+        // `attachment_ui.rs` asks the sandboxed preview first, so a file both would take stays with
+        // it; only audio the preview does not claim (a type-less FLAC or AAC) reaches the media player.
+        for (name, mime, preview, fallback) in [
+            ("a.flac", "", false, true),
+            ("a.aac", "application/octet-stream", false, true),
+            ("a.mp3", "audio/mpeg", true, true),
+            ("a.flac", "audio/flac", true, true),
+            ("clip.mp4", "video/mp4", false, false),
+        ] {
+            let file = attachment(name, mime);
+            assert_eq!(file.audio_candidate(), preview, "{name} ({mime}) preview");
+            assert_eq!(file.player_audio_candidate(), fallback, "{name} ({mime}) fallback");
+        }
     }
 
     fn fixture(name: &str) -> PathBuf {

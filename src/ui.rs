@@ -90,6 +90,7 @@ pub struct Ui {
     pub media_mode: RefCell<String>,
     pub media_tabs: adw::ToggleGroup,
     pub media_toggles: RefCell<HashMap<String, adw::Toggle>>,
+    pub(crate) primary_menu: gtk::MenuButton,
     pub request_button: gtk::Button,
     pub request_badge: gtk::Label,
     pub session: RefCell<Option<Session>>,
@@ -103,6 +104,10 @@ pub struct Ui {
     pub encryption_revision: Cell<u64>,
     pub room_syncing: RefCell<Option<(u64, String, u64)>>,
     pub room_sync_retry: RefCell<HashMap<String, (Instant, u8)>>,
+    pub(crate) active_audio: RefCell<Option<std::rc::Weak<crate::video_ui::Playback>>>,
+    pub(crate) active_profile: RefCell<Option<gtk::Popover>>,
+    pub(crate) profile_cache: RefCell<HashMap<String,(Instant,crate::profiles::Profile)>>,
+    pub(crate) requests_revision: Cell<u64>,
     pub request_secrets: RefCell<crate::request_logic::SecretJobs>,
     pub security_widgets: RefCell<Option<crate::dialogs::SecurityControls>>,
     pub link_preview_jobs: RefCell<crate::link_preview_logic::Jobs>,
@@ -410,6 +415,7 @@ impl Ui {
             media_mode: RefCell::new("media".into()),
             media_tabs: adw::ToggleGroup::builder().homogeneous(false).can_shrink(false).build(),
             media_toggles: RefCell::new(HashMap::new()),
+            primary_menu: gtk::MenuButton::builder().icon_name("open-menu-symbolic").build(),
             request_button,
             request_badge,
             session: RefCell::new(None),
@@ -423,6 +429,10 @@ impl Ui {
             encryption_revision: Cell::new(0),
             room_syncing: RefCell::new(None),
             room_sync_retry: RefCell::new(HashMap::new()),
+            active_audio: RefCell::new(None),
+            active_profile: RefCell::new(None),
+            profile_cache: RefCell::new(HashMap::new()),
+            requests_revision: Cell::new(0),
             request_secrets: RefCell::new(Default::default()),
             security_widgets: RefCell::new(None),
             contact_access_widgets: RefCell::new(None),
@@ -765,7 +775,10 @@ impl Ui {
             s.preview_form("Spaces and Channels", &["Service", "Channel name"])
         });
         self.action("profile", |s| {
-            s.preview_form("Your Profile", &["Display name", "About", "Website"])
+            let owner=s.state.borrow().account.clone();
+            if owner.is_empty(){s.notice("Sign in to view your profile.");}else{
+                let weak=Rc::downgrade(s);glib::idle_add_local_once(move||{if let Some(ui)=weak.upgrade().filter(|ui|ui.state.borrow().account==owner){ui.profile_card(&ui.primary_menu,&owner,&owner);}});
+            }
         });
         self.action("call", |s| s.call_preview());
         self.action("attach-file", |s| s.choose_files(false));
@@ -837,10 +850,8 @@ impl Ui {
             section.append(Some(title), Some(&format!("win.{action}")))
         }
         menu.append_section(None, &section);
-        let primary = gtk::MenuButton::builder()
-            .icon_name("open-menu-symbolic")
-            .menu_model(&menu)
-            .build();
+        let primary = self.primary_menu.clone();
+        primary.set_menu_model(Some(&menu));
         header.pack_end(&primary);
         let icon = gtk::Overlay::builder()
             .child(&gtk::Image::from_icon_name("contact-new-symbolic"))
@@ -1029,7 +1040,8 @@ impl Ui {
             let row = gtk::ListBoxRow::new();
             row.set_widget_name(&chat.id);
             let line = bx(false, 11);
-            line.append(&self.chat_avatar(&chat, 44));
+            let avatar=self.chat_avatar(&chat,44);
+            if chat.group{line.append(&avatar);}else{line.append(&self.profile_button(&avatar,&chat.jid,chat.display_name()));}
             let words = bx(true, 5);
             words.set_hexpand(true);
             let top = bx(false, 8);
@@ -1184,7 +1196,7 @@ impl Ui {
         });
         self.title.add_css_class("flat");
         self.title.add_css_class("conversation-title");
-        self.weak_button(&self.title, |s| s.show_info());
+        self.weak_button(&self.title, |s| {let chat=s.state.borrow().current().clone();if chat.group{s.show_info();}else{s.profile_card(&s.title,&chat.jid,chat.display_name());}});
         header.pack_start(&self.title);
         self.titles.add_named(&self.section_title, Some("normal"));
         self.titles.add_named(&self.search, Some("search"));
@@ -2041,7 +2053,6 @@ impl Ui {
         for name in [
             "wallet",
             "spaces",
-            "profile",
             "developer",
             "call",
             "article",
@@ -2145,6 +2156,9 @@ impl Ui {
         self.online.set(false);
         self.crypto.replace(Default::default());
         self.legacy_crypto.replace(Default::default());
+        if let Some(audio)=self.active_audio.borrow_mut().take().and_then(|a|a.upgrade()){audio.media.pause();}
+        self.profile_cache.borrow_mut().clear();
+        if let Some(popup)=self.active_profile.borrow_mut().take(){popup.popdown();if popup.parent().is_some(){popup.unparent();}}
         self.pq_crypto.replace(Default::default());
         self.pq_reviews.borrow_mut().clear();
         self.encryption_checks.borrow_mut().clear();
@@ -2528,6 +2542,7 @@ impl Ui {
                 self.handle_pq_review(&peer);
             }
             BackendEvent::AvatarChanged { peer, hint } => {
+                self.profile_cache.borrow_mut().remove(&peer);
                 self.avatars.borrow_mut().invalidate(&peer, hint);
                 return;
             }
@@ -2786,6 +2801,7 @@ impl Ui {
                 self.clear_contact_request(&peer);
                 self.refresh_contact_access();
             }
+            BackendEvent::RoomInvitationsAccepted(rooms) => self.resolve_room_invitations(&rooms),
             BackendEvent::RoomInvitation(invitation) => {
                 self.receive_room_invitation(invitation);
             }

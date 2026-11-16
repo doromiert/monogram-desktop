@@ -1,6 +1,7 @@
 use adw::prelude::*;
 mod action_store;
 mod attachment_ui;
+mod audio_ui;
 mod avatar;
 mod avatar_ui;
 mod blocking;
@@ -68,6 +69,8 @@ mod preview_cache;
 mod polls;
 mod polls_ui;
 mod protocol;
+mod profiles;
+mod profile_ui;
 mod pq_security_ui;
 mod read_markers;
 mod read_state;
@@ -482,3 +485,7 @@ mod picker_actions_native;
 mod room_restore_native;
 
 thread_local! {static OPEN_FILES:std::cell::RefCell<Vec<gtk::gio::File>>=const{std::cell::RefCell::new(Vec::new())};}
+
+#[cfg(test)]
+#[path="../tests/profile_invite_audio_native.rs"]
+mod profile_invite_audio_native;

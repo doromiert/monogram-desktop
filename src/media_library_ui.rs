@@ -1032,11 +1032,15 @@ impl PackLibraryPage {
         } else {
             let bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
             bar.add_css_class("pack-selector");
+            bar.set_vexpand(false);
+            bar.set_valign(gtk::Align::Start);
             let selector = gtk::Box::new(gtk::Orientation::Horizontal, 2);
             selector.add_css_class("emoji-category-bar");
             let settings = gtk::Box::new(gtk::Orientation::Horizontal, 2);
             let selector_scroll = crate::widgets::horizontal_strip(&selector);
             selector_scroll.set_hexpand(true);
+            selector_scroll.set_vexpand(false);
+            selector_scroll.set_valign(gtk::Align::Start);
             bar.append(&selector_scroll);
             bar.append(&settings);
             root.append(&bar);
@@ -1453,7 +1457,11 @@ impl PackLibraryPage {
                     picture.set_size_request(24, 24);
                     picture.set_can_shrink(true);
                     picture.set_content_fit(gtk::ContentFit::Contain);
-                    let overlay = gtk::Overlay::builder().child(&picture).build();
+                    // Source media dimensions must not size the pack category strip.
+                    let icon_size = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                    icon_size.set_size_request(24, 24);
+                    let overlay = gtk::Overlay::builder().child(&icon_size).build();
+                    overlay.add_overlay(&picture);
                     let spinner = gtk::Spinner::new();
                     spinner.start();
                     overlay.add_overlay(&spinner);
@@ -2547,8 +2555,8 @@ impl Ui {
                     }
                 }),
             );
-            stickers.root.set_margin_start(10);
-            stickers.root.set_margin_end(10);
+            stickers.root.set_margin_start(0);
+            stickers.root.set_margin_end(0);
             stickers.root.set_margin_bottom(10);
             let sticker_search = Rc::downgrade(&stickers);
             ui.media_search.connect_search_changed(move |search| {
@@ -2662,7 +2670,7 @@ mod tests {
         let(p,g,l)=(peak.clone(),gap.clone(),last.clone());let heartbeat=glib::timeout_add_local(Duration::from_millis(16),move||{p.set(p.get().max(descriptors()));g.set(g.get().max(l.replace(std::time::Instant::now()).elapsed()));glib::ControlFlow::Continue});
         window.present();page.refresh();
         assert!(until(Duration::from_secs(12),||page.model.n_items()>0&&page.preview_active.get()==0&&page.preview_queue.borrow().len()<48));
-        let icon=page.section_buttons.borrow()[&pack.id].child().unwrap().downcast::<gtk::Overlay>().unwrap().child().unwrap().downcast::<gtk::Picture>().unwrap();
+        let icon=page.section_buttons.borrow()[&pack.id].child().unwrap().downcast::<gtk::Overlay>().unwrap().child().unwrap().next_sibling().unwrap().downcast::<gtk::Picture>().unwrap();
         assert!(until(Duration::from_secs(4),||icon.paintable().is_some()),"animated pack icon loads its playback stream");
         assert!(icon.paintable().unwrap().is::<gtk::MediaStream>(),"video pack icon is live rather than a first-frame texture");
         assert!(page.video_preview.borrow().is_none(),"A tile must not keep a full video player alive");

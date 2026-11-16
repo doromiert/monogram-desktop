@@ -122,3 +122,19 @@
 - [x] Preview before installation; keep Add Pack explicit and validate archives off the UI thread with cancellation and account fencing.
 - [x] Verify cold library startup, installation, malformed input, single-click download/open, and continued GTK responsiveness.
 - [x] Move PR #2 raster-preview cache reads, PNG encoding, writes and pruning off GTK before merging.
+
+## Current invitation, profile and media follow-up
+
+- [x] Reconcile accepted group invitations on both clients from confirmed server bookmarks/joins; refresh open invitation views.
+- [x] Add clickable native profile cards to chat/sidebar avatars and names using real XMPP profile/presence data.
+- [x] Add inline audio-file and voice-message playback with download, seeking, duration and cancellation.
+- [x] Bound pack category strip height and restore full-width sidebar scroll shadows while keeping inner row padding.
+- [x] Check profile keyboard access, narrow cards, loading/error feedback, account fencing and native screenshots.
+
+## Oversized animated pack icon regression
+
+- [x] Bound animated pack icon measurement independently of source media dimensions; the previous 64px fixture missed a 512px video expanding the bar to 518px.
+- [x] Verify realistic animated icons and native responsiveness: 12×512px WebM packs keep the strip at 30px and icons at 24px; 48-video grid/hover test maximum UI gap57ms.
+- [x] Publish and update the installed ZenOS package with the corrected icon measurement: source6887b50, ZenPkgs3b26c59c; packaged smoke119ms initial feedback /338ms maximum heartbeat.
+
+- [x] Restore the pack category row’s previous 10px horizontal inset on the row itself, keeping the sidebar scroll viewport and shadow full width.

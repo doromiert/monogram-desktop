@@ -255,6 +255,11 @@ impl Attachment {
             );
         }
     }
+    /// Audio the sandboxed preview does not handle (FLAC, raw AAC, anything else with an audio type).
+    /// It plays through the media player on request; see `audio_ui.rs`.
+    pub fn player_audio_candidate(&self)->bool {
+        self.mime.starts_with("audio/") || matches!(self.name.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str(),"mp3"|"ogg"|"opus"|"m4a"|"aac"|"wav"|"flac")
+    }
     pub fn media_candidate(&self) -> bool {
         self.image_candidate() || self.video_candidate()
     }

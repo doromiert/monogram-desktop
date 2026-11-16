@@ -145,9 +145,10 @@ impl ParticipantsView {
     }
 }
 
-fn factory(ui: Weak<Ui>) -> gtk::SignalListItemFactory {
+fn factory(ui: Weak<Ui>, room:String) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, item| {
+    let profile_ui=ui.clone();
+    factory.connect_setup(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().unwrap();
         item.set_activatable(false);
         item.set_selectable(false);
@@ -178,7 +179,15 @@ fn factory(ui: Weak<Ui>) -> gtk::SignalListItemFactory {
         name.set_ellipsize(gtk::pango::EllipsizeMode::End);
         person.append(&name);
         root.append(&heading);
-        root.append(&person);
+        let button=gtk::Button::builder().child(&person).css_classes(["flat","profile-target"]).build();
+        let weak_item=item.downgrade();let weak_ui=profile_ui.clone();let room=room.clone();
+        button.connect_clicked(move|button|{
+            let (Some(item),Some(ui))=(weak_item.upgrade(),weak_ui.upgrade())else{return;};
+            if let Some(object)=item.item().and_downcast::<glib::BoxedAnyObject>() {
+                if let Row::Person(person)=object.borrow::<Row>().clone(){let peer=person.jid.unwrap_or_else(||format!("{room}/{}",person.nick));ui.profile_card(button,&peer,&person.nick);}
+            }
+        });
+        root.append(&button);
         item.set_child(Some(&root));
     });
     factory.connect_bind(move |_, item| {
@@ -192,15 +201,18 @@ fn factory(ui: Weak<Ui>) -> gtk::SignalListItemFactory {
         };
         let root = item.child().and_downcast::<gtk::Box>().unwrap();
         let heading = root.first_child().and_downcast::<gtk::Label>().unwrap();
-        let person = root.last_child().and_downcast::<gtk::Box>().unwrap();
+        let profile=root.last_child().and_downcast::<gtk::Button>().unwrap();
+        let person = profile.child().and_downcast::<gtk::Box>().unwrap();
         match row {
             Row::Heading(text) => {
                 heading.set_label(&text);
                 heading.set_visible(true);
+                profile.set_visible(false);
                 person.set_visible(false);
             }
             Row::Person(participant) => {
                 heading.set_visible(false);
+                profile.set_visible(true);
                 person.set_visible(true);
                 let overlay = person.first_child().and_downcast::<gtk::Overlay>().unwrap();
                 let avatar = overlay.child().and_downcast::<adw::Avatar>().unwrap();
@@ -346,7 +358,7 @@ impl Ui {
         let model = gio::ListStore::new::<glib::BoxedAnyObject>();
         let list = gtk::ListView::new(
             Some(gtk::NoSelection::new(Some(model.clone()))),
-            Some(factory(Rc::downgrade(self))),
+            Some(factory(Rc::downgrade(self),chat.jid.clone())),
         );
         list.add_css_class("navigation-sidebar");
         list.set_can_focus(true);

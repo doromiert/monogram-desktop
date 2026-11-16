@@ -25,8 +25,16 @@ impl Ui {
     pub(crate) fn requests_and_invitations(self: &Rc<Self>) {
         let content = adw::Bin::new();
         let history = Rc::new(RefCell::new(Vec::new()));
-        self.show_requests_page(&content, None, history);
-        self.dialog("Requests and Invitations", &content, 520, 520);
+        self.show_requests_page(&content, None, history.clone());
+        let (dialog,_)=self.dialog("Requests and Invitations", &content, 520, 520);
+        let weak=Rc::downgrade(self);let content=content.downgrade();let dialog=dialog.downgrade();
+        let seen=std::cell::Cell::new(self.requests_revision.get());let generation=self.generation.get();
+        glib::timeout_add_local(std::time::Duration::from_millis(100),move ||{
+            let (Some(ui),Some(content),Some(dialog))=(weak.upgrade(),content.upgrade(),dialog.upgrade())else{return glib::ControlFlow::Break;};
+            if ui.generation.get()!=generation || !dialog.is_visible(){return glib::ControlFlow::Break;}
+            if seen.replace(ui.requests_revision.get())!=ui.requests_revision.get(){history.borrow_mut().clear();ui.show_requests_page(&content,None,history.clone());}
+            glib::ControlFlow::Continue
+        });
     }
 
     fn show_requests_page(
@@ -324,6 +332,15 @@ impl Ui {
         page.add(&removal);
 
         let (dialog, header) = self.dialog("Join Room", &scroll(&page), 520, 560);
+        let weak=Rc::downgrade(self);let popup=dialog.downgrade();let record=invitation.clone();
+        let seen=std::cell::Cell::new(self.requests_revision.get());
+        glib::timeout_add_local(std::time::Duration::from_millis(100),move||{
+            let (Some(ui),Some(popup))=(weak.upgrade(),popup.upgrade())else{return glib::ControlFlow::Break;};
+            if !popup.is_visible(){return glib::ControlFlow::Break;}
+            if seen.replace(ui.requests_revision.get())!=ui.requests_revision.get() &&
+                ui.store.room_invitation(&record.owner,&record.room).ok().flatten().is_none(){popup.close();return glib::ControlFlow::Break;}
+            glib::ControlFlow::Continue
+        });
         let busy = gtk::Spinner::builder()
             .spinning(true)
             .visible(false)

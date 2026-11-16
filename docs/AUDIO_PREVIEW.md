@@ -122,3 +122,12 @@ and on the button instead of a player. Only one audio plays at a time.
 
 The helper must be started from a thread that lives as long as the process, or it is killed
 after about 15 seconds; see [SANDBOXED_HELPERS.md](SANDBOXED_HELPERS.md).
+
+## The other audio player
+
+Upstream also added `audio_ui.rs`, which plays audio through the media player (decoded in the app
+process, on request). The sandboxed preview in this document is asked first and takes every `audio/*`
+type and its own extensions. `audio_ui.rs` only receives what the preview does not claim: a FLAC or
+raw AAC file that arrives without an audio type. Such a file is therefore not strictly checked or
+sandboxed. Removing that fallback would make "unsupported" the answer for them too.
+
