@@ -80,6 +80,7 @@ mod animated_emoji_ui;
 mod client_commands_ui;
 mod noto_emoji;
 mod sysinfo;
+mod toast_routing;
 mod room_members_ui;
 mod room_ui;
 mod rooms;

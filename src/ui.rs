@@ -688,7 +688,11 @@ impl Ui {
         });
     }
     pub fn notice(&self, message: &str) {
-        self.toast.add_toast(adw::Toast::new(message));
+        self.show_toast(adw::Toast::new(message));
+    }
+    /// Show a toast where it is visible: above any open dialog rather than behind it.
+    pub fn show_toast(&self, toast: adw::Toast) {
+        crate::toast_routing::show(&self.window, &self.toast, toast);
     }
     fn queue_chat_refresh(self: &Rc<Self>) {
         if self.chat_refresh_pending.replace(true) {
