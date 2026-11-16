@@ -135,4 +135,4 @@
 
 - [x] Bound animated pack icon measurement independently of source media dimensions; the previous 64px fixture missed a 512px video expanding the bar to 518px.
 - [x] Verify realistic animated icons and native responsiveness: 12×512px WebM packs keep the strip at 30px and icons at 24px; 48-video grid/hover test maximum UI gap57ms.
-- [ ] Publish and update the installed ZenOS package with the corrected icon measurement.
+- [x] Publish and update the installed ZenOS package with the corrected icon measurement: source6887b50, ZenPkgs3b26c59c; packaged smoke119ms initial feedback /338ms maximum heartbeat.
