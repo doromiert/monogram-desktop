@@ -481,3 +481,6 @@ mod room_restore_native;
 
 thread_local! {static OPEN_FILES:std::cell::RefCell<Vec<gtk::gio::File>>=const{std::cell::RefCell::new(Vec::new())};}
 
+#[cfg(test)]
+#[path="../tests/profile_invite_audio_native.rs"]
+mod profile_invite_audio_native;

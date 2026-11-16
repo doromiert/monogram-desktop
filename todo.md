@@ -122,3 +122,11 @@
 - [x] Preview before installation; keep Add Pack explicit and validate archives off the UI thread with cancellation and account fencing.
 - [x] Verify cold library startup, installation, malformed input, single-click download/open, and continued GTK responsiveness.
 - [x] Move PR #2 raster-preview cache reads, PNG encoding, writes and pruning off GTK before merging.
+
+## Current invitation, profile and media follow-up
+
+- [x] Reconcile accepted group invitations on both clients from confirmed server bookmarks/joins; refresh open invitation views.
+- [x] Add clickable native profile cards to chat/sidebar avatars and names using real XMPP profile/presence data.
+- [x] Add inline audio-file and voice-message playback with download, seeking, duration and cancellation.
+- [x] Bound pack category strip height and restore full-width sidebar scroll shadows while keeping inner row padding.
+- [x] Check profile keyboard access, narrow cards, loading/error feedback, account fencing and native screenshots.
