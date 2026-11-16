@@ -435,6 +435,20 @@ mod tests {
         include_bytes!("../tests/fixtures/authoring/gradient-64x32.png").to_vec()
     }
 
+    /// The helper hardens itself, then tries calls a picture decoder must never make.
+    #[test]
+    #[ignore = "requires the built helper (cargo build --bins)"]
+    fn the_helper_filter_really_refuses_dangerous_calls_but_not_ordinary_ones() {
+        let helper = helper().expect("built helper");
+        let output = Command::new(helper).arg("selftest").output().unwrap();
+        let report = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "the filter let something through:\n{report}");
+        for call in ["socket", "io_uring_setup", "bpf", "keyctl", "userfaultfd", "perf_event_open", "execve", "mount"] {
+            assert!(report.contains(&format!("{call}: refused")), "{call} must be refused:\n{report}");
+        }
+        assert!(report.contains("ordinary calls and threads: work"), "{report}");
+    }
+
     #[test]
     #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
     fn crop_rotate_and_scale_run_in_the_real_sandbox() {

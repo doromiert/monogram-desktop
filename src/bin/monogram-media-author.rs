@@ -53,10 +53,25 @@ fn restrict_calls() -> bool {
     const KILL: u32 = 0x8000_0000;
     const EPERM: u32 = 0x0005_0000 | libc::EPERM as u32;
     const ALLOW: u32 = 0x7fff_0000;
+    // Everything a picture decoder has no business calling. A deny-list cannot be complete, so
+    // it targets the kernel attack surface that sandbox escapes usually go through (io_uring,
+    // bpf, key rings, userfaultfd, perf, module loading, the new mount API, kernel handles) on top
+    // of processes, sockets, tracing and namespace changes. The namespaces, dropped capabilities
+    // and no_new_privs set up around this process are the primary boundary.
     let mut denied = vec![
         libc::SYS_execve, libc::SYS_execveat, libc::SYS_socket, libc::SYS_ptrace,
         libc::SYS_process_vm_readv, libc::SYS_process_vm_writev, libc::SYS_setns,
         libc::SYS_unshare, libc::SYS_mount, libc::SYS_umount2,
+        libc::SYS_io_uring_setup, libc::SYS_io_uring_enter, libc::SYS_io_uring_register,
+        libc::SYS_bpf, libc::SYS_keyctl, libc::SYS_add_key, libc::SYS_request_key,
+        libc::SYS_userfaultfd, libc::SYS_perf_event_open,
+        libc::SYS_init_module, libc::SYS_finit_module, libc::SYS_delete_module,
+        libc::SYS_kexec_load, libc::SYS_kexec_file_load, libc::SYS_reboot,
+        libc::SYS_swapon, libc::SYS_swapoff, libc::SYS_acct, libc::SYS_pivot_root, libc::SYS_chroot,
+        libc::SYS_open_by_handle_at, libc::SYS_name_to_handle_at, libc::SYS_fanotify_init,
+        libc::SYS_kcmp, libc::SYS_pidfd_getfd, libc::SYS_process_madvise,
+        libc::SYS_mount_setattr, libc::SYS_move_mount, libc::SYS_open_tree,
+        libc::SYS_fsopen, libc::SYS_fsconfig, libc::SYS_fsmount, libc::SYS_fspick,
     ];
     #[cfg(target_arch = "x86_64")]
     denied.extend([libc::SYS_fork, libc::SYS_vfork]);
@@ -249,6 +264,39 @@ fn run(limits: &Limits) -> Result<(), i32> {
     Ok(())
 }
 
+/// `selftest`: after the same hardening as a real run, try each forbidden call and report what the
+/// kernel said. Exits 0 only if every one was refused with EPERM and an allowed call still works.
+fn selftest() -> Result<(), i32> {
+    let null = std::ptr::null::<libc::c_void>();
+    // The error code must be read right after its own call, before anything else can change it.
+    fn attempt(name: &'static str, call: impl FnOnce() -> i64) -> (&'static str, i64, Option<i32>) {
+        let result = call();
+        (name, result, std::io::Error::last_os_error().raw_os_error())
+    }
+    let attempts = [
+        attempt("socket", || unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) } as i64),
+        attempt("io_uring_setup", || unsafe { libc::syscall(libc::SYS_io_uring_setup, 1, null) }),
+        attempt("bpf", || unsafe { libc::syscall(libc::SYS_bpf, 0, null, 0) }),
+        attempt("keyctl", || unsafe { libc::syscall(libc::SYS_keyctl, 0, 0, 0, 0, 0) }),
+        attempt("userfaultfd", || unsafe { libc::syscall(libc::SYS_userfaultfd, 0) }),
+        attempt("perf_event_open", || unsafe { libc::syscall(libc::SYS_perf_event_open, null, 0, -1, -1, 0) }),
+        attempt("execve", || unsafe { libc::execve(c"/bin/true".as_ptr(), std::ptr::null(), std::ptr::null()) } as i64),
+        attempt("mount", || unsafe { libc::mount(std::ptr::null(), std::ptr::null(), std::ptr::null(), 0, null) } as i64),
+    ];
+    let mut failed = false;
+    for (name, result, errno) in attempts {
+        // EPERM is the filter's answer; any other failure (ENOSYS, EINVAL…) means the call reached
+        // the kernel, so it was not refused by the filter.
+        let refused = result == -1 && errno == Some(libc::EPERM);
+        println!("{name}: {}", if refused { "refused".to_owned() } else { format!("NOT REFUSED ({result}, errno {errno:?})") });
+        failed |= !refused;
+    }
+    // The filter must not be a blanket ban: ordinary calls and threads still work.
+    let alive = unsafe { libc::getpid() } > 0 && std::thread::spawn(|| 7).join().ok() == Some(7);
+    println!("ordinary calls and threads: {}", if alive { "work" } else { "BROKEN" });
+    if failed || !alive { Err(9) } else { Ok(()) }
+}
+
 fn main() {
     const MIB: libc::rlim_t = 1024 * 1024;
     let limits = Limits::default();
@@ -268,6 +316,9 @@ fn main() {
         libc::umask(0o077);
         libc::alarm(WAIT_SECONDS as u32 + 10)
     };
+    if std::env::args().nth(1).as_deref() == Some("selftest") {
+        std::process::exit(selftest().err().unwrap_or(0));
+    }
     if gst::init().is_err() {
         std::process::exit(5);
     }
