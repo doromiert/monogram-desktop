@@ -2693,7 +2693,18 @@ impl Ui {
             BackendEvent::OwnRead { peer, id } => self.receive_read_marker(owner, &peer, &id, true),
             BackendEvent::Receipt { peer, id } => self.delivery(&peer, &id, "delivered"),
             BackendEvent::Failed { peer, id, reason } => {
+                // Bounced typing, receipt and marker stanzas also arrive here; only one of our own
+                // messages is worth a toast (edits, reactions and removals toast in `delivery`).
+                let ours = self
+                    .store
+                    .own_wire_id(owner, &peer, &id)
+                    .ok()
+                    .flatten()
+                    .is_some();
                 self.delivery(&peer, &id, "failed");
+                if !ours {
+                    return;
+                }
                 let reason = reason.trim();
                 if reason.is_empty() {
                     self.notice("Message could not be sent. Retry from its menu.");
