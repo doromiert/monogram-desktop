@@ -112,3 +112,5 @@
 - [x] Verify live phone sticker favorites/recents reach desktop: after restoring TCP/UDP45950 and restarting the updated desktop, phone revision1794843209272 imported10 favorite stickers and3 recent stickers. No further phone control was used.
 - [ ] Activate the already-configured Monogram system firewall module so TCP/UDP45950 survives reboot; the booted generation predates it.
 - [x] Review PR2 head32c1b77 first: GTK-thread cache I/O/PNG work remains a freeze blocker; no merge.
+
+- [ ] Port Android's fast post-body acknowledgement recovery to desktop uploads: one-second first ACK window, one fresh slot, five-second last ACK window, final stored-object confirmation; desktop currently waits30seconds per ACK.

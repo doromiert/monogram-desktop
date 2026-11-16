@@ -275,3 +275,15 @@ The booted firewall omitted45950TCP/UDP; restoring those rules unblocked the
 transfer. The permanent Monogram system-module selection still requires system
 activation to survive reboot. No phone control was used after the user asked
 to stop. Desktop wallet scanning/spending remains absent.
+
+
+Android's upload acknowledgement recovery now waits one second after the complete
+wire body is flushed (including closing the output stream), then immediately
+requests a fresh single-use slot for one replay of the same ciphertext. The last
+acknowledgement is bounded to five seconds; final size/header checks can confirm
+either stored object, and failures/certificate/cancellation guards remain. The
+26 core transfer checks pass, including the one-second retry, stream-close wait,
+final deadline, immutable bytes and original-object fallback. Device acceptance
+is pending. Desktop already uses fresh slots but still has a30-second
+acknowledgement window and lacks this final stored-object fallback; that narrower
+recovery behavior remains a desktop parity task.
