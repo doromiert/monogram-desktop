@@ -13,7 +13,33 @@ use std::{cell::{Cell, RefCell}, rc::Rc, sync::Arc, time::Duration};
 const SIZE: i32 = 96;
 const RENDER_EDGE: u32 = 192;
 
+/// At most this many animations play at once. Each one is a confined helper process, so a flood
+/// of single-emoji messages scrolling past cannot start a crowd of them: the rest wait their turn.
+const MAX_PLAYING: u32 = 4;
+
+thread_local! {
+    static ACTIVE: Cell<u32> = const { Cell::new(0) };
+}
+/// One of the `MAX_PLAYING` places; given back when dropped.
+struct Slot;
+impl Slot {
+    fn take() -> Option<Slot> {
+        ACTIVE.with(|active| {
+            (active.get() < MAX_PLAYING).then(|| {
+                active.set(active.get() + 1);
+                Slot
+            })
+        })
+    }
+}
+impl Drop for Slot {
+    fn drop(&mut self) {
+        ACTIVE.with(|active| active.set(active.get().saturating_sub(1)));
+    }
+}
+
 struct State {
+    slot: RefCell<Option<Slot>>,
     bytes: Arc<Vec<u8>>,
     picture: gtk::Picture,
     glyph: gtk::Widget,
@@ -45,6 +71,7 @@ pub fn widget(glyph: &str, animation: Vec<u8>) -> gtk::Widget {
         return root.upcast();
     }
     let state = Rc::new(State {
+        slot: RefCell::new(None),
         bytes: Arc::new(animation),
         picture,
         glyph: label.upcast(),
@@ -89,18 +116,22 @@ fn wait_until_visible(state: std::rc::Weak<State>, root: glib::WeakRef<gtk::Over
         let (Some(state_ref), Some(root_ref)) = (state.upgrade(), root.upgrade()) else {
             return;
         };
-        if visible(root_ref.upcast_ref()) {
-            play(&state_ref);
-        } else {
-            wait_until_visible(state, root);
+        // Not visible yet, or every animation place is taken: look again shortly.
+        if visible(root_ref.upcast_ref()) && play(&state_ref) {
+            return;
         }
+        wait_until_visible(state, root);
     });
 }
 
-fn play(state: &Rc<State>) {
-    if state.playing.replace(true) {
-        return;
+/// Start playing; false when it is already playing or all places are taken.
+fn play(state: &Rc<State>) -> bool {
+    if state.playing.get() {
+        return false;
     }
+    let Some(slot) = Slot::take() else { return false };
+    state.slot.replace(Some(slot));
+    state.playing.set(true);
     let state = state.clone();
     glib::spawn_future_local(async move {
         let permit = crate::media_library_ui::lottie_permit().await;
@@ -121,18 +152,25 @@ fn play(state: &Rc<State>) {
                     "Monogram animated emoji unavailable: {}",
                     failed.err().map_or("renderer failed", |_| "worker stopped")
                 );
-                state.playing.set(false);
+                stop(&state);
                 return;
             }
         };
         if state.picture.root().is_none() {
-            state.playing.set(false);
+            stop(&state);
             return;
         }
         state.rest.replace(Some(first.texture.clone()));
         show(&state, &first.texture);
         step(state, decoder, std::time::Instant::now(), first.delay);
     });
+    true
+}
+
+/// Playback is over (finished, failed or the row went away): free the place.
+fn stop(state: &State) {
+    state.playing.set(false);
+    state.slot.take();
 }
 
 fn show(state: &State, texture: &gdk::Texture) {
@@ -151,7 +189,7 @@ fn step(state: Rc<State>, decoder: crate::lottie::Decoder, started: std::time::I
             if let Some(rest) = state.rest.borrow().as_ref() {
                 state.picture.set_paintable(Some(rest));
             }
-            state.playing.set(false);
+            stop(&state);
             // Dropping the decoder ends the sandbox process; do not wait for it on the GTK thread.
             gio::spawn_blocking(move || drop(decoder));
             return;
@@ -166,7 +204,7 @@ fn step(state: Rc<State>, decoder: crate::lottie::Decoder, started: std::time::I
             .await;
             drop(permit);
             let Ok((decoder, Ok(frame))) = pulled else {
-                state.playing.set(false);
+                stop(&state);
                 return;
             };
             state.picture.set_paintable(Some(&frame.texture));
@@ -181,6 +219,20 @@ fn step(state: Rc<State>, decoder: crate::lottie::Decoder, started: std::time::I
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_few_animations_play_at_once_and_places_are_given_back() {
+        let held: Vec<Slot> = (0..MAX_PLAYING).map(|_| Slot::take().expect("a free place")).collect();
+        assert!(Slot::take().is_none(), "a flood of emoji messages cannot start more helper processes");
+        let mut held = held;
+        drop(held.pop());
+        let again = Slot::take();
+        assert!(again.is_some(), "a finished animation frees its place");
+        assert!(Slot::take().is_none());
+        drop(held);
+        drop(again);
+        assert!(Slot::take().is_some(), "everything was given back, and the count never goes below zero");
+    }
 
     fn picture_of(root: &gtk::Widget) -> gtk::Picture {
         root.last_child().and_downcast::<gtk::Picture>().expect("the picture is the overlay child")
@@ -235,6 +287,31 @@ mod tests {
         click(&emoji);
         assert!(wait(Duration::from_secs(3), || changes.get() > before + 10), "a click replays the animation");
         window.close();
+    }
+
+    /// Twenty emoji messages on screen at once: never more than the cap play together, yet they
+    /// do start, and the places are all given back afterwards.
+    #[gtk::test]
+    #[ignore = "requires a native display, the built sandboxed renderer and bubblewrap"]
+    fn a_flood_of_visible_emoji_never_plays_more_than_the_cap_at_once() {
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        for _ in 0..20 {
+            column.append(&widget("😄", crate::noto_emoji::animation_for("😄").unwrap()));
+        }
+        let scroll = gtk::ScrolledWindow::builder().child(&column).build();
+        let window = gtk::Window::builder().default_width(300).default_height(2200).child(&scroll).build();
+        window.present();
+        let (mut peak, mut started) = (0, false);
+        wait(Duration::from_secs(5), || {
+            let active = ACTIVE.with(Cell::get);
+            peak = peak.max(active);
+            started |= active > 0;
+            false
+        });
+        assert!(started, "animations did start");
+        assert!(peak <= MAX_PLAYING, "{peak} played at once, the cap is {MAX_PLAYING}");
+        window.close();
+        wait(Duration::from_secs(2), || false);
     }
 
     fn has_class(widget: &gtk::Widget, class: &str) -> bool {
