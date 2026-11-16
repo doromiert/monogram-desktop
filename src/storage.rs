@@ -468,6 +468,15 @@ impl Store {
         }
         tx.commit()
     }
+    /// Whether this account ever sent an encrypted message to `peer` (a database check for chats
+    /// whose history predates the sticky `encrypted_history` flag).
+    pub fn sent_encrypted(&self, account: &str, peer: &str) -> rusqlite::Result<bool> {
+        self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE account=?1 AND peer=?2 AND json_extract(body,'$.own')=1 AND json_extract(body,'$.encrypted')=1)",
+            rusqlite::params![account, peer],
+            |row| row.get(0),
+        )
+    }
     pub fn update_delivery(
         &self,
         account: &str,
@@ -826,6 +835,33 @@ pub fn same_source(old: &Message, new: &Message) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sent_encrypted_only_counts_own_encrypted_messages_to_that_peer() {
+        let store = Store::open(true).unwrap();
+        let owner = "me@fixture.invalid";
+        store
+            .save_account(&Account { jid: owner.into(), host: String::new(), port: 5222, direct_tls: false })
+            .unwrap();
+        let room = "room@conference.example.org";
+        let mut state = State::live(owner, vec![]);
+        for peer in [room, "other@conference.example.org"] {
+            state.chat_for(peer);
+        }
+        store.save(&state).unwrap();
+        let save = |peer: &str, id: &str, own: bool, mode: crate::encryption_policy::Mode| {
+            let mut message = Message { id: id.into(), wire_id: id.into(), own, text: "hi".into(), kind: "text".into(), ..Default::default() };
+            message.set_encryption(mode, "fp".into());
+            store.save_outbox_row(owner, peer, &message).unwrap();
+        };
+        assert!(!store.sent_encrypted(owner, room).unwrap(), "nothing sent yet");
+        save(room, "plain", true, crate::encryption_policy::Mode::Plain);
+        save(room, "theirs", false, crate::encryption_policy::Mode::Pq);
+        save("other@conference.example.org", "elsewhere", true, crate::encryption_policy::Mode::Pq);
+        assert!(!store.sent_encrypted(owner, room).unwrap(), "plain, someone else's and another room do not count");
+        save(room, "mine", true, crate::encryption_policy::Mode::Legacy);
+        assert!(store.sent_encrypted(owner, room).unwrap());
+        assert!(!store.sent_encrypted("someone-else@fixture.invalid", room).unwrap(), "account scoped");
+    }
     #[test]
     fn folder_visibility_reload_is_account_scoped_and_legacy_safe() {
         let store = Store::open(true).unwrap();

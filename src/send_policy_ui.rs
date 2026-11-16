@@ -8,6 +8,9 @@ use adw::prelude::*;
 use gtk::glib;
 use std::rc::Rc;
 
+/// Shown instead of sending when a room that used encryption stops offering it.
+pub const DOWNGRADE_NOTICE: &str = "This room no longer offers end-to-end encryption, so nothing was sent. To send unencrypted anyway, choose Unencrypted in Conversation Security.";
+
 impl Ui {
     pub(crate) fn update_send_button(&self) {
         self.send_button.set_sensitive(
@@ -122,16 +125,11 @@ impl Ui {
                     return;
                 }
             };
-            {
-                let mut state = ui.state.borrow_mut();
-                let chat = state.current_mut();
-                chat.sending_preference = Some(Preference::Automatic);
-                chat.automatic_encryption = Some(Selection {
-                    mode,
-                    time_ms: chrono::Utc::now().timestamp_millis(),
-                });
-                chat.encryption = mode.encrypted();
+            if ui.encryption_downgrade_blocked(&peer, mode) {
+                ui.notice(DOWNGRADE_NOTICE);
+                return;
             }
+            ui.state.borrow_mut().current_mut().remember_selection(mode);
             if !ui.persist() {
                 ui.state.borrow_mut().current_mut().automatic_encryption = None;
                 return;
@@ -141,6 +139,20 @@ impl Ui {
             }
             then(&ui, mode);
         });
+    }
+
+    /// Whether `mode` would silently downgrade a room that has used encryption (see
+    /// `Chat::downgrade_blocked`). The database is checked too, for rooms whose history predates
+    /// the flag and is no longer loaded.
+    pub fn encryption_downgrade_blocked(&self, peer: &str, mode: Mode) -> bool {
+        let state = self.state.borrow();
+        let Some(chat) = state.chats.iter().find(|chat| chat.jid == peer) else {
+            return false;
+        };
+        chat.downgrade_blocked(mode)
+            || (chat.group
+                && mode == Mode::Plain
+                && self.store.sent_encrypted(&state.account, peer).unwrap_or(true))
     }
 
     pub fn update_encryption_check(&self) {
