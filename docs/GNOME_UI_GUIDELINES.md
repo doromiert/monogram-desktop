@@ -44,6 +44,9 @@ APIs and avoid deprecated ones.
   destructive actions offer Undo instead of asking for confirmation first.
 - Persistent state (offline, degraded, sign-in needed): `adw::Banner`.
 - A decision is needed, or the problem blocks the user: `adw::AlertDialog`.
+- Media from other people is parsed and decoded only in a sandboxed helper, never in the GTK process
+  (`docs/AUDIO_PREVIEW.md`, `docs/MEDIA_AUTHORING.md`); what the GTK process plays or draws is
+  fixed-format pixels or PCM that a helper produced.
 - Text that other people or servers control (nicknames, server error messages) goes through
   `text_safety` before it is shown: it strips control, bidi-override and zero-width characters,
   caps the length, and keeps another person's name from imitating the app's own "(You)" mark or a
