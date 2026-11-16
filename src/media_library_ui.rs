@@ -1032,11 +1032,15 @@ impl PackLibraryPage {
         } else {
             let bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
             bar.add_css_class("pack-selector");
+            bar.set_vexpand(false);
+            bar.set_valign(gtk::Align::Start);
             let selector = gtk::Box::new(gtk::Orientation::Horizontal, 2);
             selector.add_css_class("emoji-category-bar");
             let settings = gtk::Box::new(gtk::Orientation::Horizontal, 2);
             let selector_scroll = crate::widgets::horizontal_strip(&selector);
             selector_scroll.set_hexpand(true);
+            selector_scroll.set_vexpand(false);
+            selector_scroll.set_valign(gtk::Align::Start);
             bar.append(&selector_scroll);
             bar.append(&settings);
             root.append(&bar);
@@ -2547,8 +2551,8 @@ impl Ui {
                     }
                 }),
             );
-            stickers.root.set_margin_start(10);
-            stickers.root.set_margin_end(10);
+            stickers.root.set_margin_start(0);
+            stickers.root.set_margin_end(0);
             stickers.root.set_margin_bottom(10);
             let sticker_search = Rc::downgrade(&stickers);
             ui.media_search.connect_search_changed(move |search| {
