@@ -180,6 +180,34 @@ fn accepted_invites_profile_cards_audio_and_compact_pack_strip() {
         })
         .is_some()
     });
+    let library = ui.pack_library.borrow().clone().unwrap();
+    glib::MainContext::default()
+        .block_on(
+            library.create(
+                "Video icon".into(),
+                crate::packs::Kind::Stickers,
+                vec![crate::packs::Input {
+                    path: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("tests/fixtures/picker-video.webm"),
+                    name: "Video".into(),
+                    emoji: "🙂".into(),
+                }],
+                crate::packs::Job::new(),
+            ),
+        )
+        .unwrap();
+    ui.pack_pages.borrow()[0].refresh();
+    wait(|| {
+        find::<gtk::ToggleButton>(ui.window.upcast_ref(), &|b| {
+            b.tooltip_text().as_deref() == Some("Video icon")
+        })
+        .is_some_and(|b| {
+            find::<gtk::Picture>(b.upcast_ref(), &|p| {
+                p.paintable().is_some_and(|p| p.intrinsic_height() > 0)
+            })
+            .is_some()
+        })
+    });
     let bar = find::<gtk::Box>(ui.window.upcast_ref(), &|b| {
         b.has_css_class("pack-selector") && b.is_mapped()
     })
