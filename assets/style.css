@@ -64,6 +64,9 @@
 .payment-card { background: linear-gradient(120deg,#ff8a16,#f45100); color: white; border-radius: 12px; padding: 20px 26px; }
 .payment-card .title-1 { color: white; }
 .large-emoji { font-size: 56px; padding: 8px; }
+/* A message that is exactly one emoji. The same size as its Noto animation (about 90 px across in
+   a 96 px box), so the ordinary emoji shown until the first frame arrives does not jump. */
+.single-emoji { font-size: 72px; padding: 0; }
 .preview-label { font-size: 10px; letter-spacing: 1px; opacity: .5; }
 
 .utility-pane stackswitcher button { min-width: 60px; padding: 6px 10px; }

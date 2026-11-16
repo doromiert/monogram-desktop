@@ -1,5 +1,6 @@
 //! A message that is exactly one bundled emoji plays its Noto animation once when it scrolls into
-//! view and again when clicked. It rests on the first frame, which looks like the static emoji.
+//! view and again when clicked, and stays on its final frame when it ends. The ordinary emoji only
+//! shows until the first frame arrives and wherever the animation cannot play.
 //!
 //! Frames come from the confined renderer (`lottie::Decoder::open_emoji`) on worker threads, so
 //! nothing is parsed or drawn by Lottie code in the GTK process. The widget has a fixed size from
@@ -44,14 +45,23 @@ struct State {
     picture: gtk::Picture,
     glyph: gtk::Widget,
     playing: Cell<bool>,
-    /// First frame, shown again once an animation finishes.
-    rest: RefCell<Option<gdk::Texture>>,
+}
+
+/// A symbol such as ❤ or ☺ is drawn as a flat text glyph unless it carries the emoji variation
+/// selector. This message is an emoji with a colour animation, so its ordinary form is the colour
+/// emoji too; otherwise it would change style when the animation ends.
+fn emoji_presentation(glyph: &str) -> String {
+    let mut chars = glyph.chars();
+    match (chars.next(), chars.next()) {
+        (Some(only), None) if (only as u32) < 0x1F000 => format!("{only}\u{fe0f}"),
+        _ => glyph.to_owned(),
+    }
 }
 
 /// The widget for one emoji message. `glyph` is the emoji as text (the fallback and accessible
 /// name) and `animation` its gzip Lottie data from `noto_emoji`.
 pub fn widget(glyph: &str, animation: Vec<u8>) -> gtk::Widget {
-    let label = label(glyph, "large-emoji");
+    let label = label(&emoji_presentation(glyph), "single-emoji");
     label.set_halign(gtk::Align::Center);
     label.set_valign(gtk::Align::Center);
     let picture = gtk::Picture::builder()
@@ -76,7 +86,6 @@ pub fn widget(glyph: &str, animation: Vec<u8>) -> gtk::Widget {
         picture,
         glyph: label.upcast(),
         playing: Cell::new(false),
-        rest: RefCell::new(None),
     });
     let click = gtk::GestureClick::new();
     click.set_button(gdk::BUTTON_PRIMARY);
@@ -160,14 +169,14 @@ fn play(state: &Rc<State>) -> bool {
             stop(&state);
             return;
         }
-        state.rest.replace(Some(first.texture.clone()));
         show(&state, &first.texture);
         step(state, decoder, std::time::Instant::now(), first.delay);
     });
     true
 }
 
-/// Playback is over (finished, failed or the row went away): free the place.
+/// Playback is over (finished, failed, stopped early or the row went away): free the place. The
+/// picture on screen stays as it is; if no frame was ever shown, the ordinary emoji is still there.
 fn stop(state: &State) {
     state.playing.set(false);
     state.slot.take();
@@ -184,13 +193,33 @@ fn show(state: &State, texture: &gdk::Texture) {
 fn step(state: Rc<State>, decoder: crate::lottie::Decoder, started: std::time::Instant, delay: Duration) {
     glib::timeout_add_local_once(delay.max(Duration::from_millis(1)), move || {
         let index = (started.elapsed().as_secs_f64() * decoder.fps) as u32;
-        let finished = index >= decoder.frames || state.picture.root().is_none() || !state.picture.is_mapped();
-        if finished {
-            if let Some(rest) = state.rest.borrow().as_ref() {
-                state.picture.set_paintable(Some(rest));
-            }
+        let ended = index >= decoder.frames;
+        let gone = state.picture.root().is_none() || !state.picture.is_mapped();
+        if ended && !gone {
+            // Freeze on the animation's true last frame, not on whichever frame the clock reached.
+            let last = decoder.frames - 1;
+            glib::spawn_future_local(async move {
+                let permit = crate::media_library_ui::lottie_permit().await;
+                let pulled = gio::spawn_blocking(move || {
+                    let mut decoder = decoder;
+                    let frame = decoder.frame_at(last);
+                    (decoder, frame)
+                })
+                .await;
+                drop(permit);
+                if let Ok((decoder, frame)) = pulled {
+                    if let Ok(frame) = frame {
+                        state.picture.set_paintable(Some(&frame.texture));
+                    }
+                    // Dropping the decoder ends the sandbox process; not on the GTK thread.
+                    gio::spawn_blocking(move || drop(decoder));
+                }
+                stop(&state);
+            });
+            return;
+        }
+        if ended || gone {
             stop(&state);
-            // Dropping the decoder ends the sandbox process; do not wait for it on the GTK thread.
             gio::spawn_blocking(move || drop(decoder));
             return;
         }
@@ -219,6 +248,14 @@ fn step(state: Rc<State>, decoder: crate::lottie::Decoder, started: std::time::I
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn symbols_get_the_emoji_selector_and_real_emoji_are_left_alone() {
+        assert_eq!(emoji_presentation("\u{2764}"), "\u{2764}\u{fe0f}", "a text-style heart becomes the colour emoji");
+        assert_eq!(emoji_presentation("\u{2764}\u{fe0f}"), "\u{2764}\u{fe0f}", "already has it");
+        assert_eq!(emoji_presentation("😄"), "😄");
+        assert_eq!(emoji_presentation("👍🏽"), "👍🏽", "a sequence is left as it is");
+    }
 
     #[test]
     fn only_a_few_animations_play_at_once_and_places_are_given_back() {
@@ -252,9 +289,57 @@ mod tests {
         false
     }
 
+    /// The ordinary emoji and its animation must be the same size, or the emoji visibly shrinks
+    /// when the animation ends. Measured, not assumed: the animation's opaque area over several
+    /// frames against the glyph's ink at the real stylesheet size.
+    #[gtk::test]
+    #[ignore = "requires a native display and the built sandboxed renderer"]
+    fn the_ordinary_emoji_is_drawn_at_the_size_of_its_animation() {
+        let css = gtk::CssProvider::new();
+        css.load_from_path(crate::widgets::asset("style.css"));
+        gtk::style_context_add_provider_for_display(&gtk::gdk::Display::default().unwrap(), &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        let pack = crate::noto_emoji::curated().unwrap();
+        let cancel = gio::Cancellable::new();
+        let edge = 192u32;
+        // "❤" without the variation selector is included: it must still be drawn as the colour emoji.
+        for (glyph, key) in [("😄", "1f604"), ("👍", "1f44d"), ("🔥", "1f525"), ("😂", "1f602"), ("🎉", "1f389"), ("❤", "2764"), ("❤\u{fe0f}", "2764")] {
+            // Largest extent of the animated emoji across a few frames, in logical pixels.
+            let source = crate::lottie::memory_source(pack.get(key).unwrap()).unwrap();
+            let mut decoder = crate::lottie::Decoder::open_emoji(source, edge, &cancel).unwrap();
+            let (mut x0, mut y0, mut x1, mut y1) = (edge, edge, 0, 0);
+            for index in [0, decoder.frames / 4, decoder.frames / 2, decoder.frames * 3 / 4] {
+                let texture = decoder.frame_at(index).unwrap().texture;
+                let mut px = vec![0u8; (edge * edge * 4) as usize];
+                texture.download(&mut px, (edge * 4) as usize);
+                for y in 0..edge {
+                    for x in 0..edge {
+                        if px[((y * edge + x) * 4 + 3) as usize] > 24 {
+                            (x0, x1, y0, y1) = (x0.min(x), x1.max(x), y0.min(y), y1.max(y));
+                        }
+                    }
+                }
+            }
+            let animated = f64::from((x1 - x0 + 1).max(y1 - y0 + 1)) / f64::from(edge) * f64::from(SIZE);
+
+            let emoji = widget(glyph, crate::noto_emoji::animation_for(glyph).unwrap());
+            let label = emoji.first_child().and_downcast::<gtk::Label>().expect("the glyph label");
+            let window = gtk::Window::builder().child(&emoji).build();
+            window.present();
+            wait(Duration::from_millis(200), || false);
+            let (ink, _) = label.layout().pixel_extents();
+            let drawn = f64::from(ink.width().max(ink.height()));
+            let (_, wants_w, _, _) = label.measure(gtk::Orientation::Horizontal, -1);
+            let (_, wants_h, _, _) = label.measure(gtk::Orientation::Vertical, -1);
+            eprintln!("{glyph}: animation {animated:.0} px, ordinary emoji {drawn:.0} px, glyph box {wants_w}x{wants_h} in {SIZE}");
+            assert!((animated - drawn).abs() <= 0.10 * f64::from(SIZE), "{glyph}: animation {animated:.0} px but ordinary emoji {drawn:.0} px");
+            assert!(wants_w <= SIZE && wants_h <= SIZE, "{glyph}: the glyph must fit the {SIZE} px box so the widget never grows");
+            window.close();
+        }
+    }
+
     #[gtk::test]
     #[ignore = "requires a native display, the built sandboxed renderer and bubblewrap"]
-    fn a_bundled_emoji_swaps_in_moving_frames_and_rests_on_the_first_frame() {
+    fn a_bundled_emoji_plays_and_stays_on_its_final_frame() {
         let animation = crate::noto_emoji::animation_for("😄").expect("😄 is bundled");
         let emoji = widget("😄", animation);
         assert_eq!((emoji.width_request(), emoji.height_request()), (SIZE, SIZE), "fixed size: no reflow");
@@ -282,10 +367,21 @@ mod tests {
         eprintln!("{shown} frames shown over {played:?}");
         assert!(shown >= 30, "only {shown} frames were shown");
         assert!(played > Duration::from_millis(1800) && played < Duration::from_millis(3500), "ran for {played:?}, expected about 2.3 s");
-        // It rests on the first frame, and a click plays it again.
+        // When it ends it stays on the animation's last frame: still visible, the ordinary emoji
+        // stays hidden, and the frame is exactly the animation's final one.
+        let glyph = emoji.first_child().expect("the emoji glyph");
+        assert!(picture.is_visible() && glyph.opacity() == 0., "the animation stays, the ordinary emoji does not come back");
+        let shown = picture.paintable().and_downcast::<gdk::Texture>().expect("a frame is kept");
+        let source = crate::lottie::memory_source(&crate::noto_emoji::animation_for("😄").unwrap()).unwrap();
+        let mut reference = crate::lottie::Decoder::open_emoji(source, RENDER_EDGE, &gio::Cancellable::new()).unwrap();
+        let last = reference.frames - 1;
+        assert_eq!(shown.save_to_png_bytes(), reference.frame_at(last).unwrap().texture.save_to_png_bytes(), "frozen on frame {last}, the true last frame");
+        // A click plays it again and it freezes again.
         let before = changes.get();
         click(&emoji);
         assert!(wait(Duration::from_secs(3), || changes.get() > before + 10), "a click replays the animation");
+        assert!(wait(Duration::from_secs(5), || ACTIVE.with(Cell::get) == 0), "and it finishes");
+        assert!(picture.is_visible() && glyph.opacity() == 0.);
         window.close();
     }
 
@@ -371,6 +467,17 @@ mod tests {
                 ("👍".to_string(), true),
             ]
         );
+        // Every message that is exactly one emoji is drawn at the animation's size, bundled or
+        // not; two emoji keep the smaller size.
+        let sizes = {
+            let (state, bubbles) = (ui.state.borrow(), ui.bubbles.borrow());
+            ["😄", unbundled, "😄😄"].map(|text| {
+                let id = &state.current().messages.iter().find(|m| m.text == text).unwrap().id;
+                let bubble = bubbles.get(id).unwrap();
+                (has_class(bubble, "single-emoji"), has_class(bubble, "large-emoji"))
+            })
+        };
+        assert_eq!(sizes, [(true, false), (true, false), (false, true)]);
         ui.window.close();
     }
 
