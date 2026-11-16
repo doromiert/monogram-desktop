@@ -10,15 +10,18 @@ GTK process.
 
 ## Layers
 
-1. **Decoding waits for a click.** Audio is fetched under the same rules as other media:
-   automatically only where `automatic_media_allowed` says so (the user's own, encrypted,
-   contacts, joined rooms), never above 64 MiB, otherwise on a click. But a finished download only
-   makes the file *available*: the bubble shows a play button and the file size, and nothing
-   parses, checks or decodes the file, in this process or in a helper, until the user presses
-   play. That one press prepares and plays. So receiving a message, even from someone allowed to
-   auto-download, cannot start decoding by itself. A test finishes a download, waits, and requires
-   that no helper was started and nothing was opened; it then presses play and requires that one
-   click prepares and plays.
+1. **Decoding waits for a click, except for trusted senders.** Audio is fetched under the same
+   rules as other media: automatically only where `automatic_media_allowed` says so (the user's
+   own, encrypted, contacts, joined rooms), never above 64 MiB, otherwise on a click. A finished
+   download only makes the file *available*: the bubble shows a play button and the file size,
+   and nothing parses, checks or decodes the file, in this process or in a helper, until the user
+   presses play. That one press prepares and plays. The exception is the user's own messages and
+   contacts in a direct chat (`prepare_without_a_click`): their audio is prepared as soon as it
+   is downloaded, so the length and waveform are ready, but it never starts playing by itself.
+   Room participants and strangers, even ones whose messages arrive encrypted, always need the
+   click, so receiving a message from them cannot start decoding. Tests cover the rule for every
+   kind of sender, a stranger's finished download (no helper starts, nothing is opened, one press
+   prepares and plays), and a contact's (prepared, not played).
 2. **Strict check** (`src/audio_check.rs`, pure Rust, no decoding). The first 64 KiB are read and
    the file is refused unless it is exactly one of the accepted shapes:
    - **Ogg:** every stream header is Opus (version 1, one or two channels, mapping family 0) or

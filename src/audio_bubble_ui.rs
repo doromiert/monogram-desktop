@@ -51,6 +51,14 @@ thread_local! {
     static CURRENT: RefCell<Option<Weak<RefCell<Option<AudioPlayer>>>>> = const { RefCell::new(None) };
 }
 
+/// Whether a downloaded file is prepared (decoded in the sandbox) without a click. Only for senders
+/// the user trusts: their own messages and contacts in a direct chat. Room participants and
+/// strangers, even ones whose messages arrive encrypted, need a click: this is a stricter rule
+/// than the one that decides whether the file is downloaded at all.
+pub fn prepare_without_a_click(smoke: bool, own: bool, chat: &crate::model::Chat) -> bool {
+    !smoke && (own || (chat.contact && !chat.group))
+}
+
 /// `m:ss` as in the design: "00:02".
 pub fn clock(ms: u64) -> String {
     let seconds = ms / 1000;
@@ -207,10 +215,12 @@ impl Bubble {
         }
     }
 
-    /// Follow what the download manager says. A finished download only makes the file available:
-    /// nothing parses or decodes it until the user presses play.
-    fn apply_status(&self, status: Option<Status>, phase: &Phase) {
+    /// Follow what the download manager says. A finished download makes the file available; it is
+    /// prepared on its own only when `prepare_on_arrival` (a trusted sender), and otherwise nothing
+    /// parses or decodes it until the user presses play.
+    fn apply_status(self: &Rc<Self>, status: Option<Status>, phase: &Phase, prepare_on_arrival: bool) {
         match status {
+            Some(Status::Ready(path)) if path.is_file() && prepare_on_arrival => self.prepare(path, false),
             Some(Status::Ready(path)) if path.is_file() => self.set_phase(Phase::Downloaded(path)),
             Some(Status::Running { bytes, total, .. }) => {
                 let fraction = total.filter(|total| *total > 0 && bytes > 0).map(|total| (bytes as f64 / total as f64).min(1.));
@@ -291,6 +301,13 @@ impl Bubble {
         }
         if self.player.borrow().as_ref().is_some_and(AudioPlayer::take_finished) {
             self.progress.set(0.);
+        }
+        // Playback that could not start or broke off (no sound output, a failed sink) says so
+        // under the waveform instead of doing nothing.
+        if let Some(reason) = self.player.borrow().as_ref().and_then(AudioPlayer::take_error) {
+            self.progress.set(0.);
+            self.set_phase(Phase::Failed(format!("Can't play audio: {reason}")));
+            return;
         }
         self.update_playback();
         // While playing, follow the position ten times a second; the ticker ends by itself.
@@ -450,7 +467,8 @@ fn install(bubble: &Rc<Bubble>) {
                     ui.downloads.borrow_mut().start_automatic(&bubble.owner, bubble.file.clone(), limit);
                     status = ui.downloads.borrow().status(&bubble.owner, &bubble.file);
                 }
-                bubble.apply_status(status, &phase);
+                let trusted = crate::audio_bubble_ui::prepare_without_a_click(ui.smoke, bubble.auto.0, ui.state.borrow().current());
+                bubble.apply_status(status, &phase, trusted);
             }
         }
         glib::ControlFlow::Continue
@@ -658,7 +676,7 @@ mod tests {
         PEAK.store(0, std::sync::atomic::Ordering::SeqCst);
 
         // The download finishes (as the download manager reports it).
-        bubble.apply_status(Some(Status::Ready(fixture("tone.mp3"))), &Phase::Downloading(None));
+        bubble.apply_status(Some(Status::Ready(fixture("tone.mp3"))), &Phase::Downloading(None), false);
         assert_eq!(*bubble.phase.borrow(), Phase::Downloaded(fixture("tone.mp3")));
         assert_eq!(bubble.button.tooltip_text().as_deref(), Some("Play audio"), "it offers play, not a spinner");
         // Give any automatic preparation every chance to start.
@@ -674,6 +692,100 @@ mod tests {
         assert!(wait(Duration::from_secs(10), || bubble.player.borrow().as_ref().is_some_and(|p| p.state() == PlayState::Playing)), "and playing, without a second click");
         assert_eq!(PEAK.load(std::sync::atomic::Ordering::SeqCst), 1);
         bubble.player.borrow().as_ref().unwrap().stop();
+        window.close();
+        ui.window.close();
+    }
+
+    #[test]
+    fn only_trusted_senders_are_prepared_without_a_click() {
+        use crate::model::Chat;
+        let chat = |contact: bool, group: bool| Chat { contact, group, ..Default::default() };
+        // (own message, contact, group, expected)
+        for (own, contact, group, expected) in [
+            (true, false, false, true),   // the user's own message
+            (true, false, true, true),    // the user's own message in a room
+            (false, true, false, true),   // a contact in a direct chat
+            (false, false, false, false), // a stranger (even if the message arrived encrypted)
+            (false, false, true, false),  // a participant of a joined room
+            (false, true, true, false),   // a room is never "a contact", whatever the flag says
+        ] {
+            assert_eq!(prepare_without_a_click(false, own, &chat(contact, group)), expected, "own {own} contact {contact} group {group}");
+        }
+        assert!(!prepare_without_a_click(true, true, &chat(true, false)), "never in smoke-test mode");
+    }
+
+    /// A contact's finished download is prepared on its own (not played); a stranger's is not.
+    #[gtk::test]
+    #[ignore = "requires a display (use tools/headless-gtk-test.sh), the built helpers and bubblewrap"]
+    fn a_trusted_senders_download_is_prepared_without_a_click_but_not_played() {
+        adw::init().unwrap();
+        let app = adw::Application::builder().application_id("com.negzero.AudioContactFixture").flags(gio::ApplicationFlags::NON_UNIQUE).build();
+        app.register(None::<&gio::Cancellable>).unwrap();
+        let ui = Ui::new(&app, true);
+        ui.window.present();
+        wait(Duration::from_millis(300), || false);
+        let root = ui.audio_attachment(&Message { own: false, attachment: Some(attachment("tone.mp3", "audio/mpeg")), ..Default::default() });
+        let window = gtk::Window::builder().default_width(420).default_height(200).child(&root).build();
+        window.present();
+        let bubble = bubble_of(&root);
+        bubble.sink.set("fakesink");
+        bubble.apply_status(Some(Status::Ready(fixture("tone.mp3"))), &Phase::Downloading(None), true);
+        assert!(wait(Duration::from_secs(20), || *bubble.phase.borrow() == Phase::Ready), "prepared by itself: {:?}", bubble.phase.borrow());
+        assert_eq!(bubble.player.borrow().as_ref().unwrap().state(), PlayState::Idle, "but never started playing");
+        assert_eq!(bubble.time.label(), "00:01", "the length and waveform are already there");
+        window.close();
+        ui.window.close();
+    }
+
+    /// 0.5 s of silent 8 kHz mono WAV: plays through the real output without being heard.
+    fn silent_wav(path: &Path) {
+        let data = 8_000usize;
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&(36 + data as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        for v in [1u16, 1] { wav.extend_from_slice(&v.to_le_bytes()); }
+        wav.extend_from_slice(&8_000u32.to_le_bytes());
+        wav.extend_from_slice(&16_000u32.to_le_bytes());
+        for v in [2u16, 16] { wav.extend_from_slice(&v.to_le_bytes()); }
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data as u32).to_le_bytes());
+        wav.resize(wav.len() + data, 0);
+        std::fs::write(path, wav).unwrap();
+    }
+
+    /// The whole flow with the REAL audio output (silent audio): press play on a downloaded file, it
+    /// prepares, plays through the sound system and ends cleanly, with no failure shown.
+    #[gtk::test]
+    #[ignore = "uses the real audio output (silently); requires a display (headless runner) and the built helpers"]
+    fn pressing_play_on_a_downloaded_file_plays_through_the_real_audio_output() {
+        adw::init().unwrap();
+        let app = adw::Application::builder().application_id("com.negzero.AudioRealOutputFixture").flags(gio::ApplicationFlags::NON_UNIQUE).build();
+        app.register(None::<&gio::Cancellable>).unwrap();
+        let ui = Ui::new(&app, true);
+        ui.window.present();
+        wait(Duration::from_millis(300), || false);
+        let path = std::env::temp_dir().join(format!("silence-{}.wav", uuid::Uuid::new_v4()));
+        silent_wav(&path);
+        let root = ui.audio_attachment(&Message { own: false, attachment: Some(attachment("silence.wav", "audio/x-wav")), ..Default::default() });
+        let window = gtk::Window::builder().default_width(420).default_height(200).child(&root).build();
+        window.present();
+        let bubble = bubble_of(&root);
+        // No sink override: this is the production path (`autoaudiosink`).
+        assert_eq!(bubble.sink.get(), "autoaudiosink");
+        bubble.apply_status(Some(Status::Ready(path.clone())), &Phase::Downloading(None), false);
+        bubble.button.emit_clicked();
+        assert!(wait(Duration::from_secs(20), || *bubble.phase.borrow() == Phase::Ready || matches!(*bubble.phase.borrow(), Phase::Failed(_))), "prepared: {:?}", bubble.phase.borrow());
+        let mut saw_playing = false;
+        let finished = wait(Duration::from_secs(10), || {
+            saw_playing |= bubble.player.borrow().as_ref().is_some_and(|p| p.state() == PlayState::Playing);
+            matches!(*bubble.phase.borrow(), Phase::Failed(_)) || (saw_playing && bubble.player.borrow().as_ref().is_some_and(|p| p.state() == PlayState::Idle))
+        });
+        let phase = bubble.phase.borrow().clone();
+        std::fs::remove_file(&path).unwrap();
+        assert!(finished, "it finished: {phase:?}");
+        assert!(!matches!(phase, Phase::Failed(_)), "no failure was shown: {phase:?}");
+        assert!(saw_playing, "it reached Playing");
         window.close();
         ui.window.close();
     }
