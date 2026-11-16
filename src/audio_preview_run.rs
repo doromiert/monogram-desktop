@@ -277,11 +277,37 @@ impl PcmStream {
             return Err(Error::BadOutput);
         }
         let start = start_ms.to_string();
-        let mut child = spawn(file, &["pcm", container.name(), &start])?;
+        // The sandbox is told to die with its parent, and the kernel counts the parent as the
+        // *thread* that started it. Started from a worker-pool thread, which GLib retires after
+        // about 15 idle seconds, the helper was killed mid-song. A thread that lives as long as
+        // the process starts it instead.
+        let (file, name) = (file.try_clone().map_err(|_| Error::Unavailable)?, container.name());
+        let mut child = on_the_spawner_thread(move || spawn(&file, &["pcm", name, &start]))?;
         drop(child.stdin.take());
         let out = child.stdout.take().ok_or(Error::Failed)?;
         Ok(Self { child: Some(child), out })
     }
+}
+
+/// Run `job` on a thread that never exits and return what it returns.
+fn on_the_spawner_thread<T: Send + 'static>(job: impl FnOnce() -> Result<T, Error> + Send + 'static) -> Result<T, Error> {
+    use std::sync::{mpsc, Mutex, OnceLock};
+    type Job = Box<dyn FnOnce() + Send>;
+    static SPAWNER: OnceLock<Mutex<mpsc::Sender<Job>>> = OnceLock::new();
+    let jobs = SPAWNER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<Job>();
+        std::thread::Builder::new()
+            .name("audio-helper-spawner".into())
+            .spawn(move || receiver.iter().for_each(|job| job()))
+            .expect("the spawner thread starts");
+        Mutex::new(sender)
+    });
+    let (reply, answer) = mpsc::channel();
+    let sent = jobs.lock().map_err(|_| Error::Failed)?.send(Box::new(move || {
+        let _ = reply.send(job());
+    }));
+    sent.map_err(|_| Error::Failed)?;
+    answer.recv().map_err(|_| Error::Failed)?
 }
 impl Read for PcmStream {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {

@@ -396,6 +396,37 @@ mod tests {
         assert!(player.take_finished(), "and played to its end");
     }
 
+    /// The helper was once killed about 15 seconds into every track: the sandbox dies with the thread
+    /// that started it, and that was a worker-pool thread GLib retires when idle. Play for longer
+    /// than that, without touching the player, and the track must still be playing.
+    #[test]
+    #[ignore = "plays 25 seconds of silence through the real audio output; requires the built helper and bubblewrap"]
+    fn a_track_keeps_playing_past_the_worker_pool_idle_timeout() {
+        let seconds = 40usize;
+        let data = seconds * 8_000 * 2;
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&(36 + data as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        for v in [1u16, 1] { wav.extend_from_slice(&v.to_le_bytes()); }
+        wav.extend_from_slice(&8_000u32.to_le_bytes());
+        wav.extend_from_slice(&16_000u32.to_le_bytes());
+        for v in [2u16, 16] { wav.extend_from_slice(&v.to_le_bytes()); }
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data as u32).to_le_bytes());
+        wav.resize(wav.len() + data, 0);
+        let path = std::env::temp_dir().join(format!("silence-idle-{}.wav", uuid::Uuid::new_v4()));
+        std::fs::write(&path, &wav).unwrap();
+        let player = AudioPlayer::new(File::open(&path).unwrap(), Container::Wav, seconds as u64 * 1000);
+        std::fs::remove_file(&path).unwrap();
+        player.play_from(0);
+        assert!(wait(Duration::from_secs(15), || player.state() == PlayState::Playing));
+        wait(Duration::from_secs(25), || player.state() != PlayState::Playing);
+        assert_eq!(player.state(), PlayState::Playing, "still playing 25 s in (error: {:?})", player.take_error());
+        assert!(player.position_ms() > 22_000, "position {} ms", player.position_ms());
+        player.stop();
+    }
+
     #[test]
     #[ignore = "requires the built audio helper, GStreamer plugins and bubblewrap"]
     fn pausing_holds_the_position_resuming_continues_and_seeking_restarts_the_helper() {
