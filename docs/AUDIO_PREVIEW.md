@@ -10,10 +10,15 @@ GTK process.
 
 ## Layers
 
-1. **Download policy.** Audio is fetched under the same rules as other media: automatically only
-   where `automatic_media_allowed` says so (the user's own, encrypted, contacts, joined rooms),
-   never above 64 MiB, otherwise on a click. Preparation starts only after the download, and only
-   while the bubble is on screen.
+1. **Decoding waits for a click.** Audio is fetched under the same rules as other media:
+   automatically only where `automatic_media_allowed` says so (the user's own, encrypted,
+   contacts, joined rooms), never above 64 MiB, otherwise on a click. But a finished download only
+   makes the file *available*: the bubble shows a play button and the file size, and nothing
+   parses, checks or decodes the file, in this process or in a helper, until the user presses
+   play. That one press prepares and plays. So receiving a message, even from someone allowed to
+   auto-download, cannot start decoding by itself. A test finishes a download, waits, and requires
+   that no helper was started and nothing was opened; it then presses play and requires that one
+   click prepares and plays.
 2. **Strict check** (`src/audio_check.rs`, pure Rust, no decoding). The first 64 KiB are read and
    the file is refused unless it is exactly one of the accepted shapes:
    - **Ogg:** every stream header is Opus (version 1, one or two channels, mapping family 0) or
@@ -49,6 +54,20 @@ GTK process.
    at most two channels and 8 to 96 kHz as the decoder reports them, and at most 30 minutes
    counted from what was actually decoded, not from any header. Output is always raw S16LE,
    48 kHz, stereo.
+   Two properties of the launcher (`src/confined.rs`) matter as much as the flags:
+   - **No inherited descriptors.** bubblewrap does not close the descriptors it inherits: a file
+     the app held open without close-on-exec (a socket, a database, a handle a library opened
+     carelessly) was readable inside the sandbox, which a test with a deliberately leaked
+     descriptor reproduced. The launcher now marks every descriptor above stdio close-on-exec in
+     the forked child, and re-enables only the input. (It marks them rather than closing them, so
+     a failed exec is still reported as an error.) The helper's `selftest` prints what it
+     inherited and a sandbox test requires "none".
+   - **One open file description per launch.** A duplicated descriptor shares its read offset with
+     the original, so helpers started together (rapid seeking) each received part of the file and
+     some got nothing. Each launch reopens the verified file through `/proc/self/fd` instead.
+   At most two files are prepared at a time: a flood of audio messages scrolling into view
+   queues, because each preparation is a helper process and a memory copy of the file, and the
+   work runs on the shared I/O thread pool (the wait happens before a pool thread is taken).
 4. **The reply is untrusted too.** The main process reads at most 8 KiB, parses it with unknown
    fields refused, and checks the container, duration, rate, channels and that the waveform has
    exactly 64 bars.
@@ -56,6 +75,17 @@ GTK process.
    PCM, through `appsrc ! audioconvert ! audioresample ! <sink>`: no demuxer, decoder or URI. Seeking
    restarts the helper at the new position rather than seeking inside a container. Dropping the
    player ends the helper.
+
+## FFmpeg
+
+MP3 and AAC (M4A) have a small GStreamer decoder (mpg123, faad) and an FFmpeg one (gst-libav).
+The helper uses FFmpeg only if the system already has it installed and the small decoder is
+missing; nothing is bundled for audio. If a format's decoder is not installed at all, the bubble
+says so ("Can't play this: it needs the GStreamer mpg123 plugin or FFmpeg (gst-libav), which is
+not installed") instead of reporting a corrupt file: the app checks the plugin directories before
+starting anything, and the helper reports a missing demuxer, parser or decoder with its own exit
+code (8). The packages that already ship `gst-libav` for video playback (Arch, Nix, the AppImage)
+are unchanged.
 
 ## Residual risk
 
@@ -66,7 +96,8 @@ deeper is judged by the helper's decoder.
 
 ## Interface
 
-Play and pause on the button, click the waveform to seek, Left and Right on the focused waveform
+Press play (it downloads first if needed, then prepares and plays); pause on the same button,
+click the waveform to seek, Left and Right on the focused waveform
 move five seconds and Space toggles. The button is libadwaita's circular suggested-action
 (accent colour) with an accessible name that follows its state (download, cancel, preparing,
 play, pause, try again). A file that is refused or fails shows a short reason under the waveform
