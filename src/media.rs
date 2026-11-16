@@ -127,6 +127,7 @@ impl Ui {
         let old=self.media_toggles.borrow_mut().remove("monero");
         if let Some(old)=old{self.media_tabs.remove(&old);}
         if let Some(old)=self.media_stack.child_by_name("monero"){self.media_stack.remove(&old);}
+        self.sidebar_cards.borrow_mut().clear();
         if visible {
             let tab=adw::Toggle::builder().name("monero").label("Monero").build();
             self.media_stack.add_named(&crate::monero_settings_ui::wallet_sidebar(self),Some("monero"));

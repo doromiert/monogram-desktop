@@ -193,11 +193,12 @@ mod tests {
         let app=adw::Application::builder().application_id("com.negzero.MoneroTabTest").flags(gtk::gio::ApplicationFlags::NON_UNIQUE).build();app.register(gtk::gio::Cancellable::NONE).unwrap();let ui=Ui::new(&app,true);
         let owner="wallet@fixture.invalid";ui.state.borrow_mut().account=owner.into();ui.refresh_monero_sidebar();assert!(!ui.media_toggles.borrow().contains_key("monero"));
         let settings=Settings{enabled:true,daemon:"https://node.example".into(),..Default::default()};ui.store.set_pref(&format!("monero-settings:{owner}"),&serde_json::to_string(&settings).unwrap()).unwrap();ui.refresh_monero_sidebar();assert!(ui.media_toggles.borrow()["monero"].is_enabled());
-        ui.store.set_pref(&format!("synced-wallet:{owner}:fixture"),r#"{"name":"Main","network":"MAINNET","address":"fixture-receiving-address"}"#).unwrap();ui.refresh_monero_sidebar();assert!(ui.sidebar_card.borrow().is_some(),"synced wallets use the real 3D card widget");
+        ui.store.set_pref(&format!("synced-wallet:{owner}:fixture"),r#"{"name":"Main","network":"MAINNET","address":"fixture-receiving-address"}"#).unwrap();ui.refresh_monero_sidebar();assert!(!ui.sidebar_cards.borrow().is_empty(),"synced wallets use the real 3D card widget");
+        ui.store.set_pref(&format!("synced-wallet:{owner}:second"),r#"{"name":"Savings","network":"MAINNET","address":"second-fixture-address"}"#).unwrap();ui.refresh_monero_sidebar();assert_eq!(ui.sidebar_cards.borrow().len(),2,"all cards retain hover/resize handlers");
         assert!(ui.media_toggles.borrow()["monero"].icon_name().is_none());
         assert!(!ui.media_stack.child_by_name("monero").unwrap().is::<adw::PreferencesPage>());
         ui.media_tabs.set_active_name(Some("monero"));assert_eq!(ui.media_stack.visible_child_name().as_deref(),Some("monero"));ui.refresh_monero_sidebar();assert_eq!(ui.media_stack.visible_child_name().as_deref(),Some("monero"));
-        ui.state.borrow_mut().account="other@fixture.invalid".into();ui.refresh_monero_sidebar();assert!(!ui.media_toggles.borrow().contains_key("monero"));assert!(ui.media_stack.child_by_name("monero").is_none());ui.window.close();
+        ui.state.borrow_mut().account="other@fixture.invalid".into();ui.refresh_monero_sidebar();assert!(!ui.media_toggles.borrow().contains_key("monero"));assert!(ui.media_stack.child_by_name("monero").is_none());assert!(ui.sidebar_cards.borrow().is_empty());ui.window.close();
     }
     #[test]
     fn node_requires_https_and_separate_credentials() {
@@ -224,7 +225,7 @@ pub(crate) fn wallet_sidebar(ui: &Rc<Ui>) -> gtk::Widget {
     crate::widgets::margins(&body, 12);
     let owner = ui.state.borrow().account.clone();
     let records = crate::lan_sync::public_records(&ui.store, &format!("synced-wallet:{owner}:"));
-    ui.sidebar_card.borrow_mut().take();
+    ui.sidebar_cards.borrow_mut().clear();
     for value in &records {
         let name = value["name"].as_str().unwrap_or("Wallet");
         let address = value["address"].as_str().unwrap_or("").to_owned();
@@ -234,7 +235,7 @@ pub(crate) fn wallet_sidebar(ui: &Rc<Ui>) -> gtk::Widget {
             if let Some(ui) = weak.upgrade() { receiving_address(&ui, &receiving); }
         });
         body.append(&card.root);
-        ui.sidebar_card.replace(Some(card));
+        ui.sidebar_cards.borrow_mut().push(card);
         body.append(&adw::ActionRow::builder().title("Receiving address")
             .subtitle(&address).subtitle_selectable(true).use_markup(false).build());
     }
