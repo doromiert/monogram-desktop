@@ -216,8 +216,11 @@ fn parse_list(xml: &Element, affiliation: Affiliation) -> Result<BTreeMap<String
     Ok(members)
 }
 
-fn complete(room: &str, info: Element, lists: [Element; 3]) -> Result<MemberSnapshot> {
-    bounded(&info)?;
+/// Only a members-only, non-anonymous room discloses a complete recipient list. Anything else
+/// (a public or semi-anonymous room) can never be end-to-end encrypted, so report that from the
+/// room's features alone, before asking for member lists a public room refuses to give.
+fn require_private(info: &Element) -> Result<()> {
+    bounded(info)?;
     if !info.is("query", DISCO) || info.attr("node").is_some() {
         return Err(Error::Invalid);
     }
@@ -233,6 +236,11 @@ fn complete(room: &str, info: Element, lists: [Element; 3]) -> Result<MemberSnap
     {
         return Err(Error::RecipientsUnavailable);
     }
+    Ok(())
+}
+
+fn complete(room: &str, info: Element, lists: [Element; 3]) -> Result<MemberSnapshot> {
+    require_private(&info)?;
     let mut affiliations = BTreeMap::new();
     for (list, affiliation) in
         lists
@@ -260,8 +268,9 @@ pub async fn fetch(iq: &iq::Client, room: &str) -> Result<MemberSnapshot> {
         query.append_child(attr(el("item", ADMIN), "affiliation", affiliation.name()));
         request(iq, &room, query)
     };
-    let (info, member, admin, owner) = tokio::try_join!(
-        request(iq, &room, el("query", DISCO)),
+    let info = request(iq, &room, el("query", DISCO)).await?;
+    require_private(&info)?;
+    let (member, admin, owner) = tokio::try_join!(
         list(Affiliation::Member),
         list(Affiliation::Admin),
         list(Affiliation::Owner),
@@ -272,6 +281,26 @@ pub async fn fetch(iq: &iq::Client, room: &str) -> Result<MemberSnapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn public_rooms_are_rejected_from_their_features_before_member_lists_are_requested() {
+        let info = |features: &[&str]| -> Element {
+            let features: String = features
+                .iter()
+                .map(|feature| format!("<feature var='{feature}'/>"))
+                .collect();
+            format!("<query xmlns='{DISCO}'>{features}</query>").parse().unwrap()
+        };
+        assert!(matches!(
+            require_private(&info(&["muc_open", "muc_semianonymous", "muc_unmoderated"])),
+            Err(Error::RecipientsUnavailable)
+        ));
+        assert!(matches!(
+            require_private(&info(&["muc_membersonly"])),
+            Err(Error::RecipientsUnavailable)
+        ));
+        assert!(require_private(&info(&["muc_membersonly", "muc_nonanonymous"])).is_ok());
+    }
+
     #[test]
     fn admitted_affiliation_changes_keep_complete_recipients_but_revocation_blocks() {
         let room = "room@conference.example.org";

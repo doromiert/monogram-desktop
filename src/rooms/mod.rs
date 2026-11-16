@@ -59,6 +59,13 @@ impl fmt::Display for Error {
                 "Joined {room}, but its password could not be saved in the system keyring. The room is still joined."
             );
         }
+        if let Self::Request(iq::Error::Rejected { condition, .. }) = self {
+            return write!(
+                f,
+                "The server refused the room request: {}",
+                condition.replace('-', " ")
+            );
+        }
         f.write_str(match self {
             Self::Invalid => "Invalid room address, nickname or server response",
             Self::Request(iq::Error::Timeout) => {
