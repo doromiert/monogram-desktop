@@ -1,6 +1,7 @@
 use adw::prelude::*;
 mod action_store;
 mod attachment_ui;
+mod audio_ui;
 mod avatar;
 mod avatar_ui;
 mod blocking;
@@ -479,3 +480,4 @@ mod picker_actions_native;
 mod room_restore_native;
 
 thread_local! {static OPEN_FILES:std::cell::RefCell<Vec<gtk::gio::File>>=const{std::cell::RefCell::new(Vec::new())};}
+

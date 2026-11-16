@@ -175,14 +175,22 @@ fn media_container(head: &[u8]) -> bool {
         || (at(0, &[0x47]) && at(188, &[0x47])) // MPEG transport stream
         || (at(4, &[0x47]) && at(196, &[0x47])) // M2TS
 }
+fn audio_container(head:&[u8])->bool {
+    head.starts_with(b"ID3") && head.get(3).is_some_and(|v|(2..=4).contains(v))
+        || head.starts_with(b"fLaC")
+        || head.starts_with(b"RIFF") && head.get(8..12)==Some(b"WAVE")
+        || head.len()>=4 && head[0]==0xff && head[1]&0xe0==0xe0 && head[1]&0x18!=0x08
+}
 impl Playback {
-    pub(crate) fn new(input: VerifiedFile) -> Option<Rc<Self>> {
+    pub(crate) fn new(input: VerifiedFile) -> Option<Rc<Self>> {Self::new_kind(input,false)}
+    pub(crate) fn new_audio(input:VerifiedFile)->Option<Rc<Self>> {Self::new_kind(input,true)}
+    fn new_kind(input:VerifiedFile,audio:bool)->Option<Rc<Self>> {
         if PLAYBACK_READY.get()!=Some(&true) {return None;}
         {
             use std::os::unix::fs::FileExt;
             let mut head = [0u8; 512];
             let read = input.0.read_at(&mut head, 0).ok()?;
-            if !media_container(&head[..read]) {return None;}
+            if !media_container(&head[..read]) && !(audio && audio_container(&head[..read])) {return None;}
         }
         let file = gio::File::for_path(format!("/proc/self/fd/{}", input.0.as_raw_fd()));
         let uri = CString::new(file.uri().as_str()).ok()?;
@@ -195,8 +203,8 @@ impl Playback {
         let media: gtk::MediaStream = unsafe { from_glib_full(pointer) };
         let controls: gtk::Widget = unsafe { from_glib_none(controls) };
         let replay: gtk::Button = unsafe { from_glib_none(replay.cast::<gtk::ffi::GtkButton>()) };
-        media.set_muted(true);
-        media.set_loop(true);
+        media.set_muted(!audio);
+        media.set_loop(!audio);
         Some(Rc::new(Self {
             media,
             controls,

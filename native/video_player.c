@@ -45,10 +45,11 @@ static void refresh (MonogramVideo *self) {
   if (gtk_media_stream_is_prepared (stream) && duration > 0 &&
       gtk_media_stream_get_duration (stream) == 0)
     gtk_media_stream_stream_unprepared (stream);
-  if (!gtk_media_stream_is_prepared (stream) && self->width > 0 && self->paintable &&
-      gdk_paintable_get_intrinsic_width (self->paintable) > 1) {
-    gboolean audio = clapper_stream_list_get_n_streams (clapper_player_get_audio_streams (self->player)) > 0;
-    gtk_media_stream_stream_prepared (stream, audio, TRUE, TRUE, duration * G_USEC_PER_SEC);
+  gboolean audio = clapper_stream_list_get_n_streams (clapper_player_get_audio_streams (self->player)) > 0;
+  gboolean video_ready = self->width > 0 && self->paintable && gdk_paintable_get_intrinsic_width (self->paintable) > 1;
+  gboolean audio_ready = audio && clapper_stream_list_get_n_streams (videos) == 0 && duration > 0;
+  if (!gtk_media_stream_is_prepared (stream) && (video_ready || audio_ready)) {
+    gtk_media_stream_stream_prepared (stream, audio, video_ready, duration > 0, duration * G_USEC_PER_SEC);
   }
   ClapperPlayerState state = clapper_player_get_state (self->player);
   if (state == CLAPPER_PLAYER_STATE_PLAYING || state == CLAPPER_PLAYER_STATE_PAUSED)

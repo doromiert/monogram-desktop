@@ -12,6 +12,7 @@ pub(crate) fn automatic_media_allowed(smoke: bool, own: bool, encrypted: bool, c
 impl Ui {
     pub fn attachment_content(self: &Rc<Self>, message: &Message) -> gtk::Box {
         let file = message.attachment.as_ref().unwrap().clone();
+        if file.audio_candidate(){return self.audio_attachment(message);}
         if file.media_candidate() {
             return self.media_attachment(message);
         }
