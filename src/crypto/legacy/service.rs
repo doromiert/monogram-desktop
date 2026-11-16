@@ -33,6 +33,7 @@ pub struct LegacyReply {
     pub to: String,
     pub quote: String,
     pub text: String,
+    pub original: String,
 }
 impl LegacyReply {
     fn parse(outer: &Element, body: &str, owner: &str, peer: &str, room: bool) -> Option<Self> {
@@ -64,6 +65,7 @@ impl LegacyReply {
             to,
             quote,
             text,
+            original: body.into(),
         })
     }
 }
@@ -210,6 +212,7 @@ fn split_fallback(outer: &Element, body: &str) -> Option<(String, String)> {
     let (prefix, text) = body.split_at(body.char_indices().nth(end)?.0);
     let quote = prefix
         .strip_suffix('\n')?
+        .trim_end_matches('\n')
         .split('\n')
         .map(|line| line.strip_prefix("> "))
         .collect::<Option<Vec<_>>>()?
@@ -809,7 +812,6 @@ impl Worker {
                             });
                         }
                         let legacy_reply = if stored.mode() == Mode::Legacy
-                            && stored.reply_id.is_empty()
                             && stored.kind == "text"
                             && !stored.edited
                             && !stored.retracted
@@ -820,7 +822,7 @@ impl Worker {
                                 &self.owner,
                                 peer,
                                 room.is_some(),
-                            )
+                            ).filter(|reply| stored.reply_id.is_empty() || stored.reply_id==reply.id && (stored.reply_to.is_empty() || stored.reply_to==reply.to) && !reply.quote.is_empty())
                         } else {
                             None
                         };
@@ -1359,6 +1361,32 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monocles_reply_fallback_accepts_a_blank_separator() {
+        for prefix in ["> quoted\n","> quoted\n\n","> first\n> second\n\n"] {
+            let body=format!("{prefix}authored message");
+            let xml:Element=format!("<message xmlns='jabber:client'><reply xmlns='{REPLY}' id='original'/><fallback xmlns='{FALLBACK}' for='{REPLY}'><body start='0' end='{}'/></fallback></message>",prefix.chars().count()).parse().unwrap();
+            let (quote,text)=split_fallback(&xml,&body).unwrap();assert!(!quote.is_empty());assert_eq!(text,"authored message");
+        }
+        let body="> quoted\nnot quoted\n\nauthored";
+        let xml:Element=format!("<message xmlns='jabber:client'><fallback xmlns='{FALLBACK}' for='{REPLY}'><body start='0' end='22'/></fallback></message>").parse().unwrap();
+        assert!(split_fallback(&xml,body).is_none(),"unsigned fallback cannot hide nonquoted authored lines");
+    }
+
+    #[test]
+    fn cached_monocles_reply_removes_only_the_original_fallback_and_rebases_styles() {
+        let store=crate::storage::Store::open(true).unwrap();let owner="me@fixture.invalid";let peer="friend@fixture.invalid";
+        store.save_account(&crate::model::Account{jid:owner.into(),host:String::new(),port:5222,direct_tls:false}).unwrap();
+        let prefix="> 😀 quoted\n\n";let raw=format!("{prefix}authored");let offset=prefix.chars().count();
+        let mut message=Message{id:"cached-monocles".into(),text:raw.clone(),reply_id:"original".into(),reply_to:peer.into(),timestamp:crate::model::now(),..Default::default()};message.set_encryption(Mode::Legacy,"ab".repeat(32));
+        let mut markup=crate::formatting::Markup::plain(&raw);markup.ranges.push(crate::formatting::Range::new(offset,offset+8,crate::formatting::Style::Strong));message.formatting=Some(markup);
+        let chat=crate::model::Chat{jid:peer.into(),..Default::default()};store.save_chat_message(owner,&chat,Some(&message)).unwrap();
+        let xml:Element=format!("<message xmlns='jabber:client'><reply xmlns='{REPLY}' to='{peer}' id='original'/><fallback xmlns='{FALLBACK}' for='{REPLY}'><body start='0' end='{offset}'/></fallback></message>").parse().unwrap();
+        let parsed=LegacyReply::parse(&xml,&raw,owner,peer,false).unwrap();store.restore_legacy_reply(owner,peer,&message.id,parsed.clone()).unwrap();
+        let repaired=store.message(owner,peer,&message.id).unwrap();assert_eq!(repaired.text,"authored");let markup=repaired.formatting.unwrap();assert_eq!(markup.body,"authored");assert_eq!((markup.ranges[0].start,markup.ranges[0].end),(0,8));
+        let mut newer=message.clone();newer.text="a later edit".into();store.save_chat_message(owner,&chat,Some(&newer)).unwrap();store.restore_legacy_reply(owner,peer,&message.id,parsed).unwrap();assert_eq!(store.message(owner,peer,&message.id).unwrap().text,"a later edit");
+    }
 
     #[test]
     fn mobile_legacy_retraction_send_receive_and_cached_mam_repair() {
