@@ -283,7 +283,9 @@ requests a fresh single-use slot for one replay of the same ciphertext. The last
 acknowledgement is bounded to five seconds; final size/header checks can confirm
 either stored object, and failures/certificate/cancellation guards remain. The
 26 core transfer checks pass, including the one-second retry, stream-close wait,
-final deadline, immutable bytes and original-object fallback. Device acceptance
-is pending. Desktop already uses fresh slots but still has a30-second
+final deadline, immutable bytes and original-object fallback. Physical AndroidAPI37 acceptance passed: the first upload lost its ACK;
+the fresh-slot retry returned successfully (396ms response phase), with no
+subsequent upload/send failure in the captured interval. Desktop already uses
+fresh slots but still has a30-second
 acknowledgement window and lacks this final stored-object fallback; that narrower
 recovery behavior remains a desktop parity task.
