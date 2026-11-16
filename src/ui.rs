@@ -2758,17 +2758,7 @@ impl Ui {
                 if !ours {
                     return;
                 }
-                let reason = reason.trim();
-                if reason.is_empty() {
-                    self.notice("Message could not be sent. Retry from its menu.");
-                } else {
-                    let reason = if reason.chars().count() > 100 {
-                        format!("{}…", reason.chars().take(100).collect::<String>())
-                    } else {
-                        reason.to_owned()
-                    };
-                    self.notice(&format!("Message not sent: {reason}"));
-                }
+                self.notice(&crate::text_safety::failed_send_toast(&reason));
             }
             BackendEvent::History {
                 peer,

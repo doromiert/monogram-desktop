@@ -83,6 +83,7 @@ mod noto_emoji;
 mod picture_editor;
 mod picture_editor_ui;
 mod sysinfo;
+mod text_safety;
 mod toast_routing;
 mod room_members_ui;
 mod room_ui;

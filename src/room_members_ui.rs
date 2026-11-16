@@ -41,9 +41,11 @@ impl Section {
 /// each heading showing "visible/total" so a search shows how much of the room it covers.
 fn rows(all: &[Participant], query: &str) -> Vec<Row> {
     let query = query.trim().to_lowercase();
+    // Names are matched and sorted as they are shown, with invisible characters removed.
+    let name = |person: &Participant| crate::text_safety::display_nick(&person.nick, person.own);
     let matches = |person: &Participant| {
         query.is_empty()
-            || person.nick.to_lowercase().contains(&query)
+            || name(person).to_lowercase().contains(&query)
             || person
                 .jid
                 .as_ref()
@@ -58,7 +60,7 @@ fn rows(all: &[Participant], query: &str) -> Vec<Row> {
         if people.is_empty() {
             continue;
         }
-        people.sort_by_cached_key(|person| (!person.own, person.nick.to_lowercase()));
+        people.sort_by_cached_key(|person| (!person.own, name(person).to_lowercase()));
         rows.push(Row::Heading(format!(
             "{} ({}/{})",
             section.title(),
@@ -224,11 +226,10 @@ fn factory(ui: Weak<Ui>) -> gtk::SignalListItemFactory {
                     _ => "presence-online",
                 });
                 let name = person.last_child().and_downcast::<gtk::Label>().unwrap();
-                let shown = if participant.own {
-                    format!("{} (You)", participant.nick)
-                } else {
-                    participant.nick.clone()
-                };
+                // The "(You)" mark is added here, for the user's own entry only; other people's
+                // names are cleaned so they cannot imitate it or hide characters.
+                let nick = crate::text_safety::display_nick(&participant.nick, participant.own);
+                let shown = if participant.own { format!("{nick} (You)") } else { nick };
                 name.set_label(&shown);
                 person.set_tooltip_text(Some(&match &participant.jid {
                     Some(jid) => format!("{shown} · {jid}"),
@@ -567,6 +568,25 @@ mod tests {
         assert_eq!(auto_action(&AutoState { wide: false, ..shown(false) }), Auto::Keep, "the user opened it");
         let other = AutoState { wide: false, sidebar_shown: true, showing_auto: true, ..ready() };
         assert_eq!(auto_action(&other), Auto::Keep, "a different pane is not ours to close");
+    }
+
+    #[test]
+    fn hostile_names_cannot_hide_reorder_or_pose_as_the_user() {
+        let mut own = person("Romeo", "member", true);
+        own.nick = "Romeo".into();
+        let all = vec![person("Mallory (You)", "member", false), person("zed\u{202e}", "member", false), own];
+        let rows = rows(&all, "");
+        let names: Vec<String> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Person(p) => Some(crate::text_safety::display_nick(&p.nick, p.own)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["Romeo", "Mallory [You]", "zed"], "the user first, lookalikes neutralised, direction marks gone");
+        // Searching for "you" does not surface the lookalike as if it were the user's own row.
+        assert!(super::rows(&all, "(you)").is_empty());
+        assert_eq!(super::rows(&all, "[you]").len(), 2, "heading and the one person who really has that name");
     }
 
     #[test]

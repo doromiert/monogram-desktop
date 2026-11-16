@@ -43,6 +43,20 @@ pub struct RoomSender {
     pub author: String,
 }
 
+/// Only the values XEP-0045 and XEP-0045's presence rules define are kept; anything else (from a
+/// hostile or buggy occupant or service) becomes the default, so a stanza cannot make the roster
+/// store arbitrary text.
+fn known(value: Option<&str>, allowed: &[&str], default: &str) -> String {
+    value
+        .map(str::trim)
+        .filter(|value| allowed.contains(value))
+        .unwrap_or(default)
+        .to_owned()
+}
+const AFFILIATIONS: [&str; 5] = ["owner", "admin", "member", "none", "outcast"];
+const ROLES: [&str; 4] = ["moderator", "participant", "visitor", "none"];
+const SHOWS: [&str; 4] = ["chat", "away", "xa", "dnd"];
+
 /// One room occupant as shown in the participants list. Built from presence only, so it is
 /// available in public rooms too; `jid` is set only when the room discloses real addresses.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,13 +173,13 @@ impl Registry {
                         .and_then(|real| real.parse::<Jid>().ok())
                         .filter(|jid| jid.node().is_some())
                         .map(|jid| jid.to_bare().to_string()),
-                    affiliation: item.attr("affiliation").unwrap_or("none").into(),
-                    role: item.attr("role").unwrap_or("participant").into(),
-                    show: xml
-                        .children()
-                        .find(|child| child.name() == "show")
-                        .map(|show| show.text())
-                        .unwrap_or_default(),
+                    affiliation: known(item.attr("affiliation"), &AFFILIATIONS, "none"),
+                    role: known(item.attr("role"), &ROLES, "participant"),
+                    show: known(
+                        xml.children().find(|child| child.name() == "show").map(|show| show.text()).as_deref(),
+                        &SHOWS,
+                        "",
+                    ),
                     own: user.children().any(|status| {
                         status.name() == "status" && status.attr("code") == Some("110")
                     }),
@@ -181,10 +195,7 @@ impl Registry {
             jid.node()?;
             Some(jid.to_bare().to_string())
         });
-        let affiliation = item
-            .and_then(|item| item.attr("affiliation"))
-            .unwrap_or("")
-            .to_owned();
+        let affiliation = known(item.and_then(|item| item.attr("affiliation")), &AFFILIATIONS, "");
         let valid = parsed.is_ok() && item.is_some() && bounded(xml).is_ok();
         let value = (author, affiliation);
         let changed = if !valid
@@ -392,6 +403,39 @@ mod tests {
         registry.presence(room, &format!("{room}/amy"), &xml, &user);
         let changes = registry.take_roster_changes();
         assert_eq!(changes[0].1.iter().map(|p| p.nick.as_str()).collect::<Vec<_>>(), ["me"]);
+    }
+
+    #[test]
+    fn roster_fields_only_ever_hold_known_values_however_large_the_stanza() {
+        let room = "room@conference.example.org";
+        let mut registry = Registry::default();
+        registry.reset(room);
+        registry.take_roster_changes();
+        // The restricted XML parser already refuses large attribute values; element text such as
+        // <show> is accepted up to the stanza limit, so that is where the large value arrives.
+        let huge_text = "x".repeat(200_000);
+        let long_attribute = "y".repeat(1_000);
+        let (xml, user) = occupant_presence(
+            room,
+            "mallory",
+            &format!("<show>{huge_text}</show>"),
+            "",
+            &format!("<item affiliation='{long_attribute}' role='{long_attribute}'/>"),
+        );
+        registry.presence(room, &format!("{room}/mallory"), &xml, &user);
+        let people = registry.take_roster_changes().pop().unwrap().1;
+        let mallory = &people[0];
+        assert_eq!((mallory.affiliation.as_str(), mallory.role.as_str(), mallory.show.as_str()), ("none", "participant", ""));
+        // The real values still come through unchanged.
+        for (show, affiliation, role) in [("away", "owner", "moderator"), ("dnd", "outcast", "visitor"), ("chat", "member", "none"), ("xa", "admin", "participant")] {
+            let (xml, user) = occupant_presence(room, "p", &format!("<show>{show}</show>"), "", &format!("<item affiliation='{affiliation}' role='{role}'/>"));
+            registry.presence(room, &format!("{room}/p"), &xml, &user);
+            let people = registry.take_roster_changes().pop().unwrap().1;
+            let p = people.iter().find(|p| p.nick == "p").unwrap();
+            assert_eq!((p.show.as_str(), p.affiliation.as_str(), p.role.as_str()), (show, affiliation, role));
+        }
+        // Unknown values never reach the encryption-recipient bookkeeping either.
+        assert!(registry.rooms[room].occupants.values().all(|(_, a)| AFFILIATIONS.contains(&a.as_str()) || a.is_empty()));
     }
 
     #[test]

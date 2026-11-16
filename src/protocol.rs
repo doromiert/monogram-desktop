@@ -44,6 +44,10 @@ fn stanza_error_reason(root: &Element) -> String {
         (false, false) => format!("{condition}: {}", detail.trim()),
     }
 }
+/// A reason that came from a server says so, so it cannot pass for the app's own words.
+fn server_said(reason: String) -> String {
+    if reason.trim().is_empty() { reason } else { format!("the server said {reason}") }
+}
 fn bare_of(value: &str) -> String {
     value.split('/').next().unwrap_or("").to_string()
 }
@@ -1539,7 +1543,7 @@ impl Session {
                                 if crate::avatar::pep_changed(&root) && bare(from).ok().as_deref()==Some(from) {
                                     emit(BackendEvent::AvatarChanged{peer:from.into(),hint:None});
                                 }
-                                if root.attr("type")==Some("error"){emit(BackendEvent::Failed{peer:bare_of(from),id:root.attr("id").unwrap_or("").into(),reason:stanza_error_reason(&root)});continue}
+                                if root.attr("type")==Some("error"){emit(BackendEvent::Failed{peer:bare_of(from),id:root.attr("id").unwrap_or("").into(),reason:server_said(stanza_error_reason(&root))});continue}
                                 if let Some(notice)=crate::read_markers::incoming_receipt(&root,&owner).filter(|n|!rooms.known(&n.peer)){emit(BackendEvent::Receipt{peer:notice.peer,id:notice.id});}
                                 if let Some(notice)=crate::read_markers::incoming(&root,&owner).filter(|n|!rooms.known(&n.peer)){emit(BackendEvent::Read{peer:notice.peer,id:notice.id});}
                                 let mut carbon_wrappers=root.children().filter(|c|c.is("received","urn:xmpp:carbons:2")||c.is("sent","urn:xmpp:carbons:2"));
