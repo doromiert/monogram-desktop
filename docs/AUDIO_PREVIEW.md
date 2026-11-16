@@ -119,3 +119,6 @@ and on the button instead of a player. Only one audio plays at a time.
 - `tools/headless-gtk-test.sh --bin monogram-desktop -- --ignored the_bubble_prepares`: the
   bubble end to end, and `an_audio_message_in_the_timeline`: the player appears for audio
   messages and not for other files.
+
+The helper must be started from a thread that lives as long as the process, or it is killed
+after about 15 seconds; see [SANDBOXED_HELPERS.md](SANDBOXED_HELPERS.md).
