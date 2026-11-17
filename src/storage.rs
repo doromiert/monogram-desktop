@@ -496,10 +496,36 @@ impl Store {
         };
         if message.delivery != "read" && (message.delivery != "delivered" || status == "read") {
             message.delivery = status.into();
+            if !matches!(status, "failed" | "uncertain") {
+                message.failure_reason.clear();
+            }
             let tx = self.db.unchecked_transaction()?;
             self.upsert_message(account, peer, &message)?;
             tx.commit()?;
         }
+        Ok(Some(message))
+    }
+    /// Record why the own message `wire` failed, for Message Details.
+    pub fn record_failure(
+        &self,
+        account: &str,
+        peer: &str,
+        wire: &str,
+        reason: &str,
+    ) -> rusqlite::Result<Option<Message>> {
+        let Some(id) = self.own_wire_id(account, peer, wire)? else {
+            return Ok(None);
+        };
+        let Some(mut message) = self
+            .message(account, peer, &id)
+            .filter(|m| m.own && m.wire_id == wire && !m.retracted)
+        else {
+            return Ok(None);
+        };
+        message.failure_reason = reason.to_owned();
+        let tx = self.db.unchecked_transaction()?;
+        self.upsert_message(account, peer, &message)?;
+        tx.commit()?;
         Ok(Some(message))
     }
     /// Record that the own message `wire` went out without `skipped` room members.

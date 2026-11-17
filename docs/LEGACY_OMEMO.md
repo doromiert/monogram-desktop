@@ -59,7 +59,8 @@ Message Details lists each member who was left out and why. The choice is stored
 applies to the room's later messages for 30 minutes (until the app closes), so you are not asked for
 every message; Preferences > Offer Send Anyway turns the button off. It never locks the room to
 Legacy OMEMO, because Legacy OMEMO has no protected reactions: automatic selection still picks the
-protocol, with the encryption check leaving the same members out. It never selects
+protocol, with the encryption check leaving the same members out; OMEMO2 (PQ) rooms follow the
+same rule. It never selects
 plaintext, never skips a member whose keys are merely unreviewed, never skips your own devices,
 and refuses to send when nobody else could be reached.
 
@@ -73,6 +74,11 @@ available" and, for a room that has used encryption, refuses to fall back to pla
 reads "This room could not be fully encrypted, so nothing was sent." and offers Send Anyway, which
 encrypts for everyone who has keys. Choosing Unencrypted in Conversation Security stays the explicit
 way to send in plain text.
+
+A failed send keeps its reason on the message instead of in a toast, which cuts long text off. The
+toast says "Message not sent. See Message Details." (with Resolve or Send Anyway when they apply),
+the failed bubble's tooltip says the same, and Message Details shows **What Went Wrong** in full. The
+reason clears when the message is sent.
 
 Legacy upload requests retain the sanitized filename/MIME used by Android;
 OMEMO 2 retains opaque upload metadata. Outer SFS/OOB descriptions remain

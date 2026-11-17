@@ -11,8 +11,11 @@ use std::rc::Rc;
 /// Shown instead of sending when automatic selection could only offer plaintext for a room that has
 /// used encryption. The cause is often one member who has no usable keys, not the room itself.
 pub const DOWNGRADE_NOTICE: &str = "This room could not be fully encrypted, so nothing was sent. To send unencrypted anyway, choose Unencrypted in Conversation Security.";
-/// The same, for a toast that has a Send Anyway button.
-pub const DOWNGRADE_TOAST: &str = "This room could not be fully encrypted, so nothing was sent.";
+/// The toast for a room whose encryption was blocked; the reason is in Message Details.
+pub const DOWNGRADE_TOAST: &str = crate::text_safety::NOT_SENT_TOAST;
+/// Shown in Message Details when automatic selection ended at plaintext for a room that has used
+/// encryption and nothing was sent.
+pub const DOWNGRADE_REASON: &str = "This room could not be fully encrypted, so nothing was sent. Someone in it may have no usable keys, or it may no longer offer encryption. Send Anyway encrypts for everyone who has keys; choosing Unencrypted in Conversation Security sends in plain text.";
 
 impl Ui {
     pub(crate) fn update_send_button(&self) {

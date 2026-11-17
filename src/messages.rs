@@ -231,10 +231,12 @@ fn message_status(meta: &gtk::Box, m: &Message) {
             "failed" | "uncertain" => {
                 let image = gtk::Image::from_icon_name("dialog-warning-symbolic");
                 image.set_pixel_size(12);
-                image.set_tooltip_text(Some(if m.delivery == "failed" {
-                    "Send failed"
-                } else {
-                    "Delivery uncertain"
+                let see_details = !m.failure_reason.is_empty();
+                image.set_tooltip_text(Some(match (m.delivery == "failed", see_details) {
+                    (true, true) => "Send failed. See Message Details",
+                    (true, false) => "Send failed",
+                    (false, true) => "Delivery uncertain. See Message Details",
+                    (false, false) => "Delivery uncertain",
                 }));
                 meta.append(&image);
             }
@@ -318,6 +320,7 @@ impl Ui {
             || row.message.encrypted != message.encrypted
             || row.message.encryption_mode != message.encryption_mode
             || row.message.skipped_members != message.skipped_members
+            || row.message.failure_reason != message.failure_reason
         {
             message_status(&row.status, message);
         }

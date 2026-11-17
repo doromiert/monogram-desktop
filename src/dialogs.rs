@@ -2030,6 +2030,15 @@ impl Ui {
             ("Delivery", m.delivery.clone()),
             ("Message ID", m.wire_id.clone()),
         ] {
+            if title == "Message ID" && m.own && !m.failure_reason.is_empty() {
+                g.add(
+                    &adw::ActionRow::builder()
+                        .title("What Went Wrong")
+                        .subtitle(crate::text_safety::failure_reason(&m.failure_reason))
+                        .use_markup(false)
+                        .build(),
+                );
+            }
             g.add(
                 &adw::ActionRow::builder()
                     .title(title)
@@ -2132,6 +2141,7 @@ impl Ui {
                     let peer = s.current().jid.clone();
                     if let Some(m) = s.current_mut().messages.iter_mut().find(|m| m.id == id) {
                         m.delivery = "sending".into();
+                        m.failure_reason.clear();
                         let message = m.clone();
                         drop(s);
                         if ui.persist() {

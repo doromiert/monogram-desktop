@@ -220,6 +220,7 @@ impl Ui {
         message.preview_spoilers=Some(authored.spoiler_context());
         message.formatting=Some(authored);
         message.delivery = "queued".into();
+        message.failure_reason.clear();
         // Encryption is unknown until the sending policy has actually completed.
         message.encrypted = false;
         message.encryption_mode = None;
@@ -506,6 +507,7 @@ impl Ui {
         let ids: Vec<String> = messages.iter().map(|message| message.id.clone()).collect();
         for mut message in messages {
             message.delivery = "failed".into();
+            message.failure_reason = crate::send_policy_ui::DOWNGRADE_REASON.into();
             self.store_queued_row(owner, peer, message);
         }
         self.notice_downgrade_blocked(peer, ids);
@@ -521,11 +523,13 @@ impl Ui {
         error: &str,
     ) {
         let ids: Vec<String> = messages.iter().map(|message| message.id.clone()).collect();
+        let reason = crate::text_safety::failure_reason(error);
         for mut message in messages {
             message.delivery = "failed".into();
+            message.failure_reason = reason.clone();
             self.store_queued_row(owner, peer, message);
         }
-        self.notice_send_failure(peer, ids, error, error.to_owned());
+        self.notice_send_failure(peer, ids, error, crate::text_safety::NOT_SENT_TOAST.into());
     }
     pub fn store_queued_row(self: &Rc<Self>, owner: &str, peer: &str, message: Message) -> bool {
         if self.store.save_outbox_row(owner, peer, &message).is_err() {
@@ -588,6 +592,7 @@ impl Ui {
             }
             let mut message = message;
             message.delivery = "sending".into();
+            message.failure_reason.clear();
             if let Some(row) = self.state.borrow_mut().current_mut().messages.iter_mut().find(|row| row.id == *id) {
                 *row = message.clone();
             }
@@ -614,6 +619,7 @@ impl Ui {
             return true;
         }
         message.delivery = "queued".into();
+        message.failure_reason.clear();
         if self.store_queued_row(&owner, &peer, message) {
             self.flush_send_queue();
         }
@@ -930,7 +936,13 @@ mod tests {
         let (ui, message) = room_with_failed_message("com.negzero.SendAnywayQueuedFixture", "waiting", true);
         ui.fail_queued_selection(OWNER, ROOM, vec![message], &refusal());
         settle(300);
-        assert!(shows_text(ui.toast.upcast_ref(), "Legacy OMEMO keys require contact authorization from carol@example.org"));
+        assert!(shows_text(ui.toast.upcast_ref(), "Message not sent. See Message Details."), "a short toast");
+        assert!(!shows_text(ui.toast.upcast_ref(), "carol@example.org"), "the cause is not in the toast");
+        assert_eq!(
+            ui.store.message(OWNER, ROOM, "waiting").unwrap().failure_reason,
+            "Legacy OMEMO keys require contact authorization from carol@example.org",
+            "it is on the message, for Message Details"
+        );
         assert!(find_button(ui.toast.upcast_ref(), "Resolve").is_none(), "a room offers Send Anyway instead");
         let button = find_button(ui.toast.upcast_ref(), "Send Anyway").expect("Send Anyway button");
         assert!(!ui.store.message(OWNER, ROOM, "waiting").unwrap().skip_unreachable, "not chosen yet");
@@ -984,7 +996,8 @@ mod tests {
         ] {
             ui.fail_queued_selection(OWNER, ROOM, vec![message.clone()], &reason);
             settle(300);
-            assert!(shows_text(ui.toast.upcast_ref(), &reason[..20]), "{reason}");
+            assert!(shows_text(ui.toast.upcast_ref(), "Message not sent. See Message Details."), "{reason}");
+            assert_eq!(ui.store.message(OWNER, ROOM, "m").unwrap().failure_reason, reason);
             assert!(find_button(ui.toast.upcast_ref(), "Send Anyway").is_none(), "no Send Anyway for {reason:?}");
             ui.toast.dismiss_all();
             settle(500);
@@ -1013,7 +1026,8 @@ mod tests {
         let reason = crate::rooms::Error::NotPrivate.to_string();
         ui.backend_event(generation, &owner, BackendEvent::Failed { peer: ROOM.into(), id: "wire-m".into(), reason: reason.clone() });
         settle(300);
-        assert!(shows_text(ui.toast.upcast_ref(), "This room is not members-only and non-anonymous"));
+        assert!(shows_text(ui.toast.upcast_ref(), "Message not sent. See Message Details."));
+        assert_eq!(ui.store.message(OWNER, ROOM, "m").unwrap().failure_reason, reason, "the cause is on the message");
         assert!(find_button(ui.toast.upcast_ref(), "Send Anyway").is_none());
         find_button(ui.toast.upcast_ref(), "Resolve").expect("Resolve button").emit_clicked();
         settle(500);
@@ -1034,7 +1048,8 @@ mod tests {
         let reason = crate::rooms::Error::OccupantNotListed("lurker".into()).to_string();
         ui.backend_event(generation, &owner, BackendEvent::Failed { peer: ROOM.into(), id: "wire-m".into(), reason });
         settle(300);
-        assert!(shows_text(ui.toast.upcast_ref(), "lurker is in this room but is not a listed member"));
+        assert!(shows_text(ui.toast.upcast_ref(), "Message not sent. See Message Details."));
+        assert!(ui.store.message(OWNER, ROOM, "m").unwrap().failure_reason.starts_with("lurker is in this room but is not a listed member"), "the nickname and cause are on the message");
         assert!(ui.participants.borrow().is_none());
         find_button(ui.toast.upcast_ref(), "Resolve").expect("Resolve button").emit_clicked();
         settle(300);
@@ -1050,7 +1065,8 @@ mod tests {
         let (ui, message) = room_with_failed_message("com.negzero.DowngradeFixture", "waiting", true);
         ui.fail_queued_downgrade(OWNER, ROOM, vec![message]);
         settle(300);
-        assert!(shows_text(ui.toast.upcast_ref(), "This room could not be fully encrypted, so nothing was sent."));
+        assert!(shows_text(ui.toast.upcast_ref(), "Message not sent. See Message Details."));
+        assert!(ui.store.message(OWNER, ROOM, "waiting").unwrap().failure_reason.contains("could not be fully encrypted"), "the cause is on the message");
         assert!(!shows_text(ui.toast.upcast_ref(), "no longer offers"), "no longer blames the room");
         assert!(find_button(ui.toast.upcast_ref(), "Resolve").is_none());
         let button = find_button(ui.toast.upcast_ref(), "Send Anyway").expect("Send Anyway button");
@@ -1334,6 +1350,67 @@ mod tests {
         state.active = room_id;
         ui.activate_state(state);
         assert_eq!(selection(&ui, ROOM), Some(Mode::Legacy), "not cleared a second time");
+        ui.window.close();
+    }
+
+    fn find_icons(widget: &gtk::Widget, name: &str) -> Vec<gtk::Image> {
+        let mut found = vec![];
+        if let Some(image) = widget.downcast_ref::<gtk::Image>() {
+            if image.icon_name().as_deref() == Some(name) {
+                found.push(image.clone());
+            }
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            found.extend(find_icons(&current, name));
+            child = current.next_sibling();
+        }
+        found
+    }
+
+    /// A long failure reason stays out of the toast, which cuts text off: the toast is short, the
+    /// bubble points to Message Details, and the details give the whole reason. It clears once the
+    /// message is sent.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_failed_message_keeps_its_long_reason_in_the_details_not_the_toast() {
+        use crate::protocol::BackendEvent;
+        let (ui, _) = room_with_failed_message("com.negzero.FailureDetailsFixture", "m", false);
+        ui.window.set_default_size(1000, 700);
+        ui.render_messages(true);
+        settle(500);
+        let (generation, owner) = (ui.generation.get(), ui.state.borrow().account.clone());
+        let long = "Someone in this room hides their address, so the message cannot be encrypted for them. ".repeat(3);
+        let long = long.trim();
+        ui.backend_event(generation, &owner, BackendEvent::Failed { peer: ROOM.into(), id: "wire-m".into(), reason: long.into() });
+        settle(500);
+
+        // The toast is short and does not carry the reason.
+        assert!(shows_text(ui.toast.upcast_ref(), "Message not sent. See Message Details."));
+        assert!(!shows_text(ui.toast.upcast_ref(), "hides their address"), "the reason is not in the toast");
+        // The failed bubble points to the details.
+        let warnings = find_icons(ui.window.upcast_ref(), "dialog-warning-symbolic");
+        assert!(
+            warnings.iter().any(|w| w.tooltip_text().as_deref() == Some("Send failed. See Message Details")),
+            "the bubble's tooltip points to the details: {:?}",
+            warnings.iter().map(|w| w.tooltip_text()).collect::<Vec<_>>()
+        );
+        // The details say the whole thing.
+        let message = ui.store.message(OWNER, ROOM, "m").unwrap();
+        assert_eq!(message.failure_reason, long);
+        ui.message_details(&message);
+        settle(500);
+        let dialog = ui.window.visible_dialog().expect("details");
+        let content = dialog.child().expect("content");
+        assert!(shows_text(&content, "What Went Wrong"));
+        assert!(shows_text(&content, long), "the full reason, not cut off");
+        dialog.force_close();
+        settle(300);
+
+        // Sent later: the old reason is gone.
+        ui.backend_event(generation, &owner, BackendEvent::Sent { peer: ROOM.into(), id: "wire-m".into() });
+        settle(300);
+        assert_eq!(ui.store.message(OWNER, ROOM, "m").unwrap().failure_reason, "", "cleared once sent");
         ui.window.close();
     }
 }

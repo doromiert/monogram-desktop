@@ -762,7 +762,7 @@ impl Ui {
         if !in_group
             || ids.is_empty()
             || !self.offers_send_anyway()
-            || !crate::crypto::legacy::skippable_reason(reason)
+            || !crate::crypto::skippable_reason(reason)
         {
             return self.notice_resolving_authorization(reason, title);
         }
@@ -2957,6 +2957,7 @@ impl Ui {
                 let Some(own_id) = own_id else {
                     return;
                 };
+                self.record_failure_reason(owner, &peer, &id, &reason);
                 let title = crate::text_safety::failed_send_toast(&reason);
                 self.notice_send_failure(&peer, vec![own_id], &reason, title);
             }
@@ -3309,6 +3310,27 @@ impl Ui {
             }
             Ok(None) => {}
             Err(_) => self.notice("Message delivery status could not be saved"),
+        }
+    }
+    /// Keep why the own message `id` failed on it, so Message Details can say what went wrong and the
+    /// toast can stay short.
+    pub(crate) fn record_failure_reason(self: &Rc<Self>, owner: &str, peer: &str, id: &str, reason: &str) {
+        let reason = crate::text_safety::failure_reason(reason);
+        match self.store.record_failure(owner, peer, id, &reason) {
+            Ok(Some(message)) => {
+                let mut state = self.state.borrow_mut();
+                let active = state.current().jid == peer;
+                let chat = state.chat_for(peer);
+                if let Some(row) = chat.messages.iter_mut().find(|m| m.id == message.id) {
+                    *row = message;
+                }
+                drop(state);
+                if active {
+                    self.render_messages(false);
+                }
+            }
+            Ok(None) => {}
+            Err(_) => self.notice("Could not record why this message failed"),
         }
     }
     /// Remember on the message that it went out without `skipped` room members, so its bubble and

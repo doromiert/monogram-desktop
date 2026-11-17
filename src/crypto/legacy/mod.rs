@@ -1333,16 +1333,13 @@ mod bundle_tests {
     }
 
     #[test]
-    fn the_message_reads_clearly_and_fits_the_failed_send_toast() {
+    fn the_message_reads_clearly_and_is_kept_whole_for_the_message_details() {
         let error = Error::invalid_bundle("Legacy OMEMO", CAROL, Some(1_234_567_890));
         let text = error.to_string();
         assert_eq!(text, "No usable Legacy OMEMO keys from carol@example.invalid (device 1234567890); refresh device review");
-        assert!(text.chars().count() <= 100, "{} characters", text.chars().count());
-        assert_eq!(
-            crate::text_safety::failed_send_toast(&text),
-            format!("Message not sent: {text}"),
-            "the toast keeps the whole message, advice included"
-        );
+        // The toast is short; the whole message, advice included, is what Message Details shows.
+        assert_eq!(crate::text_safety::failed_send_toast(&text), "Message not sent. See Message Details.");
+        assert_eq!(crate::text_safety::failure_reason(&text), text, "stored and shown unchanged");
         assert_eq!(
             Error::invalid_bundle("OMEMO2", CAROL, None).to_string(),
             "No usable OMEMO2 keys from carol@example.invalid; refresh device review"
