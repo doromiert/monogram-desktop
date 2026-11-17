@@ -15,6 +15,11 @@ pub mod vault;
 use std::fmt;
 pub type Secret = zeroize::Zeroizing<Vec<u8>>;
 pub type MasterKey = zeroize::Zeroizing<[u8; 32]>;
+/// Whether a room failure shown as text is one member's unusable keys, in either protocol, which the
+/// sender may choose to leave that member out for (Send Anyway).
+pub(crate) fn skippable_reason(reason: &str) -> bool {
+    legacy::skippable_reason(reason) || pq::service::skippable_reason(reason)
+}
 /// Whose bundle could not be used, for [`Error::InvalidBundle`].
 #[derive(Debug)]
 pub struct BundleFor {

@@ -1280,7 +1280,7 @@ impl Session {
                                     RoomPreparation::Send{message,quote}=>{if message.mode()==Mode::Pq {pq.send(pq::Request::SendRoom{recipients,message,quote,epoch});}else{legacy.send(legacy::service::Request::SendRoom{recipients,message,quote,epoch});}},
                                     RoomPreparation::Probe{reply,skip_unreachable}=>{
                                         let (checked,response)=tokio::sync::oneshot::channel();
-                                        pq.send(pq::Request::ProbeRoom{recipients:recipients.clone(),reply:checked});
+                                        pq.send(pq::Request::ProbeRoom{recipients:recipients.clone(),reply:checked,skip_unreachable});
                                         let legacy_tx=legacy.sender();
                                         tokio::spawn(async move {
                                             let result=crate::encryption_policy::select(
