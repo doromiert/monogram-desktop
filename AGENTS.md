@@ -7,39 +7,42 @@ in `docs/FEATURE_PARITY.md` current. A fixture is not an implemented feature.
 
 For GTK/libadwaita UI changes, follow `docs/GNOME_UI_GUIDELINES.md`.
 
-## Pull request comments for pushed fixes (required)
+## Pull requests after a push (required)
 
-After a push that lands a feature or bug fix an open PR already tracks:
+Applies only to commits that were actually pushed, never local ones.
 
-1. Do nothing if `gh` is not installed (`command -v gh`). Otherwise only act if
-   the authenticated account can write to and merge PRs in the target repo
-   (check `gh repo view --json viewerPermission`; `WRITE`, `MAINTAIN` or
-   `ADMIN`). If either check fails, do nothing.
-2. Only for commits that were actually pushed, never local or unpushed ones.
-   Match each pushed commit against the open PRs (`gh pr list --state open`) by
-   the issue, feature or bug it addresses. Skip commits that match no open PR.
-   Also skip a PR whose author is the author of the pushed commit (compare the
-   commit author with the PR author's login); that is the user's own work, so
-   do nothing for it.
-3. Before commenting, alert the user that the feature or fix already exists in
-   the open PR (give the PR link and the pushed commit hash link) and ask
-   whether to **comment**, **merge**, or **both**. Do not comment or merge
-   until they answer. Ask once per push, listing all affected PRs together.
-4. On approval, comment on each chosen PR. Use the full or 7+ character hash
-   from the pushed commit. Merge only the PRs the user said to merge.
-   - One feature or fix: `I fixed **<feature or bug fix>** in <commit hash>`
-   - Several: one line per item under a heading, for example
+**Gates.** Do nothing if `gh` is not installed (`command -v gh`) or the
+authenticated account lacks `WRITE`, `MAINTAIN` or `ADMIN` on the repo
+(`gh repo view --json viewerPermission`).
+
+**API limits.** Fetch the open PR list once per push (`gh pr list --state open`)
+and reuse it; no polling or loops. At most one comment or one edit per PR per
+push. If unsure a PR matches, skip it.
+
+Then, for each open PR a pushed commit relates to:
+
+**Someone else's PR** (commit author is not the PR author) that already tracks
+the feature or fix:
+1. Alert the user with the PR link and the commit hash link, and ask whether to
+   **comment**, **merge** or **both**. Ask once per push, listing every affected
+   PR. Do nothing until they answer.
+2. Skip a PR whose comments already name that hash, so re-pushes never repeat.
+3. Comment with the 7+ character hash, then merge only the PRs the user chose:
+   - One item: `I fixed **<feature or bug fix>** in <commit hash>`
+   - Several:
      ```
      I fixed the following feature (or bug fixes):
      **<feature or bug fix>** in <commit hash>
-     **<feature or bug fix>** in <commit hash>
      ```
-5. Keep GitHub API usage low:
-   - One comment per PR per push, listing every matching commit hash together.
-   - Fetch the open PR list once per push and reuse it; do not poll or loop.
-   - Before commenting, skip a PR whose existing comments already name that
-     hash, so re-pushes and force-pushes never repeat a comment.
-   - Never comment in bulk on unrelated PRs; if unsure a PR matches, skip it.
+
+**Your own PR** (commit author is the PR author) on the pushed branch
+(`--head <branch>`): never comment. If the push adds something the title or body
+does not cover (feature, fix, behavior or breaking change):
+1. Edit only when something is missing. Extend the body with a bullet or section;
+   never drop text the author wrote.
+2. Keep the title a valid Conventional Commit; change it only when the PR's main
+   purpose changed.
+3. Tell the user what changed.
 
 ## Commit messages: Conventional Commits (required)
 
