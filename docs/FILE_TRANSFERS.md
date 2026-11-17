@@ -265,3 +265,11 @@ focused chat window, including media search and other chat controls. The native
 composer Paste menu uses the same handler. Ordinary text paste continues to the
 focused input. Modal dialogs keep their own clipboard behavior; staging captures
 the active account/chat and rejects completion after either changes.
+
+Ordinary files never download automatically. Download opens the native save picker
+before any transfer or cache hashing, and writes verified bytes to the selected
+destination when ready, including after leaving the conversation. Cancelling the
+picker starts no transfer. Photos, videos, audio and stickers retain automatic
+media downloads with the configured size limit (15 MB by default). Explicit pack
+attachments retain their native Open Pack flow. The same document policy and
+save-picker-first behavior apply on Android through DocumentsUI.

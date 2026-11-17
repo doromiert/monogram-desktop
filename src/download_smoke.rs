@@ -18,6 +18,7 @@ pub struct DownloadSmoke {
     discovery: RefCell<Option<tokio::sync::oneshot::Receiver<crate::iq::Reply>>>,
     stage: Cell<u8>,
     printed: Cell<u8>,
+    picker_next: Cell<u8>,
     id: RefCell<String>,
     chat: RefCell<String>,
     file: RefCell<Option<Attachment>>,
@@ -106,6 +107,19 @@ impl DownloadSmoke {
                 false
             }
         };
+        fn chooser(widget: &gtk::Widget) -> Option<gtk::FileChooserWidget> {
+            if let Some(c) = widget.downcast_ref::<gtk::FileChooserWidget>() {
+                return Some(c.clone());
+            }
+            let mut child = widget.first_child();
+            while let Some(w) = child {
+                child = w.next_sibling();
+                if let Some(c) = chooser(&w) {
+                    return Some(c);
+                }
+            }
+            None
+        }
         match self.stage.get() {
             1 => {
                 if self.discovery.borrow().is_some() {
@@ -139,7 +153,8 @@ impl DownloadSmoke {
                 assert!(message.unsupported_attachment);
                 self.id.replace(message.id);
                 assert!(click("Download"));
-                self.stage.set(2);
+                self.picker_next.set(2);
+                self.stage.set(10);
             }
             2 => {
                 match ui.downloads.borrow().status(&owner, &file) {
@@ -157,9 +172,8 @@ impl DownloadSmoke {
             }
             3 => {
                 if click("Retry") {
-                    let own = ui.state.borrow_mut().chat_for(&owner).id.clone();
-                    ui.select_chat(&own);
-                    self.stage.set(4);
+                    self.picker_next.set(4);
+                    self.stage.set(10);
                 }
             }
             4 => match ui.downloads.borrow().status(&owner, &file) {
@@ -177,19 +191,6 @@ impl DownloadSmoke {
                 }
             }
             6 => {
-                fn chooser(widget: &gtk::Widget) -> Option<gtk::FileChooserWidget> {
-                    if let Some(c) = widget.downcast_ref::<gtk::FileChooserWidget>() {
-                        return Some(c.clone());
-                    }
-                    let mut child = widget.first_child();
-                    while let Some(w) = child {
-                        child = w.next_sibling();
-                        if let Some(c) = chooser(&w) {
-                            return Some(c);
-                        }
-                    }
-                    None
-                }
                 for window in gtk::Window::list_toplevels() {
                     if let Some(chooser) = chooser(&window) {
                         if chooser.current_folder().and_then(|f| f.path()).as_deref()
@@ -210,6 +211,24 @@ impl DownloadSmoke {
                     {
                         dialog.response(gtk::ResponseType::Accept);
                         self.stage.set(8);
+                        break;
+                    }
+                }
+            }
+            10 => {
+                assert!(!matches!(ui.downloads.borrow().status(&owner, &file), Some(Status::Running { .. })));
+                for window in gtk::Window::list_toplevels() {
+                    if let Some(chooser) = chooser(&window) {
+                        chooser.set_current_name("fixture-download.bin"); self.stage.set(11); break;
+                    }
+                }
+            }
+            11 => {
+                for window in gtk::Window::list_toplevels() {
+                    if let Some(dialog)=window.downcast_ref::<gtk::Dialog>().filter(|d| d.title().as_deref()==Some("Save Attachment")) {
+                        dialog.response(gtk::ResponseType::Accept);
+                        self.stage.set(self.picker_next.get());
+                        if self.picker_next.get()==4 { let own=ui.state.borrow_mut().chat_for(&owner).id.clone();ui.select_chat(&own); }
                         break;
                     }
                 }

@@ -156,3 +156,6 @@
 - [x] Publish/install the combined media upload previews, reply-thumbnail layout and10px reply-to-media gap update: source7387e3c / ZenPkgs320697f1 installed/running; final packaged smoke109ms feedback/343ms maximum heartbeat. File replies keep the paperclip and name on one ellipsized line while text captions retain the Grid sizing fix.
 
 - [x] Keep the paperclip and attachment filename together on one ellipsized reply line while retaining the Grid fix for two-line caption previews; native filename/caption geometry and full-width text quote checks pass.
+
+- [x] Restrict automatic downloads to media; ordinary files choose a native save destination before transfer, with cancellation/account fences and pack opening retained. Native picker/cancel/background export passes1.11s;291 default tests pass (94ignored).
+- [ ] Publish/install desktop manual-document save behavior and publish the matching fresh Android APK.

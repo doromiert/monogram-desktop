@@ -89,6 +89,10 @@ impl Ui {
                 }
                 _ => {}
             }
+            if !pack && !matches!(ui.downloads.borrow().status(&account, &source), Some(Status::Running { .. })) {
+                ui.save_attachment_picker(&id, None);
+                return;
+            }
             let running = matches!(
                 ui.downloads.borrow().status(&account, &source),
                 Some(Status::Running { .. })
@@ -108,7 +112,6 @@ impl Ui {
         let p = progress.downgrade();
         let l = info.downgrade();
         let visible = controls.downgrade();
-        let auto_flags = (message.own, message.encrypted);
         glib::timeout_add_local(Duration::from_millis(150), move || {
             let (Some(ui), Some(action), Some(progress), Some(info)) =
                 (weak.upgrade(), a.upgrade(), p.upgrade(), l.upgrade())
@@ -121,7 +124,6 @@ impl Ui {
             let Some(controls) = visible.upgrade().filter(|controls| controls.is_visible()) else {
                 return glib::ControlFlow::Break;
             };
-            let allow_auto = ui.auto_download_enabled.get() && automatic_media_allowed(ui.smoke, auto_flags.0, auto_flags.1, ui.state.borrow().current());
             let status = ui.downloads.borrow().status(&owner, &file);
             if open_requested.get() {
                 match &status {
@@ -131,15 +133,6 @@ impl Ui {
                 }
             }
 
-            if status.is_none()
-                && allow_auto
-                && !file.manual
-                && ui.in_chat_viewport(&controls)
-            {
-                ui.downloads
-                    .borrow_mut()
-                    .start_automatic(&owner, file.clone(), if ui.auto_download_enabled.get(){ui.auto_download_limit.get()}else{0});
-            }
             action.set_visible(!media || !matches!(status, Some(Status::Ready(_))));
             progress.set_visible(matches!(status, Some(Status::Running { .. })));
             let (title, subtitle) = match status {
@@ -446,6 +439,9 @@ impl Ui {
         content
     }
     pub(crate) fn save_attachment(self: &Rc<Self>, id: &str, path: &std::path::Path) {
+        self.save_attachment_picker(id, Some(path.to_path_buf()));
+    }
+    fn save_attachment_picker(self: &Rc<Self>, id: &str, path: Option<std::path::PathBuf>) {
         let owner = self.state.borrow().account.clone();
         let peer = self.state.borrow().current().jid.clone();
         let Some(file) = self
@@ -462,15 +458,67 @@ impl Ui {
             .build();
         let owner = self.state.borrow().account.clone();
         let id = id.to_string();
-        let Some(cancel) = self.downloads.borrow().token(&owner, &file) else {
-            return;
-        };
         let key = file.key();
         let generation = self.generation.get();
-        let path = path.to_path_buf();
         let weak = Rc::downgrade(self);
         let window = self.window.clone();
         glib::MainContext::default().spawn_local(async move {
+            let destination = match chooser.save_future(Some(&window)).await {
+                Ok(file) => file,
+                Err(error) => {
+                    if !error.matches(gtk::DialogError::Dismissed) {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.notice("File selection unavailable");
+                        }
+                    }
+                    return;
+                }
+            };
+            let current =
+                |ui: &Ui| ui.generation.get() == generation && ui.state.borrow().account == owner;
+            let Some(ui) = weak.upgrade().filter(|ui| current(ui)) else {
+                return;
+            };
+            if ui
+                .store
+                .message(&owner, &peer, &id)
+                .filter(|m| !m.retracted)
+                .and_then(|m| m.attachment)
+                .is_none_or(|f| f.key() != key)
+            {
+                return;
+            }
+            if path.is_none() {
+                if let Err(reason) = ui.downloads.borrow_mut().start(&owner, file.clone()) {
+                    ui.notice(reason);
+                    return;
+                }
+            }
+            drop(ui);
+            let path = if let Some(path) = path {
+                path
+            } else {
+                loop {
+                    let Some(ui) = weak.upgrade().filter(|ui| current(ui)) else {
+                        return;
+                    };
+                    let status = ui.downloads.borrow().status(&owner, &file);
+                    match status {
+                        Some(Status::Ready(path)) => break path,
+                        Some(Status::Running { .. }) => {}
+                        _ => return,
+                    }
+                    drop(ui);
+                    glib::timeout_future(Duration::from_millis(80)).await;
+                }
+            };
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let Some(cancel) = ui.downloads.borrow().token(&owner, &file) else {
+                return;
+            };
+            drop(ui);
             let source = path.clone();
             let expected = file.clone();
             let valid = gio::spawn_blocking(move || {
@@ -492,23 +540,11 @@ impl Ui {
                 }
             };
             drop(ui);
-            let destination = match chooser.save_future(Some(&window)).await {
-                Ok(file) => file,
-                Err(error) => {
-                    if !error.matches(gtk::DialogError::Dismissed) {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.notice("File selection unavailable");
-                        }
-                    }
-                    return;
-                }
-            };
             let Some(ui) = weak.upgrade() else {
                 return;
             };
             if ui.state.borrow().account != owner
                 || ui.generation.get() != generation
-                || ui.state.borrow().current().jid != peer
                 || ui
                     .store
                     .message(&owner, &peer, &id)
