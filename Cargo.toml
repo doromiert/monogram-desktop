@@ -3,8 +3,14 @@ name = "monogram-desktop"
 version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
+# The other tests/*_native.rs files are #[path]-included into the binary and only compile there.
+autotests = false
 license = "GPL-3.0-or-later"
 description = "Native GTK/libadwaita Monogram client"
+
+[[test]]
+name = "transport"
+path = "tests/transport.rs"
 
 [dependencies]
 monogram-sync = {path="sync-core"}

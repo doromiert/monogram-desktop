@@ -54,6 +54,8 @@ mod iq;
 mod legacy_polls;
 #[path = "../src/legacy_inline.rs"]
 mod legacy_inline;
+#[path = "../src/media_caption.rs"]
+mod media_caption;
 #[path = "../src/media_store.rs"]
 mod media_store;
 #[path = "../src/message_actions.rs"]
