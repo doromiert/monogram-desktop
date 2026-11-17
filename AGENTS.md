@@ -5,6 +5,42 @@ feature parity**, including protocol, security and persistence behavior.
 The mobile reference repository is `../mobile/`; keep the feature parity ledger
 in `docs/FEATURE_PARITY.md` current. A fixture is not an implemented feature.
 
+For GTK/libadwaita UI changes, follow `docs/GNOME_UI_GUIDELINES.md`.
+
+## Pull request comments for pushed fixes (required)
+
+After a push that lands a feature or bug fix an open PR already tracks:
+
+1. Do nothing if `gh` is not installed (`command -v gh`). Otherwise only act if
+   the authenticated account can write to and merge PRs in the target repo
+   (check `gh repo view --json viewerPermission`; `WRITE`, `MAINTAIN` or
+   `ADMIN`). If either check fails, do nothing.
+2. Only for commits that were actually pushed, never local or unpushed ones.
+   Match each pushed commit against the open PRs (`gh pr list --state open`) by
+   the issue, feature or bug it addresses. Skip commits that match no open PR.
+   Also skip a PR whose author is the author of the pushed commit (compare the
+   commit author with the PR author's login); that is the user's own work, so
+   do nothing for it.
+3. Before commenting, alert the user that the feature or fix already exists in
+   the open PR (give the PR link and the pushed commit hash link) and ask
+   whether to **comment**, **merge**, or **both**. Do not comment or merge
+   until they answer. Ask once per push, listing all affected PRs together.
+4. On approval, comment on each chosen PR. Use the full or 7+ character hash
+   from the pushed commit. Merge only the PRs the user said to merge.
+   - One feature or fix: `I fixed **<feature or bug fix>** in <commit hash>`
+   - Several: one line per item under a heading, for example
+     ```
+     I fixed the following feature (or bug fixes):
+     **<feature or bug fix>** in <commit hash>
+     **<feature or bug fix>** in <commit hash>
+     ```
+5. Keep GitHub API usage low:
+   - One comment per PR per push, listing every matching commit hash together.
+   - Fetch the open PR list once per push and reuse it; do not poll or loop.
+   - Before commenting, skip a PR whose existing comments already name that
+     hash, so re-pushes and force-pushes never repeat a comment.
+   - Never comment in bulk on unrelated PRs; if unsure a PR matches, skip it.
+
 ## Commit messages: Conventional Commits (required)
 
 Every commit that lands on `main` **must** follow
