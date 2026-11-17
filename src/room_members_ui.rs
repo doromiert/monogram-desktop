@@ -640,4 +640,100 @@ mod tests {
         );
         assert!(super::rows(&all, "nobody").is_empty());
     }
+
+    fn settle(milliseconds: u64) {
+        let context = glib::MainContext::default();
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(milliseconds);
+        while std::time::Instant::now() < until {
+            while context.iteration(false) {}
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+    fn find_menu_button(widget: &gtk::Widget) -> Option<gtk::MenuButton> {
+        if let Some(button) = widget.downcast_ref::<gtk::MenuButton>() {
+            if button.icon_name().as_deref() == Some("view-more-symbolic") {
+                return Some(button.clone());
+            }
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            if let Some(found) = find_menu_button(&current) {
+                return Some(found);
+            }
+            child = current.next_sibling();
+        }
+        None
+    }
+
+    /// The header bar has a people-icon button next to the three-dot menu that opens the room's
+    /// participants. It exists in group chats only.
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn the_header_has_a_participants_button_in_group_chats_only() {
+        const ROOM: &str = "team@conference.example.org";
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id("com.negzero.ParticipantsButtonFixture")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let ui = Ui::new(&app, true);
+        ui.window.set_default_size(1100, 700);
+        ui.window.present();
+        settle(300);
+        let (room, direct) = {
+            let mut state = ui.state.borrow_mut();
+            let room = {
+                let chat = state.chat_for(ROOM);
+                chat.group = true;
+                chat.id.clone()
+            };
+            (room, state.chat_for("bob@example.org").id.clone())
+        };
+        let button = ui.participants_button.clone();
+
+        ui.select_chat(&direct);
+        settle(300);
+        assert!(!button.is_visible(), "no participants button in a one-to-one chat");
+
+        ui.select_chat(&room);
+        settle(300);
+        assert!(button.is_visible(), "participants button in a group chat");
+        assert_eq!(button.icon_name().as_deref(), Some("system-users-symbolic"), "a people icon");
+        assert!(
+            gtk::IconTheme::for_display(&button.display()).has_icon("system-users-symbolic"),
+            "the icon exists in the theme, so it is not drawn as a missing image"
+        );
+        assert_eq!(button.tooltip_text().as_deref(), Some("Participants"));
+        assert_eq!(button.action_name().as_deref(), Some("win.participants"));
+
+        // Right next to the three-dot menu: same header bar, directly to its left.
+        let menu = find_menu_button(ui.window.upcast_ref()).expect("the three-dot menu button");
+        let (here, there) = (
+            button.compute_bounds(&ui.window).expect("button bounds"),
+            menu.compute_bounds(&ui.window).expect("menu bounds"),
+        );
+        assert!(here.x() + here.width() <= there.x() + 0.5, "left of the menu: {here:?} vs {there:?}");
+        assert!(there.x() - (here.x() + here.width()) < 24.0, "adjacent to the menu, not across the header");
+        assert!(
+            ((here.y() + here.height() / 2.0) - (there.y() + there.height() / 2.0)).abs() < 2.0,
+            "on the same row: {here:?} vs {there:?}"
+        );
+        assert_eq!(button.parent(), menu.parent(), "packed in the same header bar section");
+
+        // Hidden while searching, back afterwards.
+        ui.search_toggle.set_active(true);
+        settle(300);
+        assert!(!button.is_visible(), "hidden in search");
+        ui.search_toggle.set_active(false);
+        settle(300);
+        assert!(button.is_visible(), "back after search");
+
+        // It opens that room's participants.
+        assert!(ui.participants.borrow().is_none());
+        button.emit_clicked();
+        settle(300);
+        assert_eq!(ui.participants.borrow().as_ref().map(|view| view.room.clone()).as_deref(), Some(ROOM));
+        ui.window.close();
+    }
 }

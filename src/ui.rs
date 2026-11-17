@@ -91,6 +91,8 @@ pub struct Ui {
     pub media_tabs: adw::ToggleGroup,
     pub media_toggles: RefCell<HashMap<String, adw::Toggle>>,
     pub(crate) primary_menu: gtk::MenuButton,
+    /// Header bar shortcut to the room participants; shown for group chats only.
+    pub(crate) participants_button: gtk::Button,
     pub request_button: gtk::Button,
     pub request_badge: gtk::Label,
     pub session: RefCell<Option<Session>>,
@@ -416,6 +418,13 @@ impl Ui {
             media_tabs: adw::ToggleGroup::builder().homogeneous(false).can_shrink(false).build(),
             media_toggles: RefCell::new(HashMap::new()),
             primary_menu: gtk::MenuButton::builder().icon_name("open-menu-symbolic").build(),
+            participants_button: {
+                let button = icon_button("system-users-symbolic", "Participants");
+                button.set_action_name(Some("win.participants"));
+                button.set_visible(false);
+                button.update_property(&[gtk::accessible::Property::Label("Participants")]);
+                button
+            },
             request_button,
             request_badge,
             session: RefCell::new(None),
@@ -1260,6 +1269,7 @@ impl Ui {
                 .menu_model(&menu)
                 .build(),
         );
+        header.pack_end(&self.participants_button);
         view.add_top_bar(&header);
         let chat = bx(true, 0);
         chat.add_css_class("conversation");
@@ -1638,6 +1648,7 @@ impl Ui {
         self.section_title.set_text("");
         let state = self.state.borrow();
         let chat = state.current();
+        self.participants_button.set_visible(chat.group);
         self.composer_placeholder
             .set_text(&format!("Message {}…", chat.display_name()));
         self.composer_placeholder
@@ -1675,11 +1686,17 @@ impl Ui {
         self.pages.add_named(widget, Some("section"));
         self.pages.set_visible_child_name("section");
         self.title.set_visible(false);
+        self.participants_button.set_visible(false);
         self.section_title.set_text(title);
     }
     fn search_mode(self: &Rc<Self>, active: bool) {
         self.stories
             .set_visible(!active && self.state.borrow().account.is_empty());
+        let in_group = {
+            let state = self.state.borrow();
+            state.chats.iter().any(|c| c.id == state.active && c.group)
+        };
+        self.participants_button.set_visible(!active && in_group);
         if active {
             self.title.set_visible(false);
             self.titles.set_visible_child_name("search");
