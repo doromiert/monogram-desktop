@@ -573,6 +573,12 @@ pub enum BackendEvent {
         id: String,
         emoji: crate::packs::InlineEmoji,
     },
+    /// The room message `id` went out without some members: each is `(address, why)`.
+    SentPartially {
+        peer: String,
+        id: String,
+        skipped: Vec<(String, String)>,
+    },
     Uncertain {
         peer: String,
         id: String,

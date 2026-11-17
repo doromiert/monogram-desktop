@@ -53,8 +53,9 @@ independent mobile room interoperability and richer room content remain open.
 
 A room message normally needs every member's keys, so one member whose keys are refused, missing or
 unreachable blocks it. In a group chat the failure toast then offers **Send Anyway**: the message is
-resent, still encrypted, for every member whose keys can be used, and a toast names who was left
-out and that they cannot read it. The choice is stored on that message only. It never selects
+resent, still encrypted, for every member whose keys can be used. The message's lock turns into a
+lock with a question mark in the theme's accent colour, with the tooltip "Sent partially", and
+Message Details lists each member who was left out and why. The choice is stored on that message only. It never selects
 plaintext, never skips a member whose keys are merely unreviewed, never skips your own devices,
 and refuses to send when nobody else could be reached.
 
@@ -62,6 +63,12 @@ When a room cannot be encrypted at all the failure says why, and Resolve opens t
 with it. A room that is not members-only and non-anonymous can never be end-to-end encrypted: Resolve
 opens Conversation Security so you choose how it is sent. Someone in the room who is not a listed
 member, or who hides their address, is named, and Resolve opens the participants.
+
+Automatic selection treats a room member with no usable Legacy OMEMO device as "encryption not
+available" and, for a room that has used encryption, refuses to fall back to plaintext. That failure
+reads "This room could not be fully encrypted, so nothing was sent." and offers Send Anyway, which
+encrypts for everyone who has keys. Choosing Unencrypted in Conversation Security stays the explicit
+way to send in plain text.
 
 Legacy upload requests retain the sanitized filename/MIME used by Android;
 OMEMO 2 retains opaque upload metadata. Outer SFS/OOB descriptions remain

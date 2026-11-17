@@ -60,6 +60,8 @@ pub struct Message {
     pub outbox_pending: bool,
     /// The sender chose to send this room message without members whose keys cannot be used.
     pub skip_unreachable: bool,
+    /// Room members this message was sent without, each with why. Set after a partial send.
+    pub skipped_members: Vec<(String, String)>,
     pub wire_id: String,
     pub aliases: Vec<String>,
     pub options: Vec<(String, u32)>,
@@ -110,6 +112,7 @@ impl Default for Message {
             delivery: "local".into(),
             outbox_pending: false,
             skip_unreachable: false,
+            skipped_members: Vec::new(),
             wire_id: String::new(),
             aliases: vec![],
             options: vec![],

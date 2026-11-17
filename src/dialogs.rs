@@ -2032,6 +2032,24 @@ impl Ui {
                     .build(),
             )
         }
+        if m.own && !m.skipped_members.is_empty() {
+            g.add(
+                &adw::ActionRow::builder()
+                    .title("Sent Partially")
+                    .subtitle("This message is encrypted and was sent, but not to the room members listed below. Their keys could not be used, so they cannot read it.")
+                    .use_markup(false)
+                    .build(),
+            );
+            for (member, why) in &m.skipped_members {
+                g.add(
+                    &adw::ActionRow::builder()
+                        .title(crate::text_safety::visible(member, 128))
+                        .subtitle(crate::text_safety::visible(why, 200))
+                        .use_markup(false)
+                        .build(),
+                );
+            }
+        }
         if !m.fingerprint.is_empty() {
             g.add(
                 &adw::ActionRow::builder()

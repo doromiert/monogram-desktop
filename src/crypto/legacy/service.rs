@@ -473,18 +473,6 @@ fn outer_metadata(
         frame.historical || frame.archive.is_some(),
     ))
 }
-/// The toast shown after a room message went out without some members.
-fn skipped_notice(skipped: &[String]) -> String {
-    const SHOWN: usize = 3;
-    let names: Vec<_> = skipped.iter().take(SHOWN).map(String::as_str).collect();
-    let more = skipped.len().saturating_sub(SHOWN);
-    let mut text = format!("Sent without {}", names.join(", "));
-    if more > 0 {
-        text.push_str(&format!(" and {more} more"));
-    }
-    text.push_str(". Their keys could not be used, so they cannot read this message.");
-    crate::text_safety::visible(&text, 200)
-}
 fn describe(error: &Error) -> String {
     match error {
         Error::Invalid(_) => "Invalid Legacy OMEMO message or key data".into(),
@@ -686,7 +674,7 @@ impl Worker {
         message: &Message,
         quote: &str,
         epoch: u64,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<(String, String)>> {
         let clear = outgoing_content(&recipients.room, message, quote)?;
         if !self.ready || !self.online {
             return Err(Error::Unavailable("Legacy OMEMO is not ready"));
@@ -1350,9 +1338,10 @@ impl Worker {
                         let room = recipients.room.clone();
                         self.sent(room.clone(), id, Ok(()));
                         if !skipped.is_empty() {
-                            self.emit(BackendEvent::CryptoError {
+                            self.emit(BackendEvent::SentPartially {
                                 peer: room,
-                                text: skipped_notice(&skipped),
+                                id: message.wire_id.clone(),
+                                skipped,
                             });
                         }
                     }

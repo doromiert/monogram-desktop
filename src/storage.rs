@@ -502,6 +502,29 @@ impl Store {
         }
         Ok(Some(message))
     }
+    /// Record that the own message `wire` went out without `skipped` room members.
+    pub fn record_skipped(
+        &self,
+        account: &str,
+        peer: &str,
+        wire: &str,
+        skipped: &[(String, String)],
+    ) -> rusqlite::Result<Option<Message>> {
+        let Some(id) = self.own_wire_id(account, peer, wire)? else {
+            return Ok(None);
+        };
+        let Some(mut message) = self
+            .message(account, peer, &id)
+            .filter(|m| m.own && m.wire_id == wire && !m.retracted)
+        else {
+            return Ok(None);
+        };
+        message.skipped_members = skipped.to_vec();
+        let tx = self.db.unchecked_transaction()?;
+        self.upsert_message(account, peer, &message)?;
+        tx.commit()?;
+        Ok(Some(message))
+    }
     pub fn interrupt_messages(&self, owner: &str) -> rusqlite::Result<()> {
         let tx = self.db.unchecked_transaction()?;
         for table in ["messages", "message_bases"] {

@@ -8,8 +8,11 @@ use adw::prelude::*;
 use gtk::glib;
 use std::rc::Rc;
 
-/// Shown instead of sending when a room that used encryption stops offering it.
-pub const DOWNGRADE_NOTICE: &str = "This room no longer offers end-to-end encryption, so nothing was sent. To send unencrypted anyway, choose Unencrypted in Conversation Security.";
+/// Shown instead of sending when automatic selection could only offer plaintext for a room that has
+/// used encryption. The cause is often one member who has no usable keys, not the room itself.
+pub const DOWNGRADE_NOTICE: &str = "This room could not be fully encrypted, so nothing was sent. To send unencrypted anyway, choose Unencrypted in Conversation Security.";
+/// The same, for a toast that has a Send Anyway button.
+pub const DOWNGRADE_TOAST: &str = "This room could not be fully encrypted, so nothing was sent.";
 
 impl Ui {
     pub(crate) fn update_send_button(&self) {

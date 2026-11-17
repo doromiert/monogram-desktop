@@ -77,9 +77,9 @@ fn lookup_peer(error: pep::Error, peer: &str, local: bool) -> Error {
     if !local && !error.unsupported() && error.access_denied() {
         return Error::ContactAuthorization(peer.into());
     }
-    lookup(error, local)
+    lookup(error)
 }
-fn lookup(error: pep::Error, local: bool) -> Error {
+fn lookup(error: pep::Error) -> Error {
     if error.unsupported() {
         return Error::Unavailable(UNSUPPORTED);
     }
@@ -133,7 +133,7 @@ impl Legacy {
             let list = discovery
                 .item(owner, DEVICES, None)
                 .await
-                .map_err(|e| lookup(e, true))?;
+                .map_err(|e| lookup(e))?;
             wire::device_ids(list.as_ref())?
         } else {
             BTreeSet::new()
@@ -169,7 +169,7 @@ impl Legacy {
             .pep
             .item(&owner, DEVICES, None)
             .await
-            .map_err(|e| lookup(e, true))?;
+            .map_err(|e| lookup(e))?;
         let mut seen = wire::device_ids(latest.as_ref())?;
         self.replenish().await?;
         for _ in 0..3 {
@@ -186,12 +186,12 @@ impl Legacy {
             self.pep
                 .publish_item(DEVICES, "current", list, "1")
                 .await
-                .map_err(|e| lookup(e, true))?;
+                .map_err(|e| lookup(e))?;
             latest = self
                 .pep
                 .item(&owner, DEVICES, None)
                 .await
-                .map_err(|e| lookup(e, true))?;
+                .map_err(|e| lookup(e))?;
             current = wire::device_ids(latest.as_ref())?;
             seen.extend(current);
         }
@@ -201,11 +201,11 @@ impl Legacy {
         self.pep
             .ensure_open_access(DEVICES)
             .await
-            .map_err(|e| lookup(e, true))?;
+            .map_err(|e| lookup(e))?;
         self.pep
             .ensure_open_access(&bundle_node(self.device()))
             .await
-            .map_err(|e| lookup(e, true))?;
+            .map_err(|e| lookup(e))?;
         Ok(())
     }
     pub async fn replenish(&mut self) -> Result<()> {
@@ -218,7 +218,7 @@ impl Legacy {
                 "1",
             )
             .await
-            .map_err(|e| lookup(e, true))
+            .map_err(|e| lookup(e))
     }
     async fn bundle(&self, peer: &str, id: u32) -> Result<Bundle> {
         address(peer, id)?;
@@ -385,7 +385,7 @@ impl Legacy {
         body: &str,
         wire_id: &str,
         skip_unreachable: bool,
-    ) -> Result<(Element, Vec<String>)> {
+    ) -> Result<(Element, Vec<(String, String)>)> {
         address(room, 1)?;
         if members.is_empty() || members.len() > 4096 || !members.contains(&self.store.owner) {
             return Err(Error::Invalid("legacy complete room recipients"));
@@ -401,7 +401,7 @@ impl Legacy {
             let devices = match self.devices(peer, Some(room)).await {
                 Ok(devices) => devices,
                 Err(error) if skip_unreachable && peer != &owner && skippable(&error) => {
-                    skipped.push(peer.clone());
+                    skipped.push((peer.clone(), error.to_string()));
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -422,7 +422,7 @@ impl Legacy {
                     .any(|(device, _)| device.trust == Trust::Trusted)
             {
                 if skip_unreachable {
-                    skipped.push(peer.clone());
+                    skipped.push((peer.clone(), NO_DEVICES.to_owned()));
                     continue;
                 }
                 return Err(Error::Unavailable(NO_DEVICES));
@@ -1274,6 +1274,7 @@ mod room_skip_tests {
     const ALICE: &str = "alice@example.invalid";
     const BOB: &str = "bob@example.invalid";
     const CAROL: &str = "carol@example.invalid";
+    const DAVE: &str = "dave@example.invalid";
     const ROOM: &str = "room@conference.example.invalid";
 
     fn items(node: &str, content: Element) -> Element {
@@ -1301,7 +1302,7 @@ mod room_skip_tests {
 
     /// Alice sends to {Alice, Bob, Carol}. Bob is reachable and his key is `bob_trusted`; Carol's
     /// server refuses every request; `alice_ok` is whether Alice's own list can be read.
-    fn send(skip: bool, members: &[&str], bob_trusted: bool, alice_ok: bool) -> Result<(Element, Vec<String>)> {
+    fn send(skip: bool, members: &[&str], bob_trusted: bool, alice_ok: bool) -> Result<(Element, Vec<(String, String)>)> {
         let (mut store, journal, _) = fixture(ALICE, 101);
         let (_, _, bob_bundle) = fixture(BOB, 202);
         if bob_trusted {
@@ -1328,6 +1329,8 @@ mod room_skip_tests {
                         (ALICE, DEVICES) if alice_ok => Ok(Some(items(DEVICES, list(&[101])))),
                         (ALICE, _) => Err(iq::Error::Closed),
                         (BOB, DEVICES) => Ok(Some(items(DEVICES, list(&[202])))),
+                        // Dave has no Legacy OMEMO devices at all.
+                        (DAVE, DEVICES) => Ok(Some(items(DEVICES, list(&[])))),
                         (BOB, bundles) => Ok(Some(items(bundles, wire::bundle_xml(&bob_bundle)))),
                         _ => forbidden(),
                     };
@@ -1350,12 +1353,28 @@ mod room_skip_tests {
     #[test]
     fn with_the_choice_the_message_is_still_encrypted_for_everyone_reachable() {
         let (xml, skipped) = send(true, &[ALICE, BOB, CAROL], true, true).unwrap();
-        assert_eq!(skipped, vec![CAROL.to_owned()]);
+        assert_eq!(
+            skipped,
+            vec![(CAROL.to_owned(), "Legacy OMEMO keys require contact authorization from carol@example.invalid".to_owned())],
+            "who was left out and why, as the message details will show it"
+        );
         let text = String::from(&xml);
         assert!(text.contains("rid='202'"), "Bob's device is a recipient: {text}");
         assert!(text.contains("<encrypted") && text.contains("<payload>"), "an encrypted payload: {text}");
         assert!(!text.contains("<body"), "no plaintext body: {text}");
         assert!(!text.contains("rid='303'"), "no key for the skipped member");
+    }
+
+    /// A member with no devices at all (the usual "dead participant") makes automatic selection
+    /// treat the room as unencryptable. Sending anyway encrypts for the members who do have keys.
+    #[test]
+    fn a_member_with_no_devices_blocks_the_room_until_the_choice_is_made() {
+        let error = send(false, &[ALICE, BOB, DAVE], true, true).unwrap_err();
+        assert!(matches!(error, Error::Unavailable(NO_DEVICES)), "{error:?}");
+        let (xml, skipped) = send(true, &[ALICE, BOB, DAVE], true, true).unwrap();
+        assert_eq!(skipped, vec![(DAVE.to_owned(), NO_DEVICES.to_owned())]);
+        let text = String::from(&xml);
+        assert!(text.contains("rid='202'") && text.contains("<encrypted") && !text.contains("<body"), "{text}");
     }
 
     #[test]

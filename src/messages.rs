@@ -176,9 +176,31 @@ fn action_actor(message: &Message, chat: &Chat, owner: &str) -> String {
     };
     actor.replace(['\n', '\r'], " ")
 }
+/// The lock of an encrypted message that was sent without some room members: the usual lock with
+/// a small question mark, drawn in the theme's accent colour (blue by default).
+fn partial_lock() -> gtk::Overlay {
+    let overlay = gtk::Overlay::new();
+    overlay.add_css_class("message-partial-lock");
+    let lock = gtk::Image::from_icon_name("channel-secure-symbolic");
+    lock.set_pixel_size(11);
+    lock.add_css_class("accent");
+    overlay.set_child(Some(&lock));
+    let badge = gtk::Image::from_icon_name("dialog-question-symbolic");
+    badge.set_pixel_size(7);
+    badge.add_css_class("accent");
+    badge.set_halign(gtk::Align::End);
+    badge.set_valign(gtk::Align::End);
+    badge.set_can_target(false);
+    overlay.add_overlay(&badge);
+    overlay.set_tooltip_text(Some("Sent partially"));
+    overlay.update_property(&[gtk::accessible::Property::Label("Sent partially")]);
+    overlay
+}
 fn message_status(meta: &gtk::Box, m: &Message) {
     clear(meta);
-    if m.encrypted
+    if m.own && m.encrypted && !m.skipped_members.is_empty() {
+        meta.append(&partial_lock());
+    } else if m.encrypted
         && (!m.own
             || !matches!(
                 m.delivery.as_str(),
@@ -303,6 +325,7 @@ impl Ui {
             || row.message.edited != message.edited
             || row.message.encrypted != message.encrypted
             || row.message.encryption_mode != message.encryption_mode
+            || row.message.skipped_members != message.skipped_members
         {
             message_status(&row.status, message);
         }

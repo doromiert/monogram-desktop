@@ -379,11 +379,7 @@ impl Ui {
             };
             // The server must not be able to talk an encrypted room into plaintext.
             if selected.is_none() && ui.encryption_downgrade_blocked(&peer, mode) {
-                for mut message in messages {
-                    message.delivery = "failed".into();
-                    ui.store_queued_row(&owner, &peer, message);
-                }
-                ui.notice(crate::send_policy_ui::DOWNGRADE_NOTICE);
+                ui.fail_queued_downgrade(&owner, &peer, messages);
                 return;
             }
             let Some(fingerprint) = ui.fingerprint_for_send(mode) else {
@@ -492,6 +488,23 @@ impl Ui {
             }
             ui.flush_send_queue();
         });
+    }
+
+    /// Automatic selection could only offer plaintext for a room that has used encryption: mark the
+    /// messages failed and, in a group, offer Send Anyway (still encrypted, without whoever has no
+    /// usable keys). Plaintext is never chosen for the user.
+    pub(crate) fn fail_queued_downgrade(
+        self: &Rc<Self>,
+        owner: &str,
+        peer: &str,
+        messages: Vec<Message>,
+    ) {
+        let ids: Vec<String> = messages.iter().map(|message| message.id.clone()).collect();
+        for mut message in messages {
+            message.delivery = "failed".into();
+            self.store_queued_row(owner, peer, message);
+        }
+        self.notice_downgrade_blocked(peer, ids);
     }
 
     /// The encryption check for queued messages failed: mark them failed and say why. A Legacy
@@ -987,6 +1000,144 @@ mod tests {
         find_button(ui.toast.upcast_ref(), "Resolve").expect("Resolve button").emit_clicked();
         settle(300);
         assert_eq!(ui.participants.borrow().as_ref().map(|view| view.room.clone()).as_deref(), Some(ROOM));
+        ui.window.close();
+    }
+
+    /// Automatic selection ended at plaintext for a room that has used encryption (the usual cause is
+    /// one member with no keys). The notice no longer blames the room and offers Send Anyway.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_blocked_downgrade_in_a_room_offers_send_anyway_not_plaintext() {
+        let (ui, message) = room_with_failed_message("com.negzero.DowngradeFixture", "waiting", true);
+        ui.fail_queued_downgrade(OWNER, ROOM, vec![message]);
+        settle(300);
+        assert!(shows_text(ui.toast.upcast_ref(), "This room could not be fully encrypted, so nothing was sent."));
+        assert!(!shows_text(ui.toast.upcast_ref(), "no longer offers"), "no longer blames the room");
+        assert!(find_button(ui.toast.upcast_ref(), "Resolve").is_none());
+        let button = find_button(ui.toast.upcast_ref(), "Send Anyway").expect("Send Anyway button");
+        assert_eq!(ui.store.message(OWNER, ROOM, "waiting").unwrap().delivery, "failed");
+
+        button.emit_clicked();
+        settle(300);
+        let stored = ui.store.message(OWNER, ROOM, "waiting").unwrap();
+        assert!(stored.skip_unreachable);
+        assert_ne!(stored.delivery, "failed", "retried");
+        let chat = ui.state.borrow().chats.iter().find(|c| c.jid == ROOM).cloned().unwrap();
+        assert_eq!(chat.selected_encryption(), Some(Mode::Legacy), "encrypted, never plaintext");
+        assert_ne!(chat.selected_encryption(), Some(Mode::Plain));
+        ui.window.close();
+    }
+
+    /// Without messages to resend (or outside a group) there is no button, only the explanation.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn the_downgrade_notice_has_no_button_without_messages_to_resend() {
+        let (ui, _) = room_with_failed_message("com.negzero.DowngradeNoButtonFixture", "m", true);
+        ui.notice_downgrade_blocked(ROOM, vec![]);
+        settle(300);
+        assert!(shows_text(ui.toast.upcast_ref(), "To send unencrypted anyway, choose Unencrypted in Conversation Security."));
+        assert!(!shows_text(ui.toast.upcast_ref(), "no longer offers"));
+        assert!(find_button(ui.toast.upcast_ref(), "Send Anyway").is_none());
+        ui.window.close();
+    }
+
+    fn find_css(widget: &gtk::Widget, class: &str) -> Vec<gtk::Widget> {
+        let mut found = vec![];
+        if widget.has_css_class(class) {
+            found.push(widget.clone());
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            found.extend(find_css(&current, class));
+            child = current.next_sibling();
+        }
+        found
+    }
+
+    /// A message sent without some room members: no toast, a blue lock with a question mark and the
+    /// tooltip "Sent partially" on its bubble, and the members with the reason in its details.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_partial_send_marks_the_bubble_and_explains_itself_in_the_details() {
+        use crate::protocol::BackendEvent;
+        let (ui, _) = room_with_failed_message("com.negzero.PartialSendFixture", "sent", false);
+        ui.window.set_default_size(1000, 700);
+        for (id, delivery) in [("sent", "sent"), ("plain", "sent")] {
+            let mut state = ui.state.borrow_mut();
+            if state.current().messages.iter().all(|m| m.id != id) {
+                let mut extra = state.current().messages[0].clone();
+                extra.id = id.into();
+                extra.wire_id = format!("wire-{id}");
+                extra.text = "another message".into();
+                extra.timestamp = "2026-11-17T10:01:00Z".into();
+                state.current_mut().messages.push(extra);
+            }
+            let message = state.current_mut().messages.iter_mut().find(|m| m.id == id).unwrap();
+            message.encrypted = true;
+            message.encryption_mode = Some(Mode::Legacy);
+            message.delivery = delivery.into();
+            let saved = message.clone();
+            let chat = state.current().clone();
+            drop(state);
+            ui.store.save_chat_message(OWNER, &chat, Some(&saved)).unwrap();
+        }
+        assert!(ui.persist());
+        ui.render_messages(true);
+        settle(500);
+        assert!(find_css(ui.window.upcast_ref(), "message-partial-lock").is_empty(), "nothing partial yet");
+
+        let (generation, owner) = (ui.generation.get(), ui.state.borrow().account.clone());
+        let why = "Legacy OMEMO keys require contact authorization from carol@example.org".to_owned();
+        ui.backend_event(
+            generation,
+            &owner,
+            BackendEvent::SentPartially { peer: ROOM.into(), id: "wire-sent".into(), skipped: vec![("carol@example.org".into(), why.clone())] },
+        );
+        settle(500);
+
+        // No toast: the long text lives in the details.
+        assert!(!shows_text(ui.toast.upcast_ref(), "Sent without"), "no toast");
+        assert!(!shows_text(ui.toast.upcast_ref(), "carol@example.org"), "no toast");
+        // Stored on the message, so it survives a restart.
+        assert_eq!(ui.store.message(OWNER, ROOM, "sent").unwrap().skipped_members, vec![("carol@example.org".to_owned(), why.clone())]);
+        assert!(ui.store.message(OWNER, ROOM, "plain").unwrap().skipped_members.is_empty());
+
+        // Exactly one bubble is marked, with the tooltip, a lock and a question mark.
+        let marked = find_css(ui.window.upcast_ref(), "message-partial-lock");
+        assert_eq!(marked.len(), 1, "only the partially sent message");
+        assert_eq!(marked[0].tooltip_text().as_deref(), Some("Sent partially"));
+        let icons = find_css(&marked[0], "accent");
+        let names: Vec<String> = icons
+            .iter()
+            .filter_map(|w| w.downcast_ref::<gtk::Image>().and_then(|i| i.icon_name()).map(|n| n.to_string()))
+            .collect();
+        assert_eq!(names, ["channel-secure-symbolic", "dialog-question-symbolic"]);
+        // It follows the theme: blue by default, and it changes with light and dark mode instead of
+        // being a fixed colour.
+        let manager = adw::StyleManager::default();
+        let mut colours = vec![];
+        for scheme in [adw::ColorScheme::ForceLight, adw::ColorScheme::ForceDark] {
+            manager.set_color_scheme(scheme);
+            settle(300);
+            let colour = icons[0].color();
+            assert!(colour.blue() > colour.red() && colour.blue() > colour.green(), "{scheme:?}: {colour:?} is blue");
+            colours.push(colour);
+        }
+        assert_ne!(colours[0], colours[1], "the colour follows light and dark themes");
+        manager.set_color_scheme(adw::ColorScheme::Default);
+        // The other encrypted message keeps the ordinary lock, with no question mark.
+        let plain_locks = find_css(ui.window.upcast_ref(), "accent");
+        assert_eq!(plain_locks.len(), 2, "only the partial bubble has accent icons (lock and question mark)");
+
+        // The details say who and why.
+        let message = ui.store.message(OWNER, ROOM, "sent").unwrap();
+        ui.message_details(&message);
+        settle(500);
+        let dialog = ui.window.visible_dialog().expect("details dialog");
+        let content = dialog.child().expect("dialog content");
+        assert!(shows_text(&content, "Sent Partially"));
+        assert!(shows_text(&content, "carol@example.org"));
+        assert!(shows_text(&content, &why));
         ui.window.close();
     }
 }

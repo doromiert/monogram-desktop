@@ -753,6 +753,31 @@ impl Ui {
         });
         self.show_toast(toast);
     }
+    /// The toast for a room whose automatic encryption ended at plaintext. In a group with messages
+    /// to resend it offers Send Anyway; otherwise it explains how to send unencrypted.
+    pub(crate) fn notice_downgrade_blocked(self: &Rc<Self>, peer: &str, ids: Vec<String>) {
+        let in_group = self
+            .state
+            .borrow()
+            .chats
+            .iter()
+            .any(|chat| chat.jid == peer && chat.group);
+        if !in_group || ids.is_empty() {
+            return self.notice(crate::send_policy_ui::DOWNGRADE_NOTICE);
+        }
+        let toast = adw::Toast::builder()
+            .title(crate::send_policy_ui::DOWNGRADE_TOAST)
+            .button_label("Send Anyway")
+            .build();
+        let weak = Rc::downgrade(self);
+        let peer = peer.to_owned();
+        toast.connect_button_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.send_anyway(&peer, &ids);
+            }
+        });
+        self.show_toast(toast);
+    }
     /// Open what deals with a room that cannot be encrypted: Conversation Security to choose how it
     /// is sent, or the participants to see who is in it. The room is shown first if it is not open.
     pub(crate) fn resolve_room_failure(self: &Rc<Self>, room: &str, fix: crate::rooms::Fix) {
@@ -2857,6 +2882,9 @@ impl Ui {
                 }
                 return;
             }
+            BackendEvent::SentPartially { peer, id, skipped } => {
+                self.record_partial_send(owner, &peer, &id, &skipped);
+            }
             BackendEvent::Uncertain { peer, id } => {
                 self.delivery(&peer, &id, "uncertain");
                 self.notice("Encrypted delivery is uncertain. Retrying may duplicate it.");
@@ -3229,6 +3257,33 @@ impl Ui {
             }
             Ok(None) => {}
             Err(_) => self.notice("Message delivery status could not be saved"),
+        }
+    }
+    /// Remember on the message that it went out without `skipped` room members, so its bubble and
+    /// its details can say so. The list is bounded; it is shown, never acted on.
+    pub(crate) fn record_partial_send(
+        self: &Rc<Self>,
+        owner: &str,
+        peer: &str,
+        id: &str,
+        skipped: &[(String, String)],
+    ) {
+        let skipped: Vec<(String, String)> = skipped.iter().take(200).cloned().collect();
+        match self.store.record_skipped(owner, peer, id, &skipped) {
+            Ok(Some(message)) => {
+                let mut state = self.state.borrow_mut();
+                let active = state.current().jid == peer;
+                let chat = state.chat_for(peer);
+                if let Some(row) = chat.messages.iter_mut().find(|m| m.id == message.id) {
+                    *row = message;
+                }
+                drop(state);
+                if active {
+                    self.render_messages(false);
+                }
+            }
+            Ok(None) => {}
+            Err(_) => self.notice("Could not record who this message was not sent to"),
         }
     }
     pub(crate) fn update_history_spinner(&self) {
