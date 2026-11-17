@@ -355,3 +355,131 @@ fn accepted_invites_profile_cards_audio_and_compact_pack_strip() {
     let _ = std::fs::remove_file(fake);
     ui.window.close();
 }
+
+#[gtk::test]
+#[ignore = "requires a private GTK display and keyring"]
+fn media_reply_insets_keep_media_edges_thin() {
+    assert_eq!(
+        std::env::var("MONOGRAM_KEYRING_FIXTURE").as_deref(),
+        Ok("1")
+    );
+    adw::init().unwrap();
+    crate::widgets::install_icons();
+    let app = adw::Application::builder()
+        .application_id("com.negzero.MonogramMediaReplyTest")
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    app.register(None::<&gio::Cancellable>).unwrap();
+    let css = gtk::CssProvider::new();
+    css.load_from_path(crate::widgets::asset("style.css"));
+    gtk::style_context_add_provider_for_display(
+        &gtk::gdk::Display::default().unwrap(),
+        &css,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+    let ui = Ui::new(&app, true);
+    adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
+    let owner = "owner@fixture.invalid";
+    let peer = "peer@fixture.invalid";
+    ui.store
+        .save_account(&crate::model::Account {
+            jid: owner.into(),
+            host: String::new(),
+            port: 5222,
+            direct_tls: false,
+        })
+        .unwrap();
+    ui.state.borrow_mut().account = owner.into();
+    let id = ui.state.borrow_mut().chat_for(peer).id.clone();
+    ui.select_chat(&id);
+    wait(|| !ui.history_window.busy());
+    let standard = crate::model::Message {
+        id: "standard-reply".into(),
+        text: "Text reply".into(),
+        reply: "Bob · too bad".into(),
+        reply_id: "original".into(),
+        sender: peer.into(),
+        author: "Bob".into(),
+        ..Default::default()
+    };
+    let attachment = crate::file_share::Attachment {
+        wire_url: "https://files.fixture.invalid/photo.png".into(),
+        name: "Photo.png".into(),
+        mime: "image/png".into(),
+        size: Some(100),
+        width: Some(320),
+        height: Some(180),
+        hashes: Default::default(),
+        manual: true,
+        sticker: false,
+    };
+    let media = crate::model::Message {
+        id: "media-reply".into(),
+        reply: "Bob · A longer quoted reply should wrap inside its own inset, without leaving a broad empty strip beside the attachment. Keep every media edge thin even when this quotation spans several lines.".into(),
+        text: String::new(),
+        kind: "file".into(),
+        attachment: Some(attachment),
+        ..standard.clone()
+    };
+    let reacted = crate::model::Message {
+        id: "media-reaction-reply".into(),
+        own: true,
+        reactions: vec!["🔥 1".into()],
+        ..media.clone()
+    };
+    ui.state.borrow_mut().chat_for(peer).messages = vec![standard, media, reacted];
+    ui.window.set_default_size(1200, 1000);
+    ui.window.present();
+    ui.render_messages(true);
+    wait(|| ui.bubbles.borrow().len() == 3 && ui.bubbles.borrow().values().all(|b| b.width() > 0));
+    let settle = Instant::now();
+    wait(|| settle.elapsed() > Duration::from_millis(300));
+    for id in ["standard-reply", "media-reply", "media-reaction-reply"] {
+        let bubble = ui.bubbles.borrow()[id].clone();
+        let reply = find::<gtk::Button>(&bubble, &|w| w.has_css_class("message-reply")).unwrap();
+        let bounds = reply.compute_bounds(&bubble).unwrap();
+        let padding = bubble.style_context().padding();
+        eprintln!(
+            "{id}: content width={}, padding={},{}, reply origin={},{}",
+            bubble.width(),
+            padding.left(),
+            padding.top(),
+            bounds.x(),
+            bounds.y()
+        );
+        assert!(
+            (bounds.x() + padding.left() as f32 - 13.).abs() < 1.,
+            "{id} reply inset {}",
+            bounds.x()
+        );
+        assert!(
+            (bounds.y() + padding.top() as f32 - 10.).abs() < 1.,
+            "{id} reply top {}",
+            bounds.y()
+        );
+        if id != "standard-reply" {
+            let tile =
+                find::<gtk::Overlay>(&bubble, &|w| w.has_css_class("media-download")).unwrap();
+            let media = tile.compute_bounds(&bubble).unwrap();
+            assert!(
+                (media.x() + padding.left() as f32 - 2.).abs() < 1.,
+                "{id} media inset {}",
+                media.x()
+            );
+            assert!(
+                (bubble.width() as f32 - media.x() - media.width() + padding.right() as f32 - 2.)
+                    .abs()
+                    < 1.,
+                "{id} media right edge"
+            );
+        }
+    }
+    assert!(
+        std::process::Command::new("import")
+            .args(["-window", "root", "/tmp/monogram-media-reply-padding.png"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    ui.window.close();
+}

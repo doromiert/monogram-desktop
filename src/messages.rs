@@ -632,11 +632,11 @@ impl Ui {
                 outer.append(&slot);
                 avatar = Some(a);
             }
-            let sticker = m.attachment.as_ref().is_some_and(|file| file.sticker)||m.upload.as_ref().is_some_and(|draft|draft.sticker&&draft.local_sticker.is_some());
+            let sticker = m.attachment.as_ref().is_some_and(|file| file.sticker)||m.upload.as_ref().is_some_and(|draft|draft.sticker);
             let media = m
                 .attachment
                 .as_ref()
-                .is_some_and(|file| file.media_candidate());
+                .is_some_and(|file| file.media_candidate()) || crate::upload_ui::pending_media(&m).is_some();
             let bubble = bx(true, 0);
             bubble.set_vexpand(false);
             bubble.set_valign(gtk::Align::Start);
@@ -722,12 +722,21 @@ impl Ui {
                     .map(|line| line.strip_prefix("> ").unwrap_or(line))
                     .collect::<Vec<_>>()
                     .join(" ");
-                let snippet = crate::reply_preview_ui::Snippet::new(if preview.is_empty(){"Original message"}else{&preview});
+                let snippet: gtk::Widget = if preview.starts_with("📎 ") {
+                    let name = text(&preview.chars().take(4096).collect::<String>(), "reply-preview");
+                    name.set_single_line_mode(true);
+                    name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                    name.set_max_width_chars(52);
+                    name.upcast()
+                } else {
+                    crate::reply_preview_ui::Snippet::new(if preview.is_empty(){"Original message"}else{&preview}).upcast()
+                };
                 contents.append(&title);
                 contents.append(&snippet);
-                let preview_row = bx(false, 7);
+                // Measure the quote at the width left by its thumbnail.
+                let preview_row = gtk::Grid::builder().column_spacing(7).build();
                 crate::reply_preview_ui::attach(self, m, &preview_row);
-                preview_row.append(&contents);
+                preview_row.attach(&contents, 1, 0, 1, 1);
                 reply.set_child(Some(&preview_row));
                 let weak = Rc::downgrade(self);
                 let target = m.reply_id.clone();
@@ -842,9 +851,15 @@ impl Ui {
                     l.set_margin_top(6);
                     bubble.append(&l)
                 }
-                "file" if sticker && m.upload.is_some() => {
-                    let overlay=gtk::Overlay::new();overlay.set_child(Some(&self.pending_sticker_content(&m)));
-                    meta.add_css_class("sticker-meta");meta.set_halign(gtk::Align::End);meta.set_valign(gtk::Align::End);meta.set_can_target(false);overlay.add_overlay(&meta);bubble.append(&overlay);
+                "file" if m.upload.is_some() && media => {
+                    let content=self.media_upload_content(&m);
+                    if sticker || m.text.is_empty() {
+                        let overlay=gtk::Overlay::new();overlay.set_child(Some(&content));
+                        meta.add_css_class("sticker-meta");meta.set_halign(gtk::Align::End);meta.set_valign(gtk::Align::End);meta.set_can_target(false);overlay.add_overlay(&meta);bubble.append(&overlay);
+                    } else {
+                        bubble.append(&content);
+                        bubble.append(&MessageText::new(&wrap(&m.text,"message-text"),&meta));
+                    }
                 }
                 "file" if m.upload.is_some() => {
                     bubble.append(&self.upload_content(&m));

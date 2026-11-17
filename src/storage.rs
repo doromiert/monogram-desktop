@@ -285,6 +285,7 @@ impl Store {
                 params![account, peer, m.id],
             )?;
         }
+        self.recover_forwarded_attachment(account, peer, m)?;
         Ok(())
     }
     pub fn ready_upload_captions(&self, owner: &str) -> rusqlite::Result<Vec<(String, Message)>> {

@@ -74,3 +74,21 @@ and upload exist; SFS/OOB and bare `aesgcm` references are refused rather than
 reusing original key-bearing URLs. Rich entities, captions, albums, room transport,
 outbox uncertainty, and physical mobile/desktop UI exchange remain open. This
 milestone does not establish complete forwarding or client parity.
+
+## Receiving mobile Legacy attachment markers
+
+Mobile's Legacy OMEMO fallback sends the encrypted file URL first, followed by a
+canonical attributed `Forwarded attachment` placeholder. Desktop folds this
+placeholder into the attachment's attribution rather than showing an extra text
+bubble. It accepts only adjacent, successfully decrypted Legacy messages with
+the same real sender/device fingerprint and direction, an encrypted attachment,
+and a nonnegative delay of at most 30 seconds. Existing attribution must agree;
+ordinary text/captions, pending/failed messages, conflicting links and unrelated
+senders remain separate. This does not authenticate the claimed original author.
+
+Presentation recovery also covers already-stored history without writing through
+read-only history snapshots. Both original message bodies and IDs remain intact;
+new rows retain derived presentation links, and local attachment deletion
+includes the marker even for history saved before this handler existed. Existing
+media captions are preserved. The marker stays visible when its attachment is
+outside the loaded window or a safe pairing cannot be established.

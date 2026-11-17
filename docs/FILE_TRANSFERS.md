@@ -100,6 +100,14 @@ local path. Sending creates durable local pending messages and clears the compos
 only after persistence. The first selected file carries the caption; selections
 currently send as independent files rather than a media album.
 
+Pending photos, videos, GIFs and stickers keep their media tile instead of a
+filename/progress-bar row. Local image decoding and video poster extraction run
+outside GTK; unavailable or non-local previews retain a neutral media tile.
+Uploads and downloads share the circular progress indicator, with Cancel while
+running and Retry after interruption. The timestamp shows the sending spinner
+until completion, and captions/replies retain their normal layout. Ordinary
+documents keep their file upload controls.
+
 [XEP-0363](https://xmpp.org/extensions/xep-0363.html) discovery queries the account
 server and its advertised services. Provider limits include the encrypted 16-byte
 tag and are checked before copying a known-size source. Unknown-size sources are

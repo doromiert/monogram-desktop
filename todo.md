@@ -91,7 +91,7 @@
 
 ## Media with replies
 
-- [ ] Media-only messages with a reply must keep thin padding on media-touching edges and standard reply padding around the reply, with or without reactions (reference: /tmp/codex-clipboard-O9Sz5j.png).
+- [x] Media-only messages with a reply must keep thin padding on media-touching edges and standard reply padding around the reply, with or without reactions (reference: /tmp/codex-clipboard-O9Sz5j.png).
 
 ## Reply compatibility
 
@@ -138,3 +138,21 @@
 - [x] Publish and update the installed ZenOS package with the corrected icon measurement: source6887b50, ZenPkgs3b26c59c; packaged smoke119ms initial feedback /338ms maximum heartbeat.
 
 - [x] Restore the pack category row’s previous 10px horizontal inset on the row itself, keeping the sidebar scroll viewport and shadow full width.
+
+## Forwarded attachments and media replies
+
+- [x] Fold the mobile Legacy OMEMO forwarded-attachment marker into its adjacent attachment, preserving both wire messages/IDs and checking author, key, protocol and timing. Recover existing history and retain linked deletion behavior.
+- [x] Give media reply cards the normal bubble inset while keeping media edges thin; native geometry/screenshot verified with and without reactions (1.13s), 290 default tests plus4 targeted compatibility checks pass.
+- [x] Publish and install the updated desktop package: sourceb29c234 / ZenPkgs59d3ae09; final packaged smoke109ms feedback /342ms maximum heartbeat.
+
+- [x] Keep long quoted media bubbles fitted to the actual media width: native regression reproduced428px content beside320px media, then passed at320px with13px/10px reply insets and2px media edges (1.04s).
+
+- [x] Increase the reply-to-media gap to10px to match the vertical reply inset; keep the media-to-reactions spacing unchanged.
+
+- [x] Show pending photo/video/GIF/sticker uploads as native media previews with the shared download-style progress ring, cancel/retry controls and overlaid sending status; native phases/cancel/retry/caption/video checks pass with26ms feedback/91ms maxUI gap.
+
+- [x] Fix long attachment names overflowing reply cards beside thumbnails: reproduce36px row allocation for50px text, replace the horizontal Box with a native Grid, and verify text/image reply width and painted bounds under fatal GTK critical checks.
+
+- [x] Publish/install the combined media upload previews, reply-thumbnail layout and10px reply-to-media gap update: source7387e3c / ZenPkgs320697f1 installed/running; final packaged smoke109ms feedback/343ms maximum heartbeat. File replies keep the paperclip and name on one ellipsized line while text captions retain the Grid sizing fix.
+
+- [x] Keep the paperclip and attachment filename together on one ellipsized reply line while retaining the Grid fix for two-line caption previews; native filename/caption geometry and full-width text quote checks pass.

@@ -137,6 +137,33 @@ mod message_bubble_limit_imp {
         let mut child=widget.first_child();while let Some(widget)=child {child=widget.next_sibling();if let Some(label)=preview_body(&widget){return Some(label);}}None
     }
 
+    fn media_bubble_width(widget: &gtk::Widget) -> Option<i32> {
+        if widget.has_css_class("message-bubble") {
+            if !widget.has_css_class("media-bubble") || widget.has_css_class("message-editing") { return None; }
+            fn tile(widget: &gtk::Widget) -> Option<gtk::Widget> {
+                if widget.has_css_class("media-download") { return Some(widget.clone()); }
+                let mut child=widget.first_child();
+                while let Some(widget)=child { child=widget.next_sibling(); if let Some(found)=tile(&widget) { return Some(found); } }
+                None
+            }
+            let media=tile(widget)?;
+            let style=widget.style_context();let padding=style.padding();let border=style.border();
+            return Some(media.measure(gtk::Orientation::Horizontal,-1).1
+                + i32::from(padding.left()+padding.right()+border.left()+border.right()));
+        }
+        let mut child=widget.first_child();
+        while let Some(widget)=child { child=widget.next_sibling(); if let Some(width)=media_bubble_width(&widget) { return Some(width); } }
+        None
+    }
+    fn preferred_width(child: &gtk::Widget) -> (i32,i32,i32,i32) {
+        let (minimum,natural,base,natural_base)=child.measure(gtk::Orientation::Horizontal,-1);
+        // A quote/caption wraps to its media, rather than leaving unused bubble space beside it.
+        match media_bubble_width(child) {
+            Some(cap) => (minimum.min(cap),natural.min(cap),base,natural_base),
+            None => (minimum,natural,base,natural_base),
+        }
+    }
+
     #[derive(Default)]
     pub struct MessageBubbleLimit {
         pub child: RefCell<Option<gtk::Widget>>,
@@ -170,7 +197,7 @@ mod message_bubble_limit_imp {
                 return (0, 0, -1, -1);
             };
             if orientation == gtk::Orientation::Horizontal {
-                let (minimum, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
+                let (minimum, natural, _, _) = preferred_width(&child);
                 // Report only a modest minimum. The timeline scrolls with a horizontal policy of
                 // Never, which makes GTK propagate the widest child's minimum to the whole chat
                 // pane: one unbreakable link would otherwise make the window ask for more width
@@ -178,7 +205,7 @@ mod message_bubble_limit_imp {
                 // size_allocate still gives the child its real minimum whenever the row has room.
                 return (minimum.min(BUBBLE_SOFT_MIN_WIDTH), natural.max(minimum), -1, -1);
             }
-            let (minimum, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
+            let (minimum, natural, _, _) = preferred_width(&child);
             let child_width = if for_size < 0 {
                 natural.max(minimum).max(1)
             } else {
@@ -210,7 +237,7 @@ mod message_bubble_limit_imp {
                 }
             }
             let cap = width.min(MESSAGE_MAX_WIDTH).max(1);
-            let (minimum, natural, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
+            let (minimum, natural, _, _) = preferred_width(&child);
             // The cap must not squeeze a child below its minimum width: an unbreakable link
             // would otherwise overflow its bubble. The row width is the only hard limit. A bubble
             // being edited keeps the plain cap.
@@ -1225,4 +1252,39 @@ impl SquareCell {
         cell.set_hexpand(true);
         cell
     }
+}
+
+/// Shared determinate/indeterminate ring for media upload and download controls.
+pub fn transfer_progress_ring(
+    fraction: std::rc::Rc<Cell<Option<f64>>>,
+    displayed_fraction: std::rc::Rc<Cell<f64>>,
+) -> gtk::DrawingArea {
+    let disk = gtk::DrawingArea::builder()
+        .content_width(58)
+        .content_height(58)
+        .build();
+    disk.set_halign(gtk::Align::Center);
+    disk.set_valign(gtk::Align::Center);
+    let draw_fraction = fraction;
+    let draw_displayed_fraction = displayed_fraction;
+    let started = std::time::Instant::now();
+    disk.set_draw_func(move |_, ctx, width, height| {
+        let x = f64::from(width) / 2.;
+        let y = f64::from(height) / 2.;
+        let radius = x.min(y) - 3.;
+        ctx.set_line_width(3.);
+        ctx.set_source_rgba(1., 1., 1., 0.22);
+        ctx.arc(x, y, radius, 0., std::f64::consts::TAU);
+        let _ = ctx.stroke();
+        let start = -std::f64::consts::FRAC_PI_2;
+        let (angle, amount) = draw_fraction.get().map_or_else(
+            || (start + started.elapsed().as_secs_f64() * 3., 0.23),
+            |_| (start, draw_displayed_fraction.get().clamp(0., 1.)),
+        );
+        ctx.set_source_rgba(1., 1., 1., 0.95);
+        ctx.set_line_cap(gtk::cairo::LineCap::Round);
+        ctx.arc(x, y, radius, angle, angle + amount * std::f64::consts::TAU);
+        let _ = ctx.stroke();
+    });
+    disk
 }

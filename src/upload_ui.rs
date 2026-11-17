@@ -10,11 +10,27 @@ use crate::{
 use adw::prelude::*;
 use gtk::glib;
 use std::{
+    cell::Cell,
     collections::VecDeque,
     rc::Rc,
     sync::{Arc, mpsc},
     time::Duration,
 };
+pub(crate) fn pending_media(message: &Message) -> Option<crate::file_share::Attachment> {
+    let draft = message.upload.as_ref()?;
+    let file = crate::file_share::Attachment {
+        wire_url: String::new(),
+        name: draft.name.clone(),
+        mime: String::new(),
+        size: None,
+        width: None,
+        height: None,
+        hashes: Default::default(),
+        manual: true,
+        sticker: draft.sticker,
+    };
+    file.media_candidate().then_some(file)
+}
 #[derive(Clone)]
 struct Work {
     owner: String,
@@ -601,6 +617,236 @@ impl Ui {
             match result {Ok(texture)=>picture.set_paintable(Some(texture.upcast())),Err(error)=>picture.set_tooltip_text(Some(&error))}
         });content
     }
+    pub(crate) fn media_upload_content(self: &Rc<Self>, message: &Message) -> gtk::Box {
+        let draft = message.upload.as_ref().unwrap();
+        let file = pending_media(message).unwrap();
+        let owner = self.state.borrow().account.clone();
+        let peer = self.state.borrow().current().jid.clone();
+        let generation = self.generation.get();
+        let id = message.id.clone();
+        let content = bx(true, 0);
+        let overlay = gtk::Overlay::new();
+        overlay.add_css_class("media-download");
+        overlay.add_css_class("media-upload");
+        if file.sticker {
+            overlay.add_css_class("sticker-download");
+        }
+        if draft.local_sticker.is_some() {
+            overlay.set_child(Some(&self.pending_sticker_content(message)));
+        } else {
+            let picture =
+                AspectImage::thumbnail(if file.sticker { 168 } else { 320 }, file.sticker);
+            picture.set_ratio(4. / 3.);
+            overlay.set_child(Some(&picture));
+            if let Some(path) = gtk::gio::File::for_uri(&draft.uri).path() {
+                if file.video_candidate() {
+                    let weak = Rc::downgrade(self);
+                    let image = picture.downgrade();
+                    let account = owner.clone();
+                    glib::spawn_future_local(async move {
+                        let _permit = crate::media_library_ui::lottie_permit().await;
+                        if image.upgrade().is_none() {
+                            return;
+                        }
+                        let result = gtk::gio::spawn_blocking(move || {
+                            crate::image_loader::encode_video_preview(
+                                &path,
+                                &gtk::gio::Cancellable::new(),
+                                1500,
+                            )
+                        })
+                        .await;
+                        let (Some(ui), Some(picture)) = (weak.upgrade(), image.upgrade()) else {
+                            return;
+                        };
+                        if ui.generation.get() != generation || ui.state.borrow().account != account
+                        {
+                            return;
+                        }
+                        if let Ok(Ok(preview)) = result {
+                            if let Ok(texture) = gtk::gdk::Texture::from_bytes(
+                                &glib::Bytes::from_owned(preview.bytes),
+                            ) {
+                                picture.set_paintable(Some(texture.upcast()));
+                            }
+                        }
+                    });
+                } else {
+                    let weak = Rc::downgrade(self);
+                    let account = owner.clone();
+                    let visible_ui = Rc::downgrade(self);
+                    crate::image_loader::play_input(
+                        &picture,
+                        640,
+                        move |picture| visible_ui.upgrade().is_some_and(|ui| ui.in_chat_viewport(picture)),
+                        move |picture, texture| {
+                            if weak.upgrade().is_some_and(|ui| {
+                                ui.generation.get() == generation
+                                    && ui.state.borrow().account == account
+                            }) {
+                                picture.set_paintable(Some(texture.upcast()));
+                            }
+                        },
+                        file.sticker,
+                        move || {
+                            let input = std::fs::File::open(&path)
+                                .map_err(|_| "Upload preview unavailable")?;
+                            let metadata =
+                                input.metadata().map_err(|_| "Upload preview unavailable")?;
+                            if !metadata.is_file() || metadata.len() > crate::file_share::MAX {
+                                return Err("Upload preview unavailable");
+                            }
+                            Ok(crate::downloads::VerifiedFile(input))
+                        },
+                    );
+                }
+            }
+        }
+        let controls = bx(true, 4);
+        controls.set_halign(gtk::Align::Center);
+        controls.set_valign(gtk::Align::Center);
+        controls.add_css_class("media-download-controls");
+        let fraction = Rc::new(Cell::new(None));
+        let displayed = Rc::new(Cell::new(0.));
+        let ring = transfer_progress_ring(fraction.clone(), displayed.clone());
+        let action = gtk::Overlay::new();
+        action.set_child(Some(&ring));
+        let button = gtk::Button::from_icon_name(if draft.error.is_some() {
+            "view-refresh-symbolic"
+        } else {
+            "process-stop-symbolic"
+        });
+        button.add_css_class("circular");
+        button.add_css_class("media-download-action");
+        button.set_halign(gtk::Align::Center);
+        button.set_valign(gtk::Align::Center);
+        let action_name = if draft.error.is_some() { "Retry upload" } else { "Cancel upload" };
+        button.set_tooltip_text(Some(action_name));
+        button.update_property(&[gtk::accessible::Property::Label(action_name)]);
+        action.add_overlay(&button);
+        controls.append(&action);
+        let status = text(
+            draft.error.as_deref().unwrap_or("Queued for upload"),
+            "caption",
+        );
+        status.add_css_class("media-upload-status");
+        status.set_max_width_chars(26);
+        status.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        controls.append(&status);
+        overlay.add_overlay(&controls);
+        content.append(&overlay);
+        let weak = Rc::downgrade(self);
+        let account = owner.clone();
+        let destination = peer.clone();
+        let target = id.clone();
+        button.connect_clicked(move |_| {
+            let Some(ui) = weak.upgrade().filter(|ui| {
+                ui.generation.get() == generation && ui.state.borrow().account == account
+            }) else {
+                return;
+            };
+            if ui.uploads.borrow().phase(&target).is_some() {
+                ui.uploads.borrow_mut().cancel(&target);
+                ui.fail_upload(
+                    &account,
+                    &destination,
+                    &target,
+                    "Upload cancelled. Retry to send.",
+                );
+                if ui.state.borrow().current().jid == destination {
+                    ui.render_messages(false);
+                }
+            } else {
+                ui.start_upload(&destination, &target);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        let action = button.downgrade();
+        let label = status.downgrade();
+        let disk = ring.downgrade();
+        let running = Rc::new(Cell::new(false));
+        let animate = Rc::new(Cell::new(false));
+        let fallback = draft
+            .error
+            .clone()
+            .unwrap_or_else(|| "Upload interrupted. Retry to send.".into());
+        glib::timeout_add_local(Duration::from_millis(80), move || {
+            let (Some(ui), Some(button), Some(label), Some(ring)) = (
+                weak.upgrade(),
+                action.upgrade(),
+                label.upgrade(),
+                disk.upgrade(),
+            ) else {
+                return glib::ControlFlow::Break;
+            };
+            if ui.generation.get() != generation || ui.state.borrow().account != owner {
+                return glib::ControlFlow::Break;
+            }
+            let phase = ui.uploads.borrow().phase(&id);
+            let active = phase.is_some();
+            let (progress, detail) = match phase {
+                Some(Phase::Uploading { bytes, total }) => (
+                    Some((bytes as f64 / total.max(1) as f64).clamp(0., 1.)),
+                    format!(
+                        "{} of {}",
+                        glib::format_size(bytes),
+                        glib::format_size(total)
+                    ),
+                ),
+                Some(Phase::Waiting) => (Some(1.), "Confirming upload…".into()),
+                Some(Phase::Discovering) => (None, "Finding upload service…".into()),
+                Some(Phase::Preparing) => (None, "Preparing upload…".into()),
+                Some(Phase::Reconnecting) => (None, "Reconnecting upload…".into()),
+                None => (Some(0.), fallback.clone()),
+            };
+            button.set_icon_name(if active {
+                "process-stop-symbolic"
+            } else {
+                "view-refresh-symbolic"
+            });
+            let action_name = if active { "Cancel upload" } else { "Retry upload" };
+            button.set_tooltip_text(Some(&format!("{action_name} · {detail}")));
+            button.update_property(&[gtk::accessible::Property::Label(action_name)]);
+            label.set_text(&detail);
+            let previous = fraction.replace(progress);
+            if previous.is_none() && progress.is_some() {
+                displayed.set(progress.unwrap_or_default());
+            }
+            let visible = active && ui.in_chat_viewport(&ring);
+            animate.set(visible);
+            if visible && !running.replace(true) {
+                let (fraction, displayed, animate, running) = (
+                    fraction.clone(),
+                    displayed.clone(),
+                    animate.clone(),
+                    running.clone(),
+                );
+                let last = Cell::new(None::<i64>);
+                ring.add_tick_callback(move |ring, clock| {
+                    if !animate.get() || !ring.is_mapped() {
+                        running.set(false);
+                        return glib::ControlFlow::Break;
+                    }
+                    let now = clock.frame_time();
+                    let dt = last.replace(Some(now)).map_or(1. / 60., |old| {
+                        ((now - old) as f64 / 1_000_000.).clamp(0., 0.1)
+                    });
+                    if let Some(target) = fraction.get() {
+                        displayed.set(
+                            displayed.get() + (target - displayed.get()) * (1. - (-dt * 16.).exp()),
+                        );
+                    }
+                    ring.queue_draw();
+                    glib::ControlFlow::Continue
+                });
+            } else if !active {
+                displayed.set(progress.unwrap_or_default());
+                ring.queue_draw();
+            }
+            glib::ControlFlow::Continue
+        });
+        content
+    }
     pub fn upload_content(self: &Rc<Self>, message: &Message) -> gtk::Box {
         let draft = message.upload.as_ref().unwrap();
         let id = message.id.clone();
@@ -702,6 +948,7 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("../tests/media_upload_native.rs");
     #[test]
     fn pending_uploads_are_durable_but_never_immutable_wire_payloads() {
         let store = crate::storage::Store::open(true).unwrap();
