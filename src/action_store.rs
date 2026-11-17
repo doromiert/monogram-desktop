@@ -367,6 +367,9 @@ impl Store {
             }) else {
                 continue;
             };
+            if let Some(marker) = self.forwarded_attachment_neighbor(account, peer, &parent)? {
+                if !targets.contains(&marker.id) { targets.push(marker.id); }
+            }
             let mut query = self.db.prepare("SELECT body FROM messages WHERE account=? AND peer=? AND json_extract(body,'$.upload_caption_for')=? AND json_extract(body,'$.own')=1")?;
             let rows = query.query_map(params![account, peer, parent.wire_id], |row| {
                 row.get::<_, String>(0)

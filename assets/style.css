@@ -184,6 +184,7 @@
 
 .message-bubble.media-bubble { padding: 2px; border-radius: 12px; }
 .media-bubble .attachment-controls { padding: 8px; }
+.media-bubble > .message-reply { margin: 8px 11px 7px; }
 .media-bubble .message-author { margin: 3px 7px; }
 .media-viewer .media-controls-top { background: linear-gradient(to bottom, rgba(0,0,0,.5), transparent); padding-bottom: 24px; }
 .media-viewer .media-controls-top headerbar { color: white; }

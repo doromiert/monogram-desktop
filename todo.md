@@ -91,7 +91,7 @@
 
 ## Media with replies
 
-- [ ] Media-only messages with a reply must keep thin padding on media-touching edges and standard reply padding around the reply, with or without reactions (reference: /tmp/codex-clipboard-O9Sz5j.png).
+- [x] Media-only messages with a reply must keep thin padding on media-touching edges and standard reply padding around the reply, with or without reactions (reference: /tmp/codex-clipboard-O9Sz5j.png).
 
 ## Reply compatibility
 
@@ -138,3 +138,9 @@
 - [x] Publish and update the installed ZenOS package with the corrected icon measurement: source6887b50, ZenPkgs3b26c59c; packaged smoke119ms initial feedback /338ms maximum heartbeat.
 
 - [x] Restore the pack category row’s previous 10px horizontal inset on the row itself, keeping the sidebar scroll viewport and shadow full width.
+
+## Forwarded attachments and media replies
+
+- [x] Fold the mobile Legacy OMEMO forwarded-attachment marker into its adjacent attachment, preserving both wire messages/IDs and checking author, key, protocol and timing. Recover existing history and retain linked deletion behavior.
+- [x] Give media reply cards the normal bubble inset while keeping media edges thin; native geometry/screenshot verified with and without reactions (1.13s), 290 default tests plus4 targeted compatibility checks pass.
+- [ ] Publish and install the updated desktop package.
