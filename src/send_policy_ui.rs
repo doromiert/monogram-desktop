@@ -50,6 +50,17 @@ impl Ui {
         }
     }
 
+    /// The encryption check failed. A Legacy OMEMO contact-authorization denial offers Resolve.
+    pub(crate) fn report_encryption_check_failure(
+        self: &Rc<Self>,
+        peer: &str,
+        error: &crate::crypto::Error,
+    ) {
+        let reason = error.to_string();
+        let title = format!("Could not check conversation encryption. {reason}");
+        self.notice_resolving_authorization(peer, &reason, title);
+    }
+
     pub fn choose_sending(self: &Rc<Self>, then: impl FnOnce(&Rc<Self>, Mode) + 'static) {
         let state = self.state.borrow();
         if state.account.is_empty() {
@@ -117,7 +128,7 @@ impl Ui {
             let mode = match result {
                 Ok(Ok(mode)) => mode,
                 Ok(Err(error)) => {
-                    ui.notice(&format!("Could not check conversation encryption. {error}"));
+                    ui.report_encryption_check_failure(&peer, &error);
                     return;
                 }
                 Err(_) => {

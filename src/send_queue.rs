@@ -372,11 +372,7 @@ impl Ui {
             let mode = match result {
                 Ok(mode) => mode,
                 Err(error) => {
-                    for mut message in messages {
-                        message.delivery = "failed".into();
-                        ui.store_queued_row(&owner, &peer, message);
-                    }
-                    ui.notice(&error);
+                    ui.fail_queued_selection(&owner, &peer, messages, &error);
                     return;
                 }
             };
@@ -497,6 +493,21 @@ impl Ui {
         });
     }
 
+    /// The encryption check for queued messages failed: mark them failed and say why. A Legacy
+    /// OMEMO contact-authorization denial offers Resolve.
+    pub(crate) fn fail_queued_selection(
+        self: &Rc<Self>,
+        owner: &str,
+        peer: &str,
+        messages: Vec<Message>,
+        error: &str,
+    ) {
+        for mut message in messages {
+            message.delivery = "failed".into();
+            self.store_queued_row(owner, peer, message);
+        }
+        self.notice_resolving_authorization(peer, error, error.to_owned());
+    }
     pub fn store_queued_row(self: &Rc<Self>, owner: &str, peer: &str, message: Message) -> bool {
         if self.store.save_outbox_row(owner, peer, &message).is_err() {
             self.notice("Queued message could not be saved");

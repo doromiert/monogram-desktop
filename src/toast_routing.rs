@@ -306,4 +306,140 @@ mod tests {
         assert_eq!(peer.as_deref(), Some("bob@example.org"));
         ui.window.close();
     }
+
+    // ---- Resolve toast on every path that can report the contact-authorization denial ----
+
+    const PEER: &str = "bob@example.org";
+    const DENIED_TEXT: &str = "Legacy OMEMO keys require contact authorization";
+
+    /// A window with an account, a chat with `PEER` and two stored own messages (`wire-a`, `wire-b`).
+    fn fixture(app_id: &str) -> std::rc::Rc<crate::ui::Ui> {
+        use crate::model::{Account, Chat, Message};
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id(app_id)
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let ui = crate::ui::Ui::new(&app, true);
+        ui.window.present();
+        settle(300);
+        let owner = ui.state.borrow().account.clone();
+        let chat = Chat { jid: PEER.into(), name: "Bob".into(), ..Default::default() };
+        ui.store
+            .save_account(&Account { jid: owner.clone(), host: String::new(), port: 5222, direct_tls: false })
+            .unwrap();
+        for n in ["a", "b"] {
+            let message = Message {
+                id: format!("local-{n}"),
+                wire_id: format!("wire-{n}"),
+                markable_id: format!("wire-{n}"),
+                sender: owner.clone(),
+                timestamp: "2026-11-17T10:00:00Z".into(),
+                text: "hi".into(),
+                own: true,
+                ..Default::default()
+            };
+            ui.store.save_chat_message(&owner, &chat, Some(&message)).unwrap();
+        }
+        ui
+    }
+    fn clear(ui: &crate::ui::Ui) {
+        ui.toast.dismiss_all();
+        settle(500);
+    }
+    fn open_contact_access_peer(ui: &crate::ui::Ui) -> Option<String> {
+        ui.contact_access_widgets.borrow().as_ref().map(|c| c.peer().to_owned())
+    }
+    /// The toast is shown, has no Resolve button when `resolvable` is false, and otherwise has one
+    /// that opens Control Access for `PEER`.
+    fn assert_toast(ui: &crate::ui::Ui, title: &str, resolvable: bool) {
+        settle(300);
+        assert!(shows_text(ui.toast.upcast_ref(), title), "toast text {title:?}");
+        let button = find_button(ui.toast.upcast_ref(), "Resolve");
+        assert_eq!(button.is_some(), resolvable, "Resolve button presence for {title:?}");
+        if let Some(button) = button {
+            assert!(open_contact_access_peer(ui).is_none());
+            button.emit_clicked();
+            settle(300);
+            assert_eq!(open_contact_access_peer(ui).as_deref(), Some(PEER), "Control Access opened for the contact");
+            ui.contact_access_widgets.borrow_mut().take();
+        }
+        clear(ui);
+    }
+
+    /// A queued message whose encryption could not be chosen: this toast is the raw reason.
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn queued_send_encryption_failure_offers_resolve_for_the_denial_only() {
+        let ui = fixture("com.negzero.ResolveQueuedFixture");
+        let owner = ui.state.borrow().account.clone();
+        let queued = |n: &str| ui.store.message(&owner, PEER, &format!("local-{n}")).unwrap();
+
+        ui.fail_queued_selection(&owner, PEER, vec![queued("b")], "The connection is unavailable");
+        assert_toast(&ui, "The connection is unavailable", false);
+
+        ui.fail_queued_selection(&owner, PEER, vec![queued("a")], DENIED_TEXT);
+        assert_toast(&ui, DENIED_TEXT, true);
+        ui.window.close();
+    }
+
+    /// The composer's encryption check failing: "Could not check conversation encryption. <reason>".
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn encryption_check_failure_offers_resolve_for_the_denial_only() {
+        use crate::crypto::Error;
+        let ui = fixture("com.negzero.ResolveCheckFixture");
+
+        ui.report_encryption_check_failure(PEER, &Error::Unavailable("Connection interrupted"));
+        assert_toast(&ui, "Could not check conversation encryption. Connection interrupted", false);
+
+        ui.report_encryption_check_failure(PEER, &Error::Unavailable(crate::crypto::legacy::DENIED));
+        assert_toast(&ui, &format!("Could not check conversation encryption. {DENIED_TEXT}"), true);
+        ui.window.close();
+    }
+
+    /// The `CryptoError` backend event.
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn crypto_error_event_offers_resolve_for_the_denial_only() {
+        use crate::protocol::BackendEvent;
+        let ui = fixture("com.negzero.ResolveEventFixture");
+        let (generation, owner) = (ui.generation.get(), ui.state.borrow().account.clone());
+        let event = |text: &str| BackendEvent::CryptoError { peer: PEER.into(), text: text.into() };
+
+        ui.backend_event(generation, &owner, event("Something else"));
+        assert_toast(&ui, &format!("{PEER}: Something else"), false);
+
+        ui.backend_event(generation, &owner, event(DENIED_TEXT));
+        assert_toast(&ui, &format!("{PEER}: {DENIED_TEXT}"), true);
+        ui.window.close();
+    }
+
+    /// The `Failed` backend event for one of our own messages.
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn failed_send_event_offers_resolve_for_the_denial_only() {
+        use crate::protocol::BackendEvent;
+        let ui = fixture("com.negzero.ResolveFailedEventFixture");
+        let (generation, owner) = (ui.generation.get(), ui.state.borrow().account.clone());
+        let event = |id: &str, reason: &str| BackendEvent::Failed { peer: PEER.into(), id: id.into(), reason: reason.into() };
+
+        ui.backend_event(generation, &owner, event("wire-b", "the server connection dropped"));
+        assert_toast(&ui, "Message not sent: the server connection dropped", false);
+
+        ui.backend_event(generation, &owner, event("wire-a", DENIED_TEXT));
+        assert_toast(&ui, &format!("Message not sent: {DENIED_TEXT}"), true);
+        ui.window.close();
+    }
+
+    /// A server cannot fake the button: its words are prefixed or differ, so they never match.
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_reason_that_only_contains_the_denial_text_gets_no_resolve_button() {
+        let ui = fixture("com.negzero.ResolveSpoofFixture");
+        ui.notice_resolving_authorization(PEER, &format!("the server said: {DENIED_TEXT}"), "spoof".into());
+        assert_toast(&ui, "spoof", false);
+        ui.window.close();
+    }
 }

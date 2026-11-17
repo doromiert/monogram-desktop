@@ -701,7 +701,7 @@ impl Ui {
     }
     /// A toast for `title`; when `reason` is the Legacy OMEMO "contact authorization" denial, it
     /// carries a Resolve button that opens Control Access for `peer`.
-    fn notice_resolving_authorization(self: &Rc<Self>, peer: &str, reason: &str, title: String) {
+    pub(crate) fn notice_resolving_authorization(self: &Rc<Self>, peer: &str, reason: &str, title: String) {
         if reason != crate::crypto::legacy::DENIED {
             return self.notice(&title);
         }
