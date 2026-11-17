@@ -153,6 +153,6 @@
 
 - [x] Fix long attachment names overflowing reply cards beside thumbnails: reproduce36px row allocation for50px text, replace the horizontal Box with a native Grid, and verify text/image reply width and painted bounds under fatal GTK critical checks.
 
-- [ ] Publish/install the combined media upload previews, reply-thumbnail layout and10px reply-to-media gap update.
+- [x] Publish/install the combined media upload previews, reply-thumbnail layout and10px reply-to-media gap update: source7387e3c / ZenPkgs320697f1 installed/running; final packaged smoke109ms feedback/343ms maximum heartbeat. File replies keep the paperclip and name on one ellipsized line while text captions retain the Grid sizing fix.
 
 - [x] Keep the paperclip and attachment filename together on one ellipsized reply line while retaining the Grid fix for two-line caption previews; native filename/caption geometry and full-width text quote checks pass.
