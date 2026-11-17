@@ -158,4 +158,4 @@
 - [x] Keep the paperclip and attachment filename together on one ellipsized reply line while retaining the Grid fix for two-line caption previews; native filename/caption geometry and full-width text quote checks pass.
 
 - [x] Restrict automatic downloads to media; ordinary files choose a native save destination before transfer, with cancellation/account fences and pack opening retained. Native picker/cancel/background export passes1.11s;291 default tests pass (94ignored).
-- [ ] Publish/install desktop manual-document save behavior and publish the matching fresh Android APK.
+- [x] Publish/install desktop manual-document save behavior: source656bf13 / ZenPkgsf8a7340b, packaged smoke147ms feedback/369ms maximum heartbeat. Mobile0.2.227/74449 published froma6bccbc34 with3API36 tests, matching signer/all8native libraries and ELF/ZIP16KiB checks; hosted digest verified.
