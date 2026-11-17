@@ -161,4 +161,4 @@
 - [x] Publish/install desktop manual-document save behavior: source656bf13 / ZenPkgsf8a7340b, packaged smoke147ms feedback/369ms maximum heartbeat. Mobile0.2.227/74449 published froma6bccbc34 with3API36 tests, matching signer/all8native libraries and ELF/ZIP16KiB checks; hosted digest verified.
 
 - [x] Integrate merged PR3 audio helper and preserve manual-document save behavior plus automatic media policy for both audio paths.321 default tests pass128ignored;12 real sandbox +4 playback +6 audio UI checks pass, including25s playback and bounded preparation. Existing audio/profile/pack-strip and native save-picker checks pass.
-- [ ] Publish/install the merged PR3 desktop package with its audio helper.
+- [x] Publish/install merged PR3 (850786b) plus audio-policy integration270c11b: ZenPkgs97eb01b7, packaged audio container/PCM and helper-confinement checks pass; native package smoke109ms feedback/339ms maximum heartbeat. Exact installed app verified with2.3ms Ping and no GTK criticals; live loading feedback205ms/frame gap369ms.
