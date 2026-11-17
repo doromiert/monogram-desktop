@@ -246,6 +246,7 @@ pub enum Request {
     ProbeRoom {
         recipients: RoomRecipients,
         reply: oneshot::Sender<Result<bool>>,
+        skip_unreachable: bool,
     },
     SendRoom {
         recipients: RoomRecipients,
@@ -645,7 +646,7 @@ impl Worker {
             Err(Error::Uncertain)
         }
     }
-    async fn probe_room(&mut self, recipients: &RoomRecipients) -> Result<bool> {
+    async fn probe_room(&mut self, recipients: &RoomRecipients, skip_unreachable: bool) -> Result<bool> {
         if !self.ready {
             self.initialize().await?;
         }
@@ -659,7 +660,7 @@ impl Worker {
                 &members,
                 "Monogram encryption check",
                 &crate::model::new_id(),
-                false,
+                skip_unreachable,
             )
             .await
         {
@@ -1348,9 +1349,9 @@ impl Worker {
                     Err(error) => self.sent(recipients.room, id, Err(error)),
                 }
             }
-            Request::ProbeRoom { recipients, reply } => {
+            Request::ProbeRoom { recipients, reply, skip_unreachable } => {
                 if !reply.is_closed() {
-                    let _ = reply.send(self.probe_room(&recipients).await);
+                    let _ = reply.send(self.probe_room(&recipients, skip_unreachable).await);
                 }
             }
             Request::ReviewRoom { peer, members } => {

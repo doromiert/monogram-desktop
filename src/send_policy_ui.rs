@@ -98,6 +98,7 @@ impl Ui {
         if !self.command(Command::ChooseEncryption {
             peer: peer.clone(),
             reply,
+            skip_unreachable: self.send_anyway_active(&peer),
         }) {
             self.notice("Encryption check could not start. Your draft is kept.");
             return;

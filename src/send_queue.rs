@@ -329,9 +329,13 @@ impl Ui {
         let result: Option<Result<Mode, String>> = selected.map(Ok);
         let receive = if result.is_none() {
             let (reply, receive) = tokio::sync::oneshot::channel();
+            let skip_unreachable = self.offers_send_anyway()
+                && (messages.iter().any(|message| message.skip_unreachable)
+                    || self.send_anyway_active(&peer));
             if self.command(Command::ChooseEncryption {
                 peer: peer.clone(),
                 reply,
+                skip_unreachable,
             }) {
                 Some(receive)
             } else {
@@ -558,13 +562,11 @@ impl Ui {
         if self.state.borrow().current().jid != peer {
             self.select_chat(&room_id);
         }
-        // The room's keys are Legacy OMEMO. Choosing it here skips an encryption check that would
-        // fail on the same member again; it never selects plaintext.
-        if let Some(chat) = self.state.borrow_mut().chats.iter_mut().find(|chat| chat.jid == peer) {
-            if chat.selected_encryption().is_none() {
-                chat.remember_selection(Mode::Legacy);
-            }
-        }
+        // Later messages to this room skip the same members for a while, so the user is not asked
+        // again for every message.
+        self.send_anyway_until
+            .borrow_mut()
+            .insert(peer.to_owned(), std::time::Instant::now() + Self::SEND_ANYWAY_COOLDOWN);
         for id in ids {
             let message = {
                 let mut state = self.state.borrow_mut();
@@ -844,6 +846,34 @@ mod tests {
     }
     const ROOM: &str = "team@conference.example.org";
     const OWNER: &str = "owner@fixture.invalid";
+    type Commands = tokio::sync::mpsc::UnboundedReceiver<Command>;
+    /// Route what the app sends to the server into a receiver the test can read.
+    fn capture(ui: &Ui) -> Commands {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        ui.session.replace(Some(crate::protocol::Session::fixture_channel(tx)));
+        rx
+    }
+    fn drain(rx: &mut Commands) -> Vec<Command> {
+        let mut out = vec![];
+        while let Ok(command) = rx.try_recv() {
+            out.push(command);
+        }
+        out
+    }
+    /// The `skip_unreachable` of the encryption check asked for `peer`, if one was asked.
+    fn probe_skip(commands: &[Command], peer: &str) -> Option<bool> {
+        commands.iter().find_map(|c| match c {
+            Command::ChooseEncryption { peer: p, skip_unreachable, .. } if p == peer => Some(*skip_unreachable),
+            _ => None,
+        })
+    }
+    /// The `skip_unreachable` of the message sent to `peer`, if one was sent.
+    fn sent_skip(commands: &[Command], peer: &str) -> Option<(bool, bool)> {
+        commands.iter().find_map(|c| match c {
+            Command::Send { peer: p, message, .. } if p == peer => Some((message.skip_unreachable, message.action.is_some())),
+            _ => None,
+        })
+    }
     fn refusal() -> String {
         crate::crypto::Error::ContactAuthorization("carol@example.org".into()).to_string()
     }
@@ -865,10 +895,14 @@ mod tests {
         let room = state.chat_for(ROOM);
         room.group = true;
         room.room_can_send = true;
+        // Automatic selection, as in a real chat: without a preference the smoke fixture would
+        // skip the encryption check these tests look at.
+        room.sending_preference = Some(crate::encryption_policy::Preference::Automatic);
         let room_id = room.id.clone();
         state.active = room_id;
         ui.activate_state(state);
         ui.online.set(true);
+        ui.legacy_crypto.borrow_mut().ready = true;
         let message = Message {
             id: id.into(),
             wire_id: format!("wire-{id}"),
@@ -900,16 +934,19 @@ mod tests {
         assert!(find_button(ui.toast.upcast_ref(), "Resolve").is_none(), "a room offers Send Anyway instead");
         let button = find_button(ui.toast.upcast_ref(), "Send Anyway").expect("Send Anyway button");
         assert!(!ui.store.message(OWNER, ROOM, "waiting").unwrap().skip_unreachable, "not chosen yet");
+        let mut commands = capture(&ui);
 
         button.emit_clicked();
         settle(300);
         let stored = ui.store.message(OWNER, ROOM, "waiting").unwrap();
         assert!(stored.skip_unreachable, "the choice is stored on the message");
         assert_ne!(stored.delivery, "failed", "the message was retried");
+        let sent = drain(&mut commands);
+        assert_eq!(probe_skip(&sent, ROOM), Some(true), "the encryption check is asked to leave members out");
         assert_eq!(
             ui.state.borrow().chats.iter().find(|c| c.jid == ROOM).unwrap().selected_encryption(),
-            Some(Mode::Legacy),
-            "the room stays encrypted; plaintext is never selected"
+            None,
+            "the room is not locked to a protocol: automatic selection still chooses"
         );
         ui.window.close();
     }
@@ -924,8 +961,10 @@ mod tests {
         ui.backend_event(generation, &owner, BackendEvent::Failed { peer: ROOM.into(), id: "wire-sent".into(), reason: refusal() });
         settle(300);
         let button = find_button(ui.toast.upcast_ref(), "Send Anyway").expect("Send Anyway button");
+        let mut commands = capture(&ui);
         button.emit_clicked();
         settle(300);
+        assert_eq!(sent_skip(&drain(&mut commands), ROOM), Some((true, false)), "resent with the choice");
         let row = ui.state.borrow().current().messages.iter().find(|m| m.id == "sent").cloned().unwrap();
         assert!(row.skip_unreachable, "the choice is on the message that is resent");
         assert_eq!(row.delivery, "sending", "resent without a confirmation dialog");
@@ -1016,15 +1055,16 @@ mod tests {
         assert!(find_button(ui.toast.upcast_ref(), "Resolve").is_none());
         let button = find_button(ui.toast.upcast_ref(), "Send Anyway").expect("Send Anyway button");
         assert_eq!(ui.store.message(OWNER, ROOM, "waiting").unwrap().delivery, "failed");
+        let mut commands = capture(&ui);
 
         button.emit_clicked();
         settle(300);
         let stored = ui.store.message(OWNER, ROOM, "waiting").unwrap();
         assert!(stored.skip_unreachable);
         assert_ne!(stored.delivery, "failed", "retried");
+        assert_eq!(probe_skip(&drain(&mut commands), ROOM), Some(true), "checked again, leaving members out");
         let chat = ui.state.borrow().chats.iter().find(|c| c.jid == ROOM).cloned().unwrap();
-        assert_eq!(chat.selected_encryption(), Some(Mode::Legacy), "encrypted, never plaintext");
-        assert_ne!(chat.selected_encryption(), Some(Mode::Plain));
+        assert_eq!(chat.selected_encryption(), None, "neither plaintext nor a locked protocol");
         ui.window.close();
     }
 
@@ -1054,7 +1094,7 @@ mod tests {
         found
     }
 
-    /// A message sent without some room members: no toast, a blue lock with a question mark and the
+    /// A message sent without some room members: no toast, a coloured lock and the
     /// tooltip "Sent partially" on its bubble, and the members with the reason in its details.
     #[test]
     #[ignore = "requires a private GTK display and D-Bus"]
@@ -1102,16 +1142,13 @@ mod tests {
         assert_eq!(ui.store.message(OWNER, ROOM, "sent").unwrap().skipped_members, vec![("carol@example.org".to_owned(), why.clone())]);
         assert!(ui.store.message(OWNER, ROOM, "plain").unwrap().skipped_members.is_empty());
 
-        // Exactly one bubble is marked, with the tooltip, a lock and a question mark.
+        // Exactly one bubble is marked: the ordinary lock, coloured, with the tooltip.
         let marked = find_css(ui.window.upcast_ref(), "message-partial-lock");
         assert_eq!(marked.len(), 1, "only the partially sent message");
-        assert_eq!(marked[0].tooltip_text().as_deref(), Some("Sent partially"));
-        let icons = find_css(&marked[0], "accent");
-        let names: Vec<String> = icons
-            .iter()
-            .filter_map(|w| w.downcast_ref::<gtk::Image>().and_then(|i| i.icon_name()).map(|n| n.to_string()))
-            .collect();
-        assert_eq!(names, ["channel-secure-symbolic", "dialog-question-symbolic"]);
+        assert_eq!(marked[0].tooltip_text().as_deref(), Some("Legacy OMEMO with problems. See Message Details"));
+        let lock = marked[0].downcast_ref::<gtk::Image>().expect("the lock is an image");
+        assert_eq!(lock.icon_name().as_deref(), Some("channel-secure-symbolic"), "the regular lock");
+        assert!(lock.has_css_class("accent"), "coloured with the theme's accent");
         // It follows the theme: blue by default, and it changes with light and dark mode instead of
         // being a fixed colour.
         let manager = adw::StyleManager::default();
@@ -1119,15 +1156,14 @@ mod tests {
         for scheme in [adw::ColorScheme::ForceLight, adw::ColorScheme::ForceDark] {
             manager.set_color_scheme(scheme);
             settle(300);
-            let colour = icons[0].color();
+            let colour = lock.color();
             assert!(colour.blue() > colour.red() && colour.blue() > colour.green(), "{scheme:?}: {colour:?} is blue");
             colours.push(colour);
         }
         assert_ne!(colours[0], colours[1], "the colour follows light and dark themes");
         manager.set_color_scheme(adw::ColorScheme::Default);
-        // The other encrypted message keeps the ordinary lock, with no question mark.
-        let plain_locks = find_css(ui.window.upcast_ref(), "accent");
-        assert_eq!(plain_locks.len(), 2, "only the partial bubble has accent icons (lock and question mark)");
+        // The other encrypted message keeps its ordinary, uncoloured lock.
+        assert_eq!(find_css(ui.window.upcast_ref(), "accent").len(), 1, "only the partial lock is coloured");
 
         // The details say who and why.
         let message = ui.store.message(OWNER, ROOM, "sent").unwrap();
@@ -1138,6 +1174,166 @@ mod tests {
         assert!(shows_text(&content, "Sent Partially"));
         assert!(shows_text(&content, "carol@example.org"));
         assert!(shows_text(&content, &why));
+        ui.window.close();
+    }
+
+    /// Reacting in a room keeps working after Send Anyway. It used to lock the room to Legacy OMEMO,
+    /// which has no protected message actions, so every reaction was refused. A reaction sent while
+    /// some members' keys are unusable now goes out like the messages do.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn reacting_in_a_room_still_works_after_send_anyway() {
+        const REFUSAL: &str = "Legacy OMEMO does not support protected message actions here";
+        let (ui, _) = room_with_failed_message("com.negzero.ReactAfterSendAnywayFixture", "m", false);
+        let mut commands = capture(&ui);
+        ui.react("m", "\u{1f44d}");
+        settle(300);
+        assert!(!shows_text(ui.toast.upcast_ref(), REFUSAL), "reacting works before Send Anyway");
+        assert_eq!(sent_skip(&drain(&mut commands), ROOM), Some((false, true)), "a reaction was sent");
+        ui.toast.dismiss_all();
+        settle(500);
+
+        ui.send_anyway(ROOM, &["m".to_owned()]);
+        settle(300);
+        drain(&mut commands);
+        ui.toast.dismiss_all();
+        settle(500);
+        ui.react("m", "\u{2764}");
+        settle(300);
+        assert!(!shows_text(ui.toast.upcast_ref(), REFUSAL), "reacting still works after Send Anyway");
+        assert_eq!(
+            sent_skip(&drain(&mut commands), ROOM),
+            Some((true, true)),
+            "the reaction is sent, leaving out the members Send Anyway skips"
+        );
+        assert_eq!(
+            ui.state.borrow().chats.iter().find(|c| c.jid == ROOM).unwrap().selected_encryption(),
+            None,
+            "the room is not locked to Legacy OMEMO"
+        );
+        ui.window.close();
+    }
+
+    /// Send Anyway keeps applying to the room for a while, so the user is not asked for every
+    /// message; it ends, it is per room, and the setting turns it off.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn send_anyway_lasts_thirty_minutes_per_room_and_can_be_turned_off() {
+        assert_eq!(Ui::SEND_ANYWAY_COOLDOWN, std::time::Duration::from_secs(30 * 60));
+        let (ui, message) = room_with_failed_message("com.negzero.SendAnywayCooldownFixture", "m", true);
+        let mut commands = capture(&ui);
+        let send = |ui: &Ui, peer: &str| {
+            ui.command(Command::Send { peer: peer.into(), message: Message::default(), quote: String::new() });
+        };
+        send(&ui, ROOM);
+        assert_eq!(sent_skip(&drain(&mut commands), ROOM), Some((false, false)), "not chosen yet");
+
+        ui.fail_queued_selection(OWNER, ROOM, vec![message], &refusal());
+        settle(300);
+        find_button(ui.toast.upcast_ref(), "Send Anyway").expect("button").emit_clicked();
+        settle(300);
+        drain(&mut commands);
+        ui.toast.dismiss_all();
+        settle(500);
+
+        // Later messages to this room skip without asking, and so does their encryption check.
+        send(&ui, ROOM);
+        assert_eq!(sent_skip(&drain(&mut commands), ROOM), Some((true, false)), "later messages skip");
+        let fresh = Message { id: "fresh".into(), wire_id: "fresh".into(), own: true, outbox_pending: true, delivery: "queued".into(), ..Default::default() };
+        ui.prepare_queued_peer(ROOM.into(), vec![fresh]);
+        assert_eq!(probe_skip(&drain(&mut commands), ROOM), Some(true), "a new message's check skips too");
+        // Another conversation is unaffected.
+        send(&ui, "other@conference.example.org");
+        assert_eq!(sent_skip(&drain(&mut commands), "other@conference.example.org"), Some((false, false)));
+
+        // It ends.
+        ui.send_anyway_until
+            .borrow_mut()
+            .insert(ROOM.into(), std::time::Instant::now() - std::time::Duration::from_secs(1));
+        send(&ui, ROOM);
+        assert_eq!(sent_skip(&drain(&mut commands), ROOM), Some((false, false)), "after the cooldown");
+
+        // Turned off: nothing is skipped and no button is offered.
+        ui.send_anyway_until
+            .borrow_mut()
+            .insert(ROOM.into(), std::time::Instant::now() + Ui::SEND_ANYWAY_COOLDOWN);
+        ui.store.set_pref(&format!("offer_send_anyway:{OWNER}"), "false").unwrap();
+        send(&ui, ROOM);
+        assert_eq!(sent_skip(&drain(&mut commands), ROOM), Some((false, false)), "the setting is off");
+        let m = Message { id: "again".into(), wire_id: "again".into(), own: true, outbox_pending: true, ..Default::default() };
+        ui.fail_queued_selection(OWNER, ROOM, vec![m], &refusal());
+        settle(300);
+        assert!(find_button(ui.toast.upcast_ref(), "Send Anyway").is_none(), "no button when turned off");
+        ui.window.close();
+    }
+
+    /// The switch in Preferences controls the button.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn the_preferences_switch_turns_send_anyway_off() {
+        fn find_switch(widget: &gtk::Widget) -> Option<adw::SwitchRow> {
+            if let Some(row) = widget.downcast_ref::<adw::SwitchRow>() {
+                if row.title() == "Offer Send Anyway" {
+                    return Some(row.clone());
+                }
+            }
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                if let Some(found) = find_switch(&current) {
+                    return Some(found);
+                }
+                child = current.next_sibling();
+            }
+            None
+        }
+        let (ui, _) = room_with_failed_message("com.negzero.SendAnywaySwitchFixture", "m", true);
+        assert!(ui.offers_send_anyway(), "on by default");
+        ui.preferences();
+        settle(500);
+        let dialog = ui.window.visible_dialog().expect("preferences");
+        let row = find_switch(&dialog.child().expect("content")).expect("the Offer Send Anyway switch");
+        assert!(row.is_active());
+        row.set_active(false);
+        settle(200);
+        assert!(!ui.offers_send_anyway(), "the switch turns it off");
+        row.set_active(true);
+        settle(200);
+        assert!(ui.offers_send_anyway());
+        ui.window.close();
+    }
+
+    /// Earlier versions pinned a room to Legacy OMEMO for a day after Send Anyway. That is forgotten
+    /// once, for rooms only, so reactions work again without waiting a day.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn an_old_legacy_pin_on_a_room_is_cleared_once() {
+        use crate::encryption_policy::Selection;
+        let (ui, _) = room_with_failed_message("com.negzero.LegacyPinFixture", "m", false);
+        let pinned = || Some(Selection { mode: Mode::Legacy, time_ms: chrono::Utc::now().timestamp_millis() });
+        // The fixture already activated this account once; start from "not cleared yet".
+        ui.store.set_pref(&format!("legacy_room_pins_cleared:{OWNER}"), "false").unwrap();
+        let mut state = State::live(OWNER, vec![]);
+        let room = state.chat_for(ROOM);
+        room.group = true;
+        room.automatic_encryption = pinned();
+        let room_id = room.id.clone();
+        let direct = state.chat_for("peer@fixture.invalid");
+        direct.automatic_encryption = pinned();
+        state.active = room_id;
+        ui.activate_state(state);
+        let selection = |ui: &Ui, jid: &str| ui.state.borrow().chats.iter().find(|c| c.jid == jid).unwrap().automatic_encryption.map(|s| s.mode);
+        assert_eq!(selection(&ui, ROOM), None, "the room's old pin is forgotten");
+        assert_eq!(selection(&ui, "peer@fixture.invalid"), Some(Mode::Legacy), "a direct chat keeps its choice");
+
+        // Only once: a Legacy selection made later is left alone.
+        let mut state = State::live(OWNER, vec![]);
+        let room = state.chat_for(ROOM);
+        room.group = true;
+        room.automatic_encryption = pinned();
+        let room_id = room.id.clone();
+        state.active = room_id;
+        ui.activate_state(state);
+        assert_eq!(selection(&ui, ROOM), Some(Mode::Legacy), "not cleared a second time");
         ui.window.close();
     }
 }

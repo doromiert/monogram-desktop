@@ -176,30 +176,22 @@ fn action_actor(message: &Message, chat: &Chat, owner: &str) -> String {
     };
     actor.replace(['\n', '\r'], " ")
 }
-/// The lock of an encrypted message that was sent without some room members: the usual lock with
-/// a small question mark, drawn in the theme's accent colour (blue by default).
-fn partial_lock() -> gtk::Overlay {
-    let overlay = gtk::Overlay::new();
-    overlay.add_css_class("message-partial-lock");
+/// The ordinary lock of an encrypted message that was sent without some room members, in the
+/// theme's accent colour (blue by default) so it stands out.
+fn partial_lock(m: &Message) -> gtk::Image {
     let lock = gtk::Image::from_icon_name("channel-secure-symbolic");
     lock.set_pixel_size(11);
+    lock.add_css_class("message-partial-lock");
     lock.add_css_class("accent");
-    overlay.set_child(Some(&lock));
-    let badge = gtk::Image::from_icon_name("dialog-question-symbolic");
-    badge.set_pixel_size(7);
-    badge.add_css_class("accent");
-    badge.set_halign(gtk::Align::End);
-    badge.set_valign(gtk::Align::End);
-    badge.set_can_target(false);
-    overlay.add_overlay(&badge);
-    overlay.set_tooltip_text(Some("Sent partially"));
-    overlay.update_property(&[gtk::accessible::Property::Label("Sent partially")]);
-    overlay
+    let tooltip = format!("{} with problems. See Message Details", m.mode().name());
+    lock.set_tooltip_text(Some(&tooltip));
+    lock.update_property(&[gtk::accessible::Property::Label(&tooltip)]);
+    lock
 }
 fn message_status(meta: &gtk::Box, m: &Message) {
     clear(meta);
     if m.own && m.encrypted && !m.skipped_members.is_empty() {
-        meta.append(&partial_lock());
+        meta.append(&partial_lock(m));
     } else if m.encrypted
         && (!m.own
             || !matches!(

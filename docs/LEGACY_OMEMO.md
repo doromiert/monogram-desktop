@@ -53,9 +53,13 @@ independent mobile room interoperability and richer room content remain open.
 
 A room message normally needs every member's keys, so one member whose keys are refused, missing or
 unreachable blocks it. In a group chat the failure toast then offers **Send Anyway**: the message is
-resent, still encrypted, for every member whose keys can be used. The message's lock turns into a
-lock with a question mark in the theme's accent colour, with the tooltip "Sent partially", and
-Message Details lists each member who was left out and why. The choice is stored on that message only. It never selects
+resent, still encrypted, for every member whose keys can be used. The message's lock is
+coloured in the theme's accent colour, with the tooltip "<protocol> with problems. See Message Details", and
+Message Details lists each member who was left out and why. The choice is stored on that message and
+applies to the room's later messages for 30 minutes (until the app closes), so you are not asked for
+every message; Preferences > Offer Send Anyway turns the button off. It never locks the room to
+Legacy OMEMO, because Legacy OMEMO has no protected reactions: automatic selection still picks the
+protocol, with the encryption check leaving the same members out. It never selects
 plaintext, never skips a member whose keys are merely unreviewed, never skips your own devices,
 and refuses to send when nobody else could be reached.
 

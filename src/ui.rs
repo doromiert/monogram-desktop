@@ -104,6 +104,9 @@ pub struct Ui {
     pub pq_reviews: RefCell<HashMap<String, Vec<crate::crypto::pq::service::Review>>>,
     pub encryption_checks: RefCell<HashMap<String, String>>,
     pub encryption_revision: Cell<u64>,
+    /// Rooms where the user chose Send Anyway, and until when: messages to them skip members whose
+    /// keys cannot be used without asking again. In memory only, so it ends with the session.
+    pub(crate) send_anyway_until: RefCell<HashMap<String, std::time::Instant>>,
     pub room_syncing: RefCell<Option<(u64, String, u64)>>,
     pub room_sync_retry: RefCell<HashMap<String, (Instant, u8)>>,
     pub(crate) active_audio: RefCell<Option<std::rc::Weak<crate::video_ui::Playback>>>,
@@ -436,6 +439,7 @@ impl Ui {
             pq_reviews: RefCell::new(HashMap::new()),
             encryption_checks: RefCell::new(HashMap::new()),
             encryption_revision: Cell::new(0),
+            send_anyway_until: RefCell::new(HashMap::new()),
             room_syncing: RefCell::new(None),
             room_sync_retry: RefCell::new(HashMap::new()),
             active_audio: RefCell::new(None),
@@ -708,6 +712,24 @@ impl Ui {
             }
         });
     }
+    /// Earlier versions pinned a room to Legacy OMEMO for a day when the user chose Send Anyway, and
+    /// Legacy OMEMO refuses reactions. Forget those cached choices once; the next send simply asks
+    /// again, and automatic selection picks the protocol as usual.
+    fn clear_legacy_room_pins(&self, state: &mut State) {
+        let key = format!("legacy_room_pins_cleared:{}", state.account);
+        if state.account.is_empty() || self.store.pref(&key, "false") == "true" {
+            return;
+        }
+        for chat in state.chats.iter_mut().filter(|chat| chat.group) {
+            if chat
+                .automatic_encryption
+                .is_some_and(|selection| selection.mode == crate::encryption_policy::Mode::Legacy)
+            {
+                chat.automatic_encryption = None;
+            }
+        }
+        let _ = self.store.set_pref(&key, "true");
+    }
     /// The toast for a message that did not go out. In a group chat, when the cause is one member's
     /// keys that cannot be used, it offers Send Anyway: the same message, still encrypted, for
     /// everyone who can be reached. Otherwise it is [`Self::notice_resolving_authorization`].
@@ -737,7 +759,11 @@ impl Ui {
                 return self.show_toast(toast);
             }
         }
-        if !in_group || ids.is_empty() || !crate::crypto::legacy::skippable_reason(reason) {
+        if !in_group
+            || ids.is_empty()
+            || !self.offers_send_anyway()
+            || !crate::crypto::legacy::skippable_reason(reason)
+        {
             return self.notice_resolving_authorization(reason, title);
         }
         let toast = adw::Toast::builder()
@@ -762,7 +788,7 @@ impl Ui {
             .chats
             .iter()
             .any(|chat| chat.jid == peer && chat.group);
-        if !in_group || ids.is_empty() {
+        if !in_group || ids.is_empty() || !self.offers_send_anyway() {
             return self.notice(crate::send_policy_ui::DOWNGRADE_NOTICE);
         }
         let toast = adw::Toast::builder()
@@ -1914,8 +1940,33 @@ impl Ui {
             );
         }
     }
-    pub fn command(&self, c: Command) -> bool {
+    pub fn command(&self, mut c: Command) -> bool {
+        if let Command::Send { peer, message, .. } = &mut c {
+            self.apply_send_anyway_cooldown(peer, message);
+        }
         self.session.borrow().as_ref().is_some_and(|s| s.send(c))
+    }
+    /// How long Send Anyway keeps applying to a room after the user chose it.
+    pub(crate) const SEND_ANYWAY_COOLDOWN: Duration = Duration::from_secs(30 * 60);
+    /// Whether the Send Anyway button is offered at all (Preferences > Offer Send Anyway).
+    pub(crate) fn offers_send_anyway(&self) -> bool {
+        self.preference("offer_send_anyway", true)
+    }
+    /// Within the cooldown after Send Anyway, a message to that room is sent without the members
+    /// whose keys cannot be used, as the user already chose, instead of failing again.
+    pub(crate) fn apply_send_anyway_cooldown(&self, peer: &str, message: &mut Message) {
+        if self.send_anyway_active(peer) {
+            message.skip_unreachable = true;
+        }
+    }
+    /// Whether Send Anyway is on for `peer` right now: offered, chosen, and not yet expired.
+    pub(crate) fn send_anyway_active(&self, peer: &str) -> bool {
+        self.offers_send_anyway()
+            && self
+                .send_anyway_until
+                .borrow()
+                .get(peer)
+                .is_some_and(|until| *until > std::time::Instant::now())
     }
     pub fn send_content(self: &Rc<Self>, value: &str, kind: &str) -> Option<String> {
         if kind=="article" {return self.queue_formatted_text(value,Some(crate::formatting::Markup{body:value.into(),markdown:true,unstyled:true,..Default::default()}));}
@@ -2264,6 +2315,7 @@ impl Ui {
         self.stop_uploads();
         self.images.borrow_mut().clear();
         self.avatars.borrow_mut().clear();
+        self.clear_legacy_room_pins(&mut state);
         for chat in &mut state.chats {
             for m in &mut chat.messages {
                 if let Some(draft) = &mut m.upload {

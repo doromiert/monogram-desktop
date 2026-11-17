@@ -707,6 +707,7 @@ pub enum RoomPreparation {
     },
     Probe {
         reply: tokio::sync::oneshot::Sender<crate::crypto::Result<Mode>>,
+        skip_unreachable: bool,
     },
     Review,
     PqReview,
@@ -723,6 +724,9 @@ pub enum Command {
     ChooseEncryption {
         peer: String,
         reply: tokio::sync::oneshot::Sender<crate::crypto::Result<crate::encryption_policy::Mode>>,
+        /// For a room: leave out members whose Legacy OMEMO keys cannot be used, as the user chose
+        /// with Send Anyway. The protocol is still chosen automatically.
+        skip_unreachable: bool,
     },
     Crypto(crate::crypto::service::Request),
     Legacy(crate::crypto::legacy::service::Request),
@@ -1274,7 +1278,7 @@ impl Session {
                             match recipients {
                                 Ok(recipients)=>match purpose {
                                     RoomPreparation::Send{message,quote}=>{if message.mode()==Mode::Pq {pq.send(pq::Request::SendRoom{recipients,message,quote,epoch});}else{legacy.send(legacy::service::Request::SendRoom{recipients,message,quote,epoch});}},
-                                    RoomPreparation::Probe{reply}=>{
+                                    RoomPreparation::Probe{reply,skip_unreachable}=>{
                                         let (checked,response)=tokio::sync::oneshot::channel();
                                         pq.send(pq::Request::ProbeRoom{recipients:recipients.clone(),reply:checked});
                                         let legacy_tx=legacy.sender();
@@ -1283,7 +1287,7 @@ impl Session {
                                                 async { response.await.unwrap_or(Err(crate::crypto::Error::Unavailable("OMEMO2 room check interrupted"))) },
                                                 async {
                                                     let (checked,response)=tokio::sync::oneshot::channel();
-                                                    legacy_tx.send(legacy::service::Request::ProbeRoom{recipients,reply:checked}).map_err(|_|crate::crypto::Error::Unavailable("Legacy room check interrupted"))?;
+                                                    legacy_tx.send(legacy::service::Request::ProbeRoom{recipients,reply:checked,skip_unreachable}).map_err(|_|crate::crypto::Error::Unavailable("Legacy room check interrupted"))?;
                                                     response.await.unwrap_or(Err(crate::crypto::Error::Unavailable("Legacy room check interrupted")))
                                                 },
                                             ).await;
@@ -1299,7 +1303,7 @@ impl Session {
                                     let mut report=true;
                                     match purpose {
                                         RoomPreparation::Send{message,..}=>{report=false;emit(BackendEvent::Failed{peer:peer.clone(),id:message.wire_id,reason:text.clone()})},
-                                        RoomPreparation::Probe{reply}=>{
+                                        RoomPreparation::Probe{reply,..}=>{
                                             report=false;
                                             // The server said the room has no complete member list (a public or
                                             // anonymous room), so end-to-end encryption cannot exist there: send plain.
@@ -1351,13 +1355,13 @@ impl Session {
                                 let _ = reply.send(result);
                             });
                         },
-                        Some(Command::ChooseEncryption{peer,reply})=>{
+                        Some(Command::ChooseEncryption{peer,reply,skip_unreachable})=>{
                             if !online {
                                 let _ = reply.send(Err(crate::crypto::Error::Unavailable("Connection interrupted")));
                                 continue;
                             }
                             if rooms.known(&peer) {
-                                prepare_room(&rooms,peer,room_epoch,RoomPreparation::Probe{reply},&network);
+                                prepare_room(&rooms,peer,room_epoch,RoomPreparation::Probe{reply,skip_unreachable},&network);
                                 continue;
                             }
                             let (checked, first) = tokio::sync::oneshot::channel();

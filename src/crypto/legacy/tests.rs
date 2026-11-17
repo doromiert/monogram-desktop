@@ -387,6 +387,7 @@ fn live_legacy_service_and_independent_send_preference() {
     sender.send(Command::ChooseEncryption {
         peer: RECEIVER.into(),
         reply: tx,
+        skip_unreachable: false,
     });
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {

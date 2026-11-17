@@ -1528,6 +1528,12 @@ impl Ui {
                 "Show text in desktop notifications",
                 false,
             ),
+            (
+                "offer_send_anyway",
+                "Offer Send Anyway",
+                "In group chats, offer to send an encrypted message to the members who have keys, then keep doing so for 30 minutes",
+                true,
+            ),
         ] {
             let row = adw::SwitchRow::builder()
                 .title(title)

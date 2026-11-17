@@ -1426,7 +1426,7 @@ mod tests {
             history.set_blind_trust(owner, peer, false).unwrap();
             assert!(matches!(probe(&alice, peer).await, Err(Error::OwnDeviceTrustRequired)));
             let (reply, selected) = oneshot::channel();
-            assert!(alice.send(Command::ChooseEncryption { peer: peer.into(), reply }));
+            assert!(alice.send(Command::ChooseEncryption { peer: peer.into(), reply, skip_unreachable: false }));
             assert!(matches!(tokio::time::timeout(Duration::from_secs(15), selected).await.unwrap().unwrap(), Err(Error::OwnDeviceTrustRequired)));
             history.set_blind_trust(owner, peer, true).unwrap();
             assert!(probe(&alice, peer).await.unwrap(), "Conversation blind trust approves authenticated own-device copies");
