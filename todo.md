@@ -146,3 +146,5 @@
 - [x] Publish and install the updated desktop package: sourceb29c234 / ZenPkgs59d3ae09; final packaged smoke109ms feedback /342ms maximum heartbeat.
 
 - [x] Keep long quoted media bubbles fitted to the actual media width: native regression reproduced428px content beside320px media, then passed at320px with13px/10px reply insets and2px media edges (1.04s).
+
+- [x] Increase the reply-to-media gap to10px to match the vertical reply inset; keep the media-to-reactions spacing unchanged.
