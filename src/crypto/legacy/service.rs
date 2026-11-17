@@ -474,6 +474,16 @@ fn outer_metadata(
         frame.historical || frame.archive.is_some(),
     ))
 }
+/// What automatic selection learns from trying to encrypt a room: `true` when it can be encrypted,
+/// `false` when Legacy OMEMO is simply not available there (a member has no devices), and an error
+/// for anything that should stop the send instead.
+pub(crate) fn probe_outcome<T>(result: Result<T>) -> Result<bool> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(Error::Unavailable(super::NO_DEVICES | super::UNSUPPORTED)) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
 fn describe(error: &Error) -> String {
     match error {
         Error::Invalid(_) => "Invalid Legacy OMEMO message or key data".into(),
@@ -651,23 +661,19 @@ impl Worker {
             self.initialize().await?;
         }
         let members = recipients.members.keys().cloned().collect();
-        match self
-            .local
-            .as_mut()
-            .ok_or(Error::Incomplete)?
-            .encrypt_room(
-                &recipients.room,
-                &members,
-                "Monogram encryption check",
-                &crate::model::new_id(),
-                skip_unreachable,
-            )
-            .await
-        {
-            Ok(_) => Ok(true),
-            Err(Error::Unavailable(super::NO_DEVICES | super::UNSUPPORTED)) => Ok(false),
-            Err(error) => Err(error),
-        }
+        probe_outcome(
+            self.local
+                .as_mut()
+                .ok_or(Error::Incomplete)?
+                .encrypt_room(
+                    &recipients.room,
+                    &members,
+                    "Monogram encryption check",
+                    &crate::model::new_id(),
+                    skip_unreachable,
+                )
+                .await,
+        )
     }
     async fn send_room(
         &mut self,

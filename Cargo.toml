@@ -55,6 +55,10 @@ gstreamer-app = "=0.25.2"
 cc = "1"
 pkg-config = "0.3"
 
+[dev-dependencies]
+# The paused clock lets timing tests simulate network latency and 25 s timeouts instantly.
+tokio = { version = "1", features = ["test-util"] }
+
 [profile.dev]
 debug = 0
 
