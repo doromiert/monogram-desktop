@@ -107,7 +107,7 @@ impl Downloads {
         self.start_with_policy(account, file, Policy::Cache)
     }
     pub fn start_automatic(&mut self, account: &str, file: Attachment, limit:u64) {
-        if limit>0 && (file.media_candidate() || file.audio_candidate()) && !file.manual && self.status(account, &file).is_none() {
+        if limit>0 && (file.media_candidate() || file.audio_candidate() || file.player_audio_candidate()) && !file.manual && self.status(account, &file).is_none() {
             let _ = self.start_with_policy(account, file, Policy::Automatic(limit.min(MAX)));
         }
     }
