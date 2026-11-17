@@ -11,15 +11,14 @@ For GTK/libadwaita UI changes, follow `docs/GNOME_UI_GUIDELINES.md`.
 
 Applies only to commits that were actually pushed, never local ones.
 
-**Gates.** Do nothing if `gh` is not installed (`command -v gh`) or the
-authenticated account lacks `WRITE`, `MAINTAIN` or `ADMIN` on the repo
-(`gh repo view --json viewerPermission`).
-
-These gates limit only this automatic follow-up. They are a project rule, not a
-statement about what GitHub allows: `viewerPermission: READ` means the account
-cannot push or merge, but it does not by itself stop the user from commenting on
-a pull request. Do not tell the user that commenting is impossible; say that this
-procedure does not run, and leave any manual comment or PR edit to them.
+**Gates.** Do nothing if `gh` is not installed (`command -v gh`). Check the
+account's permission once (`gh repo view --json viewerPermission`); it only decides
+whether merging is possible:
+- `READ` (or `TRIAGE`) is enough to comment on a pull request and to edit the
+  title and description of your own PR. Do not skip those steps, and do not tell
+  the user they are impossible.
+- Merging needs `WRITE`, `MAINTAIN` or `ADMIN`. Without one of them, never offer
+  or attempt a merge; offer **comment** only.
 
 **API limits.** Fetch the open PR list once per push (`gh pr list --state open`)
 and reuse it; no polling or loops. At most one comment or one edit per PR per
@@ -30,8 +29,9 @@ Then, for each open PR a pushed commit relates to:
 **Someone else's PR** (commit author is not the PR author) that already tracks
 the feature or fix:
 1. Alert the user with the PR link and the commit hash link, and ask whether to
-   **comment**, **merge** or **both**. Ask once per push, listing every affected
-   PR. Do nothing until they answer.
+   **comment**, **merge** or **both** (only **comment** without merge
+   permission). Ask once per push, listing every affected PR. Do nothing until
+   they answer.
 2. Skip a PR whose comments already name that hash, so re-pushes never repeat.
 3. Comment with the 7+ character hash, then merge only the PRs the user chose:
    - One item: `I fixed **<feature or bug fix>** in <commit hash>`
