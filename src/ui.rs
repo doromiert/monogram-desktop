@@ -699,6 +699,25 @@ impl Ui {
             }
         });
     }
+    /// A toast for `title`; when `reason` is the Legacy OMEMO "contact authorization" denial, it
+    /// carries a Resolve button that opens Control Access for `peer`.
+    fn notice_resolving_authorization(self: &Rc<Self>, peer: &str, reason: &str, title: String) {
+        if reason != crate::crypto::legacy::DENIED {
+            return self.notice(&title);
+        }
+        let toast = adw::Toast::builder()
+            .title(title)
+            .button_label("Resolve")
+            .build();
+        let weak = Rc::downgrade(self);
+        let peer = peer.to_owned();
+        toast.connect_button_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.contact_access(&peer);
+            }
+        });
+        self.show_toast(toast);
+    }
     pub fn notice(&self, message: &str) {
         self.show_toast(adw::Toast::new(message));
     }
@@ -2568,7 +2587,10 @@ impl Ui {
                     errors,
                 );
             }
-            BackendEvent::CryptoError { peer, text } => self.notice(&format!("{peer}: {text}")),
+            BackendEvent::CryptoError { peer, text } => {
+                let title = format!("{peer}: {text}");
+                self.notice_resolving_authorization(&peer, &text, title);
+            }
             BackendEvent::InlineEmoji { peer, id, emoji } => {
                 if self
                     .store
@@ -2775,7 +2797,8 @@ impl Ui {
                 if !ours {
                     return;
                 }
-                self.notice(&crate::text_safety::failed_send_toast(&reason));
+                let title = crate::text_safety::failed_send_toast(&reason);
+                self.notice_resolving_authorization(&peer, &reason, title);
             }
             BackendEvent::History {
                 peer,

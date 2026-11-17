@@ -30,7 +30,7 @@ pub const NS: &str = "eu.siacs.conversations.axolotl";
 const DEVICES: &str = "eu.siacs.conversations.axolotl.devicelist";
 const MAX_WIRE: usize = 1024 * 1024;
 const NO_DEVICES: &str = "No eligible Legacy OMEMO devices";
-const DENIED: &str = "Legacy OMEMO keys require contact authorization";
+pub(crate) const DENIED: &str = "Legacy OMEMO keys require contact authorization";
 const UNSUPPORTED: &str = "Legacy OMEMO key publication is unsupported";
 
 pub struct Device {

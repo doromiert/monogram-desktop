@@ -20,6 +20,13 @@ pub struct ContactAccessControls {
     refresh_pending: bool,
 }
 
+#[cfg(test)]
+impl ContactAccessControls {
+    pub fn peer(&self) -> &str {
+        &self.peer
+    }
+}
+
 fn cache_rendered_state(cache: &mut Option<State>, received: &State, will_render: bool) -> bool {
     let changed = cache.as_ref() != Some(received);
     if will_render {
