@@ -12,7 +12,14 @@ pub(crate) fn automatic_media_allowed(smoke: bool, own: bool, encrypted: bool, c
 impl Ui {
     pub fn attachment_content(self: &Rc<Self>, message: &Message) -> gtk::Box {
         let file = message.attachment.as_ref().unwrap().clone();
-        if file.audio_candidate(){return self.audio_attachment(message);}
+        // The sandboxed, strictly checked player takes the formats it supports; the rest fall back
+        // to the media player, as before.
+        if file.audio_candidate() {
+            return self.audio_attachment(message);
+        }
+        if file.player_audio_candidate() {
+            return self.player_audio_attachment(message);
+        }
         if file.media_candidate() {
             return self.media_attachment(message);
         }

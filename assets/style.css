@@ -64,6 +64,9 @@
 .payment-card { background: linear-gradient(120deg,#ff8a16,#f45100); color: white; border-radius: 12px; padding: 20px 26px; }
 .payment-card .title-1 { color: white; }
 .large-emoji { font-size: 56px; padding: 8px; }
+/* A message that is exactly one emoji. The same size as its Noto animation (about 90 px across in
+   a 96 px box), so the ordinary emoji shown until the first frame arrives does not jump. */
+.single-emoji { font-size: 72px; padding: 0; }
 .preview-label { font-size: 10px; letter-spacing: 1px; opacity: .5; }
 
 .utility-pane stackswitcher button { min-width: 60px; padding: 6px 10px; }
@@ -300,6 +303,14 @@
 .presence-dot { min-width: 12px; min-height: 12px; border-radius: 999px; border: 2px solid @window_bg_color; background: @success_color; }
 .presence-dot.presence-away { background: @warning_color; }
 .presence-dot.presence-busy { background: @error_color; }
+
+/* Audio messages: a round play button, a waveform and the duration. The button is libadwaita's
+   circular suggested-action, so it follows the accent colour; the waveform takes the same colour. */
+.audio-bubble { min-width: 230px; padding: 2px 0; }
+.audio-bubble .audio-play { min-width: 48px; min-height: 48px; padding: 0; }
+.audio-bubble .audio-wave { color: @accent_color; }
+.audio-bubble .audio-wave:focus-visible { outline: 2px solid @accent_color; outline-offset: 2px; border-radius: 4px; }
+.audio-bubble .audio-time { font-variant-numeric: tabular-nums; }
 
 .profile-target { padding: 0; min-width: 0; min-height: 0; }
 .profile-card-banner { background: color-mix(in srgb, var(--accent-bg-color) 60%, var(--window-bg-color)); border-radius: 6px; }

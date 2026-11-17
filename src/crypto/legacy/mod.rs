@@ -30,7 +30,16 @@ pub const NS: &str = "eu.siacs.conversations.axolotl";
 const DEVICES: &str = "eu.siacs.conversations.axolotl.devicelist";
 const MAX_WIRE: usize = 1024 * 1024;
 const NO_DEVICES: &str = "No eligible Legacy OMEMO devices";
-const DENIED: &str = "Legacy OMEMO keys require contact authorization";
+/// The refusal reads `<DENIED_PREFIX> <contact's bare address>`.
+pub(crate) const DENIED_PREFIX: &str = "Legacy OMEMO keys require contact authorization from";
+/// The contact a [`Error::ContactAuthorization`] message names, or `None` for any other text, so
+/// words that merely resemble it (a server's, for instance) never match.
+pub(crate) fn denied_contact(reason: &str) -> Option<&str> {
+    reason
+        .strip_prefix(DENIED_PREFIX)?
+        .strip_prefix(' ')
+        .filter(|contact| !contact.is_empty() && !contact.contains(char::is_whitespace))
+}
 const UNSUPPORTED: &str = "Legacy OMEMO key publication is unsupported";
 
 pub struct Device {
@@ -61,12 +70,16 @@ pub fn exists(root: &Path, owner: &str) -> bool {
 fn bundle_node(id: u32) -> String {
     format!("{NS}.bundles:{id}")
 }
+/// `lookup` for fetching `peer`'s keys: a refusal names the contact so it can be resolved.
+fn lookup_peer(error: pep::Error, peer: &str, local: bool) -> Error {
+    if !local && !error.unsupported() && error.access_denied() {
+        return Error::ContactAuthorization(peer.into());
+    }
+    lookup(error, local)
+}
 fn lookup(error: pep::Error, local: bool) -> Error {
     if error.unsupported() {
         return Error::Unavailable(UNSUPPORTED);
-    }
-    if error.access_denied() && !local {
-        return Error::Unavailable(DENIED);
     }
     match error {
         pep::Error::Crypto(error) => error,
@@ -78,7 +91,8 @@ fn probe_unavailable(error: &Error) -> bool {
         error,
         Error::TrustRequired
             | Error::InvalidBundle
-            | Error::Unavailable(NO_DEVICES | DENIED | UNSUPPORTED)
+            | Error::Unavailable(NO_DEVICES | UNSUPPORTED)
+            | Error::ContactAuthorization(_)
     )
 }
 fn history(path: &Path) -> Result<Option<crate::storage::Store>> {
@@ -193,7 +207,7 @@ impl Legacy {
             .pep
             .item(peer, &bundle_node(id), None)
             .await
-            .map_err(|e| lookup(e, peer == self.store.owner))?
+            .map_err(|e| lookup_peer(e, peer, peer == self.store.owner))?
             .ok_or(Error::InvalidBundle)?;
         wire::parse_bundle(&data).map_err(|error| match error {
             Error::Invalid(_) | Error::Native(_) => Error::InvalidBundle,
@@ -231,7 +245,7 @@ impl Legacy {
             .pep
             .item(peer, DEVICES, None)
             .await
-            .map_err(|e| lookup(e, own))?;
+            .map_err(|e| lookup_peer(e, peer, own))?;
         let mut ids = wire::device_ids(list.as_ref())?;
         if own && !ids.remove(&self.device()) {
             return Err(Error::Unavailable(
@@ -974,5 +988,119 @@ mod repair_tests {
             receiver.begin_repair(&stale, None).unwrap().is_none(),
             "a working session is never replaced by an old failure"
         );
+    }
+}
+
+#[cfg(test)]
+mod denial_tests {
+    use super::*;
+    use crate::iq;
+
+    fn rejected(condition: &str, pubsub: Option<&str>) -> pep::Error {
+        pep::Error::Request(iq::Error::Rejected {
+            condition: condition.into(),
+            pubsub: pubsub.map(str::to_owned),
+        })
+    }
+
+    #[test]
+    fn a_refused_key_fetch_names_the_contact_who_refused() {
+        for error in [
+            rejected("forbidden", None),
+            rejected("not-authorized", None),
+            rejected("subscription-required", None),
+            rejected("auth", Some("presence-subscription-required")),
+        ] {
+            let Error::ContactAuthorization(contact) = lookup_peer(error, "carol@example.org", false) else {
+                panic!("a refusal must be a ContactAuthorization");
+            };
+            assert_eq!(contact, "carol@example.org");
+        }
+    }
+
+    #[test]
+    fn the_message_names_the_contact_and_only_that_text_parses_back() {
+        let text = Error::ContactAuthorization("carol@example.org".into()).to_string();
+        assert_eq!(text, "Legacy OMEMO keys require contact authorization from carol@example.org");
+        assert_eq!(denied_contact(&text), Some("carol@example.org"));
+        for other in [
+            "Legacy OMEMO keys require contact authorization",
+            "Legacy OMEMO keys require contact authorization from ",
+            "Legacy OMEMO keys require contact authorization from a b",
+            "the server said: Legacy OMEMO keys require contact authorization from carol@example.org",
+            "No eligible Legacy OMEMO devices",
+        ] {
+            assert_eq!(denied_contact(other), None, "{other:?}");
+        }
+    }
+
+    #[test]
+    fn our_own_devices_and_other_failures_are_not_a_contact_refusal() {
+        assert!(!matches!(lookup_peer(rejected("forbidden", None), "me@example.org", true), Error::ContactAuthorization(_)));
+        assert!(matches!(lookup_peer(rejected("feature-not-implemented", None), "carol@example.org", false), Error::Unavailable(UNSUPPORTED)));
+        assert!(matches!(lookup_peer(rejected("item-not-found", None), "carol@example.org", false), Error::Unavailable(_)));
+    }
+
+    #[test]
+    fn a_refusal_is_a_definitive_probe_answer_not_a_failure() {
+        assert!(probe_unavailable(&Error::ContactAuthorization("carol@example.org".into())));
+    }
+
+    /// The real send path: `probe` fetches the contact's device list, the server refuses it, and
+    /// the error that comes back names that contact (here a room member, not the chat's address).
+    #[test]
+    fn a_probe_whose_key_fetch_is_refused_names_the_refusing_contact() {
+        use crate::protocol::Command;
+        use super::tests::fixture;
+        let (store, journal, _) = fixture("alice@example.invalid", 101);
+        let (network, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let mut legacy = Legacy {
+            store,
+            journal,
+            pep: Pep::new(iq::Client::new(network), "alice@example.invalid", 101).unwrap(),
+            history_path: PathBuf::new(),
+            _lock: File::open("/dev/null").unwrap(),
+            repairs: BTreeMap::new(),
+            pending_repairs: BTreeMap::new(),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let outcome = runtime.block_on(async {
+            let server = async {
+                while let Some(command) = requests.recv().await {
+                    if let Command::Iq { reply, .. } = command {
+                        let _ = reply.send(Err(iq::Error::Rejected {
+                            condition: "forbidden".into(),
+                            pubsub: None,
+                        }));
+                    }
+                }
+            };
+            tokio::select! {
+                result = legacy.probe("carol@example.invalid") => result,
+                _ = server => unreachable!("the fake server only ends when the client does"),
+            }
+        });
+        // A refusal is a definitive answer for selection, but the typed error is still what `encrypt` reports.
+        assert!(matches!(outcome, Ok(false)), "a refusal makes the probe say \"not available\": {outcome:?}");
+        let error = runtime.block_on(async {
+            let server = async {
+                while let Some(command) = requests.recv().await {
+                    if let Command::Iq { reply, .. } = command {
+                        let _ = reply.send(Err(iq::Error::Rejected {
+                            condition: "forbidden".into(),
+                            pubsub: None,
+                        }));
+                    }
+                }
+            };
+            tokio::select! {
+                result = legacy.encrypt("carol@example.invalid", "hi", "wire") => result.unwrap_err(),
+                _ = server => unreachable!(),
+            }
+        });
+        match error {
+            Error::ContactAuthorization(contact) => assert_eq!(contact, "carol@example.invalid"),
+            other => panic!("expected the refusing contact, got {other:?}"),
+        }
     }
 }

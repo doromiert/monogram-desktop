@@ -360,11 +360,12 @@ impl Ui {
             if !ui.online.get() {
                 return;
             }
-            let result = if ui.encryption_revision.get() != revision {
-                Err("Encryption settings changed. Retry this message.".into())
-            } else {
-                result
-            };
+            if ui.encryption_revision.get() != revision {
+                // The settings changed while the check ran, so its answer may be stale. Check
+                // again under the current settings instead of failing the messages.
+                ui.prepare_queued_peer(peer, messages);
+                return;
+            }
             if ui.peer_blocked(&peer) {
                 ui.retain_blocked_queue(&owner, &peer, messages);
                 return;
@@ -372,11 +373,7 @@ impl Ui {
             let mode = match result {
                 Ok(mode) => mode,
                 Err(error) => {
-                    for mut message in messages {
-                        message.delivery = "failed".into();
-                        ui.store_queued_row(&owner, &peer, message);
-                    }
-                    ui.notice(&error);
+                    ui.fail_queued_selection(&owner, &peer, messages, &error);
                     return;
                 }
             };
@@ -497,6 +494,21 @@ impl Ui {
         });
     }
 
+    /// The encryption check for queued messages failed: mark them failed and say why. A Legacy
+    /// OMEMO contact-authorization denial offers Resolve.
+    pub(crate) fn fail_queued_selection(
+        self: &Rc<Self>,
+        owner: &str,
+        peer: &str,
+        messages: Vec<Message>,
+        error: &str,
+    ) {
+        for mut message in messages {
+            message.delivery = "failed".into();
+            self.store_queued_row(owner, peer, message);
+        }
+        self.notice_resolving_authorization(error, error.to_owned());
+    }
     pub fn store_queued_row(self: &Rc<Self>, owner: &str, peer: &str, message: Message) -> bool {
         if self.store.save_outbox_row(owner, peer, &message).is_err() {
             self.notice("Queued message could not be saved");
@@ -674,5 +686,79 @@ mod tests {
                 .any(|(_, message)| message.upload.as_ref().is_some_and(|draft| draft.sticker))
         );
         ui.window.destroy();
+    }
+
+    fn settle(milliseconds: u64) {
+        let context = gtk::glib::MainContext::default();
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(milliseconds);
+        while std::time::Instant::now() < until {
+            while context.iteration(false) {}
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+    fn shows_text(widget: &gtk::Widget, needle: &str) -> bool {
+        widget
+            .downcast_ref::<gtk::Label>()
+            .is_some_and(|label| label.text().contains(needle))
+            || {
+                let mut child = widget.first_child();
+                let mut found = false;
+                while let Some(current) = child {
+                    found |= shows_text(&current, needle);
+                    child = current.next_sibling();
+                }
+                found
+            }
+    }
+
+    /// Encryption settings that change while a queued message's key check is running no longer fail
+    /// the message with a toast: the check runs again under the new settings and the message goes on.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_queued_message_is_rechecked_automatically_when_settings_change_mid_check() {
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id("com.negzero.StaleCheckFixture")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let ui = Ui::new(&app, true);
+        ui.window.present();
+        let (owner, peer) = ("owner@fixture.invalid", "peer@fixture.invalid");
+        ui.store
+            .save_account(&Account { jid: owner.into(), host: String::new(), port: 5222, direct_tls: false })
+            .unwrap();
+        let mut state = State::live(owner, vec![]);
+        state.active = state.chat_for(peer).id.clone();
+        ui.activate_state(state);
+        ui.online.set(true);
+        let queued = Message {
+            id: "waiting".into(),
+            wire_id: "waiting".into(),
+            text: "Queued while settings change".into(),
+            own: true,
+            delivery: "queued".into(),
+            outbox_pending: true,
+            ..Default::default()
+        };
+        ui.state.borrow_mut().current_mut().messages.push(queued.clone());
+        assert!(ui.persist());
+
+        // Start the check, then change the encryption settings before its answer is handled.
+        ui.prepare_queued_peer(peer.into(), vec![queued]);
+        ui.encryption_revision.set(ui.encryption_revision.get().wrapping_add(1));
+        settle(500);
+
+        assert!(
+            !shows_text(ui.toast.upcast_ref(), "Encryption settings changed"),
+            "no stale-settings toast"
+        );
+        let message = ui.store.message(owner, peer, "waiting").unwrap();
+        assert!(
+            message.encryption_mode.is_some(),
+            "the check ran again and the message was prepared under the current settings"
+        );
+        assert!(!message.outbox_pending, "the message left the queue instead of failing in it");
+        ui.window.close();
     }
 }

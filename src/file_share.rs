@@ -255,7 +255,9 @@ impl Attachment {
             );
         }
     }
-    pub fn audio_candidate(&self)->bool {
+    /// Audio the sandboxed preview does not handle (FLAC, raw AAC, anything else with an audio type).
+    /// It plays through the media player on request; see `audio_ui.rs`.
+    pub fn player_audio_candidate(&self)->bool {
         self.mime.starts_with("audio/") || matches!(self.name.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str(),"mp3"|"ogg"|"opus"|"m4a"|"aac"|"wav"|"flac")
     }
     pub fn media_candidate(&self) -> bool {
@@ -270,6 +272,20 @@ impl Attachment {
             && width == height
             && width <= 1280
             && duration_us > 0
+    }
+    /// Audio the preview player handles: an `audio/*` type, or a name ending in one of the
+    /// accepted extensions when the type says nothing. A video type is never audio, and a bare
+    /// `.webm` name stays a video: only an `audio/webm` type makes it audio.
+    pub fn audio_candidate(&self) -> bool {
+        if self.sticker || self.mime.starts_with("video/") || self.mime.starts_with("image/") {
+            return false;
+        }
+        self.mime.starts_with("audio/") || (self.mime.is_empty() || self.mime == "application/octet-stream") && self.audio_extension()
+    }
+    pub fn audio_extension(&self) -> bool {
+        self.name.rsplit_once('.').is_some_and(|(_, extension)| {
+            matches!(extension.to_ascii_lowercase().as_str(), "ogg" | "oga" | "opus" | "mp3" | "wav" | "wave" | "m4a")
+        })
     }
     pub fn video_candidate(&self) -> bool {
         self.mime.starts_with("video/") || self.video_extension()

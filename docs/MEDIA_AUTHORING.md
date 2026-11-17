@@ -34,6 +34,9 @@ media: it never runs in the main process.
 - The helper re-validates the plan it receives (`Plan::check`). After it exits, the main process
   accepts the result only if it is a regular, non-symlink file within the size cap whose own
   header is PNG or JPEG with exactly the planned dimensions.
+- The launcher is shared with the audio helper (`src/confined.rs`) and marks every descriptor above
+  stdio close-on-exec before the exec, so nothing the app holds open reaches the sandbox
+  (bubblewrap does not close inherited descriptors).
 - Pipelines are built element by element from the validated `Plan`, never from a string that
   contains user input. EXIF orientation is applied first, so crop coordinates are in the picture
   as the user sees it. JPEG stays JPEG (quality 90); PNG and WebP become PNG, keeping transparency.

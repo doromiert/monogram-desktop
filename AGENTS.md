@@ -5,6 +5,51 @@ feature parity**, including protocol, security and persistence behavior.
 The mobile reference repository is `../mobile/`; keep the feature parity ledger
 in `docs/FEATURE_PARITY.md` current. A fixture is not an implemented feature.
 
+For GTK/libadwaita UI changes, follow `docs/GNOME_UI_GUIDELINES.md`.
+
+## Pull requests after a push (required)
+
+Applies only to commits that were actually pushed, never local ones.
+
+**Gates.** Do nothing if `gh` is not installed (`command -v gh`). Check the
+account's permission once (`gh repo view --json viewerPermission`); it only decides
+whether merging is possible:
+- `READ` (or `TRIAGE`) is enough to comment on a pull request and to edit the
+  title and description of your own PR. Do not skip those steps, and do not tell
+  the user they are impossible.
+- Merging needs `WRITE`, `MAINTAIN` or `ADMIN`. Without one of them, never offer
+  or attempt a merge; offer **comment** only.
+
+**API limits.** Fetch the open PR list once per push (`gh pr list --state open`)
+and reuse it; no polling or loops. At most one comment or one edit per PR per
+push. If unsure a PR matches, skip it.
+
+Then, for each open PR a pushed commit relates to:
+
+**Someone else's PR** (commit author is not the PR author) that already tracks
+the feature or fix:
+1. Alert the user with the PR link and the commit hash link, and ask whether to
+   **comment**, **merge** or **both** (only **comment** without merge
+   permission). Ask once per push, listing every affected PR. Do nothing until
+   they answer.
+2. Skip a PR whose comments already name that hash, so re-pushes never repeat.
+3. Comment with the 7+ character hash, then merge only the PRs the user chose:
+   - One item: `I fixed **<feature or bug fix>** in <commit hash>`
+   - Several:
+     ```
+     I fixed the following feature (or bug fixes):
+     **<feature or bug fix>** in <commit hash>
+     ```
+
+**Your own PR** (commit author is the PR author) on the pushed branch
+(`--head <branch>`): never comment. If the push adds something the title or body
+does not cover (feature, fix, behavior or breaking change):
+1. Edit only when something is missing. Extend the body with a bullet or section;
+   never drop text the author wrote.
+2. Keep the title a valid Conventional Commit; change it only when the PR's main
+   purpose changed.
+3. Tell the user what changed.
+
 ## Commit messages: Conventional Commits (required)
 
 Every commit that lands on `main` **must** follow

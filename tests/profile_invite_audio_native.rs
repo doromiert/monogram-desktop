@@ -282,8 +282,10 @@ fn accepted_invites_profile_cards_audio_and_compact_pack_strip() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/audio/voice.ogg");
     let attachment = crate::file_share::Attachment {
         wire_url: "https://files.fixture.invalid/voice.ogg".into(),
-        name: "Voice recording.ogg".into(),
-        mime: "audio/ogg".into(),
+        // The sandboxed audio preview takes audio/* types and its own extensions (see
+        // `audio_bubble_ui.rs`); a type-less `.flac` name exercises the media-player fallback.
+        name: "Voice recording.flac".into(),
+        mime: String::new(),
         size: Some(std::fs::metadata(&path).unwrap().len()),
         width: None,
         height: None,

@@ -3,8 +3,14 @@ name = "monogram-desktop"
 version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
+# The other tests/*_native.rs files are #[path]-included into the binary and only compile there.
+autotests = false
 license = "GPL-3.0-or-later"
 description = "Native GTK/libadwaita Monogram client"
+
+[[test]]
+name = "transport"
+path = "tests/transport.rs"
 
 [dependencies]
 monogram-sync = {path="sync-core"}
@@ -43,6 +49,7 @@ rand = "=0.9.4"
 tiny-keccak = { version = "=2.0.2", features = ["kmac"] }
 pulldown-cmark = { version = "=0.13.6", default-features = false }
 gstreamer = "=0.25.4"
+gstreamer-app = "=0.25.2"
 
 [build-dependencies]
 cc = "1"

@@ -1,6 +1,19 @@
 //! Disposable loopback-only transport checks; launched by xmpp_fixture.py.
 #[path = "../src/lan_sync.rs"]
 mod lan_sync;
+#[path = "../src/emoji_preferences.rs"]
+mod emoji_preferences;
+#[path = "../src/favorite_order_store.rs"]
+mod favorite_order_store;
+#[path = "../src/text_safety.rs"]
+mod text_safety;
+#[path = "../src/profiles.rs"]
+mod profiles;
+mod ui {
+    pub mod favorite_order {
+        pub use crate::favorite_order_store::*;
+    }
+}
 #[path = "../src/monero_settings.rs"]
 mod monero_settings;
 #[path = "../src/chat_states.rs"]
@@ -41,6 +54,8 @@ mod iq;
 mod legacy_polls;
 #[path = "../src/legacy_inline.rs"]
 mod legacy_inline;
+#[path = "../src/media_caption.rs"]
+mod media_caption;
 #[path = "../src/media_store.rs"]
 mod media_store;
 #[path = "../src/message_actions.rs"]

@@ -68,57 +68,19 @@ pub struct Authored {
     pub bytes: u64,
 }
 
-fn program(variable: &str, fallback: Option<PathBuf>) -> Option<PathBuf> {
-    let path = std::env::var_os(variable).map(PathBuf::from).or(fallback)?;
-    (path.is_absolute() && path.is_file()).then_some(path)
-}
 fn helper() -> Option<PathBuf> {
-    let beside = std::env::current_exe().ok().and_then(|exe| {
-        let dir = exe.parent()?;
-        [dir.join(HELPER), dir.parent()?.join(HELPER)]
-            .into_iter()
-            .find(|path| path.is_file())
-    });
-    program("MONOGRAM_MEDIA_AUTHOR_HELPER", beside)
+    crate::confined::helper(HELPER, "MONOGRAM_MEDIA_AUTHOR_HELPER")
 }
 fn bwrap() -> Option<PathBuf> {
-    program("MONOGRAM_BWRAP", Some(env!("MONOGRAM_BUILT_BWRAP").into()))
+    crate::confined::bwrap()
 }
-
-/// Directories GStreamer plugins live in: an explicit search path first (Nix splits plugins over
-/// several store paths), then the usual distribution locations and the AppImage.
 fn plugin_dirs() -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = ["GST_PLUGIN_SYSTEM_PATH_1_0", "GST_PLUGIN_SYSTEM_PATH"]
-        .iter()
-        .filter_map(std::env::var_os)
-        .flat_map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
-        .collect();
-    if let Some(appdir) = std::env::var_os("APPDIR") {
-        dirs.push(Path::new(&appdir).join("lib/gstreamer-1.0"));
-    }
-    for dir in [
-        "/usr/lib/gstreamer-1.0",
-        "/usr/lib64/gstreamer-1.0",
-        "/usr/lib/x86_64-linux-gnu/gstreamer-1.0",
-        "/usr/lib/aarch64-linux-gnu/gstreamer-1.0",
-    ] {
-        dirs.push(dir.into());
-    }
-    dirs
+    crate::confined::plugin_dirs()
 }
 fn plugin_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
-    PLUGINS
-        .iter()
-        .filter_map(|name| {
-            dirs.iter()
-                .map(|dir| dir.join(name))
-                .find(|path| path.is_file())
-        })
-        .collect()
+    crate::confined::plugin_files(PLUGINS, dirs)
 }
-
-/// The bubblewrap command line. Separate from spawning so tests can inspect exactly what is
-/// exposed to the helper.
+/// The bubblewrap command line (see `confined`); separate from spawning so tests can inspect it.
 fn sandbox_command(
     bwrap: &Path,
     helper: &Path,
@@ -127,63 +89,7 @@ fn sandbox_command(
     plugins: &[PathBuf],
     mode: &str,
 ) -> Command {
-    let mut command = Command::new(bwrap);
-    crate::renderer_sandbox::runtime(&mut command);
-    command
-        .env_clear()
-        .args([
-            "--unshare-all",
-            "--die-with-parent",
-            "--new-session",
-            "--cap-drop",
-            "ALL",
-            "--clearenv",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--tmpfs",
-            "/tmp",
-            "--dir",
-            "/in",
-            "--chdir",
-            "/tmp",
-        ])
-        .arg("--ro-bind")
-        .arg(source)
-        .arg("/in/source")
-        .arg("--bind")
-        .arg(out_dir)
-        .arg("/out");
-    for plugin in plugins {
-        if let Some(name) = plugin.file_name() {
-            command
-                .arg("--ro-bind")
-                .arg(plugin)
-                .arg(Path::new("/plugins").join(name));
-        }
-    }
-    for (key, value) in [
-        ("HOME", "/nonexistent"),
-        ("XDG_CACHE_HOME", "/tmp"),
-        ("GST_REGISTRY", "/tmp/gst-registry.bin"),
-        ("GST_REGISTRY_FORK", "no"),
-        ("GST_PLUGIN_SCANNER", "/nonexistent"),
-        ("GST_PLUGIN_SYSTEM_PATH_1_0", "/plugins"),
-        ("GST_PLUGIN_PATH_1_0", ""),
-    ] {
-        command.args(["--setenv", key, value]);
-    }
-    command
-        .arg("--ro-bind")
-        .arg(helper)
-        .arg("/author")
-        .arg("/author")
-        .arg(mode)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    command
+    crate::confined::sandbox_command(bwrap, helper, crate::confined::Input::Path(source), Some(out_dir), plugins, &[mode])
 }
 
 /// Wait for the helper, killing it on cancellation or after the deadline.

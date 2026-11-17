@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 impl Ui {
-    pub(crate) fn audio_attachment(self: &Rc<Self>, message: &Message) -> gtk::Box {
+    pub(crate) fn player_audio_attachment(self: &Rc<Self>, message: &Message) -> gtk::Box {
         let file = message.attachment.as_ref().unwrap().clone();
         let owner = self.state.borrow().account.clone();
         let generation = self.generation.get();

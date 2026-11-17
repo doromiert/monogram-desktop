@@ -949,7 +949,12 @@ impl Ui {
                         && planned.emoji_only[index]
                         && m.text.chars().count() < 5
                     {
-                        "large-emoji"
+                        // Exactly one emoji is drawn at the size of its animation, bundled or not.
+                        if crate::emoji_completion::catalog_entry(m.text.trim()).is_some() {
+                            "single-emoji"
+                        } else {
+                            "large-emoji"
+                        }
                     } else {
                         "message-text"
                     };
@@ -961,7 +966,7 @@ impl Ui {
                         // Exactly one bundled emoji and nothing else: play its Noto animation.
                         // Anything else (more emoji, text, links, formatting, custom emoji,
                         // emoji outside the packs) keeps the ordinary rendering below.
-                        let animation=(css=="large-emoji"
+                        let animation=(css=="single-emoji"
                             && preview.is_none()
                             && m.inline_emoji.is_none()
                             // Sent messages always carry a formatting record; only styled text opts out.

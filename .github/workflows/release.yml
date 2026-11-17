@@ -91,6 +91,7 @@ jobs:
           install -Dm755 target/release/monogram-desktop /usr/bin/monogram-desktop
           install -Dm755 target/release/monogram-sticker-renderer /opt/monogram/monogram-sticker-renderer
           install -Dm755 target/release/monogram-media-author /opt/monogram/monogram-media-author
+          install -Dm755 target/release/monogram-audio-preview /opt/monogram/monogram-audio-preview
           install -d /usr/share/monogram-desktop
           cp -a assets/. /usr/share/monogram-desktop/
           install -Dm644 data/com.negzero.MonogramDesktop.xml /usr/share/mime/packages/com.negzero.MonogramDesktop.xml
@@ -126,6 +127,7 @@ jobs:
           install -Dm644 data/com.negzero.MonogramDesktop.xml AppDir/share/mime/packages/com.negzero.MonogramDesktop.xml
           install -m755 /opt/monogram/monogram-sticker-renderer AppDir/libexec/
           install -m755 /opt/monogram/monogram-media-author AppDir/libexec/
+          install -m755 /opt/monogram/monogram-audio-preview AppDir/libexec/
           # NOTE: the native MicroTeX math helper is not bundled yet (it needs host pangomm/cairomm/tinyxml2
           # and a baked /usr/share/monogram-math path), so LaTeX shows "unavailable" in the AppImage.
           install -m644 packaging/appimage/10-monogram.hook AppDir/bin/
