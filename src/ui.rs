@@ -713,10 +713,29 @@ impl Ui {
         let peer = peer.to_owned();
         toast.connect_button_clicked(move |_| {
             if let Some(ui) = weak.upgrade() {
-                ui.contact_access(&peer);
+                ui.resolve_contact_authorization(&peer);
             }
         });
         self.show_toast(toast);
+    }
+    /// A direct contact opens Control Access. A room has no access of its own and the denial does
+    /// not say which member was refused, so show the room's participants, whose profile cards
+    /// lead to Control Access.
+    pub(crate) fn resolve_contact_authorization(self: &Rc<Self>, peer: &str) {
+        let room = self
+            .state
+            .borrow()
+            .chats
+            .iter()
+            .find(|chat| chat.jid == peer && chat.group)
+            .map(|chat| chat.id.clone());
+        let Some(id) = room else {
+            return self.contact_access(peer);
+        };
+        if self.state.borrow().current().jid != peer {
+            self.select_chat(&id);
+        }
+        self.show_participants();
     }
     pub fn notice(&self, message: &str) {
         self.show_toast(adw::Toast::new(message));

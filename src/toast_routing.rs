@@ -442,4 +442,76 @@ mod tests {
         assert_toast(&ui, "spoof", false);
         ui.window.close();
     }
+
+    const ROOM: &str = "team@conference.example.org";
+
+    fn add_room(ui: &std::rc::Rc<crate::ui::Ui>) -> String {
+        let mut state = ui.state.borrow_mut();
+        let chat = state.chat_for(ROOM);
+        chat.group = true;
+        chat.id.clone()
+    }
+
+    /// In a group chat the denied member is unknown and the room has no contact access: Resolve
+    /// must not open the "Contact Access Unavailable / A direct contact is required" dialog.
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn resolve_in_a_room_opens_its_participants_not_contact_access() {
+        let ui = fixture("com.negzero.ResolveRoomFixture");
+        let room_id = add_room(&ui);
+        ui.select_chat(&room_id);
+        settle(300);
+
+        ui.notice_resolving_authorization(ROOM, DENIED_TEXT, format!("Message not sent: {DENIED_TEXT}"));
+        settle(300);
+        assert!(ui.participants.borrow().is_none(), "nothing open yet");
+        find_button(ui.toast.upcast_ref(), "Resolve").expect("Resolve button").emit_clicked();
+        settle(300);
+        assert!(open_contact_access_peer(&ui).is_none(), "no Control Access dialog for a room");
+        assert_eq!(ui.participants.borrow().as_ref().map(|view| view.room.clone()).as_deref(), Some(ROOM));
+        ui.window.close();
+    }
+
+    /// The toast can belong to a room that is not the one in view: Resolve switches to it first.
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn resolve_for_a_room_that_is_not_open_switches_to_it() {
+        let ui = fixture("com.negzero.ResolveOtherRoomFixture");
+        let room_id = add_room(&ui);
+        let other_id = ui.state.borrow_mut().chat_for(PEER).id.clone();
+        ui.select_chat(&other_id);
+        settle(300);
+        assert_eq!(ui.state.borrow().current().jid, PEER);
+
+        ui.notice_resolving_authorization(ROOM, DENIED_TEXT, "title".into());
+        settle(300);
+        find_button(ui.toast.upcast_ref(), "Resolve").expect("Resolve button").emit_clicked();
+        settle(300);
+        assert_eq!(ui.state.borrow().current().id, room_id, "switched to the room");
+        assert_eq!(ui.participants.borrow().as_ref().map(|view| view.room.clone()).as_deref(), Some(ROOM));
+        assert!(open_contact_access_peer(&ui).is_none());
+        ui.window.close();
+    }
+
+    /// A room member's profile card (reached from the participants list) leads to Control Access.
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_member_profile_card_has_control_access_only_for_a_real_contact() {
+        let ui = fixture("com.negzero.ResolveProfileFixture");
+        let popover = |ui: &crate::ui::Ui| ui.active_profile.borrow().clone().expect("profile card open");
+
+        // A room occupant whose real address is hidden: only a room nick, no contact access.
+        ui.profile_card(&ui.window, &format!("{ROOM}/bob"), "bob");
+        settle(300);
+        assert!(find_button(popover(&ui).upcast_ref(), "Control Access").is_none());
+
+        ui.profile_card(&ui.window, PEER, "Bob");
+        settle(300);
+        let button = find_button(popover(&ui).upcast_ref(), "Control Access").expect("Control Access on the card");
+        assert!(open_contact_access_peer(&ui).is_none());
+        button.emit_clicked();
+        settle(300);
+        assert_eq!(open_contact_access_peer(&ui).as_deref(), Some(PEER));
+        ui.window.close();
+    }
 }
