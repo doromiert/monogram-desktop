@@ -394,7 +394,7 @@ async fn configure(
     .await?;
     let info = room_info(iq, room).await?;
     if !info.private {
-        return Err(Error::RecipientsUnavailable);
+        return Err(Error::NotPrivate);
     }
     Ok(info)
 }

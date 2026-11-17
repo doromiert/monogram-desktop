@@ -58,6 +58,11 @@ out and that they cannot read it. The choice is stored on that message only. It 
 plaintext, never skips a member whose keys are merely unreviewed, never skips your own devices,
 and refuses to send when nobody else could be reached.
 
+When a room cannot be encrypted at all the failure says why, and Resolve opens the place that deals
+with it. A room that is not members-only and non-anonymous can never be end-to-end encrypted: Resolve
+opens Conversation Security so you choose how it is sent. Someone in the room who is not a listed
+member, or who hides their address, is named, and Resolve opens the participants.
+
 Legacy upload requests retain the sanitized filename/MIME used by Android;
 OMEMO 2 retains opaque upload metadata. Outer SFS/OOB descriptions remain
 untrusted and cannot supply Legacy URLs, keys, sizes or hashes. A small isolated

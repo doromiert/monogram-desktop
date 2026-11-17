@@ -724,6 +724,19 @@ impl Ui {
             .chats
             .iter()
             .any(|chat| chat.jid == peer && chat.group);
+        if in_group {
+            if let Some(fix) = crate::rooms::fix_for(reason) {
+                let toast = adw::Toast::builder().title(title).button_label("Resolve").build();
+                let weak = Rc::downgrade(self);
+                let peer = peer.to_owned();
+                toast.connect_button_clicked(move |_| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.resolve_room_failure(&peer, fix);
+                    }
+                });
+                return self.show_toast(toast);
+            }
+        }
         if !in_group || ids.is_empty() || !crate::crypto::legacy::skippable_reason(reason) {
             return self.notice_resolving_authorization(reason, title);
         }
@@ -739,6 +752,25 @@ impl Ui {
             }
         });
         self.show_toast(toast);
+    }
+    /// Open what deals with a room that cannot be encrypted: Conversation Security to choose how it
+    /// is sent, or the participants to see who is in it. The room is shown first if it is not open.
+    pub(crate) fn resolve_room_failure(self: &Rc<Self>, room: &str, fix: crate::rooms::Fix) {
+        let id = self
+            .state
+            .borrow()
+            .chats
+            .iter()
+            .find(|chat| chat.jid == room && chat.group)
+            .map(|chat| chat.id.clone());
+        let Some(id) = id else { return };
+        if self.state.borrow().current().jid != room {
+            self.select_chat(&id);
+        }
+        match fix {
+            crate::rooms::Fix::Security => self.security(),
+            crate::rooms::Fix::Participants => self.show_participants(),
+        }
     }
     /// A toast for `title`. When `reason` is a Legacy OMEMO contact-authorization refusal, it names
     /// the contact who refused and carries a Resolve button that opens Control Access for them

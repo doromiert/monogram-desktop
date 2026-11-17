@@ -946,4 +946,47 @@ mod tests {
         assert!(find_button(ui.toast.upcast_ref(), "Resolve").is_some());
         ui.window.close();
     }
+
+    /// A room that is not members-only and non-anonymous can never be encrypted: Resolve opens
+    /// Conversation Security for that room (switching to it first), where the user chooses.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_room_that_cannot_be_encrypted_offers_resolve_to_conversation_security() {
+        use crate::protocol::BackendEvent;
+        let (ui, _) = room_with_failed_message("com.negzero.RoomNotPrivateFixture", "m", false);
+        let other = ui.state.borrow_mut().chat_for("peer@fixture.invalid").id.clone();
+        ui.select_chat(&other);
+        settle(300);
+        let (generation, owner) = (ui.generation.get(), ui.state.borrow().account.clone());
+        let reason = crate::rooms::Error::NotPrivate.to_string();
+        ui.backend_event(generation, &owner, BackendEvent::Failed { peer: ROOM.into(), id: "wire-m".into(), reason: reason.clone() });
+        settle(300);
+        assert!(shows_text(ui.toast.upcast_ref(), "This room is not members-only and non-anonymous"));
+        assert!(find_button(ui.toast.upcast_ref(), "Send Anyway").is_none());
+        find_button(ui.toast.upcast_ref(), "Resolve").expect("Resolve button").emit_clicked();
+        settle(500);
+        assert_eq!(ui.state.borrow().current().jid, ROOM, "the room is shown first");
+        let dialog = ui.window.visible_dialog().expect("a dialog is open");
+        assert_eq!(dialog.title(), "Conversation Security");
+        ui.window.close();
+    }
+
+    /// Someone in the room who is not a listed member or hides their address: the toast names them
+    /// and Resolve opens the participants.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn an_unlisted_occupant_offers_resolve_to_the_participants() {
+        use crate::protocol::BackendEvent;
+        let (ui, _) = room_with_failed_message("com.negzero.RoomOccupantFixture", "m", false);
+        let (generation, owner) = (ui.generation.get(), ui.state.borrow().account.clone());
+        let reason = crate::rooms::Error::OccupantNotListed("lurker".into()).to_string();
+        ui.backend_event(generation, &owner, BackendEvent::Failed { peer: ROOM.into(), id: "wire-m".into(), reason });
+        settle(300);
+        assert!(shows_text(ui.toast.upcast_ref(), "lurker is in this room but is not a listed member"));
+        assert!(ui.participants.borrow().is_none());
+        find_button(ui.toast.upcast_ref(), "Resolve").expect("Resolve button").emit_clicked();
+        settle(300);
+        assert_eq!(ui.participants.borrow().as_ref().map(|view| view.room.clone()).as_deref(), Some(ROOM));
+        ui.window.close();
+    }
 }

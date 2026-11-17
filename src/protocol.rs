@@ -1299,7 +1299,7 @@ impl Session {
                                             // anonymous room), so end-to-end encryption cannot exist there: send plain.
                                             // Timeouts and other failures must never downgrade an encrypted room.
                                             let _=reply.send(match error {
-                                                crate::rooms::Error::RecipientsUnavailable=>Ok(Mode::Plain),
+                                                crate::rooms::Error::RecipientsUnavailable|crate::rooms::Error::NotPrivate|crate::rooms::Error::OccupantNotListed(_)=>Ok(Mode::Plain),
                                                 crate::rooms::Error::Request(crate::iq::Error::Timeout)=>Err(crate::crypto::Error::Unavailable("The room did not answer. Try again.")),
                                                 crate::rooms::Error::NotJoined|crate::rooms::Error::Joining=>Err(crate::crypto::Error::Unavailable("Join the room before sending.")),
                                                 _=>Err(crate::crypto::Error::Unavailable("Could not read the room's member list. Try again.")),
