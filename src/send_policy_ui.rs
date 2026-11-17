@@ -58,7 +58,7 @@ impl Ui {
     ) {
         let reason = error.to_string();
         let title = format!("Could not check conversation encryption. {reason}");
-        self.notice_resolving_authorization(peer, &reason, title);
+        self.notice_resolving_authorization(&reason, title);
     }
 
     pub fn choose_sending(self: &Rc<Self>, then: impl FnOnce(&Rc<Self>, Mode) + 'static) {

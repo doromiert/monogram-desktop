@@ -506,7 +506,7 @@ impl Ui {
             message.delivery = "failed".into();
             self.store_queued_row(owner, peer, message);
         }
-        self.notice_resolving_authorization(peer, error, error.to_owned());
+        self.notice_resolving_authorization(error, error.to_owned());
     }
     pub fn store_queued_row(self: &Rc<Self>, owner: &str, peer: &str, message: Message) -> bool {
         if self.store.save_outbox_row(owner, peer, &message).is_err() {

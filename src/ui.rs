@@ -699,43 +699,28 @@ impl Ui {
             }
         });
     }
-    /// A toast for `title`; when `reason` is the Legacy OMEMO "contact authorization" denial, it
-    /// carries a Resolve button that opens Control Access for `peer`.
-    pub(crate) fn notice_resolving_authorization(self: &Rc<Self>, peer: &str, reason: &str, title: String) {
-        if reason != crate::crypto::legacy::DENIED {
+    /// A toast for `title`. When `reason` is a Legacy OMEMO contact-authorization refusal, it names
+    /// the contact who refused and carries a Resolve button that opens Control Access for them
+    /// (in a room too, where the contact is a member and `peer` is the room).
+    pub(crate) fn notice_resolving_authorization(self: &Rc<Self>, reason: &str, title: String) {
+        let owner = self.state.borrow().account.clone();
+        let Some(contact) = crate::crypto::legacy::denied_contact(reason)
+            .filter(|contact| crate::contact_access::valid_peer(&owner, contact))
+            .map(str::to_owned)
+        else {
             return self.notice(&title);
-        }
+        };
         let toast = adw::Toast::builder()
             .title(title)
             .button_label("Resolve")
             .build();
         let weak = Rc::downgrade(self);
-        let peer = peer.to_owned();
         toast.connect_button_clicked(move |_| {
             if let Some(ui) = weak.upgrade() {
-                ui.resolve_contact_authorization(&peer);
+                ui.contact_access(&contact);
             }
         });
         self.show_toast(toast);
-    }
-    /// A direct contact opens Control Access. A room has no access of its own and the denial does
-    /// not say which member was refused, so show the room's participants, whose profile cards
-    /// lead to Control Access.
-    pub(crate) fn resolve_contact_authorization(self: &Rc<Self>, peer: &str) {
-        let room = self
-            .state
-            .borrow()
-            .chats
-            .iter()
-            .find(|chat| chat.jid == peer && chat.group)
-            .map(|chat| chat.id.clone());
-        let Some(id) = room else {
-            return self.contact_access(peer);
-        };
-        if self.state.borrow().current().jid != peer {
-            self.select_chat(&id);
-        }
-        self.show_participants();
     }
     pub fn notice(&self, message: &str) {
         self.show_toast(adw::Toast::new(message));
@@ -2608,7 +2593,7 @@ impl Ui {
             }
             BackendEvent::CryptoError { peer, text } => {
                 let title = format!("{peer}: {text}");
-                self.notice_resolving_authorization(&peer, &text, title);
+                self.notice_resolving_authorization(&text, title);
             }
             BackendEvent::InlineEmoji { peer, id, emoji } => {
                 if self
@@ -2817,7 +2802,7 @@ impl Ui {
                     return;
                 }
                 let title = crate::text_safety::failed_send_toast(&reason);
-                self.notice_resolving_authorization(&peer, &reason, title);
+                self.notice_resolving_authorization(&reason, title);
             }
             BackendEvent::History {
                 peer,

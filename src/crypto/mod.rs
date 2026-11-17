@@ -28,11 +28,16 @@ pub enum Error {
     Incomplete,
     Vault,
     Unavailable(&'static str),
+    /// A contact refused to share their Legacy OMEMO keys: it carries their bare address.
+    ContactAuthorization(String),
     Uncertain,
     InvalidBundle,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Self::ContactAuthorization(contact) = self {
+            return write!(f, "{} {contact}", legacy::DENIED_PREFIX);
+        }
         f.write_str(match self {
             Self::Invalid(_) => "Invalid OMEMO 2 content",
             Self::Native(_) => "OMEMO 2 ratchet operation failed",
@@ -46,6 +51,7 @@ impl fmt::Display for Error {
             Self::Incomplete => "Incomplete OMEMO 2 state; existing identity preserved",
             Self::Vault => "The encryption key is missing or the keyring is locked",
             Self::Unavailable(reason) => reason,
+            Self::ContactAuthorization(_) => unreachable!("written above"),
             Self::Uncertain => "Encrypted delivery is uncertain; retrying may send a duplicate",
             Self::InvalidBundle => {
                 "A device's public bundle is invalid or missing; refresh device review"

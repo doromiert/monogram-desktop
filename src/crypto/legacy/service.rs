@@ -1235,7 +1235,7 @@ impl Worker {
                 let data = discovery
                     .item(&peer, &super::bundle_node(repair.device), None)
                     .await
-                    .map_err(|error| super::lookup(error, own))?
+                    .map_err(|error| super::lookup_peer(error, &peer, own))?
                     .ok_or(Error::InvalidBundle)?;
                 super::wire::parse_bundle(&data)
             }
