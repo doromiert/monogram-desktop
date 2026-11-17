@@ -306,3 +306,5 @@
 
 .profile-card, .profile-card > contents { padding: 0; border: none; background: transparent; box-shadow: none; }
 .profile-card-panel { padding: 8px; border-radius: 14px; background: @popover_bg_color; box-shadow: 0 2px 8px alpha(black,.2); }
+
+.media-upload-status { color: white; background: alpha(black,.65); border-radius: 8px; padding: 2px 6px; font-size: 10px; }

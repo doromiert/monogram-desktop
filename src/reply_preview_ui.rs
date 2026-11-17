@@ -94,7 +94,7 @@ fn image(message: &Message) -> Option<Attachment> {
         .cloned()
 }
 
-pub fn attach(ui: &Rc<Ui>, reply: &Message, row: &gtk::Box) {
+pub fn attach(ui: &Rc<Ui>, reply: &Message, row: &gtk::Grid) {
     if reply.reply_id.is_empty() {
         return;
     }
@@ -107,7 +107,7 @@ pub fn attach(ui: &Rc<Ui>, reply: &Message, row: &gtk::Box) {
     let pending = gtk::Image::from_icon_name("image-x-generic-symbolic");
     pending.set_pixel_size(18);
     slot.add_overlay(&pending);
-    row.append(&slot);
+    row.attach(&slot, 0, 0, 1, 1);
     let (owner, peer) = {
         let state = ui.state.borrow();
         (state.account.clone(), state.current().jid.clone())
@@ -351,7 +351,7 @@ mod tests {
             },
             Message {
                 id: "reply".into(),
-                reply: "You · 📎 image.png".into(),
+                reply: format!("You · 📎 {}...", "longattachmentfilename".repeat(4)),
                 reply_id: "original-image".into(),
                 reply_to: owner.into(),
                 text: "Could be worse".into(),
@@ -400,6 +400,25 @@ mod tests {
         }
         let picture = find(ui.timeline.upcast_ref()).unwrap();
         assert_eq!((picture.width(), picture.height()), (36, 36));
+        let settle = Instant::now();
+        while settle.elapsed() < Duration::from_millis(150) {
+            context.iteration(false);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        fn quote(widget: &gtk::Widget) -> Option<gtk::Label> {
+            if let Some(label) = widget.downcast_ref::<gtk::Label>().filter(|l| l.has_css_class("reply-preview")) { return Some(label.clone()); }
+            let mut child = widget.first_child();
+            while let Some(w) = child { child = w.next_sibling(); if let Some(label) = quote(&w) { return Some(label); } }
+            None
+        }
+        let bubble = ui.bubbles.borrow()["reply"].clone();
+        let snippet = quote(&bubble).unwrap();
+        let card = snippet.ancestor(gtk::Button::static_type()).unwrap();
+        let painted = snippet.layout().pixel_size();
+        let bounds = snippet.compute_bounds(&card).unwrap();
+        eprintln!("reply card={}x{}, snippet={}x{}, painted={:?}, origin={},{}",card.width(),card.height(),snippet.width(),snippet.height(),painted,bounds.x(),bounds.y());
+        assert!(painted.1 <= snippet.height(), "Reply text paints below its allocated height");
+        assert!(bounds.y() + painted.1 as f32 <= card.height() as f32, "Reply text escapes the card");
         assert!(gap < Duration::from_millis(400), "UI gap: {gap:?}");
         assert!(
             !ui.state

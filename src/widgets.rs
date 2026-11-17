@@ -1253,3 +1253,38 @@ impl SquareCell {
         cell
     }
 }
+
+/// Shared determinate/indeterminate ring for media upload and download controls.
+pub fn transfer_progress_ring(
+    fraction: std::rc::Rc<Cell<Option<f64>>>,
+    displayed_fraction: std::rc::Rc<Cell<f64>>,
+) -> gtk::DrawingArea {
+    let disk = gtk::DrawingArea::builder()
+        .content_width(58)
+        .content_height(58)
+        .build();
+    disk.set_halign(gtk::Align::Center);
+    disk.set_valign(gtk::Align::Center);
+    let draw_fraction = fraction;
+    let draw_displayed_fraction = displayed_fraction;
+    let started = std::time::Instant::now();
+    disk.set_draw_func(move |_, ctx, width, height| {
+        let x = f64::from(width) / 2.;
+        let y = f64::from(height) / 2.;
+        let radius = x.min(y) - 3.;
+        ctx.set_line_width(3.);
+        ctx.set_source_rgba(1., 1., 1., 0.22);
+        ctx.arc(x, y, radius, 0., std::f64::consts::TAU);
+        let _ = ctx.stroke();
+        let start = -std::f64::consts::FRAC_PI_2;
+        let (angle, amount) = draw_fraction.get().map_or_else(
+            || (start + started.elapsed().as_secs_f64() * 3., 0.23),
+            |_| (start, draw_displayed_fraction.get().clamp(0., 1.)),
+        );
+        ctx.set_source_rgba(1., 1., 1., 0.95);
+        ctx.set_line_cap(gtk::cairo::LineCap::Round);
+        ctx.arc(x, y, radius, angle, angle + amount * std::f64::consts::TAU);
+        let _ = ctx.stroke();
+    });
+    disk
+}
