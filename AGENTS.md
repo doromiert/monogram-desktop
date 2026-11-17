@@ -15,6 +15,12 @@ Applies only to commits that were actually pushed, never local ones.
 authenticated account lacks `WRITE`, `MAINTAIN` or `ADMIN` on the repo
 (`gh repo view --json viewerPermission`).
 
+These gates limit only this automatic follow-up. They are a project rule, not a
+statement about what GitHub allows: `viewerPermission: READ` means the account
+cannot push or merge, but it does not by itself stop the user from commenting on
+a pull request. Do not tell the user that commenting is impossible; say that this
+procedure does not run, and leave any manual comment or PR edit to them.
+
 **API limits.** Fetch the open PR list once per push (`gh pr list --state open`)
 and reuse it; no polling or loops. At most one comment or one edit per PR per
 push. If unsure a PR matches, skip it.
