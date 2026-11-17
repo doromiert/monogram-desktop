@@ -370,7 +370,14 @@ mod tests {
                 ..Default::default()
             });
         }
+        let caption_reply = Message {
+            id: "caption-reply".into(),
+            reply: "You · A caption beside a thumbnail must still have room for two lines, including long quotations that need ellipsizing within the card.".into(),
+            text: "Reply to a caption".into(),
+            ..reply.clone()
+        };
         state.current_mut().messages.push(reply);
+        state.current_mut().messages.push(caption_reply);
         ui.store.save(&state).unwrap();
         state.current_mut().messages.remove(0);
         ui.activate_state(state);
@@ -417,6 +424,14 @@ mod tests {
         let painted = snippet.layout().pixel_size();
         let bounds = snippet.compute_bounds(&card).unwrap();
         eprintln!("reply card={}x{}, snippet={}x{}, painted={:?}, origin={},{}",card.width(),card.height(),snippet.width(),snippet.height(),painted,bounds.x(),bounds.y());
+        assert_eq!(snippet.layout().line_count(), 1, "Paperclip and filename must share one line");
+        assert!(snippet.text().starts_with("📎 "));
+        let caption_bubble = ui.bubbles.borrow()["caption-reply"].clone();
+        let caption = quote(&caption_bubble).unwrap();
+        let caption_card = caption.ancestor(gtk::Button::static_type()).unwrap();
+        let caption_bounds = caption.compute_bounds(&caption_card).unwrap();
+        assert_eq!(caption.layout().line_count(), 2, "Text captions retain their two-line preview");
+        assert!(caption_bounds.y() + caption.layout().pixel_size().1 as f32 <= caption_card.height() as f32, "Wrapped caption escapes the card");
         assert!(painted.1 <= snippet.height(), "Reply text paints below its allocated height");
         assert!(bounds.y() + painted.1 as f32 <= card.height() as f32, "Reply text escapes the card");
         assert!(gap < Duration::from_millis(400), "UI gap: {gap:?}");

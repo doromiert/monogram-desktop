@@ -722,7 +722,15 @@ impl Ui {
                     .map(|line| line.strip_prefix("> ").unwrap_or(line))
                     .collect::<Vec<_>>()
                     .join(" ");
-                let snippet = crate::reply_preview_ui::Snippet::new(if preview.is_empty(){"Original message"}else{&preview});
+                let snippet: gtk::Widget = if preview.starts_with("📎 ") {
+                    let name = text(&preview.chars().take(4096).collect::<String>(), "reply-preview");
+                    name.set_single_line_mode(true);
+                    name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                    name.set_max_width_chars(52);
+                    name.upcast()
+                } else {
+                    crate::reply_preview_ui::Snippet::new(if preview.is_empty(){"Original message"}else{&preview}).upcast()
+                };
                 contents.append(&title);
                 contents.append(&snippet);
                 // Measure the quote at the width left by its thumbnail.
