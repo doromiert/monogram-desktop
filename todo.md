@@ -144,3 +144,5 @@
 - [x] Fold the mobile Legacy OMEMO forwarded-attachment marker into its adjacent attachment, preserving both wire messages/IDs and checking author, key, protocol and timing. Recover existing history and retain linked deletion behavior.
 - [x] Give media reply cards the normal bubble inset while keeping media edges thin; native geometry/screenshot verified with and without reactions (1.13s), 290 default tests plus4 targeted compatibility checks pass.
 - [ ] Publish and install the updated desktop package.
+
+- [x] Keep long quoted media bubbles fitted to the actual media width: native regression reproduced428px content beside320px media, then passed at320px with13px/10px reply insets and2px media edges (1.04s).

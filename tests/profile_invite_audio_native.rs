@@ -413,6 +413,7 @@ fn media_reply_insets_keep_media_edges_thin() {
     };
     let media = crate::model::Message {
         id: "media-reply".into(),
+        reply: "Bob · A longer quoted reply should wrap inside its own inset, without leaving a broad empty strip beside the attachment. Keep every media edge thin even when this quotation spans several lines.".into(),
         text: String::new(),
         kind: "file".into(),
         attachment: Some(attachment),
