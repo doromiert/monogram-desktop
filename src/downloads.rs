@@ -107,7 +107,7 @@ impl Downloads {
         self.start_with_policy(account, file, Policy::Cache)
     }
     pub fn start_automatic(&mut self, account: &str, file: Attachment, limit:u64) {
-        if limit>0 && !file.manual && self.status(account, &file).is_none() {
+        if limit>0 && (file.media_candidate() || file.audio_candidate()) && !file.manual && self.status(account, &file).is_none() {
             let _ = self.start_with_policy(account, file, Policy::Automatic(limit.min(MAX)));
         }
     }
@@ -669,9 +669,18 @@ mod tests {
         }
     }
     #[test]
-    fn automatic_documents_obey_the_configured_limit() {
+    fn ordinary_documents_never_start_automatically() {
+        let mut downloads=Downloads::default();
+        let mut file=Attachment::bare("https://fixture.invalid/document.zip").unwrap();
+        file.name="document.zip".into();file.mime="application/zip".into();file.manual=false;
+        downloads.start_automatic("owner@fixture.invalid",file.clone(),DEFAULT_AUTO_MAX);
+        assert!(downloads.status("owner@fixture.invalid",&file).is_none());
+        assert!(downloads.tasks.is_empty());
+    }
+    #[test]
+    fn automatic_media_obey_the_configured_limit() {
         let server=Server::new(b"a small document".to_vec());let client=server.client();
-        let mut file=Attachment::bare(&format!("{}/file",server.url)).unwrap();file.name="notes.txt".into();file.mime="text/plain".into();file.manual=false;
+        let mut file=Attachment::bare(&format!("{}/file",server.url)).unwrap();file.name="photo.png".into();file.mime="image/png".into();file.manual=false;
         let root=std::env::temp_dir().join(crate::model::new_id());
         let state=Mutex::new(Status::Running{bytes:0,total:None,reconnecting:false});
         let rt=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();

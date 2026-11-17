@@ -1477,7 +1477,7 @@ impl Ui {
         appearance.add(&emoji);
         general.add(&appearance);
         let downloads=adw::PreferencesGroup::builder().title("Automatic Downloads").description("Download files from contacts and joined groups while viewing the conversation.").build();
-        let enabled=adw::SwitchRow::builder().title("Automatically download files").subtitle("Includes photos, videos, stickers and documents").active(self.auto_download_enabled.get()).build();
+        let enabled=adw::SwitchRow::builder().title("Automatically download media").subtitle("Photos, videos, audio and stickers").active(self.auto_download_enabled.get()).build();
         let size=adw::SpinRow::with_range(1.,4000.,1.);size.set_title("Maximum file size");size.set_subtitle("MB per file");size.set_value((self.auto_download_limit.get()/1024/1024) as f64);size.set_sensitive(enabled.is_active());
         let weak=Rc::downgrade(self);enabled.connect_active_notify(move|row|{if let Some(ui)=weak.upgrade(){ui.auto_download_enabled.set(row.is_active());ui.downloads.borrow_mut().reset_automatic();let _=ui.store.set_pref("auto_download_files",if row.is_active(){"true"}else{"false"});}});
         enabled.bind_property("active",&size,"sensitive").sync_create().build();

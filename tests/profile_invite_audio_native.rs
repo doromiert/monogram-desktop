@@ -483,3 +483,57 @@ fn media_reply_insets_keep_media_edges_thin() {
     );
     ui.window.close();
 }
+
+#[gtk::test]
+#[ignore = "requires a private GTK display and keyring"]
+#[allow(deprecated)]
+fn documents_choose_destination_before_download_and_save_after_leaving_chat() {
+    assert_eq!(std::env::var("MONOGRAM_KEYRING_FIXTURE").as_deref(), Ok("1"));
+    adw::init().unwrap();
+    let app = adw::Application::builder().application_id("com.negzero.MonogramDocumentSaveTest")
+        .flags(gio::ApplicationFlags::NON_UNIQUE).build();
+    app.register(None::<&gio::Cancellable>).unwrap();
+    let ui = Ui::new(&app, true);
+    let owner = "owner@fixture.invalid";
+    let peer = "peer@fixture.invalid";
+    ui.store.save_account(&crate::model::Account { jid: owner.into(), host: String::new(), port: 5222, direct_tls: false }).unwrap();
+    ui.state.borrow_mut().account = owner.into();
+    let chat = ui.state.borrow_mut().chat_for(peer).id.clone();
+    ui.select_chat(&chat);
+    wait(|| !ui.history_window.busy());
+    let bytes = b"verified document bytes";
+    let mut file = crate::file_share::Attachment::bare("https://fixture.invalid/document.zip").unwrap();
+    file.name = "document.zip".into(); file.mime = "application/zip".into(); file.size = Some(bytes.len() as u64); file.manual = false;
+    file.hashes.insert("sha-256".into(), openssl::sha::sha256(bytes).to_vec());
+    let message = crate::model::Message { id: "document".into(), kind: "file".into(), attachment: Some(file.clone()), ..Default::default() };
+    ui.state.borrow_mut().chat_for(peer).messages = vec![message];
+    ui.store.save(&ui.state.borrow()).unwrap();
+    ui.window.set_default_size(1000, 700); ui.window.present(); ui.render_messages(true);
+    wait(|| ui.bubbles.borrow().contains_key("document"));
+    ui.downloads.borrow_mut().start_automatic(owner, file.clone(), crate::downloads::DEFAULT_AUTO_MAX);
+    assert!(ui.downloads.borrow().status(owner, &file).is_none());
+    let button = find::<gtk::Button>(&ui.bubbles.borrow()["document"], &|b| b.label().as_deref() == Some("Download")).unwrap();
+    fn dialog() -> Option<gtk::Dialog> {
+        gtk::Window::list_toplevels().into_iter().find_map(|w| w.downcast::<gtk::Dialog>().ok().filter(|d| d.title().as_deref() == Some("Save Attachment") && d.is_visible()))
+    }
+    let start = Instant::now(); button.emit_clicked(); wait(|| dialog().is_some());
+    assert!(start.elapsed() < Duration::from_millis(400), "Save picker must appear promptly");
+    assert!(ui.downloads.borrow().status(owner, &file).is_none(), "Choosing a location must not start HTTP");
+    dialog().unwrap().response(gtk::ResponseType::Cancel); wait(|| dialog().is_none());
+    assert!(ui.downloads.borrow().status(owner, &file).is_none(), "Cancelling must not download");
+    // A verified private cache fixture exercises the same post-picker transfer/export path without networking.
+    let root = crate::downloads::account_root(owner).unwrap(); std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join(file.key()), bytes).unwrap();
+    button.emit_clicked(); wait(|| dialog().is_some());
+    let chooser = find::<gtk::FileChooserWidget>(dialog().unwrap().upcast_ref(), &|_| true).unwrap();
+    let destination = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join("saved-document.zip");
+    chooser.set_current_folder(Some(&gio::File::for_path(destination.parent().unwrap()))).unwrap();
+    chooser.set_current_name("saved-document.zip");
+    let settle = Instant::now(); wait(|| settle.elapsed() > Duration::from_millis(150));
+    dialog().unwrap().response(gtk::ResponseType::Accept);
+    let other = ui.state.borrow_mut().chat_for("other@fixture.invalid").id.clone(); ui.select_chat(&other);
+    wait(|| std::fs::read(&destination).is_ok_and(|data| data == bytes));
+    assert!(matches!(ui.downloads.borrow().status(owner, &file), Some(crate::downloads::Status::Ready(_))));
+    assert_eq!(ui.state.borrow().current().jid, "other@fixture.invalid");
+    ui.window.close();
+}

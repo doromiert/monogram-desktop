@@ -3312,6 +3312,6 @@ mod folder_empty_tests {
         fn descendants(widget:&gtk::Widget,out:&mut Vec<gtk::Widget>){out.push(widget.clone());let mut child=widget.first_child();while let Some(w)=child {child=w.next_sibling();descendants(&w,out);}}
         let dialog=ui.window.visible_dialog().unwrap();let mut widgets=Vec::new();descendants(dialog.upcast_ref(),&mut widgets);
         let size=widgets.iter().find_map(|w|w.downcast_ref::<adw::SpinRow>().filter(|r|r.title()=="Maximum file size")).unwrap();assert_eq!(size.value(),15.);size.set_value(23.);assert_eq!(ui.auto_download_limit.get(),23*1024*1024);assert_eq!(ui.store.pref("auto_download_limit_mb",""),"23");
-        let toggle=widgets.iter().find_map(|w|w.downcast_ref::<adw::SwitchRow>().filter(|r|r.title()=="Automatically download files")).unwrap();assert!(toggle.is_active());toggle.set_active(false);assert!(!ui.auto_download_enabled.get());assert!(!size.is_sensitive());assert_eq!(ui.store.pref("auto_download_files",""),"false");dialog.close();ui.window.close();
+        let toggle=widgets.iter().find_map(|w|w.downcast_ref::<adw::SwitchRow>().filter(|r|r.title()=="Automatically download media")).unwrap();assert!(toggle.is_active());toggle.set_active(false);assert!(!ui.auto_download_enabled.get());assert!(!size.is_sensitive());assert_eq!(ui.store.pref("auto_download_files",""),"false");dialog.close();ui.window.close();
     }
 }
