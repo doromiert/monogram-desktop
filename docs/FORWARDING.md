@@ -88,7 +88,7 @@ senders remain separate. This does not authenticate the claimed original author.
 
 Presentation recovery also covers already-stored history without writing through
 read-only history snapshots. Both original message bodies and IDs remain intact;
-new rows retain derived presentation links, and outgoing attachment deletion
+new rows retain derived presentation links, and local attachment deletion
 includes the marker even for history saved before this handler existed. Existing
 media captions are preserved. The marker stays visible when its attachment is
 outside the loaded window or a safe pairing cannot be established.

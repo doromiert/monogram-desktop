@@ -38,7 +38,7 @@ fn mobile_pair(parent: &Message, marker: &Message) -> bool {
         || parent.fingerprint != marker.fingerprint
         || parent.wire_id.is_empty()
         || parent.id == marker.id
-        || !parent.text.is_empty()
+        || !parent.text.is_empty() && marker.upload_caption_for.is_empty()
         || parent
             .forwarded
             .as_ref()
@@ -289,7 +289,12 @@ mod tests {
             if !own {
                 message.delivery.clear();
             }
-            message.sender = "owner@fixture.invalid/phone".into();
+            message.sender = if own {
+                "owner@fixture.invalid/phone"
+            } else {
+                "peer@fixture.invalid/phone"
+            }
+            .into();
             message.fingerprint = "authenticated-phone-key".into();
             message.timestamp = format!("2026-11-17T17:06:0{index}Z");
         }
@@ -358,7 +363,7 @@ mod tests {
         };
         const OWNER: &str = "owner@fixture.invalid";
         const PEER: &str = "peer@fixture.invalid";
-        for reverse in [false, true] {
+        for (own, reverse) in [(false, false), (false, true), (true, false), (true, true)] {
             let store = Store::open(true).unwrap();
             store
                 .save_account(&Account {
@@ -368,7 +373,7 @@ mod tests {
                     direct_tls: false,
                 })
                 .unwrap();
-            let original = mobile_forward(true);
+            let original = mobile_forward(own);
             let mut state = State::live(OWNER, vec![]);
             let chat = state.chat_for(PEER);
             let order = if reverse { [1, 0] } else { [0, 1] };

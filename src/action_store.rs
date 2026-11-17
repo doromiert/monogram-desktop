@@ -357,19 +357,18 @@ impl Store {
         let mut targets = ids.to_vec();
         for id in ids {
             let Some(parent) = self.message(account, peer, id).filter(|m| {
-                m.own
-                    && m.mode() == crate::encryption_policy::Mode::Legacy
+                m.mode() == crate::encryption_policy::Mode::Legacy
                     && m.attachment.is_some()
                     && !m.retracted
                     && !m.unavailable
                     && actions::valid_id(&m.wire_id)
-                    && m.sender.split('/').next() == Some(account)
             }) else {
                 continue;
             };
             if let Some(marker) = self.forwarded_attachment_neighbor(account, peer, &parent)? {
                 if !targets.contains(&marker.id) { targets.push(marker.id); }
             }
+            if !parent.own || parent.sender.split('/').next() != Some(account) { continue; }
             let mut query = self.db.prepare("SELECT body FROM messages WHERE account=? AND peer=? AND json_extract(body,'$.upload_caption_for')=? AND json_extract(body,'$.own')=1")?;
             let rows = query.query_map(params![account, peer, parent.wire_id], |row| {
                 row.get::<_, String>(0)
