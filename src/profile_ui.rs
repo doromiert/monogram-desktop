@@ -166,6 +166,19 @@ impl Ui {
                 }
             });
             content.append(&edit);
+            let access = gtk::Button::with_label("Control Access");
+            let ui = Rc::downgrade(self);
+            let peer = chat.jid.clone();
+            let pop = popup.downgrade();
+            access.connect_clicked(move |_| {
+                if let Some(ui) = ui.upgrade() {
+                    if let Some(pop) = pop.upgrade() {
+                        pop.popdown();
+                    }
+                    ui.contact_access(&peer);
+                }
+            });
+            content.append(&access);
         }
         let scroll = gtk::ScrolledWindow::builder()
             .child(&content)
