@@ -41,6 +41,8 @@ pub(crate) fn denied_contact(reason: &str) -> Option<&str> {
         .filter(|contact| !contact.is_empty() && !contact.contains(char::is_whitespace))
 }
 const UNSUPPORTED: &str = "Legacy OMEMO key publication is unsupported";
+const NOBODY_REACHABLE: &str = "No other room member's keys could be used";
+const FETCH_FAILED: &str = "Could not read or publish Legacy OMEMO keys";
 
 pub struct Device {
     pub peer: String,
@@ -83,8 +85,25 @@ fn lookup(error: pep::Error, local: bool) -> Error {
     }
     match error {
         pep::Error::Crypto(error) => error,
-        _ => Error::Unavailable("Could not read or publish Legacy OMEMO keys"),
+        _ => Error::Unavailable(FETCH_FAILED),
     }
+}
+/// Whether a failure to get one room member's keys is a reason the sender may choose to leave that
+/// member out: their keys are refused, missing, invalid or unreachable. Unreviewed keys
+/// ([`Error::TrustRequired`]) are never skippable, and neither is anything about our own devices.
+pub(crate) fn skippable(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::ContactAuthorization(_)
+            | Error::InvalidBundle(_)
+            | Error::Unavailable(NO_DEVICES | UNSUPPORTED | FETCH_FAILED)
+    )
+}
+/// [`skippable`] for a failure that is only available as the text shown to the user.
+pub(crate) fn skippable_reason(reason: &str) -> bool {
+    denied_contact(reason).is_some()
+        || matches!(reason, NO_DEVICES | UNSUPPORTED | FETCH_FAILED)
+        || (reason.starts_with("No usable ") && reason.contains(" keys from "))
 }
 fn probe_unavailable(error: &Error) -> bool {
     matches!(
@@ -365,7 +384,8 @@ impl Legacy {
         members: &BTreeSet<String>,
         body: &str,
         wire_id: &str,
-    ) -> Result<Element> {
+        skip_unreachable: bool,
+    ) -> Result<(Element, Vec<String>)> {
         address(room, 1)?;
         if members.is_empty() || members.len() > 4096 || !members.contains(&self.store.owner) {
             return Err(Error::Invalid("legacy complete room recipients"));
@@ -373,9 +393,19 @@ impl Legacy {
         let owner = self.store.owner.clone();
         let mut targets = vec![];
         let mut seen = BTreeSet::new();
+        // Members left out because their keys could not be fetched or used. Only when the sender
+        // asked for it, never for our own account, and never for unreviewed keys.
+        let mut skipped = vec![];
         for peer in members {
             address(peer, 1)?;
-            let devices = self.devices(peer, Some(room)).await?;
+            let devices = match self.devices(peer, Some(room)).await {
+                Ok(devices) => devices,
+                Err(error) if skip_unreachable && peer != &owner && skippable(&error) => {
+                    skipped.push(peer.clone());
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if devices
                 .iter()
                 .any(|(device, _)| device.trust == Trust::Undecided)
@@ -391,6 +421,10 @@ impl Legacy {
                     .iter()
                     .any(|(device, _)| device.trust == Trust::Trusted)
             {
+                if skip_unreachable {
+                    skipped.push(peer.clone());
+                    continue;
+                }
                 return Err(Error::Unavailable(NO_DEVICES));
             }
             for (device, bundle) in devices {
@@ -402,7 +436,11 @@ impl Legacy {
                 }
             }
         }
-        encrypt_for_kind(&mut self.store, room, body, wire_id, &targets, true)
+        if !skipped.is_empty() && skipped.len() + 1 >= members.len() {
+            return Err(Error::Unavailable(NOBODY_REACHABLE));
+        }
+        let xml = encrypt_for_kind(&mut self.store, room, body, wire_id, &targets, true)?;
+        Ok((xml, skipped))
     }
     pub fn digest(&self, outer: &Element) -> Result<[u8; 32]> {
         Ok(Envelope::parse(outer, &self.store.owner, self.device())?.digest)
@@ -1223,5 +1261,147 @@ mod bundle_tests {
             "A device's public bundle is invalid or missing; refresh device review",
             "call sites that do not know the contact keep the old wording"
         );
+    }
+}
+
+#[cfg(test)]
+mod room_skip_tests {
+    use super::tests::{approve, fixture};
+    use super::*;
+    use crate::{iq, protocol::Command};
+
+    const PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+    const ALICE: &str = "alice@example.invalid";
+    const BOB: &str = "bob@example.invalid";
+    const CAROL: &str = "carol@example.invalid";
+    const ROOM: &str = "room@conference.example.invalid";
+
+    fn items(node: &str, content: Element) -> Element {
+        Element::builder("pubsub", PUBSUB)
+            .append(
+                Element::builder("items", PUBSUB)
+                    .attr("node".try_into().unwrap(), node)
+                    .append(Element::builder("item", PUBSUB).append(content).build())
+                    .build(),
+            )
+            .build()
+    }
+    fn list(ids: &[u32]) -> Element {
+        let mut list = Element::builder("list", NS).build();
+        for id in ids {
+            list.append_child(
+                Element::builder("device", NS).attr("id".try_into().unwrap(), id.to_string()).build(),
+            );
+        }
+        list
+    }
+    fn forbidden() -> std::result::Result<Option<Element>, iq::Error> {
+        Err(iq::Error::Rejected { condition: "forbidden".into(), pubsub: None })
+    }
+
+    /// Alice sends to {Alice, Bob, Carol}. Bob is reachable and his key is `bob_trusted`; Carol's
+    /// server refuses every request; `alice_ok` is whether Alice's own list can be read.
+    fn send(skip: bool, members: &[&str], bob_trusted: bool, alice_ok: bool) -> Result<(Element, Vec<String>)> {
+        let (mut store, journal, _) = fixture(ALICE, 101);
+        let (_, _, bob_bundle) = fixture(BOB, 202);
+        if bob_trusted {
+            approve(&mut store, BOB, 202, &bob_bundle);
+        }
+        let (network, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let mut legacy = Legacy {
+            store,
+            journal,
+            pep: Pep::new(iq::Client::new(network), ALICE, 101).unwrap(),
+            history_path: PathBuf::new(),
+            _lock: File::open("/dev/null").unwrap(),
+            repairs: BTreeMap::new(),
+            pending_repairs: BTreeMap::new(),
+        };
+        let members: BTreeSet<String> = members.iter().map(|m| m.to_string()).collect();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let server = async {
+                while let Some(command) = requests.recv().await {
+                    let Command::Iq { to, payload, reply, .. } = command else { continue };
+                    let node = payload.children().next().and_then(|i| i.attr("node")).unwrap_or("").to_owned();
+                    let answer = match (to.as_str(), node.as_str()) {
+                        (ALICE, DEVICES) if alice_ok => Ok(Some(items(DEVICES, list(&[101])))),
+                        (ALICE, _) => Err(iq::Error::Closed),
+                        (BOB, DEVICES) => Ok(Some(items(DEVICES, list(&[202])))),
+                        (BOB, bundles) => Ok(Some(items(bundles, wire::bundle_xml(&bob_bundle)))),
+                        _ => forbidden(),
+                    };
+                    let _ = reply.send(answer);
+                }
+            };
+            tokio::select! {
+                result = legacy.encrypt_room(ROOM, &members, "hi", "wire", skip) => result,
+                _ = server => unreachable!("the fake server only ends when the client does"),
+            }
+        })
+    }
+
+    #[test]
+    fn without_the_choice_one_refusing_member_blocks_the_whole_room_message() {
+        let error = send(false, &[ALICE, BOB, CAROL], true, true).unwrap_err();
+        assert!(matches!(error, Error::ContactAuthorization(ref who) if who == CAROL), "{error:?}");
+    }
+
+    #[test]
+    fn with_the_choice_the_message_is_still_encrypted_for_everyone_reachable() {
+        let (xml, skipped) = send(true, &[ALICE, BOB, CAROL], true, true).unwrap();
+        assert_eq!(skipped, vec![CAROL.to_owned()]);
+        let text = String::from(&xml);
+        assert!(text.contains("rid='202'"), "Bob's device is a recipient: {text}");
+        assert!(text.contains("<encrypted") && text.contains("<payload>"), "an encrypted payload: {text}");
+        assert!(!text.contains("<body"), "no plaintext body: {text}");
+        assert!(!text.contains("rid='303'"), "no key for the skipped member");
+    }
+
+    #[test]
+    fn nothing_is_sent_when_nobody_but_the_sender_could_be_reached() {
+        let error = send(true, &[ALICE, CAROL], true, true).unwrap_err();
+        assert!(matches!(error, Error::Unavailable(NOBODY_REACHABLE)), "{error:?}");
+    }
+
+    #[test]
+    fn unreviewed_keys_are_never_skipped() {
+        let error = send(true, &[ALICE, BOB, CAROL], false, true).unwrap_err();
+        assert!(matches!(error, Error::TrustRequired), "{error:?}");
+    }
+
+    #[test]
+    fn our_own_devices_are_never_skipped() {
+        let error = send(true, &[ALICE, BOB, CAROL], true, false).unwrap_err();
+        assert!(!matches!(error, Error::ContactAuthorization(_)));
+        assert!(send(true, &[ALICE, BOB], true, false).is_err(), "an unreadable own list still blocks");
+    }
+
+    #[test]
+    fn the_text_the_user_sees_is_recognised_as_skippable_only_for_skippable_errors() {
+        for error in [
+            Error::ContactAuthorization(CAROL.into()),
+            Error::invalid_bundle("Legacy OMEMO", CAROL, Some(7)),
+            Error::InvalidBundle(None),
+            Error::Unavailable(NO_DEVICES),
+            Error::Unavailable(UNSUPPORTED),
+            Error::Unavailable(FETCH_FAILED),
+        ] {
+            assert!(skippable(&error), "{error:?}");
+            if !matches!(error, Error::InvalidBundle(None)) {
+                assert!(skippable_reason(&error.to_string()), "{error}");
+            }
+        }
+        for error in [
+            Error::TrustRequired,
+            Error::OwnDeviceTrustRequired,
+            Error::Changed,
+            Error::Vault,
+            Error::Unavailable("Legacy OMEMO is not ready"),
+            Error::Unavailable(NOBODY_REACHABLE),
+        ] {
+            assert!(!skippable(&error), "{error:?}");
+            assert!(!skippable_reason(&error.to_string()), "{error}");
+        }
     }
 }

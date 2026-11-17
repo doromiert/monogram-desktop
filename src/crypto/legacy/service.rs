@@ -473,6 +473,18 @@ fn outer_metadata(
         frame.historical || frame.archive.is_some(),
     ))
 }
+/// The toast shown after a room message went out without some members.
+fn skipped_notice(skipped: &[String]) -> String {
+    const SHOWN: usize = 3;
+    let names: Vec<_> = skipped.iter().take(SHOWN).map(String::as_str).collect();
+    let more = skipped.len().saturating_sub(SHOWN);
+    let mut text = format!("Sent without {}", names.join(", "));
+    if more > 0 {
+        text.push_str(&format!(" and {more} more"));
+    }
+    text.push_str(". Their keys could not be used, so they cannot read this message.");
+    crate::text_safety::visible(&text, 200)
+}
 fn describe(error: &Error) -> String {
     match error {
         Error::Invalid(_) => "Invalid Legacy OMEMO message or key data".into(),
@@ -659,6 +671,7 @@ impl Worker {
                 &members,
                 "Monogram encryption check",
                 &crate::model::new_id(),
+                false,
             )
             .await
         {
@@ -673,7 +686,7 @@ impl Worker {
         message: &Message,
         quote: &str,
         epoch: u64,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         let clear = outgoing_content(&recipients.room, message, quote)?;
         if !self.ready || !self.online {
             return Err(Error::Unavailable("Legacy OMEMO is not ready"));
@@ -691,8 +704,14 @@ impl Worker {
             .ok_or(Error::Invalid("legacy room body"))?
             .text();
         let members = recipients.members.keys().cloned().collect();
-        let mut xml = local
-            .encrypt_room(&recipients.room, &members, &body, &message.wire_id)
+        let (mut xml, skipped) = local
+            .encrypt_room(
+                &recipients.room,
+                &members,
+                &body,
+                &message.wire_id,
+                message.skip_unreachable,
+            )
             .await?;
         decorate_outgoing(&mut xml, &clear, message);
         let current =
@@ -726,7 +745,7 @@ impl Worker {
             .await
             .is_ok_and(|value| value.unwrap_or(false))
         {
-            Ok(())
+            Ok(skipped)
         } else {
             Err(Error::Uncertain)
         }
@@ -1326,7 +1345,19 @@ impl Worker {
             } => {
                 let id = message.wire_id.clone();
                 let result = self.send_room(&recipients, &message, &quote, epoch).await;
-                self.sent(recipients.room, id, result);
+                match result {
+                    Ok(skipped) => {
+                        let room = recipients.room.clone();
+                        self.sent(room.clone(), id, Ok(()));
+                        if !skipped.is_empty() {
+                            self.emit(BackendEvent::CryptoError {
+                                peer: room,
+                                text: skipped_notice(&skipped),
+                            });
+                        }
+                    }
+                    Err(error) => self.sent(recipients.room, id, Err(error)),
+                }
             }
             Request::ProbeRoom { recipients, reply } => {
                 if !reply.is_closed() {

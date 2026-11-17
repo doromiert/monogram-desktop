@@ -51,6 +51,13 @@ recovery and trust retries. Fingerprint review shows member devices. An isolated
 TLS Prosody check verified encrypted delivery and MAM with an offline member;
 independent mobile room interoperability and richer room content remain open.
 
+A room message normally needs every member's keys, so one member whose keys are refused, missing or
+unreachable blocks it. In a group chat the failure toast then offers **Send Anyway**: the message is
+resent, still encrypted, for every member whose keys can be used, and a toast names who was left
+out and that they cannot read it. The choice is stored on that message only. It never selects
+plaintext, never skips a member whose keys are merely unreviewed, never skips your own devices,
+and refuses to send when nobody else could be reached.
+
 Legacy upload requests retain the sanitized filename/MIME used by Android;
 OMEMO 2 retains opaque upload metadata. Outer SFS/OOB descriptions remain
 untrusted and cannot supply Legacy URLs, keys, sizes or hashes. A small isolated

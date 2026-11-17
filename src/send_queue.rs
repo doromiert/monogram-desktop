@@ -503,11 +503,12 @@ impl Ui {
         messages: Vec<Message>,
         error: &str,
     ) {
+        let ids: Vec<String> = messages.iter().map(|message| message.id.clone()).collect();
         for mut message in messages {
             message.delivery = "failed".into();
             self.store_queued_row(owner, peer, message);
         }
-        self.notice_resolving_authorization(error, error.to_owned());
+        self.notice_send_failure(peer, ids, error, error.to_owned());
     }
     pub fn store_queued_row(self: &Rc<Self>, owner: &str, peer: &str, message: Message) -> bool {
         if self.store.save_outbox_row(owner, peer, &message).is_err() {
@@ -528,6 +529,57 @@ impl Ui {
         }
         self.refresh_chats(None);
         true
+    }
+
+    /// Send the messages `ids` of the room `peer` again, encrypted for every member whose keys can
+    /// be used and without the ones that cannot. The choice is stored on each message, so it
+    /// survives a restart, and it applies to these messages only.
+    pub(crate) fn send_anyway(self: &Rc<Self>, peer: &str, ids: &[String]) {
+        let (owner, room_id) = {
+            let state = self.state.borrow();
+            let Some(room) = state.chats.iter().find(|chat| chat.jid == peer && chat.group) else {
+                return;
+            };
+            (state.account.clone(), room.id.clone())
+        };
+        if self.state.borrow().current().jid != peer {
+            self.select_chat(&room_id);
+        }
+        // The room's keys are Legacy OMEMO. Choosing it here skips an encryption check that would
+        // fail on the same member again; it never selects plaintext.
+        if let Some(chat) = self.state.borrow_mut().chats.iter_mut().find(|chat| chat.jid == peer) {
+            if chat.selected_encryption().is_none() {
+                chat.remember_selection(Mode::Legacy);
+            }
+        }
+        for id in ids {
+            let message = {
+                let mut state = self.state.borrow_mut();
+                state.current_mut().messages.iter_mut().find(|message| message.id == *id).map(|message| {
+                    message.skip_unreachable = true;
+                    message.clone()
+                })
+            };
+            let Some(message) = message else { continue };
+            if message.outbox_pending {
+                self.store_queued_row(&owner, peer, message);
+                self.retry_queued_message(id);
+                continue;
+            }
+            // Already sent once and failed: send it again without asking, the user just chose to.
+            if !self.online.get() {
+                self.notice("Reconnect before sending");
+                return;
+            }
+            let mut message = message;
+            message.delivery = "sending".into();
+            if let Some(row) = self.state.borrow_mut().current_mut().messages.iter_mut().find(|row| row.id == *id) {
+                *row = message.clone();
+            }
+            if self.persist() {
+                self.command(Command::Send { peer: peer.into(), message, quote: String::new() });
+            }
+        }
     }
 
     pub fn retry_queued_message(self: &Rc<Self>, id: &str) -> bool {
@@ -759,6 +811,139 @@ mod tests {
             "the check ran again and the message was prepared under the current settings"
         );
         assert!(!message.outbox_pending, "the message left the queue instead of failing in it");
+        ui.window.close();
+    }
+
+    fn find_button(widget: &gtk::Widget, label: &str) -> Option<gtk::Button> {
+        if let Some(button) = widget.downcast_ref::<gtk::Button>() {
+            if button.label().as_deref() == Some(label) {
+                return Some(button.clone());
+            }
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            if let Some(found) = find_button(&current, label) {
+                return Some(found);
+            }
+            child = current.next_sibling();
+        }
+        None
+    }
+    const ROOM: &str = "team@conference.example.org";
+    const OWNER: &str = "owner@fixture.invalid";
+    fn refusal() -> String {
+        crate::crypto::Error::ContactAuthorization("carol@example.org".into()).to_string()
+    }
+
+    /// A signed-in window in the group chat `ROOM`, holding one own message `id` that failed.
+    fn room_with_failed_message(app_id: &str, id: &str, outbox_pending: bool) -> (Rc<Ui>, Message) {
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id(app_id)
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let ui = Ui::new(&app, true);
+        ui.window.present();
+        ui.store
+            .save_account(&Account { jid: OWNER.into(), host: String::new(), port: 5222, direct_tls: false })
+            .unwrap();
+        let mut state = State::live(OWNER, vec![]);
+        let room = state.chat_for(ROOM);
+        room.group = true;
+        room.room_can_send = true;
+        let room_id = room.id.clone();
+        state.active = room_id;
+        ui.activate_state(state);
+        ui.online.set(true);
+        let message = Message {
+            id: id.into(),
+            wire_id: format!("wire-{id}"),
+            markable_id: format!("wire-{id}"),
+            sender: OWNER.into(),
+            text: "hello room".into(),
+            own: true,
+            delivery: "failed".into(),
+            outbox_pending,
+            timestamp: "2026-11-17T10:00:00Z".into(),
+            ..Default::default()
+        };
+        ui.state.borrow_mut().current_mut().messages.push(message.clone());
+        assert!(ui.persist());
+        let chat = ui.state.borrow().current().clone();
+        ui.store.save_chat_message(OWNER, &chat, Some(&message)).unwrap();
+        (ui, message)
+    }
+
+    /// The encryption check for a queued room message failed on one member's keys: the toast offers
+    /// Send Anyway (not Resolve), and choosing it retries the message without that member.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_queued_room_message_blocked_by_one_member_can_be_sent_anyway() {
+        let (ui, message) = room_with_failed_message("com.negzero.SendAnywayQueuedFixture", "waiting", true);
+        ui.fail_queued_selection(OWNER, ROOM, vec![message], &refusal());
+        settle(300);
+        assert!(shows_text(ui.toast.upcast_ref(), "Legacy OMEMO keys require contact authorization from carol@example.org"));
+        assert!(find_button(ui.toast.upcast_ref(), "Resolve").is_none(), "a room offers Send Anyway instead");
+        let button = find_button(ui.toast.upcast_ref(), "Send Anyway").expect("Send Anyway button");
+        assert!(!ui.store.message(OWNER, ROOM, "waiting").unwrap().skip_unreachable, "not chosen yet");
+
+        button.emit_clicked();
+        settle(300);
+        let stored = ui.store.message(OWNER, ROOM, "waiting").unwrap();
+        assert!(stored.skip_unreachable, "the choice is stored on the message");
+        assert_ne!(stored.delivery, "failed", "the message was retried");
+        assert_eq!(
+            ui.state.borrow().chats.iter().find(|c| c.jid == ROOM).unwrap().selected_encryption(),
+            Some(Mode::Legacy),
+            "the room stays encrypted; plaintext is never selected"
+        );
+        ui.window.close();
+    }
+
+    /// A room message that was sent and failed (not queued): the same offer, resent directly.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_failed_room_send_can_be_sent_anyway() {
+        use crate::protocol::BackendEvent;
+        let (ui, _) = room_with_failed_message("com.negzero.SendAnywayFailedFixture", "sent", false);
+        let (generation, owner) = (ui.generation.get(), ui.state.borrow().account.clone());
+        ui.backend_event(generation, &owner, BackendEvent::Failed { peer: ROOM.into(), id: "wire-sent".into(), reason: refusal() });
+        settle(300);
+        let button = find_button(ui.toast.upcast_ref(), "Send Anyway").expect("Send Anyway button");
+        button.emit_clicked();
+        settle(300);
+        let row = ui.state.borrow().current().messages.iter().find(|m| m.id == "sent").cloned().unwrap();
+        assert!(row.skip_unreachable, "the choice is on the message that is resent");
+        assert_eq!(row.delivery, "sending", "resent without a confirmation dialog");
+        ui.window.close();
+    }
+
+    /// Nothing about unreviewed keys, a lost connection, or a one-to-one chat is skippable.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn send_anyway_is_offered_only_for_a_members_unusable_keys_in_a_group() {
+        let (ui, message) = room_with_failed_message("com.negzero.SendAnywayNegativeFixture", "m", true);
+        for reason in [
+            crate::crypto::Error::TrustRequired.to_string(),
+            crate::crypto::Error::OwnDeviceTrustRequired.to_string(),
+            "The connection is unavailable".to_owned(),
+            "Legacy OMEMO is not ready".to_owned(),
+        ] {
+            ui.fail_queued_selection(OWNER, ROOM, vec![message.clone()], &reason);
+            settle(300);
+            assert!(shows_text(ui.toast.upcast_ref(), &reason[..20]), "{reason}");
+            assert!(find_button(ui.toast.upcast_ref(), "Send Anyway").is_none(), "no Send Anyway for {reason:?}");
+            ui.toast.dismiss_all();
+            settle(500);
+        }
+        // One-to-one: the same refusal offers Resolve, as before.
+        let direct = ui.state.borrow_mut().chat_for("peer@fixture.invalid").id.clone();
+        ui.select_chat(&direct);
+        ui.fail_queued_selection(OWNER, "peer@fixture.invalid", vec![message], &refusal());
+        settle(300);
+        assert!(find_button(ui.toast.upcast_ref(), "Send Anyway").is_none());
+        assert!(find_button(ui.toast.upcast_ref(), "Resolve").is_some());
         ui.window.close();
     }
 }

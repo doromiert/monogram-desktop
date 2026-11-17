@@ -708,6 +708,38 @@ impl Ui {
             }
         });
     }
+    /// The toast for a message that did not go out. In a group chat, when the cause is one member's
+    /// keys that cannot be used, it offers Send Anyway: the same message, still encrypted, for
+    /// everyone who can be reached. Otherwise it is [`Self::notice_resolving_authorization`].
+    pub(crate) fn notice_send_failure(
+        self: &Rc<Self>,
+        peer: &str,
+        ids: Vec<String>,
+        reason: &str,
+        title: String,
+    ) {
+        let in_group = self
+            .state
+            .borrow()
+            .chats
+            .iter()
+            .any(|chat| chat.jid == peer && chat.group);
+        if !in_group || ids.is_empty() || !crate::crypto::legacy::skippable_reason(reason) {
+            return self.notice_resolving_authorization(reason, title);
+        }
+        let toast = adw::Toast::builder()
+            .title(title)
+            .button_label("Send Anyway")
+            .build();
+        let weak = Rc::downgrade(self);
+        let peer = peer.to_owned();
+        toast.connect_button_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.send_anyway(&peer, &ids);
+            }
+        });
+        self.show_toast(toast);
+    }
     /// A toast for `title`. When `reason` is a Legacy OMEMO contact-authorization refusal, it names
     /// the contact who refused and carries a Resolve button that opens Control Access for them
     /// (in a room too, where the contact is a member and `peer` is the room).
@@ -2808,18 +2840,13 @@ impl Ui {
             BackendEvent::Failed { peer, id, reason } => {
                 // Bounced typing, receipt and marker stanzas also arrive here; only one of our own
                 // messages is worth a toast (edits, reactions and removals toast in `delivery`).
-                let ours = self
-                    .store
-                    .own_wire_id(owner, &peer, &id)
-                    .ok()
-                    .flatten()
-                    .is_some();
+                let own_id = self.store.own_wire_id(owner, &peer, &id).ok().flatten();
                 self.delivery(&peer, &id, "failed");
-                if !ours {
+                let Some(own_id) = own_id else {
                     return;
-                }
+                };
                 let title = crate::text_safety::failed_send_toast(&reason);
-                self.notice_resolving_authorization(&reason, title);
+                self.notice_send_failure(&peer, vec![own_id], &reason, title);
             }
             BackendEvent::History {
                 peer,
