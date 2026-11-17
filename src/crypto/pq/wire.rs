@@ -261,7 +261,13 @@ pub async fn encrypt(
             )?;
         }
         if !native::has_session(&tx, &target.peer, target.device)? {
-            let bundle = target.bundle.as_ref().ok_or(Error::InvalidBundle)?;
+            let bundle = target.bundle.as_ref().ok_or_else(|| {
+                Error::invalid_bundle(
+                    crate::encryption_policy::Mode::Pq.name(),
+                    &target.peer,
+                    Some(target.device),
+                )
+            })?;
             native::process_bundle(
                 &tx,
                 &target.peer,

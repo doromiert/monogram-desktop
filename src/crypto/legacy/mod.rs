@@ -90,7 +90,7 @@ fn probe_unavailable(error: &Error) -> bool {
     matches!(
         error,
         Error::TrustRequired
-            | Error::InvalidBundle
+            | Error::InvalidBundle(_)
             | Error::Unavailable(NO_DEVICES | UNSUPPORTED)
             | Error::ContactAuthorization(_)
     )
@@ -208,9 +208,11 @@ impl Legacy {
             .item(peer, &bundle_node(id), None)
             .await
             .map_err(|e| lookup_peer(e, peer, peer == self.store.owner))?
-            .ok_or(Error::InvalidBundle)?;
+            .ok_or_else(|| Error::invalid_bundle(crate::encryption_policy::Mode::Legacy.name(), peer, Some(id)))?;
         wire::parse_bundle(&data).map_err(|error| match error {
-            Error::Invalid(_) | Error::Native(_) => Error::InvalidBundle,
+            Error::Invalid(_) | Error::Native(_) => {
+                Error::invalid_bundle(crate::encryption_policy::Mode::Legacy.name(), peer, Some(id))
+            }
             other => other,
         })
     }
@@ -581,7 +583,11 @@ impl Legacy {
             // XEP-0384 v0.3 §5 repairs a consumed-prekey collision with a new key transport.
             // A session established while discovery was pending always takes precedence.
             if bundle.prekeys.is_empty() || bundle.prekeys.len() > 1000 {
-                return Err(Error::InvalidBundle);
+                return Err(Error::invalid_bundle(
+                    crate::encryption_policy::Mode::Legacy.name(),
+                    &repair.peer,
+                    Some(repair.device),
+                ));
             }
             native::verify_legacy(&bundle)?;
             let bound = (u64::from(u32::MAX) + 1) / bundle.prekeys.len() as u64
@@ -596,7 +602,9 @@ impl Legacy {
                 .prekeys
                 .iter()
                 .nth(index)
-                .ok_or(Error::InvalidBundle)?;
+                .ok_or_else(|| {
+                    Error::invalid_bundle(crate::encryption_policy::Mode::Legacy.name(), &repair.peer, Some(repair.device))
+                })?;
             native::build_for(
                 true,
                 tx,
@@ -705,7 +713,9 @@ fn encrypt_for_kind(
                     .prekeys
                     .iter()
                     .nth(index)
-                    .ok_or(Error::InvalidBundle)?;
+                    .ok_or_else(|| {
+                        Error::invalid_bundle(crate::encryption_policy::Mode::Legacy.name(), &device.peer, Some(device.id))
+                    })?;
                 native::build_for(
                     true,
                     tx,
@@ -1102,5 +1112,116 @@ mod denial_tests {
             Error::ContactAuthorization(contact) => assert_eq!(contact, "carol@example.invalid"),
             other => panic!("expected the refusing contact, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod bundle_tests {
+    use super::*;
+    use crate::{iq, protocol::Command};
+
+    const PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+    const CAROL: &str = "carol@example.invalid";
+
+    fn pubsub(node: &str, item: Element) -> Element {
+        Element::builder("pubsub", PUBSUB)
+            .append(
+                Element::builder("items", PUBSUB)
+                    .attr("node".try_into().unwrap(), node)
+                    .append(Element::builder("item", PUBSUB).append(item).build())
+                    .build(),
+            )
+            .build()
+    }
+    fn device_list(id: u32) -> Element {
+        pubsub(
+            DEVICES,
+            Element::builder("list", NS)
+                .append(
+                    Element::builder("device", NS)
+                        .attr("id".try_into().unwrap(), id.to_string())
+                        .build(),
+                )
+                .build(),
+        )
+    }
+
+    /// `encrypt` to Carol against a server that lists device 7 and answers the bundle request with
+    /// `bundle`: `None` is item-not-found, `Some` is the item's content.
+    fn encrypt_with_bundle(bundle: Option<Element>) -> Error {
+        use super::tests::fixture;
+        let (store, journal, _) = fixture("alice@example.invalid", 101);
+        let (network, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let mut legacy = Legacy {
+            store,
+            journal,
+            pep: Pep::new(iq::Client::new(network), "alice@example.invalid", 101).unwrap(),
+            history_path: PathBuf::new(),
+            _lock: File::open("/dev/null").unwrap(),
+            repairs: BTreeMap::new(),
+            pending_repairs: BTreeMap::new(),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let server = async {
+                while let Some(command) = requests.recv().await {
+                    let Command::Iq { payload, reply, .. } = command else { continue };
+                    let node = payload.children().next().and_then(|items| items.attr("node")).unwrap_or("").to_owned();
+                    let _ = reply.send(if node == DEVICES {
+                        Ok(Some(device_list(7)))
+                    } else {
+                        match &bundle {
+                            None => Err(iq::Error::Rejected { condition: "item-not-found".into(), pubsub: None }),
+                            Some(content) => Ok(Some(pubsub(&node, content.clone()))),
+                        }
+                    });
+                }
+            };
+            tokio::select! {
+                result = legacy.encrypt(CAROL, "hi", "wire") => result.unwrap_err(),
+                _ = server => unreachable!("the fake server only ends when the client does"),
+            }
+        })
+    }
+    fn named(error: Error) -> (String, String, Option<u32>) {
+        match error {
+            Error::InvalidBundle(Some(who)) => (who.protocol.into(), who.peer, who.device),
+            other => panic!("expected a named InvalidBundle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_missing_bundle_names_the_protocol_contact_and_device() {
+        let (protocol, peer, device) = named(encrypt_with_bundle(None));
+        assert_eq!((protocol.as_str(), peer.as_str(), device), ("Legacy OMEMO", CAROL, Some(7)));
+    }
+
+    #[test]
+    fn a_malformed_bundle_names_the_protocol_contact_and_device() {
+        let junk = Element::builder("bundle", NS).build();
+        let (protocol, peer, device) = named(encrypt_with_bundle(Some(junk)));
+        assert_eq!((protocol.as_str(), peer.as_str(), device), ("Legacy OMEMO", CAROL, Some(7)));
+    }
+
+    #[test]
+    fn the_message_reads_clearly_and_fits_the_failed_send_toast() {
+        let error = Error::invalid_bundle("Legacy OMEMO", CAROL, Some(1_234_567_890));
+        let text = error.to_string();
+        assert_eq!(text, "No usable Legacy OMEMO keys from carol@example.invalid (device 1234567890); refresh device review");
+        assert!(text.chars().count() <= 100, "{} characters", text.chars().count());
+        assert_eq!(
+            crate::text_safety::failed_send_toast(&text),
+            format!("Message not sent: {text}"),
+            "the toast keeps the whole message, advice included"
+        );
+        assert_eq!(
+            Error::invalid_bundle("OMEMO2", CAROL, None).to_string(),
+            "No usable OMEMO2 keys from carol@example.invalid; refresh device review"
+        );
+        assert_eq!(
+            Error::InvalidBundle(None).to_string(),
+            "A device's public bundle is invalid or missing; refresh device review",
+            "call sites that do not know the contact keep the old wording"
+        );
     }
 }

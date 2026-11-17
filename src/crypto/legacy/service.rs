@@ -1236,7 +1236,13 @@ impl Worker {
                     .item(&peer, &super::bundle_node(repair.device), None)
                     .await
                     .map_err(|error| super::lookup_peer(error, &peer, own))?
-                    .ok_or(Error::InvalidBundle)?;
+                    .ok_or_else(|| {
+                        Error::invalid_bundle(
+                            crate::encryption_policy::Mode::Legacy.name(),
+                            &peer,
+                            Some(repair.device),
+                        )
+                    })?;
                 super::wire::parse_bundle(&data)
             }
             .await;

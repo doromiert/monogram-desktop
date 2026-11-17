@@ -504,7 +504,7 @@ impl Worker {
         }
         if result.is_empty() && !optional {
             return Err(if missing {
-                Error::InvalidBundle
+                Error::invalid_bundle(crate::encryption_policy::Mode::Pq.name(), peer, None)
             } else {
                 Error::TrustRequired
             });
@@ -1124,7 +1124,7 @@ mod actor_tests {
             let contact=worker.targets(PEER,false,true,Some(PEER)).await.unwrap().unwrap();
             assert_eq!(contact.iter().map(|target|target.device).collect::<Vec<_>>(),vec![83],"mobile skips stale contact entries while retaining valid recipient devices");
             missing_contact.store(2,std::sync::atomic::Ordering::Release);
-            assert!(matches!(worker.targets(PEER,false,true,Some(PEER)).await,Err(Error::InvalidBundle)),"a required contact with no bundle/session must still fail closed");
+            assert!(matches!(worker.targets(PEER,false,true,Some(PEER)).await,Err(Error::InvalidBundle(_))),"a required contact with no bundle/session must still fail closed");
             drop(worker);server.abort();drop(history);std::fs::remove_dir_all(root).unwrap();
         });
     }
