@@ -151,6 +151,17 @@ impl Tx<'_> {
             .query_map(params![self.owner, self.device, kind], |r| r.get(0))?
             .collect::<std::result::Result<_, _>>()?)
     }
+    pub fn peer_ids(&self, kind: i32, peer: &str) -> Result<Vec<u32>> {
+        self.valid(kind, peer)?;
+        let mut stmt=self.sql.prepare("SELECT id FROM omemo2_records WHERE owner=? AND device=? AND kind=? AND peer=? ORDER BY id LIMIT 1001")?;
+        let ids = stmt
+            .query_map(params![self.owner, self.device, kind, peer], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if ids.len() > 1000 {
+            return Err(Error::Invalid("device record limit"));
+        }
+        Ok(ids)
+    }
     pub fn initialized(&self) -> Result<bool> {
         Ok(self.sql.query_row(
             "SELECT initialized FROM omemo2_scopes WHERE owner=? AND device=?",

@@ -29,6 +29,38 @@ pub(super) fn device(peer: &str, id: u32, bundle: &Bundle) -> Device {
     }
 }
 #[test]
+fn established_legacy_session_sends_without_a_published_bundle() {
+    let (mut alice, _, alice_bundle) = fixture(A, 101);
+    let (mut bob, journal, bob_bundle) = fixture(B, 202);
+    approve(&mut alice, B, 202, &bob_bundle);
+    approve(&mut bob, A, 101, &alice_bundle);
+    assert!(matches!(
+        encrypt_for(&mut alice, B, "not ready", "missing", &[(device(B, 202, &bob_bundle), None)]),
+        Err(Error::InvalidBundle)
+    ));
+    for (id, body, bundle) in [
+        ("first", "first", Some(bob_bundle.clone())),
+        ("next", "still encrypted", None),
+    ] {
+        let outer = attr(
+            encrypt_for(&mut alice, B, body, id, &[(device(B, 202, &bob_bundle), bundle)]).unwrap(),
+            "from", A,
+        );
+        let envelope = Envelope::parse(&outer, B, 202).unwrap();
+        let received = receive_for(&mut bob, &journal, &outer, &envelope, 42, None).unwrap();
+        assert_eq!(received.content.unwrap().get_child("body", payload::CLIENT).unwrap().text(), body);
+    }
+    device::decide(
+        &mut alice,
+        &BTreeMap::from([(B.into(), BTreeMap::from([(202, bob_bundle.identity)]))]),
+        false,
+    ).unwrap();
+    assert!(matches!(
+        encrypt_for(&mut alice, B, "blocked", "blocked", &[(device(B, 202, &bob_bundle), None)]),
+        Err(Error::TrustRequired)
+    ));
+}
+#[test]
 fn room_body_includes_offline_and_own_devices_with_colliding_ids() {
     use crate::rooms::members::RoomSender;
     const C: &str = "carol@example.invalid";
@@ -49,9 +81,9 @@ fn room_body_includes_offline_and_own_devices_with_colliding_ids() {
         "Everyone, including offline Carol 🌿",
         "group-wire",
         &[
-            (device(B, 202, &bob_bundle), bob_bundle),
-            (device(C, 202, &carol_bundle), carol_bundle),
-            (device(A, 202, &own_bundle), own_bundle),
+            (device(B, 202, &bob_bundle), Some(bob_bundle)),
+            (device(C, 202, &carol_bundle), Some(carol_bundle)),
+            (device(A, 202, &own_bundle), Some(own_bundle)),
         ],
         true,
     )
@@ -145,8 +177,8 @@ fn authenticated_body_and_other_device_copy_survive_failed_gcm_and_archive_redel
         "A legacy message 🌿",
         "msg1",
         &[
-            (device(B, 202, &peer), peer),
-            (device(A, 202, &other_bundle), other_bundle),
+            (device(B, 202, &peer), Some(peer)),
+            (device(A, 202, &other_bundle), Some(other_bundle)),
         ],
     )
     .unwrap();
@@ -265,7 +297,7 @@ fn smack_signal_interoperability() {
         B,
         "From Rust 🌿",
         "wire",
-        &[(device(B, 202, &bob), bob)],
+        &[(device(B, 202, &bob), Some(bob))],
     )
     .unwrap();
     let frame = Envelope::parse(&rust, B, 202).unwrap();
@@ -453,6 +485,6 @@ fn live_legacy_service_and_independent_send_preference() {
  let body="🙂";let bytes=STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=").unwrap();
  let asset=crate::packs::InlineAsset::new("image/png".into(),bytes).unwrap();let inline=crate::packs::InlineEmoji::new(body.into(),vec![crate::packs::InlineRange{start:0,end:1,asset}]).unwrap();
  let mut clear=Element::builder("message",payload::CLIENT).append(Element::builder("body",payload::CLIENT).append(body).build()).build();inline.add_to(&mut clear).unwrap();let encoded=crate::legacy_inline::encode(&clear).unwrap();
- let wire=encrypt_for(&mut a,B,&encoded,"inline-wire",&[(device(B,202,&bb),bb)]).unwrap();assert!(wire.get_child("html","http://jabber.org/protocol/xhtml-im").is_none());assert!(wire.get_child("data","urn:xmpp:bob").is_none());
+ let wire=encrypt_for(&mut a,B,&encoded,"inline-wire",&[(device(B,202,&bb),Some(bb))]).unwrap();assert!(wire.get_child("html","http://jabber.org/protocol/xhtml-im").is_none());assert!(wire.get_child("data","urn:xmpp:bob").is_none());
  let env=Envelope::parse(&wire,B,202).unwrap();let received=receive_for(&mut b,&bj,&wire,&env,1,None).unwrap();let content=received.content.unwrap();assert_eq!(crate::packs::InlineEmoji::from_message(&content,body),Some(inline));
 }

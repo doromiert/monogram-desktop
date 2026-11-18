@@ -287,6 +287,17 @@ fn describe(error: &Error) -> String {
         _ => error.to_string(),
     }
 }
+fn unusable_published_keys(result: &Result<Option<Vec<Target>>>) -> bool {
+    matches!(result, Err(Error::InvalidBundle | Error::Invalid("PQ bundle")))
+}
+fn probe_available(result: Result<Option<Vec<Target>>>) -> Result<bool> {
+    match result {
+        Ok(targets) => Ok(targets.is_some()),
+        // This mode is definitively unavailable. Automatic may try another encrypted mode.
+        Err(Error::InvalidBundle | Error::Invalid("PQ bundle")) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
 fn pep_error(error: pep::Error) -> Error {
     match error {
         pep::Error::Crypto(error) => error,
@@ -425,7 +436,10 @@ impl Worker {
         let Some(xml) = xml else {
             return Ok(None);
         };
-        let bundle = Bundle::parse(&xml)?;
+        let bundle = Bundle::parse(&xml).map_err(|error| match error {
+            Error::Invalid(_) | Error::Native(_) => Error::InvalidBundle,
+            other => other,
+        })?;
         let blind = self.blind(peer, conversation)?;
         self.local
             .as_mut()
@@ -465,7 +479,12 @@ impl Worker {
                     continue;
                 }
             }
-            let bundle = self.observe(peer, id, force, conversation).await?;
+            let bundle = match self.observe(peer, id, force, conversation).await {
+                Ok(bundle) => bundle,
+                Err(Error::InvalidBundle | Error::Invalid("PQ bundle"))
+                    if self.blind(peer, conversation)? => None,
+                Err(error) => return Err(error),
+            };
             let local = self.local.as_mut().ok_or(Error::Incomplete)?;
             let tx = local.begin()?;
             if bundle.is_none() {
@@ -883,17 +902,29 @@ impl Worker {
                 }
             }
             Request::Probe { peer, reply } => {
-                let result = self
-                    .recipients(&peer)
-                    .await
-                    .map(|targets| targets.is_some());
+                let mut result = self.recipients(&peer).await;
+                if unusable_published_keys(&result) {
+                    self.lists.clear();
+                    self.bundles.clear();
+                    result = self.recipients(&peer).await;
+                }
+                let result = probe_available(result);
+                if let Err(error) = &result {
+                    eprintln!("Monogram encryption probe PQ direct: {}", error.diagnostic());
+                }
                 let _ = reply.send(result);
             }
             Request::ProbeRoom { recipients, reply } => {
-                let result = self
-                    .room_targets(&recipients)
-                    .await
-                    .map(|targets| targets.is_some());
+                let mut result = self.room_targets(&recipients).await;
+                if unusable_published_keys(&result) {
+                    self.lists.clear();
+                    self.bundles.clear();
+                    result = self.room_targets(&recipients).await;
+                }
+                let result = probe_available(result);
+                if let Err(error) = &result {
+                    eprintln!("Monogram encryption probe PQ room: {}", error.diagnostic());
+                }
                 let _ = reply.send(result);
             }
             Request::Review(peer) | Request::RefreshTrust(peer) => {
@@ -1037,6 +1068,7 @@ impl Worker {
         match result {
             Ok(()) => self.emit(BackendEvent::Sent { peer, id }),
             Err(error) => {
+                eprintln!("Monogram encrypted send PQ: {}", error.diagnostic());
                 let uncertain = matches!(error, Error::Uncertain);
                 self.emit(if uncertain {
                     BackendEvent::Uncertain {
@@ -1079,6 +1111,24 @@ mod actor_tests {
     use crate::{encryption_policy::Mode, model::Account, protocol::Session};
     use std::sync::mpsc::Receiver;
     #[test]
+    fn unusable_public_keys_allow_an_encrypted_fallback_without_hiding_local_failures() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            for error in [Error::InvalidBundle, Error::Invalid("PQ bundle")] {
+                let mode = crate::encryption_policy::select(
+                    async { probe_available(Err(error)) },
+                    async { Ok::<_, Error>(true) },
+                ).await.unwrap();
+                assert_eq!(mode, Mode::Legacy);
+            }
+            for error in [Error::TrustRequired, Error::OwnDeviceTrustRequired, Error::Vault,
+                Error::Unavailable("connection interrupted"), Error::Invalid("PQ ratchet or authentication")] {
+                assert!(probe_available(Err(error)).is_err());
+            }
+            assert!(!probe_available(Ok(None)).unwrap());
+            assert!(probe_available(Ok(Some(vec![]))).unwrap());
+        });
+    }
+    #[test]
     fn stale_own_bundle_does_not_block_conversation_blind_trust() {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async{
             const OWNER:&str="owner@example.invalid";const PEER:&str="peer@example.invalid";
@@ -1091,11 +1141,13 @@ mod actor_tests {
             local.observe(OWNER,85,&rejected_bundle,false).unwrap();local.decide(OWNER,85,&rejected_bundle.fingerprint().unwrap(),false).unwrap();
             let hidden=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));let hide=hidden.clone();
             let missing_contact=std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));let missing=missing_contact.clone();
+            let missing_queries=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));let queried=missing_queries.clone();
             let (network,mut requests)=channel::unbounded_channel();let (events,_)=mpsc::channel();
             let server=tokio::spawn(async move{
                 const PUBSUB:&str="http://jabber.org/protocol/pubsub";
                 while let Some(Command::Iq{to,payload,reply,..})=requests.recv().await {
                     let requested=payload.get_child("items",PUBSUB).unwrap();let node=requested.attr("node").unwrap();let id=requested.children().next().unwrap().attr("id").unwrap();
+                    if node==pep::BUNDLES && to==PEER && id=="84" {queried.fetch_add(1,std::sync::atomic::Ordering::Relaxed);}
                     let payload=if node==pep::DEVICES {
                         let ids=if to==OWNER {vec![81,82,84,85]}else {match missing.load(std::sync::atomic::Ordering::Acquire) {1=>vec![83,84],2=>vec![84],_=>vec![83]}};
                         let mut devices=Element::builder("devices",super::super::NS);
@@ -1125,6 +1177,13 @@ mod actor_tests {
             assert_eq!(contact.iter().map(|target|target.device).collect::<Vec<_>>(),vec![83],"mobile skips stale contact entries while retaining valid recipient devices");
             missing_contact.store(2,std::sync::atomic::Ordering::Release);
             assert!(matches!(worker.targets(PEER,false,true,Some(PEER)).await,Err(Error::InvalidBundle)),"a required contact with no bundle/session must still fail closed");
+            let before=missing_queries.load(std::sync::atomic::Ordering::Relaxed);
+            let (reply,result)=oneshot::channel();worker.process(Request::Probe{peer:PEER.into(),reply}).await;
+            assert!(!result.await.unwrap().unwrap(),"Automatic can try another encrypted mode when these published keys cannot be used");
+            assert_eq!(missing_queries.load(std::sync::atomic::Ordering::Relaxed)-before,2,"one bounded refresh, without a retry loop");
+            missing_contact.store(0,std::sync::atomic::Ordering::Release);
+            let (reply,result)=oneshot::channel();worker.process(Request::Probe{peer:PEER.into(),reply}).await;
+            assert!(result.await.unwrap().unwrap(),"freshly republished valid keys recover without manual review");
             drop(worker);server.abort();drop(history);std::fs::remove_dir_all(root).unwrap();
         });
     }

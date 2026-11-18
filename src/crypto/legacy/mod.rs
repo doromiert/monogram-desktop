@@ -41,6 +41,13 @@ pub(crate) fn denied_contact(reason: &str) -> Option<&str> {
         .filter(|contact| !contact.is_empty() && !contact.contains(char::is_whitespace))
 }
 const UNSUPPORTED: &str = "Legacy OMEMO key publication is unsupported";
+const KEY_SERVER_TIMEOUT: &str = "The encryption key server did not respond. Your message is kept; retry when it is reachable.";
+const MISSING_KEYS: &str = "A participant has no usable encryption keys yet. They need to reconnect their client before you can send encrypted messages.";
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedDevices {
+    time: u64,
+    ids: BTreeSet<u32>,
+}
 
 pub struct Device {
     pub peer: String,
@@ -56,6 +63,7 @@ pub struct Legacy {
     _lock: File,
     repairs: BTreeMap<(String, u32), Instant>,
     pending_repairs: BTreeMap<(String, u32), Instant>,
+    discovery_backoff: BTreeMap<String, Instant>,
 }
 #[derive(Debug)]
 pub struct Repair {
@@ -78,11 +86,17 @@ fn lookup_peer(error: pep::Error, peer: &str, local: bool) -> Error {
     lookup(error, local)
 }
 fn lookup(error: pep::Error, local: bool) -> Error {
+    if let pep::Error::Request(request) = &error {
+        eprintln!("Monogram Legacy key request (own={local}): {request:?}");
+    }
     if error.unsupported() {
         return Error::Unavailable(UNSUPPORTED);
     }
     match error {
         pep::Error::Crypto(error) => error,
+        pep::Error::Request(iq::Error::Timeout) => Error::Unavailable(KEY_SERVER_TIMEOUT),
+        pep::Error::Request(iq::Error::Rejected { condition, .. })
+            if condition == "remote-server-timeout" => Error::Unavailable(KEY_SERVER_TIMEOUT),
         _ => Error::Unavailable("Could not read or publish Legacy OMEMO keys"),
     }
 }
@@ -130,6 +144,7 @@ impl Legacy {
             _lock: lock,
             repairs: BTreeMap::new(),
             pending_repairs: BTreeMap::new(),
+            discovery_backoff: BTreeMap::new(),
         })
     }
     pub fn device(&self) -> u32 {
@@ -272,16 +287,111 @@ impl Legacy {
             bundle,
         ))
     }
+    fn cached_devices(&mut self, peer: &str) -> Result<Option<CachedDevices>> {
+        self.store.transaction(|tx| {
+            let Some(bytes) = tx.load(crate::crypto::records::DEVICES, peer, 0)? else {
+                return Ok(None);
+            };
+            let cached: CachedDevices = serde_json::from_slice(&bytes).map_err(|_| Error::Incomplete)?;
+            if cached.ids.len() > 500 || cached.ids.iter().any(|id| address(peer, *id).is_err()) {
+                return Err(Error::Incomplete);
+            }
+            Ok(Some(cached))
+        })
+    }
+    fn save_devices(&mut self, peer: &str, ids: &BTreeSet<u32>) -> Result<()> {
+        let bytes = serde_json::to_vec(&CachedDevices { time: now(), ids: ids.clone() })
+            .map_err(|_| Error::Incomplete)?;
+        self.store.transaction(|tx| tx.save(crate::crypto::records::DEVICES, peer, 0, Some(&bytes)))
+    }
+    async fn sending_ids(&mut self, peer: &str, conversation: Option<&str>) -> Result<BTreeSet<u32>> {
+        let cached = self.cached_devices(peer)?;
+        let blind = self.blind_trust(peer, conversation)?;
+        if blind && cached.as_ref().is_some_and(|cache| now().checked_sub(cache.time).is_some_and(|age| age < 60_000)) {
+            return Ok(cached.unwrap().ids);
+        }
+        let result = if blind && self.discovery_backoff.get(peer).is_some_and(|at| at.elapsed() < Duration::from_secs(60)) {
+            Err(Error::Unavailable(KEY_SERVER_TIMEOUT))
+        } else { self.published_ids(peer).await };
+        match result {
+            Ok(ids) => {
+                self.discovery_backoff.remove(peer);
+                self.save_devices(peer, &ids)?;
+                Ok(ids)
+            }
+            Err(error @ Error::Unavailable(KEY_SERVER_TIMEOUT))
+                if self.blind_trust(peer, conversation)? => {
+                if self.discovery_backoff.len() >= 256 { self.discovery_backoff.clear(); }
+                let at = self.discovery_backoff.entry(peer.into()).or_insert_with(Instant::now);
+                if at.elapsed() >= Duration::from_secs(60) { *at = Instant::now(); }
+                if let Some(cache) = cached {
+                    return if now().checked_sub(cache.time).is_some_and(|age| age < 86_400_000) {
+                        eprintln!("Monogram Legacy discovery: using cached device list during remote timeout");
+                        Ok(cache.ids)
+                    } else { Err(error) };
+                }
+                // Upgrade profiles have trusted ratchets but no persisted discovery cache yet.
+                let known = self.store.transaction(|tx| tx.peer_ids(SESSION, peer))?;
+                let mut ids = BTreeSet::new();
+                for id in known {
+                    if self.session_device(peer, id)?.is_some() {
+                        ids.insert(id);
+                    }
+                }
+                if ids.is_empty() { return Err(error); }
+                self.save_devices(peer, &ids)?;
+                eprintln!("Monogram Legacy discovery: recovered device list from established sessions");
+                Ok(ids)
+            }
+            Err(error) => Err(error),
+        }
+    }
     async fn devices(
         &mut self,
         peer: &str,
         conversation: Option<&str>,
-    ) -> Result<Vec<(Device, Bundle)>> {
+    ) -> Result<Vec<(Device, Option<Bundle>)>> {
         let mut entries = vec![];
-        for id in self.published_ids(peer).await? {
-            entries.push(self.observe_bundle(peer, id, conversation).await?);
+        let mut missing = false;
+        for id in self.sending_ids(peer, conversation).await? {
+            if self.blind_trust(peer, conversation)? {
+                if let Some(device) = self.session_device(peer, id)? {
+                    entries.push((device, None));
+                    continue;
+                }
+            }
+            match self.observe_bundle(peer, id, conversation).await {
+                Ok((device, bundle)) => entries.push((device, Some(bundle))),
+                Err(Error::InvalidBundle | Error::Unavailable(KEY_SERVER_TIMEOUT)) if self.blind_trust(peer, conversation)? => {
+                    // Stale PEP entries must not block other working devices or existing ratchets.
+                    if let Some(device) = self.session_device(peer, id)? {
+                        entries.push((device, None));
+                    } else {
+                        missing = true;
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if entries.is_empty() && missing && peer != self.store.owner {
+            return Err(Error::Unavailable(MISSING_KEYS));
         }
         Ok(entries)
+    }
+    fn session_device(&mut self, peer: &str, id: u32) -> Result<Option<Device>> {
+        self.store.transaction(|tx| {
+            if tx.load(SESSION, peer, id)?.is_none() {
+                return Ok(None);
+            }
+            let Some(identity) = tx.load(SESSION_IDENTITY, peer, id)? else {
+                return Err(Error::Incomplete);
+            };
+            let key = identity.as_slice().try_into().map_err(|_| Error::Incomplete)?;
+            if device::trust(tx, peer, id, &key)? != Trust::Trusted {
+                return Ok(None);
+            }
+            Ok(Some(Device { peer: peer.into(), id, key, trust: Trust::Trusted }))
+        })
     }
     pub async fn discover(&mut self, peer: &str) -> Result<(Vec<Device>, Vec<(u32, Error)>)> {
         self.discover_for(peer, None).await
@@ -371,10 +481,20 @@ impl Legacy {
         let owner = self.store.owner.clone();
         let mut targets = vec![];
         let mut seen = BTreeSet::new();
+        let automatic = self.blind_trust(room, Some(room))?;
+        let mut skipped = 0;
         for peer in members {
             address(peer, 1)?;
-            let devices = self.devices(peer, Some(room)).await?;
-            if devices
+            let mut devices = match self.devices(peer, Some(room)).await {
+                Ok(devices) => devices,
+                Err(Error::InvalidBundle | Error::ContactAuthorization(_)
+                    | Error::Unavailable(KEY_SERVER_TIMEOUT | MISSING_KEYS | NO_DEVICES | UNSUPPORTED)) if automatic => {
+                    skipped += 1;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if !automatic && devices
                 .iter()
                 .any(|(device, _)| device.trust == Trust::Undecided)
             {
@@ -384,11 +504,13 @@ impl Legacy {
                     Error::TrustRequired
                 });
             }
+            if automatic { devices.retain(|(device, _)| device.trust == Trust::Trusted); }
             if peer != &owner
                 && !devices
                     .iter()
                     .any(|(device, _)| device.trust == Trust::Trusted)
             {
+                if automatic { skipped += 1; continue; }
                 return Err(Error::Unavailable(NO_DEVICES));
             }
             for (device, bundle) in devices {
@@ -399,6 +521,13 @@ impl Legacy {
                     targets.push((device, bundle));
                 }
             }
+        }
+        if members.iter().any(|peer| peer != &owner)
+            && !targets.iter().any(|(device, _)| device.peer != owner) {
+            return Err(Error::Unavailable(NO_DEVICES));
+        }
+        if skipped > 0 {
+            eprintln!("Monogram Legacy automatic room encryption: skipped {skipped} unavailable participants; retained {} encrypted device targets", targets.len());
         }
         encrypt_for_kind(&mut self.store, room, body, wire_id, &targets, true)
     }
@@ -645,7 +774,7 @@ fn encrypt_for(
     peer: &str,
     body: &str,
     id: &str,
-    recipients: &[(Device, Bundle)],
+    recipients: &[(Device, Option<Bundle>)],
 ) -> Result<Element> {
     encrypt_for_kind(store, peer, body, id, recipients, false)
 }
@@ -655,7 +784,7 @@ fn encrypt_for_kind(
     peer: &str,
     body: &str,
     id: &str,
-    recipients: &[(Device, Bundle)],
+    recipients: &[(Device, Option<Bundle>)],
     room: bool,
 ) -> Result<Element> {
     if body.is_empty()
@@ -688,10 +817,14 @@ fn encrypt_for_kind(
             if device.peer == owner && device.id == local {
                 return Err(Error::Invalid("legacy local device target"));
             }
-            if device::trust(tx, &device.peer, device.id, &bundle.identity)? != Trust::Trusted {
+            if device::trust(tx, &device.peer, device.id, &device.key)? != Trust::Trusted {
                 return Err(Error::TrustRequired);
             }
             if tx.load(SESSION, &device.peer, device.id)?.is_none() {
+                let bundle = bundle.as_ref().ok_or(Error::InvalidBundle)?;
+                if bundle.identity != device.key || bundle.prekeys.is_empty() {
+                    return Err(Error::InvalidBundle);
+                }
                 // Sample uniformly from the published prekeys without bias.
                 let bound = (u64::from(u32::MAX) + 1) / bundle.prekeys.len() as u64
                     * bundle.prekeys.len() as u64;
@@ -877,7 +1010,7 @@ mod repair_tests {
                 B,
                 "first",
                 "first",
-                &[(device(B, 202, &bob_bundle), bob_bundle.clone())],
+                &[(device(B, 202, &bob_bundle), Some(bob_bundle.clone()))],
             )
             .unwrap(),
             "from",
@@ -889,7 +1022,7 @@ mod repair_tests {
                 B,
                 "stale",
                 "stale",
-                &[(device(B, 202, &bob_bundle), bob_bundle.clone())],
+                &[(device(B, 202, &bob_bundle), Some(bob_bundle.clone()))],
             )
             .unwrap(),
             "from",
@@ -904,6 +1037,7 @@ mod repair_tests {
             _lock: File::open("/dev/null").unwrap(),
             repairs: BTreeMap::new(),
             pending_repairs: BTreeMap::new(),
+            discovery_backoff: BTreeMap::new(),
         };
         let envelope = Envelope::parse(&first, B, 202).unwrap();
         let accepted = receiver.receive_for(&first, &envelope, 0, None).unwrap();
@@ -969,7 +1103,7 @@ mod repair_tests {
                 B,
                 "next",
                 "next",
-                &[(device(B, 202, &fresh_bundle), fresh_bundle)],
+                &[(device(B, 202, &fresh_bundle), Some(fresh_bundle))],
             )
             .unwrap(),
             "from",
@@ -1062,6 +1196,7 @@ mod denial_tests {
             _lock: File::open("/dev/null").unwrap(),
             repairs: BTreeMap::new(),
             pending_repairs: BTreeMap::new(),
+            discovery_backoff: BTreeMap::new(),
         };
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let outcome = runtime.block_on(async {

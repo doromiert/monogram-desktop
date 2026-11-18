@@ -54,12 +54,23 @@ impl fmt::Display for Error {
             Self::ContactAuthorization(_) => unreachable!("written above"),
             Self::Uncertain => "Encrypted delivery is uncertain; retrying may send a duplicate",
             Self::InvalidBundle => {
-                "A device's public bundle is invalid or missing; refresh device review"
+                "A device's encryption keys are unavailable. Reconnect and retry."
             }
         })
     }
 }
 impl std::error::Error for Error {}
+impl Error {
+    /// Diagnostic labels contain no message content, addresses, keys or server responses.
+    pub(crate) fn diagnostic(&self) -> String {
+        match self {
+            Self::Invalid(reason) => format!("invalid: {reason}"),
+            Self::Native(code) => format!("ratchet: {code}"),
+            Self::Unavailable(reason) => format!("unavailable: {reason}"),
+            other => format!("{:?}", std::mem::discriminant(other)),
+        }
+    }
+}
 impl From<rusqlite::Error> for Error {
     fn from(e: rusqlite::Error) -> Self {
         Self::Storage(e)

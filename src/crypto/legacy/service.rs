@@ -1169,6 +1169,7 @@ impl Worker {
         match result {
             Ok(()) => self.emit(BackendEvent::Sent { peer, id }),
             Err(error) => {
+                eprintln!("Monogram encrypted send Legacy: {}", error.diagnostic());
                 let uncertain = matches!(error, Error::Uncertain);
                 self.emit(if uncertain {
                     BackendEvent::Uncertain {
@@ -1278,7 +1279,11 @@ impl Worker {
             }
             Request::Probe { peer, reply } => {
                 if !reply.is_closed() {
-                    let _ = reply.send(self.probe(&peer).await);
+                    let result = self.probe(&peer).await;
+                    if let Err(error) = &result {
+                        eprintln!("Monogram encryption probe Legacy direct: {}", error.diagnostic());
+                    }
+                    let _ = reply.send(result);
                 }
             }
             Request::Review(peer) => self.review(&peer).await,
@@ -1324,7 +1329,11 @@ impl Worker {
             }
             Request::ProbeRoom { recipients, reply } => {
                 if !reply.is_closed() {
-                    let _ = reply.send(self.probe_room(&recipients).await);
+                    let result = self.probe_room(&recipients).await;
+                    if let Err(error) = &result {
+                        eprintln!("Monogram encryption probe Legacy room: {}", error.diagnostic());
+                    }
+                    let _ = reply.send(result);
                 }
             }
             Request::ReviewRoom { peer, members } => {
@@ -1430,7 +1439,7 @@ mod tests {
                 "control",
                 &[(
                     device(owner, 202, &receiver_bundle),
-                    receiver_bundle.clone(),
+                    Some(receiver_bundle.clone()),
                 )],
             )
             .unwrap();
