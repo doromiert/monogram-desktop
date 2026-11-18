@@ -418,7 +418,6 @@ impl Store {
                 sender.author == owner
                     && sender.room == peer
                     && sender.occupant == base.sender
-                    && base.mode() == Mode::Pq
             });
         (base.own
             && current.own
@@ -449,7 +448,7 @@ impl Store {
                 || !request.own
                 || request.sender != owner
                 || request.mode() != base.mode()
-                || !matches!(&request.action,Some(Action::Retract{target,..}) if Some(target.clone())==actions::original_wire(&base))
+                || !matches!(&request.action,Some(Action::Retract{target,..}) if Some(target.clone())==actions::stanza_reference(&base))
             {
                 return Err(rusqlite::Error::InvalidQuery);
             }
@@ -714,7 +713,7 @@ impl Ui {
                     self.notice("The original message's encryption is not ready. Nothing was deleted; reconnect and try again.");
                     return;
                 };
-                let Some(target) = actions::original_wire(base) else {
+                let Some(target) = actions::stanza_reference(base) else {
                     return;
                 };
                 let wire = new_id();

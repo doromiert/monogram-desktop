@@ -403,12 +403,12 @@ pub fn text_stanza(peer: &str, text: &str, id: &str, reply: Option<(&str, &str, 
     let mut body = text.to_string();
     if let Some((reference, author, quote)) = reply {
         if !reference.is_empty() {
-            root.append_child(
-                Element::builder("reply", REPLY)
-                    .attr("id".try_into().expect("static XML attribute"), reference)
-                    .attr("to".try_into().expect("static XML attribute"), author)
-                    .build(),
-            );
+            let mut reply = Element::builder("reply", REPLY)
+                .attr("id".try_into().expect("static XML attribute"), reference);
+            if !author.is_empty() {
+                reply = reply.attr("to".try_into().expect("static XML attribute"), author);
+            }
+            root.append_child(reply.build());
             if !quote.is_empty() {
                 let quoted: String = quote.chars().take(512).collect();
                 let prefix = format!(

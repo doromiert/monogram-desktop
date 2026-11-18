@@ -32,7 +32,7 @@ impl Store {
     pub fn add_refs(&self, a: &str, peer: &str, m: &Message) -> rusqlite::Result<()> {
         for alias in &m.aliases {
             if let Some((kind, value)) = alias.split_once(':') {
-                if matches!(kind, "wire" | "origin") && actions::valid_id(value) {
+                if matches!(kind, "wire" | "origin" | "room-archive") && actions::valid_id(value) {
                     self.db.execute(
                         "INSERT OR IGNORE INTO action_refs VALUES(?,?,?,?,?,?)",
                         params![a, peer, m.own, kind, value, m.id],
@@ -82,7 +82,13 @@ impl Store {
         let Some(action) = &m.action else {
             return Err(rusqlite::Error::InvalidQuery);
         };
-        if m.sender.split('/').next() != Some(if m.own { a } else { peer })
+        let verified_room = m.legacy_room_sender.as_ref().is_some_and(|sender| {
+            sender.room == peer && sender.occupant == m.sender
+                && crate::protocol::bare(&sender.author).ok().as_deref() == Some(sender.author.as_str())
+                && m.own == (sender.author == a)
+                && matches!(m.action, Some(Action::Retract { .. }))
+        });
+        if (!verified_room && m.sender.split('/').next() != Some(if m.own { a } else { peer }))
             || !actions::valid_id(action.target())
             || m.encrypted && matches!(action, Action::Retract { .. }) && m.fingerprint.is_empty()
         {
@@ -159,6 +165,10 @@ impl Store {
                 if unavailable.is_some_and(|body| {
                     Message::decode(&body).is_ok_and(|previous| {
                         previous.unavailable
+                            || verified_room && matches!(m.action, Some(Action::Retract { .. }))
+                                && !previous.encrypted && previous.own == m.own
+                                && previous.text == "A previous message was retracted."
+                                && previous.sender == m.sender && previous.wire_id == m.wire_id
                             || matches!(m.action, Some(Action::Retract { .. }))
                                 && m.mode() == crate::encryption_policy::Mode::Legacy
                                 && previous.mode() == m.mode()
@@ -223,7 +233,7 @@ impl Store {
             })
             .collect();
         let bases = {
-            let mut query=self.db.prepare("SELECT b.body FROM message_bases b WHERE b.account=?1 AND b.peer=?2 AND b.id IN(SELECT r.message FROM action_refs r JOIN action_events e ON e.account=r.account AND e.peer=r.peer AND e.target=r.value WHERE r.account=?1 AND r.peer=?2 UNION SELECT resolved FROM action_events WHERE account=?1 AND peer=?2)")?;
+            let mut query=self.db.prepare("SELECT b.body FROM message_bases b WHERE b.account=?1 AND b.peer=?2 AND b.id IN(SELECT r.message FROM action_refs r JOIN action_events e ON e.account=r.account AND e.peer=r.peer AND e.target=r.value WHERE r.account=?1 AND r.peer=?2 UNION SELECT r.message FROM aliases r JOIN action_events e ON e.account=r.account AND e.peer=r.peer AND r.alias='room-archive:'||e.target WHERE r.account=?1 AND r.peer=?2 UNION SELECT resolved FROM action_events WHERE account=?1 AND peer=?2)")?;
             query
                 .query_map(params![a, peer], |r| r.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?

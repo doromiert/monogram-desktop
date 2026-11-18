@@ -2006,12 +2006,12 @@ impl Ui {
             if let Some(ref r) = reply {
                 message.reply = format!("{} · {}", r.author, r.reply_preview());
                 message.reply_id = if live {
-                    r.wire_id.clone()
+                    crate::message_actions::stanza_reference(r).unwrap_or_default()
                 } else {
                     r.id.clone()
                 };
-                message.reply_to = if group && !r.sender.is_empty() {
-                    r.sender.clone()
+                message.reply_to = if group {
+                    crate::message_actions::room_reply_address(r, &peer)
                 } else if r.own {
                     owner
                 } else {

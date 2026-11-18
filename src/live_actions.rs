@@ -157,6 +157,8 @@ impl Ui {
         };
         let expected = if kind == "react" {
             actions::reaction_reference(&base)
+        } else if kind == "retract" {
+            actions::stanza_reference(&base)
         } else {
             actions::original_wire(&base)
         };

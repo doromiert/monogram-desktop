@@ -267,6 +267,20 @@ pub fn source_key(message: &Message) -> String {
 pub fn original_wire(message: &Message) -> Option<String> {
     valid_id(&message.wire_id).then(|| message.wire_id.clone())
 }
+/// XEP-0359 room-assigned IDs take precedence for group replies and retractions.
+pub fn stanza_reference(message: &Message) -> Option<String> {
+    message.aliases.iter().find_map(|alias| {
+        alias.strip_prefix("room-archive:").filter(|id| valid_id(id)).map(str::to_owned)
+    }).or_else(|| original_wire(message))
+}
+pub fn room_reply_address(message: &Message, room: &str) -> String {
+    let sender = message.legacy_room_sender.as_ref()
+        .filter(|sender| sender.room == room).map(|sender| sender.occupant.as_str())
+        .unwrap_or(&message.sender);
+    sender.parse::<tokio_xmpp::jid::Jid>().ok()
+        .filter(|jid| jid.resource().is_some() && jid.to_bare().as_str() == room)
+        .map(|jid| jid.to_string()).unwrap_or_default()
+}
 pub fn reaction_reference(message: &Message) -> Option<String> {
     message
         .aliases
@@ -284,6 +298,15 @@ fn match_wire(message: &Message, target: &str) -> bool {
             .aliases
             .iter()
             .any(|v| v.strip_prefix("wire:") == Some(target))
+}
+fn same_retraction_author(base: &Message, event: &Message, account: &str, peer: &str) -> bool {
+    if base.own != event.own { return false; }
+    match (&base.legacy_room_sender, &event.legacy_room_sender) {
+        (Some(a), Some(b)) => a.room == peer && b.room == peer && a.author == b.author,
+        (None, Some(b)) => base.own && b.room == peer && b.author == account,
+        (Some(a), None) => base.own && event.sender == account && a.room == peer && a.author == account,
+        (None, None) => true,
+    }
 }
 fn match_reaction(message: &Message, target: &str) -> bool {
     match_wire(message, target)
@@ -402,7 +425,7 @@ pub fn project(
         let candidates: Vec<_> = bases
             .iter()
             .filter(|base| {
-                base.own == m.own
+                same_retraction_author(base, m, owner, peer)
                     && !base.unavailable
                     && if *legacy {
                         base.aliases
@@ -410,6 +433,8 @@ pub fn project(
                             .any(|v| v.strip_prefix("origin:") == Some(target))
                     } else {
                         match_wire(base, target)
+                            || m.legacy_room_sender.is_some()
+                                && base.aliases.iter().any(|alias| alias.strip_prefix("room-archive:") == Some(target))
                     }
             })
             .collect();
@@ -417,7 +442,9 @@ pub fn project(
             continue;
         }
         let base = candidates[0];
-        if base.encrypted && (base.mode() != m.mode() || m.fingerprint.is_empty()) {
+        let public_legacy_room = !m.encrypted && m.legacy_room_sender.is_some()
+            && base.mode() == crate::encryption_policy::Mode::Legacy;
+        if base.encrypted && !public_legacy_room && (base.mode() != m.mode() || m.fingerprint.is_empty()) {
             continue;
         }
         event.resolved = Some(base.id.clone());

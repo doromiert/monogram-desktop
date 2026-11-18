@@ -649,6 +649,22 @@ impl Rooms {
         let unavailable = xml
             .children()
             .any(|child| child.name() == "encrypted" || child.is("encryption", "urn:xmpp:eme:0"));
+        let action = if unavailable {
+            None
+        } else {
+            crate::message_actions::parse(xml).ok()?.filter(|action| {
+                matches!(action, crate::message_actions::Action::Retract { .. })
+            })
+        };
+        let room_sender = self.sender(xml, archive.is_some()).ok().or_else(|| {
+            own.then(|| members::RoomSender {
+                room: jid.clone(), occupant: address.to_string(), author: self.owner.clone(),
+            })
+        });
+        if action.is_some() && room_sender.is_none() {
+            return None;
+        }
+        let own = own || room_sender.as_ref().is_some_and(|sender| sender.author == self.owner);
         let text = if unavailable {
             "Encrypted room message · this encryption is unavailable on desktop".into()
         } else {
@@ -658,10 +674,10 @@ impl Rooms {
                 _ => return None,
             }
         };
-        let attachment = (!unavailable)
+        let attachment = (!unavailable && action.is_none())
             .then(|| crate::file_share::Attachment::incoming(xml, &text, false))
             .flatten();
-        if (text.trim().is_empty() && attachment.is_none()) || text.len() > 256 * 1024 {
+        if (text.trim().is_empty() && attachment.is_none() && action.is_none()) || text.len() > 256 * 1024 {
             return None;
         }
         let caption = attachment.as_ref().map(|file| file.caption(xml, &text));
@@ -707,7 +723,7 @@ impl Rooms {
         if !wire_id.is_empty() {
             aliases.push(format!("wire:{wire_id}"));
         }
-        if own {
+        {
             if let Some(id) = child(xml, "origin-id", SID)
                 .ok()
                 .flatten()
@@ -724,7 +740,9 @@ impl Rooms {
                 .get_child("file-sharing", crate::file_share::NS)
                 .is_some()
                 || xml.get_child("x", crate::file_share::OOB).is_some(),
-            text,
+            text: if action.is_some() { String::new() } else { text },
+            action,
+            legacy_room_sender: room_sender,
             reply_id,
             reply_to,
             reply,
@@ -797,5 +815,55 @@ impl Rooms {
             root.append_child(child.clone());
         }
         Ok(root)
+    }
+}
+
+#[cfg(test)]
+mod retraction_tests {
+    use super::*;
+    use crate::{model::Account, message_actions::{self, Action, Event}, storage::Store};
+
+    #[test]
+    fn room_retractions_resolve_archive_ids_and_repair_cached_compatibility_notices() {
+        const OWNER: &str = "owner@example.invalid";
+        const ROOM: &str = "room@conference.example.invalid";
+        let mut rooms = Rooms::new(OWNER.into());
+        rooms.membership.insert(ROOM.into(), Membership::Joined {
+            occupant: format!("{ROOM}/me").parse().unwrap(), can_send: true,
+            locked: false, created: false, owner: false,
+        });
+        rooms.enable_stable_ids(ROOM.into());
+        let xml: Element = format!("<message xmlns='jabber:client' type='groupchat' from='{ROOM}/me' to='{OWNER}' id='original-wire'><body>original</body><stanza-id xmlns='urn:xmpp:sid:0' by='{ROOM}' id='server-original'/><origin-id xmlns='urn:xmpp:sid:0' id='original-origin'/></message>").parse().unwrap();
+        let (_,mut base,_) = rooms.message(&xml).unwrap();
+        base.id = "original".into();
+        base.set_encryption(Mode::Legacy, "trusted-original-key".into());
+        let xml: Element = format!("<message xmlns='jabber:client' type='groupchat' from='{ROOM}/me' to='{OWNER}' id='control-wire'><body>A previous message was retracted.</body><retract xmlns='urn:xmpp:message-retract:1' id='server-original'/><fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:message-retract:1'/><stanza-id xmlns='urn:xmpp:sid:0' by='{ROOM}' id='server-control'/></message>").parse().unwrap();
+        let (_,mut control,_) = rooms.message(&xml).unwrap();
+        control.id = "control".into();
+        assert!(control.text.is_empty());
+        assert!(matches!(&control.action,Some(Action::Retract{target,..}) if target=="server-original"));
+        let db = Store::open(true).unwrap();
+        db.save_account(&Account { jid: OWNER.into(), host: String::new(), port: 5222, direct_tls: false }).unwrap();
+        let chat=crate::model::Chat { jid:ROOM.into(),group:true,..Default::default() };
+        db.save_chat_message(OWNER,&chat,Some(&base)).unwrap();
+        // Simulate history saved by the old room decoder, including its already indexed aliases.
+        db.db.execute("DELETE FROM action_refs WHERE kind='room-archive'", []).unwrap();
+        let mut notice=control.clone();notice.action=None;notice.legacy_room_sender=None;
+        notice.text="A previous message was retracted.".into();db.save_chat_message(OWNER,&chat,Some(&notice)).unwrap();
+        db.record_action(OWNER,ROOM,&control,"received").unwrap();
+        db.reconcile_actions(OWNER,ROOM).unwrap();
+        assert!(db.history(OWNER,ROOM,None,20).is_empty());
+        assert!(db.message(OWNER,ROOM,"control").is_none());
+        for mode in [Mode::Omemo2,Mode::Pq] {
+            let mut protected=base.clone();protected.set_encryption(mode,"protected-key".into());
+            let projected=message_actions::project(vec![protected],vec![Event {row:1,message:control.clone(),failed:false,resolved:None}],OWNER,ROOM);
+            assert!(!projected.messages[0].retracted,"public metadata cannot remove authenticated SCE messages");
+        }
+        let mut other=base.clone();other.own=false;
+        other.legacy_room_sender.as_mut().unwrap().author="friend@example.invalid".into();
+        let mut spoof=control.clone();spoof.own=false;
+        spoof.legacy_room_sender.as_mut().unwrap().author="different@example.invalid".into();
+        let projected=message_actions::project(vec![other],vec![Event {row:1,message:spoof,failed:false,resolved:None}],OWNER,ROOM);
+        assert!(!projected.messages[0].retracted,"one participant cannot retract another participant's message");
     }
 }
