@@ -1455,7 +1455,7 @@ impl Ui {
                 s.compose_changed()
             }
         });
-        let emoji_completion = crate::emoji_completion::attach(&self.composer);
+        let emoji_completion = crate::emoji_completion::attach_for_chat(&self.composer, self);
         crate::clipboard_upload::attach(self);
         let key = gtk::EventControllerKey::new();
         key.set_propagation_phase(gtk::PropagationPhase::Capture);

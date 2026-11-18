@@ -1822,7 +1822,7 @@ impl Ui {
         });
         actions.append(&save);
         bubble.append(&actions);
-        let completion=crate::emoji_completion::attach(&editor);
+        let completion=crate::emoji_completion::attach_for_chat(&editor,self);
         let keys=gtk::EventControllerKey::new();keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let confirm=save.downgrade();let dismiss=cancel.downgrade();
         keys.connect_key_pressed(move|_,key,_,modifiers|{

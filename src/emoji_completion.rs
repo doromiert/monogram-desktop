@@ -131,6 +131,7 @@ struct Token {
     start: i32,
     end: i32,
     query: String,
+    mention: bool,
 }
 fn token(view: &gtk::TextView) -> Option<Token> {
     let buffer = view.buffer();
@@ -170,7 +171,29 @@ fn token(view: &gtk::TextView) -> Option<Token> {
         start: first + before.chars().count() as i32,
         end,
         query: normalized(query),
+        mention: false,
     })
+}
+
+fn mention_token(view: &gtk::TextView) -> Option<Token> {
+    let buffer = view.buffer();
+    if buffer.selection_bounds().is_some() { return None; }
+    let end = buffer.cursor_position();
+    let first = (end - 128).max(0);
+    let text = buffer.text(&buffer.iter_at_offset(first), &buffer.iter_at_offset(end), false);
+    let at = text.rfind('@')?;
+    let before = &text[..at];
+    if (at == 0 && first != 0) || before.chars().next_back().is_some_and(|c|
+        !c.is_whitespace() && !matches!(c, '(' | '[' | '{' | '\'' | '"')) { return None; }
+    let query = &text[at + 1..];
+    if query.chars().any(char::is_control) { return None; }
+    Some(Token { start: first + before.chars().count() as i32, end, query: query.to_lowercase(), mention: true })
+}
+
+#[derive(Clone)]
+enum Suggestion {
+    Emoji(usize),
+    Mention(String),
 }
 
 pub struct Completion {
@@ -178,10 +201,21 @@ pub struct Completion {
     popover: gtk::Popover,
     list: gtk::ListBox,
     token: RefCell<Option<Token>>,
-    matches: RefCell<Vec<usize>>,
+    matches: RefCell<Vec<Suggestion>>,
     selected: Cell<usize>,
+    mentions: Option<Box<dyn Fn() -> Vec<String>>>,
 }
 impl Completion {
+    fn current_token(&self, view: &gtk::TextView) -> Option<Token> {
+        if self.mentions.is_some() {
+            if let Some(token) = mention_token(view).filter(|token|
+                self.mentions.as_ref().is_some_and(|get|
+                    get().iter().any(|nick| nick.to_lowercase().starts_with(&token.query)))) {
+                return Some(token);
+            }
+        }
+        token(view)
+    }
     fn hide(&self) {
         self.popover.popdown();
         self.token.borrow_mut().take();
@@ -191,13 +225,21 @@ impl Completion {
             self.hide();
             return;
         };
-        let Some(token) = token(&view) else {
+        let Some(token) = self.current_token(&view) else {
             self.hide();
             return;
         };
         if self.token.borrow().as_ref() == Some(&token) && self.popover.is_mapped() {
             return;
         }
+        let matches = if token.mention {
+            let mut names = self.mentions.as_ref().map(|get| get()).unwrap_or_default();
+            names.retain(|name| name.to_lowercase().starts_with(&token.query));
+            names.sort_by_cached_key(|name| name.to_lowercase());
+            names.dedup();
+            names.truncate(6);
+            names.into_iter().map(Suggestion::Mention).collect::<Vec<_>>()
+        } else {
         let Some(data) = EMOJI.get() else {
             self.hide();
             return;
@@ -230,6 +272,8 @@ impl Completion {
             .collect();
         matches.sort_by_key(|&(score, index)| (score, index));
         matches.truncate(6);
+        matches.into_iter().map(|(_, index)| Suggestion::Emoji(index)).collect()
+        };
         if matches.is_empty() {
             self.hide();
             return;
@@ -237,17 +281,26 @@ impl Completion {
         while let Some(child) = self.list.first_child() {
             self.list.remove(&child);
         }
-        let matches: Vec<_> = matches.into_iter().map(|(_, index)| index).collect();
-        for index in &matches {
-            let emoji = &data[*index];
+        for suggestion in &matches {
+            let (icon, name) = match suggestion {
+                Suggestion::Emoji(index) => {
+                    let emoji = &EMOJI.get().unwrap()[*index];
+                    (emoji.text.clone(), emoji.name.clone())
+                }
+                Suggestion::Mention(nick) => ("@".into(), crate::text_safety::display_nick(nick, false)),
+            };
             let row = gtk::ListBoxRow::builder()
                 .focusable(false)
                 .focus_on_click(false)
                 .build();
             let line = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-            for (value, class) in [(&emoji.text, "title-2"), (&emoji.name, "")] {
+            for (value, class) in [(&icon, "title-2"), (&name, "")] {
                 let label = gtk::Label::new(Some(value));
                 label.set_xalign(0.);
+                if token.mention && class.is_empty() {
+                    label.set_max_width_chars(32);
+                    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                }
                 if !class.is_empty() {
                     label.add_css_class(class);
                 }
@@ -285,23 +338,34 @@ impl Completion {
         let Some(expected) = self.token.borrow().clone() else {
             return;
         };
-        if token(&view).as_ref() != Some(&expected) {
+        if self.current_token(&view).as_ref() != Some(&expected) {
             self.hide();
             return;
         }
-        let Some(index) = self.matches.borrow().get(row).copied() else {
+        let Some(suggestion) = self.matches.borrow().get(row).cloned() else {
             return;
         };
-        let Some(emoji) = EMOJI.get().and_then(|data| data.get(index)) else {
-            return;
+        let text = match suggestion {
+            Suggestion::Emoji(index) => {
+                let Some(emoji) = EMOJI.get().and_then(|data| data.get(index)) else { return; };
+                emoji.text.clone()
+            }
+            Suggestion::Mention(nick) => {
+                if !self.mentions.as_ref().is_some_and(|get| get().contains(&nick)) {
+                    self.hide();
+                    return;
+                }
+                format!("@{nick} ")
+            }
         };
         self.hide();
         let buffer = view.buffer();
         buffer.begin_user_action();
         let mut start = buffer.iter_at_offset(expected.start);
         let mut end = buffer.iter_at_offset(expected.end);
+        if expected.mention && end.char() == ' ' { end.forward_char(); }
         buffer.delete(&mut start, &mut end);
-        buffer.insert(&mut start, &emoji.text);
+        buffer.insert(&mut start, &text);
         buffer.end_user_action();
         view.grab_focus();
     }
@@ -330,7 +394,8 @@ impl Completion {
             }
             gdk::Key::Tab => self.activate(self.selected.get()),
             gdk::Key::Return | gdk::Key::KP_Enter
-                if discord_style() && !modifiers.contains(gdk::ModifierType::SHIFT_MASK) =>
+                if !self.token.borrow().as_ref().is_some_and(|token| token.mention)
+                    && discord_style() && !modifiers.contains(gdk::ModifierType::SHIFT_MASK) =>
             {
                 self.activate(self.selected.get())
             }
@@ -342,6 +407,24 @@ impl Completion {
 }
 
 pub fn attach(view: &gtk::TextView) -> Rc<Completion> {
+    attach_with_mentions(view, None)
+}
+
+pub fn attach_for_chat(view: &gtk::TextView, ui: &Rc<crate::ui::Ui>) -> Rc<Completion> {
+    let weak = Rc::downgrade(ui);
+    attach_with_mentions(view, Some(Box::new(move || {
+        let Some(ui) = weak.upgrade() else { return Vec::new(); };
+        let state = ui.state.borrow();
+        let chat = state.current();
+        if !chat.group { return Vec::new(); }
+        ui.room_rosters.borrow().get(&chat.jid).into_iter().flatten()
+            .filter(|member| !member.own && !member.nick.is_empty() && member.nick.chars().count() <= 128
+                && crate::text_safety::visible(&member.nick, 128) == member.nick)
+            .map(|member| member.nick.clone()).collect()
+    })))
+}
+
+fn attach_with_mentions(view: &gtk::TextView, mentions: Option<Box<dyn Fn() -> Vec<String>>>) -> Rc<Completion> {
     view.set_input_hints(view.input_hints() | gtk::InputHints::EMOJI);
     let list = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::Single)
@@ -363,6 +446,7 @@ pub fn attach(view: &gtk::TextView) -> Rc<Completion> {
         token: RefCell::new(None),
         matches: RefCell::new(Vec::new()),
         selected: Cell::new(0),
+        mentions,
     });
     let state = completion.clone();
     view.buffer().connect_changed(move |_| state.update());
