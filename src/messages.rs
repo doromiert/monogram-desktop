@@ -130,7 +130,9 @@ fn cluster_style(row: &RenderedRow, previous: bool, next: bool, group: bool) {
         row.row.remove_css_class("cluster-next");
     }
     row.heading
-        .set_visible(group && !row.message.own && !previous || row.message.pinned);
+        .set_visible(group && !row.message.own && !previous
+            && !row.bubble.has_css_class("media-bubble") && !row.bubble.has_css_class("sticker-bubble")
+            || row.message.pinned);
     if let Some(avatar) = row.avatar.as_ref() {
         avatar.set_visible(!next);
     }
@@ -671,6 +673,7 @@ impl Ui {
             let heading = bx(false, 6);
             heading.set_margin_bottom(6);
             let author = text(&m.author, "message-author");
+            author.set_visible(!media && !sticker);
             author.set_hexpand(true);
             author.set_valign(gtk::Align::Center);
             author.set_ellipsize(gtk::pango::EllipsizeMode::End);
