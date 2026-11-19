@@ -1,7 +1,8 @@
 # Animated emoji
 
 A message whose entire text is **exactly one emoji** that is bundled plays its Noto animation: once
-when it scrolls into view, and again when clicked. When it ends it stays on the animation's final frame. Two or more emoji, any other text, links, formatting, custom emoji, or an emoji that
+when it scrolls into view, and again when clicked. When it ends it rests on the last frame where the emoji is fully visible: Noto animations usually
+enter, loop and then leave, so their true last frame is often empty (❣, 🙌, 🌟 and the 🫶 family). One that never rests, only appearing and leaving (💥), goes back to the ordinary emoji. Two or more emoji, any other text, links, formatting, custom emoji, or an emoji that
 is not in the pack all keep the ordinary static rendering.
 
 It only applies while the "big emoji" setting is on, and never when GNOME's animations are turned

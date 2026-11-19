@@ -1,5 +1,5 @@
 //! A message that is exactly one bundled emoji plays its Noto animation once when it scrolls into
-//! view and again when clicked, and stays on its final frame when it ends. The ordinary emoji only
+//! view and again when clicked, and rests on its last fully visible frame when it ends. The ordinary emoji only
 //! shows until the first frame arrives and wherever the animation cannot play.
 //!
 //! Frames come from the confined renderer (`lottie::Decoder::open_emoji`) on worker threads, so
@@ -149,11 +149,12 @@ fn play(state: &Rc<State>) -> bool {
             let source = crate::lottie::memory_source(&bytes)?;
             let mut decoder = crate::lottie::Decoder::open_emoji(source, RENDER_EDGE, &gio::Cancellable::new())?;
             let first = decoder.frame_at(0)?;
-            Ok::<_, &'static str>((decoder, first))
+            let ink = crate::lottie::ink(&first.texture);
+            Ok::<_, &'static str>((decoder, first, ink))
         })
         .await;
         drop(permit);
-        let (decoder, first) = match opened {
+        let (decoder, first, ink) = match opened {
             Ok(Ok(started)) => started,
             failed => {
                 // The ordinary emoji stays; say why, so a stale or missing renderer is findable.
@@ -170,7 +171,7 @@ fn play(state: &Rc<State>) -> bool {
             return;
         }
         show(&state, &first.texture);
-        step(state, decoder, std::time::Instant::now(), first.delay);
+        step(state, decoder, std::time::Instant::now(), first.delay, ink);
     });
     true
 }
@@ -190,26 +191,32 @@ fn show(state: &State, texture: &gdk::Texture) {
 
 /// Pull the frame the clock says is due after `delay`, stopping when the animation ends or the
 /// row is gone or off screen. A slow frame makes the next one skip ahead; frames never queue up.
-fn step(state: Rc<State>, decoder: crate::lottie::Decoder, started: std::time::Instant, delay: Duration) {
+fn step(state: Rc<State>, decoder: crate::lottie::Decoder, started: std::time::Instant, delay: Duration, peak: u64) {
     glib::timeout_add_local_once(delay.max(Duration::from_millis(1)), move || {
         let index = (started.elapsed().as_secs_f64() * decoder.fps) as u32;
         let ended = index >= decoder.frames;
         let gone = state.picture.root().is_none() || !state.picture.is_mapped();
         if ended && !gone {
-            // Freeze on the animation's true last frame, not on whichever frame the clock reached.
-            let last = decoder.frames - 1;
+            // Rest on the frame where the emoji is fully visible: Noto animations usually leave at
+            // the end, so their true last frame is empty.
             glib::spawn_future_local(async move {
                 let permit = crate::media_library_ui::lottie_permit().await;
                 let pulled = gio::spawn_blocking(move || {
                     let mut decoder = decoder;
-                    let frame = decoder.frame_at(last);
-                    (decoder, frame)
+                    let rest = decoder.resting_frame(peak);
+                    (decoder, rest)
                 })
                 .await;
                 drop(permit);
-                if let Ok((decoder, frame)) = pulled {
-                    if let Ok(frame) = frame {
-                        state.picture.set_paintable(Some(&frame.texture));
+                if let Ok((decoder, rest)) = pulled {
+                    match rest {
+                        Ok(Some(frame)) => state.picture.set_paintable(Some(&frame.texture)),
+                        // It never rests (it only appears and leaves): the ordinary emoji is the rest pose.
+                        Ok(None) => {
+                            state.picture.set_visible(false);
+                            state.glyph.set_opacity(1.);
+                        }
+                        Err(_) => {}
                     }
                     // Dropping the decoder ends the sandbox process; not on the GTK thread.
                     gio::spawn_blocking(move || drop(decoder));
@@ -228,19 +235,21 @@ fn step(state: Rc<State>, decoder: crate::lottie::Decoder, started: std::time::I
             let pulled = gio::spawn_blocking(move || {
                 let mut decoder = decoder;
                 let frame = decoder.frame_at(index);
-                (decoder, frame)
+                let ink = frame.as_ref().map_or(0, |frame| crate::lottie::ink(&frame.texture));
+                (decoder, frame, ink)
             })
             .await;
             drop(permit);
-            let Ok((decoder, Ok(frame))) = pulled else {
+            let Ok((decoder, Ok(frame), ink)) = pulled else {
                 stop(&state);
                 return;
             };
+            let peak = peak.max(ink);
             state.picture.set_paintable(Some(&frame.texture));
             // The next frame is due at the next tick of the animation's own clock.
             let elapsed = started.elapsed();
             let tick = ((elapsed.as_secs_f64() * decoder.fps).floor() + 1.) / decoder.fps;
-            step(state, decoder, started, Duration::from_secs_f64(tick).saturating_sub(elapsed));
+            step(state, decoder, started, Duration::from_secs_f64(tick).saturating_sub(elapsed), peak);
         });
     });
 }
@@ -382,6 +391,27 @@ mod tests {
         assert!(wait(Duration::from_secs(3), || changes.get() > before + 10), "a click replays the animation");
         assert!(wait(Duration::from_secs(5), || ACTIVE.with(Cell::get) == 0), "and it finishes");
         assert!(picture.is_visible() && glyph.opacity() == 0.);
+        window.close();
+    }
+
+    /// ❣ leaves at the end of its animation, so its last frame is empty. It must come to rest on a
+    /// frame where the heart is fully there, not vanish.
+    #[gtk::test]
+    #[ignore = "requires the built sandboxed renderer and bubblewrap"]
+    fn an_emoji_that_leaves_at_the_end_rests_on_a_visible_frame() {
+        let animation = crate::noto_emoji::animation_for("\u{2763}").expect("\u{2763} is bundled");
+        let source = crate::lottie::memory_source(&animation).unwrap();
+        let mut reference = crate::lottie::Decoder::open_emoji(source, RENDER_EDGE, &gio::Cancellable::new()).unwrap();
+        let peak = (0..reference.frames).map(|i| crate::lottie::ink(&reference.frame_at(i).unwrap().texture)).max().unwrap();
+        assert!(crate::lottie::ink(&reference.frame_at(reference.frames - 1).unwrap().texture) * 10 < peak, "its true last frame is empty");
+        let emoji = widget("\u{2763}", animation);
+        let picture = picture_of(&emoji);
+        let window = gtk::Window::builder().default_width(300).default_height(300).child(&emoji).build();
+        window.present();
+        assert!(wait(Duration::from_secs(10), || picture.is_visible()), "first frame arrives");
+        assert!(wait(Duration::from_secs(8), || ACTIVE.with(Cell::get) == 0), "it finishes");
+        let rest = picture.paintable().and_downcast::<gdk::Texture>().expect("a frame is kept");
+        assert!(crate::lottie::ink(&rest) * 10 >= peak * 9, "it rests on a fully visible frame");
         window.close();
     }
 
