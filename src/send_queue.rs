@@ -127,9 +127,9 @@ impl Ui {
             };
             if let Some(reply) = &reply {
                 message.reply = format!("{} · {}", reply.author, reply.reply_preview());
-                message.reply_id = reply.wire_id.clone();
-                message.reply_to = if group && !reply.sender.is_empty() {
-                    reply.sender.clone()
+                message.reply_id = crate::message_actions::stanza_reference(reply).unwrap_or_default();
+                message.reply_to = if group {
+                    crate::message_actions::room_reply_address(reply, &peer)
                 } else if reply.own {
                     owner.clone()
                 } else {
@@ -226,9 +226,9 @@ impl Ui {
         message.encryption_mode = None;
         if let Some(reply) = reply {
             message.reply = format!("{} · {}", reply.author, reply.reply_preview());
-            message.reply_id = reply.wire_id.clone();
-            message.reply_to = if group && !reply.sender.is_empty() {
-                reply.sender
+            message.reply_id = crate::message_actions::stanza_reference(&reply).unwrap_or_default();
+            message.reply_to = if group {
+                crate::message_actions::room_reply_address(&reply, &peer)
             } else if reply.own {
                 owner
             } else {

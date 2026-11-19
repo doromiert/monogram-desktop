@@ -50,6 +50,13 @@ const KEY_FETCH_CONCURRENCY: usize = 16;
 const UNREACHABLE_MEMORY: Duration = Duration::from_secs(5 * 60);
 const NOBODY_REACHABLE: &str = "No other room member's keys could be used";
 const FETCH_FAILED: &str = "Could not read or publish Legacy OMEMO keys";
+const KEY_SERVER_TIMEOUT: &str = "The encryption key server did not respond. Your message is kept; retry when it is reachable.";
+const MISSING_KEYS: &str = "A participant has no usable encryption keys yet. They need to reconnect their client before you can send encrypted messages.";
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedDevices {
+    time: u64,
+    ids: BTreeSet<u32>,
+}
 
 pub struct Device {
     pub peer: String,
@@ -68,6 +75,7 @@ pub struct Legacy {
     /// Room members whose keys could not be fetched, when, and why. Only filled and read while the
     /// sender has chosen to leave unreachable members out.
     unreachable: BTreeMap<String, (tokio::time::Instant, String)>,
+    discovery_backoff: BTreeMap<String, Instant>,
 }
 #[derive(Debug)]
 pub struct Repair {
@@ -87,14 +95,20 @@ fn lookup_peer(error: pep::Error, peer: &str, local: bool) -> Error {
     if !local && !error.unsupported() && error.access_denied() {
         return Error::ContactAuthorization(peer.into());
     }
-    lookup(error)
+    lookup(error, local)
 }
-fn lookup(error: pep::Error) -> Error {
+fn lookup(error: pep::Error, local: bool) -> Error {
+    if let pep::Error::Request(request) = &error {
+        eprintln!("Monogram Legacy key request (own={local}): {request:?}");
+    }
     if error.unsupported() {
         return Error::Unavailable(UNSUPPORTED);
     }
     match error {
         pep::Error::Crypto(error) => error,
+        pep::Error::Request(iq::Error::Timeout) => Error::Unavailable(KEY_SERVER_TIMEOUT),
+        pep::Error::Request(iq::Error::Rejected { condition, .. })
+            if condition == "remote-server-timeout" => Error::Unavailable(KEY_SERVER_TIMEOUT),
         _ => Error::Unavailable(FETCH_FAILED),
     }
 }
@@ -106,13 +120,18 @@ pub(crate) fn skippable(error: &Error) -> bool {
         error,
         Error::ContactAuthorization(_)
             | Error::InvalidBundle(_)
-            | Error::Unavailable(NO_DEVICES | UNSUPPORTED | FETCH_FAILED)
+            | Error::Unavailable(
+                NO_DEVICES | UNSUPPORTED | FETCH_FAILED | KEY_SERVER_TIMEOUT | MISSING_KEYS,
+            )
     )
 }
 /// [`skippable`] for a failure that is only available as the text shown to the user.
 pub(crate) fn skippable_reason(reason: &str) -> bool {
     denied_contact(reason).is_some()
-        || matches!(reason, NO_DEVICES | UNSUPPORTED | FETCH_FAILED)
+        || matches!(
+            reason,
+            NO_DEVICES | UNSUPPORTED | FETCH_FAILED | KEY_SERVER_TIMEOUT | MISSING_KEYS
+        )
         || (reason.starts_with("No usable ") && reason.contains(" keys from "))
 }
 fn probe_unavailable(error: &Error) -> bool {
@@ -143,7 +162,7 @@ impl Legacy {
             let list = discovery
                 .item(owner, DEVICES, None)
                 .await
-                .map_err(|e| lookup(e))?;
+                .map_err(|e| lookup(e, true))?;
             wire::device_ids(list.as_ref())?
         } else {
             BTreeSet::new()
@@ -160,6 +179,7 @@ impl Legacy {
             repairs: BTreeMap::new(),
             pending_repairs: BTreeMap::new(),
             unreachable: BTreeMap::new(),
+            discovery_backoff: BTreeMap::new(),
         })
     }
     pub fn device(&self) -> u32 {
@@ -180,7 +200,7 @@ impl Legacy {
             .pep
             .item(&owner, DEVICES, None)
             .await
-            .map_err(|e| lookup(e))?;
+            .map_err(|e| lookup(e, true))?;
         let mut seen = wire::device_ids(latest.as_ref())?;
         self.replenish().await?;
         for _ in 0..3 {
@@ -197,12 +217,12 @@ impl Legacy {
             self.pep
                 .publish_item(DEVICES, "current", list, "1")
                 .await
-                .map_err(|e| lookup(e))?;
+                .map_err(|e| lookup(e, true))?;
             latest = self
                 .pep
                 .item(&owner, DEVICES, None)
                 .await
-                .map_err(|e| lookup(e))?;
+                .map_err(|e| lookup(e, true))?;
             current = wire::device_ids(latest.as_ref())?;
             seen.extend(current);
         }
@@ -212,11 +232,11 @@ impl Legacy {
         self.pep
             .ensure_open_access(DEVICES)
             .await
-            .map_err(|e| lookup(e))?;
+            .map_err(|e| lookup(e, true))?;
         self.pep
             .ensure_open_access(&bundle_node(self.device()))
             .await
-            .map_err(|e| lookup(e))?;
+            .map_err(|e| lookup(e, true))?;
         Ok(())
     }
     pub async fn replenish(&mut self) -> Result<()> {
@@ -229,7 +249,7 @@ impl Legacy {
                 "1",
             )
             .await
-            .map_err(|e| lookup(e))
+            .map_err(|e| lookup(e, true))
     }
     async fn bundle(&self, peer: &str, id: u32) -> Result<Bundle> {
         address(peer, id)?;
@@ -335,16 +355,111 @@ impl Legacy {
         }
         Ok(entries)
     }
+    fn cached_devices(&mut self, peer: &str) -> Result<Option<CachedDevices>> {
+        self.store.transaction(|tx| {
+            let Some(bytes) = tx.load(crate::crypto::records::DEVICES, peer, 0)? else {
+                return Ok(None);
+            };
+            let cached: CachedDevices = serde_json::from_slice(&bytes).map_err(|_| Error::Incomplete)?;
+            if cached.ids.len() > 500 || cached.ids.iter().any(|id| address(peer, *id).is_err()) {
+                return Err(Error::Incomplete);
+            }
+            Ok(Some(cached))
+        })
+    }
+    fn save_devices(&mut self, peer: &str, ids: &BTreeSet<u32>) -> Result<()> {
+        let bytes = serde_json::to_vec(&CachedDevices { time: now(), ids: ids.clone() })
+            .map_err(|_| Error::Incomplete)?;
+        self.store.transaction(|tx| tx.save(crate::crypto::records::DEVICES, peer, 0, Some(&bytes)))
+    }
+    async fn sending_ids(&mut self, peer: &str, conversation: Option<&str>) -> Result<BTreeSet<u32>> {
+        let cached = self.cached_devices(peer)?;
+        let blind = self.blind_trust(peer, conversation)?;
+        if blind && cached.as_ref().is_some_and(|cache| now().checked_sub(cache.time).is_some_and(|age| age < 60_000)) {
+            return Ok(cached.unwrap().ids);
+        }
+        let result = if blind && self.discovery_backoff.get(peer).is_some_and(|at| at.elapsed() < Duration::from_secs(60)) {
+            Err(Error::Unavailable(KEY_SERVER_TIMEOUT))
+        } else { self.published_ids(peer).await };
+        match result {
+            Ok(ids) => {
+                self.discovery_backoff.remove(peer);
+                self.save_devices(peer, &ids)?;
+                Ok(ids)
+            }
+            Err(error @ Error::Unavailable(KEY_SERVER_TIMEOUT))
+                if self.blind_trust(peer, conversation)? => {
+                if self.discovery_backoff.len() >= 256 { self.discovery_backoff.clear(); }
+                let at = self.discovery_backoff.entry(peer.into()).or_insert_with(Instant::now);
+                if at.elapsed() >= Duration::from_secs(60) { *at = Instant::now(); }
+                if let Some(cache) = cached {
+                    return if now().checked_sub(cache.time).is_some_and(|age| age < 86_400_000) {
+                        eprintln!("Monogram Legacy discovery: using cached device list during remote timeout");
+                        Ok(cache.ids)
+                    } else { Err(error) };
+                }
+                // Upgrade profiles have trusted ratchets but no persisted discovery cache yet.
+                let known = self.store.transaction(|tx| tx.peer_ids(SESSION, peer))?;
+                let mut ids = BTreeSet::new();
+                for id in known {
+                    if self.session_device(peer, id)?.is_some() {
+                        ids.insert(id);
+                    }
+                }
+                if ids.is_empty() { return Err(error); }
+                self.save_devices(peer, &ids)?;
+                eprintln!("Monogram Legacy discovery: recovered device list from established sessions");
+                Ok(ids)
+            }
+            Err(error) => Err(error),
+        }
+    }
     async fn devices(
         &mut self,
         peer: &str,
         conversation: Option<&str>,
-    ) -> Result<Vec<(Device, Bundle)>> {
+    ) -> Result<Vec<(Device, Option<Bundle>)>> {
         let mut entries = vec![];
-        for id in self.published_ids(peer).await? {
-            entries.push(self.observe_bundle(peer, id, conversation).await?);
+        let mut missing = false;
+        for id in self.sending_ids(peer, conversation).await? {
+            if self.blind_trust(peer, conversation)? {
+                if let Some(device) = self.session_device(peer, id)? {
+                    entries.push((device, None));
+                    continue;
+                }
+            }
+            match self.observe_bundle(peer, id, conversation).await {
+                Ok((device, bundle)) => entries.push((device, Some(bundle))),
+                Err(Error::InvalidBundle(_) | Error::Unavailable(KEY_SERVER_TIMEOUT)) if self.blind_trust(peer, conversation)? => {
+                    // Stale PEP entries must not block other working devices or existing ratchets.
+                    if let Some(device) = self.session_device(peer, id)? {
+                        entries.push((device, None));
+                    } else {
+                        missing = true;
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if entries.is_empty() && missing && peer != self.store.owner {
+            return Err(Error::Unavailable(MISSING_KEYS));
         }
         Ok(entries)
+    }
+    fn session_device(&mut self, peer: &str, id: u32) -> Result<Option<Device>> {
+        self.store.transaction(|tx| {
+            if tx.load(SESSION, peer, id)?.is_none() {
+                return Ok(None);
+            }
+            let Some(identity) = tx.load(SESSION_IDENTITY, peer, id)? else {
+                return Err(Error::Incomplete);
+            };
+            let key = identity.as_slice().try_into().map_err(|_| Error::Incomplete)?;
+            if device::trust(tx, peer, id, &key)? != Trust::Trusted {
+                return Ok(None);
+            }
+            Ok(Some(Device { peer: peer.into(), id, key, trust: Trust::Trusted }))
+        })
     }
     pub async fn discover(&mut self, peer: &str) -> Result<(Vec<Device>, Vec<(u32, Error)>)> {
         self.discover_for(peer, None).await
@@ -435,14 +550,17 @@ impl Legacy {
         let owner = self.store.owner.clone();
         let mut targets = vec![];
         let mut seen = BTreeSet::new();
-        // Members left out because their keys could not be fetched or used. Only when the sender
-        // asked for it, never for our own account, and never for unreviewed keys.
+        let automatic = self.blind_trust(room, Some(room))?;
+        // Members left out because their keys could not be fetched or used. In an automatic room that
+        // happens on its own and is only logged; otherwise only when the sender asked for it, never
+        // for our own account, and never for unreviewed keys.
         let mut skipped = vec![];
+        let mut automatic_skipped = 0;
         // Fetch every member's keys at once: a member that never answers costs one timeout for the
         // whole room instead of one each. Trust and errors are then handled in member order.
         // Members found unreachable a moment ago are not waited for again while the sender has chosen
         // to leave unreachable members out; the choice, not a guess, is what allows skipping them.
-        let remembered: BTreeMap<String, String> = if skip_unreachable {
+        let remembered: BTreeMap<String, String> = if skip_unreachable && !automatic {
             self.unreachable
                 .retain(|_, (when, _)| when.elapsed() < UNREACHABLE_MEMORY);
             self.unreachable
@@ -453,7 +571,9 @@ impl Legacy {
         } else {
             BTreeMap::new()
         };
-        let mut fetched: BTreeMap<String, Result<Vec<(u32, Bundle)>>> = {
+        let mut fetched: BTreeMap<String, Result<Vec<(u32, Bundle)>>> = if automatic {
+            BTreeMap::new()
+        } else {
             use futures_util::stream::{self, StreamExt};
             let this = &*self;
             stream::iter(members.iter().filter(|peer| !remembered.contains_key(*peer)).cloned())
@@ -480,11 +600,23 @@ impl Legacy {
                 skipped.push((peer.clone(), why.clone()));
                 continue;
             }
-            let result = fetched.remove(peer).expect("every member was fetched");
-            let devices = match result.and_then(|found| self.observe_fetched(peer, found, Some(room))) {
+            let result = if automatic {
+                self.devices(peer, Some(room)).await
+            } else {
+                let found = fetched.remove(peer).expect("every member was fetched");
+                found
+                    .and_then(|found| self.observe_fetched(peer, found, Some(room)))
+                    .map(|devices| devices.into_iter().map(|(device, bundle)| (device, Some(bundle))).collect())
+            };
+            let mut devices = match result {
                 Ok(devices) => {
                     self.unreachable.remove(peer);
                     devices
+                }
+                Err(Error::InvalidBundle(_) | Error::ContactAuthorization(_)
+                    | Error::Unavailable(KEY_SERVER_TIMEOUT | MISSING_KEYS | NO_DEVICES | UNSUPPORTED)) if automatic => {
+                    automatic_skipped += 1;
+                    continue;
                 }
                 Err(error) if skip_unreachable && peer != &owner && skippable(&error) => {
                     let why = error.to_string();
@@ -494,7 +626,7 @@ impl Legacy {
                 }
                 Err(error) => return Err(error),
             };
-            if devices
+            if !automatic && devices
                 .iter()
                 .any(|(device, _)| device.trust == Trust::Undecided)
             {
@@ -504,11 +636,16 @@ impl Legacy {
                     Error::TrustRequired
                 });
             }
+            if automatic { devices.retain(|(device, _)| device.trust == Trust::Trusted); }
             if peer != &owner
                 && !devices
                     .iter()
                     .any(|(device, _)| device.trust == Trust::Trusted)
             {
+                if automatic {
+                    automatic_skipped += 1;
+                    continue;
+                }
                 if skip_unreachable {
                     skipped.push((peer.clone(), NO_DEVICES.to_owned()));
                     continue;
@@ -526,6 +663,13 @@ impl Legacy {
         }
         if !skipped.is_empty() && skipped.len() + 1 >= members.len() {
             return Err(Error::Unavailable(NOBODY_REACHABLE));
+        }
+        if members.iter().any(|peer| peer != &owner)
+            && !targets.iter().any(|(device, _)| device.peer != owner) {
+            return Err(Error::Unavailable(NO_DEVICES));
+        }
+        if automatic_skipped > 0 {
+            eprintln!("Monogram Legacy automatic room encryption: skipped {automatic_skipped} unavailable participants; retained {} encrypted device targets", targets.len());
         }
         let xml = encrypt_for_kind(&mut self.store, room, body, wire_id, &targets, true)?;
         Ok((xml, skipped))
@@ -779,7 +923,7 @@ fn encrypt_for(
     peer: &str,
     body: &str,
     id: &str,
-    recipients: &[(Device, Bundle)],
+    recipients: &[(Device, Option<Bundle>)],
 ) -> Result<Element> {
     encrypt_for_kind(store, peer, body, id, recipients, false)
 }
@@ -789,7 +933,7 @@ fn encrypt_for_kind(
     peer: &str,
     body: &str,
     id: &str,
-    recipients: &[(Device, Bundle)],
+    recipients: &[(Device, Option<Bundle>)],
     room: bool,
 ) -> Result<Element> {
     if body.is_empty()
@@ -822,10 +966,14 @@ fn encrypt_for_kind(
             if device.peer == owner && device.id == local {
                 return Err(Error::Invalid("legacy local device target"));
             }
-            if device::trust(tx, &device.peer, device.id, &bundle.identity)? != Trust::Trusted {
+            if device::trust(tx, &device.peer, device.id, &device.key)? != Trust::Trusted {
                 return Err(Error::TrustRequired);
             }
             if tx.load(SESSION, &device.peer, device.id)?.is_none() {
+                let bundle = bundle.as_ref().ok_or_else(|| Error::invalid_bundle(crate::encryption_policy::Mode::Legacy.name(), &device.peer, Some(device.id)))?;
+                if bundle.identity != device.key || bundle.prekeys.is_empty() {
+                    return Err(Error::invalid_bundle(crate::encryption_policy::Mode::Legacy.name(), &device.peer, Some(device.id)));
+                }
                 // Sample uniformly from the published prekeys without bias.
                 let bound = (u64::from(u32::MAX) + 1) / bundle.prekeys.len() as u64
                     * bundle.prekeys.len() as u64;
@@ -1013,7 +1161,7 @@ mod repair_tests {
                 B,
                 "first",
                 "first",
-                &[(device(B, 202, &bob_bundle), bob_bundle.clone())],
+                &[(device(B, 202, &bob_bundle), Some(bob_bundle.clone()))],
             )
             .unwrap(),
             "from",
@@ -1025,7 +1173,7 @@ mod repair_tests {
                 B,
                 "stale",
                 "stale",
-                &[(device(B, 202, &bob_bundle), bob_bundle.clone())],
+                &[(device(B, 202, &bob_bundle), Some(bob_bundle.clone()))],
             )
             .unwrap(),
             "from",
@@ -1041,6 +1189,7 @@ mod repair_tests {
             repairs: BTreeMap::new(),
             pending_repairs: BTreeMap::new(),
             unreachable: BTreeMap::new(),
+            discovery_backoff: BTreeMap::new(),
         };
         let envelope = Envelope::parse(&first, B, 202).unwrap();
         let accepted = receiver.receive_for(&first, &envelope, 0, None).unwrap();
@@ -1106,7 +1255,7 @@ mod repair_tests {
                 B,
                 "next",
                 "next",
-                &[(device(B, 202, &fresh_bundle), fresh_bundle)],
+                &[(device(B, 202, &fresh_bundle), Some(fresh_bundle))],
             )
             .unwrap(),
             "from",
@@ -1200,6 +1349,7 @@ mod denial_tests {
             repairs: BTreeMap::new(),
             pending_repairs: BTreeMap::new(),
             unreachable: BTreeMap::new(),
+            discovery_backoff: BTreeMap::new(),
         };
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let outcome = runtime.block_on(async {
@@ -1289,6 +1439,7 @@ mod bundle_tests {
             repairs: BTreeMap::new(),
             pending_repairs: BTreeMap::new(),
             unreachable: BTreeMap::new(),
+            discovery_backoff: BTreeMap::new(),
         };
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
@@ -1346,7 +1497,7 @@ mod bundle_tests {
         );
         assert_eq!(
             Error::InvalidBundle(None).to_string(),
-            "A device's public bundle is invalid or missing; refresh device review",
+            "A device's encryption keys are unavailable. Reconnect and retry.",
             "call sites that do not know the contact keep the old wording"
         );
     }
@@ -1406,6 +1557,7 @@ mod room_skip_tests {
             repairs: BTreeMap::new(),
             pending_repairs: BTreeMap::new(),
             unreachable: BTreeMap::new(),
+            discovery_backoff: BTreeMap::new(),
         };
         let members: BTreeSet<String> = members.iter().map(|m| m.to_string()).collect();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -1621,6 +1773,7 @@ mod room_perf {
             repairs: BTreeMap::new(),
             pending_repairs: BTreeMap::new(),
             unreachable: BTreeMap::new(),
+            discovery_backoff: BTreeMap::new(),
         };
         let count = Arc::new(AtomicUsize::new(0));
         let held = Arc::new(Mutex::new(Vec::new()));

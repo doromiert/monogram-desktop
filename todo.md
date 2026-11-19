@@ -159,3 +159,13 @@
 
 - [x] Restrict automatic downloads to media; ordinary files choose a native save destination before transfer, with cancellation/account fences and pack opening retained. Native picker/cancel/background export passes1.11s;291 default tests pass (94ignored).
 - [x] Publish/install desktop manual-document save behavior: source656bf13 / ZenPkgsf8a7340b, packaged smoke147ms feedback/369ms maximum heartbeat. Mobile0.2.227/74449 published froma6bccbc34 with3API36 tests, matching signer/all8native libraries and ELF/ZIP16KiB checks; hosted digest verified.
+
+- [x] Integrate merged PR3 audio helper and preserve manual-document save behavior plus automatic media policy for both audio paths.321 default tests pass128ignored;12 real sandbox +4 playback +6 audio UI checks pass, including25s playback and bounded preparation. Existing audio/profile/pack-strip and native save-picker checks pass.
+- [x] Publish/install merged PR3 (850786b) plus audio-policy integration270c11b: ZenPkgs97eb01b7, packaged audio container/PCM and helper-confinement checks pass; native package smoke109ms feedback/339ms maximum heartbeat. Exact installed app verified with2.3ms Ping and no GTK criticals; live loading feedback205ms/frame gap369ms.
+
+## Current encrypted sending and mentions
+
+- [x] Match mobile automatic MUC encryption: reuse established sessions and cached discovery, skip temporarily unavailable recipients while retaining encrypted delivery to at least one external recipient. Preserve strict trust mode and explicit blocks.
+- [x] Add MUC @nickname suggestions to composer and message editor using the existing emoji completion popover; Tab accepts, arrows choose, Escape dismisses, Enter retains its send/save behavior.
+- [x] Review native popover reuse, accessible plain-text nickname labels, room scoping and bounded synchronous filtering in source. Build passed; user requested no self-testing.
+- [ ] User acceptance of @nickname popup behavior; the last three user-sent messages were observed as sent with Legacy encryption after the automatic recipient-policy fix.

@@ -51,8 +51,22 @@ impl Selection {
         const DAY_MS: i64 = 24 * 60 * 60 * 1000;
         now.checked_sub(self.time_ms)
             .filter(|age| (0..DAY_MS).contains(age))
-            .filter(|_| self.mode != Mode::Omemo2)
+            // Published PQ device lists can outlive their bundles; preflight each send.
+            .filter(|_| !matches!(self.mode, Mode::Omemo2 | Mode::Pq))
             .map(|_| self.mode)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pq_selection_is_rechecked_while_explicit_choices_remain_pinned() {
+        let now = 1_000_000;
+        assert_eq!(Selection { mode: Mode::Pq, time_ms: now }.current(now), None);
+        assert_eq!(Selection { mode: Mode::Legacy, time_ms: now }.current(now), Some(Mode::Legacy));
+        assert_eq!(Preference::Omemo2.forced(), Some(Mode::Pq));
     }
 }
 

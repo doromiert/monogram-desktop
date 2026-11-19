@@ -539,9 +539,9 @@ impl Ui {
             };
             if let Some(r) = &reply {
                 message.reply = format!("{} · {}", r.author, r.reply_preview());
-                message.reply_id = r.wire_id.clone();
-                message.reply_to = if group && !r.sender.is_empty() {
-                    r.sender.clone()
+                message.reply_id = crate::message_actions::stanza_reference(r).unwrap_or_default();
+                message.reply_to = if group {
+                    crate::message_actions::room_reply_address(r, &peer)
                 } else if r.own {
                     owner.clone()
                 } else {

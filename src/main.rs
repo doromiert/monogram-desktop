@@ -208,6 +208,26 @@ fn main() -> gtk::glib::ExitCode {
                 started.elapsed().as_millis()
             );
             let ui = ui::Ui::new_with_window(&app, smoke, ready_window);
+            #[cfg(debug_assertions)]
+            {
+                let probe = gtk::gio::SimpleAction::new("diagnose-encryption", None);
+                let weak = std::rc::Rc::downgrade(&ui);
+                probe.connect_activate(move |_, _| {
+                    let Some(ui) = weak.upgrade() else { return };
+                    let peer = ui.state.borrow().current().jid.clone();
+                    let (reply, receive) = tokio::sync::oneshot::channel();
+                    if ui.command(protocol::Command::ChooseEncryption { peer, reply, skip_unreachable: false }) {
+                        gtk::glib::MainContext::default().spawn_local(async move {
+                            match receive.await {
+                                Ok(Ok(mode)) => eprintln!("Monogram diagnostic encryption choice: {mode:?}"),
+                                Ok(Err(error)) => eprintln!("Monogram diagnostic encryption choice: {}", error.diagnostic()),
+                                Err(_) => eprintln!("Monogram diagnostic encryption choice interrupted"),
+                            }
+                        });
+                    }
+                });
+                app.add_action(&probe);
+            }
             let reconnect = ui.clone();
             after_next_paint(&ui.window, move || {
                 eprintln!(
