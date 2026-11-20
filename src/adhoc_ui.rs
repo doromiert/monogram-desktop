@@ -41,24 +41,26 @@ pub(crate) fn form_widgets(form: &Form) -> (gtk::Box, Vec<(String, Getter)>) {
                 }
             }
             Kind::Text | Kind::Jid => {
-                let row = adw::EntryRow::builder().title(field_title(field)).build();
+                let row = adw::EntryRow::new();
                 row.set_use_markup(false);
+                row.set_title(&field_title(field));
                 row.set_text(field.values.first().map_or("", String::as_str));
                 singles.add(&row);
                 singles_used = true;
                 getters.push((field.var.clone(), Box::new(move || vec![row.text().to_string()])));
             }
             Kind::Private => {
-                let row = adw::PasswordEntryRow::builder().title(field_title(field)).build();
+                let row = adw::PasswordEntryRow::new();
                 row.set_use_markup(false);
+                row.set_title(&field_title(field));
                 singles.add(&row);
                 singles_used = true;
                 getters.push((field.var.clone(), Box::new(move || vec![row.text().to_string()])));
             }
             Kind::Boolean => {
                 let row = adw::SwitchRow::builder()
-                    .title(&field.label)
                     .use_markup(false)
+                    .title(&field.label)
                     .active(field.values.first().is_some_and(|v| adhoc::truthy(v)))
                     .build();
                 singles.add(&row);
@@ -71,8 +73,8 @@ pub(crate) fn form_widgets(form: &Form) -> (gtk::Box, Vec<(String, Getter)>) {
             Kind::ListSingle => {
                 let labels: Vec<&str> = field.options.iter().map(|(_, label)| label.as_str()).collect();
                 let row = adw::ComboRow::builder()
-                    .title(field_title(field))
                     .use_markup(false)
+                    .title(field_title(field))
                     .model(&gtk::StringList::new(&labels))
                     .build();
                 let chosen = field
@@ -101,8 +103,8 @@ pub(crate) fn form_widgets(form: &Form) -> (gtk::Box, Vec<(String, Getter)>) {
                 let mut rows = Vec::new();
                 for (value, label) in &field.options {
                     let row = adw::SwitchRow::builder()
-                        .title(label)
                         .use_markup(false)
+                        .title(label)
                         .active(field.values.contains(value))
                         .build();
                     group.add(&row);
@@ -242,9 +244,9 @@ impl Ui {
             let group = adw::PreferencesGroup::new();
             for command in commands {
                 let row = adw::ActionRow::builder()
+                    .use_markup(false)
                     .title(&command.name)
                     .subtitle(&command.node)
-                    .use_markup(false)
                     .activatable(true)
                     .build();
                 row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
@@ -476,11 +478,36 @@ impl Runner {
             group.add(&row);
         }
         self.body.append(&group);
-        if let Some(expires) = &invite.expires {
-            self.body.append(&wrap(&format!("Expires {expires}"), "dim-label"));
+        match (invite.expires_at(), &invite.expires) {
+            (Some(at), _) => self.body.append(&live_expiry(at)),
+            (None, Some(raw)) => self.body.append(&wrap(&format!("Expires {raw}"), "dim-label")),
+            (None, None) => {}
         }
         self.close_button();
     }
+}
+
+/// "Expires in 6 days", kept current: it recounts every second and says "Expired" once the time
+/// passes. The exact local time is in the tooltip. The timer stops when the label is gone.
+pub(crate) fn live_expiry(at: chrono::DateTime<chrono::Utc>) -> gtk::Label {
+    let label = wrap(&adhoc::expiry_text(at, chrono::Utc::now()), "dim-label");
+    label.set_tooltip_text(Some(
+        &at.with_timezone(&chrono::Local).format("%A %-d %B %Y, %H:%M").to_string(),
+    ));
+    let weak = label.downgrade();
+    glib::timeout_add_seconds_local(1, move || {
+        let Some(label) = weak.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        let now = chrono::Utc::now();
+        label.set_label(&adhoc::expiry_text(at, now));
+        if at <= now {
+            label.remove_css_class("dim-label");
+            label.add_css_class("error");
+        }
+        glib::ControlFlow::Continue
+    });
+    label
 }
 
 /// A result form as read-only rows.
@@ -605,5 +632,23 @@ mod tests {
         assert_eq!(field_title(&f), "Label n");
         f.required = true;
         assert_eq!(field_title(&f), "Label n *");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn the_expiry_label_counts_down_and_turns_to_expired() {
+        gtk::init().expect("display");
+        let soon = chrono::Utc::now() + chrono::Duration::milliseconds(1500);
+        let label = live_expiry(soon);
+        assert_eq!(label.label(), "Expires in less than a minute");
+        assert!(label.tooltip_text().is_some_and(|tip| tip.contains(':')), "the exact time is in the tooltip");
+        let context = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+        while label.label() != "Expired just now" && std::time::Instant::now() < deadline {
+            context.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(label.label(), "Expired just now", "the text changed without being reopened");
+        assert!(label.has_css_class("error") && !label.has_css_class("dim-label"));
     }
 }

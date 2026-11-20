@@ -446,6 +446,45 @@ pub fn invite(step: &Step) -> Option<Invite> {
     })
 }
 
+impl Invite {
+    /// When the invitation stops working, if the server said and the time is readable.
+    pub fn expires_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        let value = self.expires.as_deref()?.trim();
+        chrono::DateTime::parse_from_rfc3339(value)
+            .ok()
+            .map(|time| time.with_timezone(&chrono::Utc))
+    }
+}
+
+/// How long until `expires`, in words: "Expires in 6 days", "Expires in 12 minutes", "Expired 3
+/// hours ago". It changes with `now`, so show it from a timer rather than once.
+pub fn expiry_text(expires: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> String {
+    let delta = expires - now;
+    // Judged on the exact instant: a fraction of a second left is still "not expired".
+    let (amount, past) = (delta.num_seconds().abs(), delta <= chrono::Duration::zero());
+    let span = if amount < 60 {
+        if past {
+            return "Expired just now".into();
+        }
+        return "Expires in less than a minute".into();
+    } else if amount < 3600 {
+        plural(amount / 60, "minute")
+    } else if amount < 2 * 86_400 {
+        plural(amount / 3600, "hour")
+    } else {
+        plural(amount / 86_400, "day")
+    };
+    if past {
+        format!("Expired {span} ago")
+    } else {
+        format!("Expires in {span}")
+    }
+}
+
+fn plural(count: i64, unit: &str) -> String {
+    format!("{count} {unit}{}", if count == 1 { "" } else { "s" })
+}
+
 fn safe_link(value: &str, scheme: &str) -> bool {
     value.len() <= MAX_URI
         && value.len() > scheme.len()
@@ -832,5 +871,58 @@ mod tests {
             assert!(!error_text(&error).is_empty());
         }
         assert!(!error_text(&rejected("<script>")).contains('<'), "a condition is never echoed");
+    }
+
+    fn at(text: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(text).unwrap().with_timezone(&chrono::Utc)
+    }
+    #[test]
+    fn expiry_reads_in_the_largest_whole_unit() {
+        let now = at("2026-11-21T12:00:00Z");
+        let cases = [
+            ("2026-11-21T12:00:30Z", "Expires in less than a minute"),
+            ("2026-11-21T12:01:00Z", "Expires in 1 minute"),
+            ("2026-11-21T12:12:59Z", "Expires in 12 minutes"),
+            ("2026-11-21T13:00:00Z", "Expires in 1 hour"),
+            ("2026-11-22T11:00:00Z", "Expires in 23 hours"),
+            ("2026-11-22T12:00:00Z", "Expires in 24 hours"),
+            ("2026-11-23T12:00:00Z", "Expires in 2 days"),
+            ("2026-11-27T18:00:00Z", "Expires in 6 days"),
+            ("2027-11-21T12:00:00Z", "Expires in 365 days"),
+        ];
+        for (when, text) in cases {
+            assert_eq!(expiry_text(at(when), now), text, "{when}");
+        }
+    }
+    #[test]
+    fn an_expired_invite_says_so() {
+        let now = at("2026-11-21T12:00:00Z");
+        assert_eq!(expiry_text(now, now), "Expired just now");
+        assert_eq!(expiry_text(at("2026-11-21T11:59:30Z"), now), "Expired just now");
+        assert_eq!(expiry_text(at("2026-11-21T11:58:00Z"), now), "Expired 2 minutes ago");
+        assert_eq!(expiry_text(at("2026-11-21T11:00:00Z"), now), "Expired 1 hour ago");
+        assert_eq!(expiry_text(at("2026-11-18T12:00:00Z"), now), "Expired 3 days ago");
+    }
+    #[test]
+    fn the_text_follows_the_clock() {
+        let expires = at("2026-11-21T12:10:00Z");
+        assert_eq!(expiry_text(expires, at("2026-11-21T12:00:00Z")), "Expires in 10 minutes");
+        assert_eq!(expiry_text(expires, at("2026-11-21T12:09:00Z")), "Expires in 1 minute");
+        assert_eq!(expiry_text(expires, at("2026-11-21T12:09:45Z")), "Expires in less than a minute");
+        assert_eq!(expiry_text(expires, at("2026-11-21T12:10:00Z")), "Expired just now");
+        let almost = at("2026-11-21T12:09:59.600Z");
+        assert_eq!(expiry_text(expires, almost), "Expires in less than a minute", "0.4 s left is not expired");
+        assert_eq!(expiry_text(expires, at("2026-11-21T12:20:00Z")), "Expired 10 minutes ago");
+    }
+    #[test]
+    fn the_servers_expiry_is_read_with_any_offset() {
+        let invite = |value: &str| Invite { uri: None, landing: None, expires: Some(value.into()) };
+        assert_eq!(invite("2026-12-01T00:00:00Z").expires_at(), Some(at("2026-12-01T00:00:00Z")));
+        assert_eq!(invite("2026-12-01T02:00:00+02:00").expires_at(), Some(at("2026-12-01T00:00:00Z")));
+        assert_eq!(invite("2026-12-01T00:00:00.250Z").expires_at().is_some(), true);
+        for bad in ["", "soon", "2026-12-01", "9999999999999999999"] {
+            assert_eq!(invite(bad).expires_at(), None, "{bad:?}");
+        }
+        assert_eq!(Invite { uri: None, landing: None, expires: None }.expires_at(), None);
     }
 }
