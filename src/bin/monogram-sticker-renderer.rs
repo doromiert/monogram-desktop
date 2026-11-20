@@ -2,7 +2,7 @@
 //! Private bounded frame-pull helper for TGS stickers, rendered with tlottie (the engine
 //! Telegram Desktop uses). It never resolves external references. Launched only inside bwrap.
 //! Protocol: `MGT1`,len,edge + gzip TGS in; `MGF1` header out; then per u32 frame
-//! request one `index,len,RGBA(premultiplied)` reply. `MGE1` is the same for bundled Noto
+//! request one `index,len,RGBA(premultiplied)` reply. `MGE2`/`MGF2` add a rest-frame index for bundled Noto
 //! emoji, whose animations are larger and longer than a sticker (square up to 1024, 360
 //! frames, 6 seconds); stickers keep their exact 512x512, 180 frame, 3 second limits.
 use tlottie::{Composition, Limits, RenderOptions};
@@ -57,6 +57,19 @@ fn restrict_calls() -> bool {
 fn number(bytes: &[u8]) -> u32 {
     u32::from_le_bytes(bytes.try_into().unwrap())
 }
+// Noto's static pose is a marker, not the last frame of its looping timeline.
+fn rest_frame(json: &str, in_point: f32, frames: u32) -> Option<u32> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let mut markers = value.get("markers")?.as_array()?.iter().filter(|marker|
+        marker.get("cm").and_then(|name| name.as_str())
+            .is_some_and(|name| name.trim().eq_ignore_ascii_case("rest")));
+    let marker = markers.next()?;
+    if markers.next().is_some() { return None; }
+    let relative = marker.get("tm")?.as_f64()? - f64::from(in_point);
+    (relative.is_finite() && relative >= 0. && relative < f64::from(frames))
+        .then(|| relative.floor() as u32)
+}
+
 fn run() -> Result<(), i32> {
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout().lock();
@@ -64,7 +77,7 @@ fn run() -> Result<(), i32> {
     input.read_exact(&mut header).map_err(|_| 3)?;
     let emoji = match &header[..4] {
         b"MGT1" => false,
-        b"MGE1" => true,
+        b"MGE2" => true,
         _ => return Err(3),
     };
     let (length, edge) = (number(&header[4..8]), number(&header[8..12]));
@@ -82,8 +95,9 @@ fn run() -> Result<(), i32> {
     drop(gzip);
     // tlottie treats the JSON as untrusted: bounded parsing, no I/O, no external references.
     let animation = Composition::parse(json.as_bytes(), &Limits::default()).map_err(|_| 5)?;
-    drop(json);
     let (fps, frames) = (animation.frame_rate, animation.frame_count());
+    let rest = if emoji { rest_frame(&json, animation.in_point, frames) } else { None };
+    drop(json);
     let (square_ok, max_frames, max_seconds) = if emoji {
         (animation.width == animation.height && (1..=1024).contains(&animation.width), 360, 6.1)
     } else {
@@ -96,11 +110,12 @@ fn run() -> Result<(), i32> {
     }
     let mut renderer = tlottie::CPURenderer::new(animation);
     let mut canvas = vec![0u32; (edge * edge) as usize];
-    let mut meta = Vec::with_capacity(20);
-    meta.extend_from_slice(b"MGF1");
+    let mut meta = Vec::with_capacity(if emoji { 24 } else { 20 });
+    meta.extend_from_slice(if emoji { b"MGF2" } else { b"MGF1" });
     for value in [edge, edge, frames, (f64::from(fps) * 1000.0).round() as u32] {
         meta.extend_from_slice(&value.to_le_bytes());
     }
+    if emoji { meta.extend_from_slice(&rest.unwrap_or(u32::MAX).to_le_bytes()); }
     output.write_all(&meta).and_then(|_| output.flush()).map_err(|_| 6)?;
     let mut request = [0u8; 4];
     while input.read_exact(&mut request).is_ok() {
@@ -139,5 +154,25 @@ fn main() {
     unsafe { libc::umask(0o077); libc::alarm(8) };
     if let Err(code) = run() {
         std::process::exit(code);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn rest_markers_are_case_insensitive_relative_and_bounded() {
+        for name in ["rest", "Rest", " REST "] {
+            let json = format!(r#"{{"markers":[{{"tm":110,"cm":"{name}","dr":0}}]}}"#);
+            assert_eq!(rest_frame(&json, 0., 143), Some(110));
+            assert_eq!(rest_frame(&json, 10., 133), Some(100));
+        }
+        for json in [r#"{}"#, r#"{"markers":[]}"#, r#"{"markers":[{"tm":110,"cm":"other"}]}"#,
+            r#"{"markers":[{"tm":-1,"cm":"rest"}]}"#, r#"{"markers":[{"tm":143,"cm":"rest"}]}"#,
+            r#"{"markers":[{"tm":"110","cm":"rest"}]}"#, r#"{"markers":[{"cm":"rest"}]}"#,
+            r#"{"markers":[{"tm":1,"cm":"rest"},{"tm":2,"cm":"Rest"}]}"#, "invalid"] {
+            assert_eq!(rest_frame(json, 0., 143), None, "{json}");
+        }
+        assert_eq!(rest_frame(r#"{"markers":[{"tm":10,"cm":"rest"}]}"#, 11., 143), None);
     }
 }

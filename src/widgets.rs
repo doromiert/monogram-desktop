@@ -1,4 +1,4 @@
-use gtk::{gdk, glib, prelude::*, subclass::prelude::*};
+use gtk::{gdk, gio, glib, prelude::*, subclass::prelude::*};
 use std::{
     cell::{Cell, RefCell},
     path::{Path, PathBuf},
@@ -1287,4 +1287,73 @@ pub fn transfer_progress_ring(
         let _ = ctx.stroke();
     });
     disk
+}
+
+/// Standard model-backed menu, matching Nautilus's PopoverMenu/GMenu pattern.
+pub(crate) fn context_menu(items:&[(String,String)], activate:impl Fn(&str)+'static)->gtk::PopoverMenu {
+    let model=gio::Menu::new();
+    for (title,key) in items {
+        let item=gio::MenuItem::new(Some(title),None);
+        item.set_action_and_target_value(Some("context.activate"),Some(&key.to_variant()));
+        model.append_item(&item);
+    }
+    let popup=gtk::PopoverMenu::from_model(Some(&model));
+    popup.set_has_arrow(false);popup.set_halign(gtk::Align::Start);popup.set_width_request(200);
+    let group=gio::SimpleActionGroup::new();
+    let action=gio::SimpleAction::new("activate",Some(glib::VariantTy::STRING));
+    let weak=popup.downgrade();
+    action.connect_activate(move|_,value| {
+        let Some(key)=value.and_then(|value|value.str()) else{return};
+        if let Some(popup)=weak.upgrade() {popup.popdown();}
+        activate(key);
+    });
+    group.add_action(&action);popup.insert_action_group("context",Some(&group));
+    popup.connect_closed(|popup| {
+        // Native menus close before action dispatch; keep the action group alive until then.
+        let popup=popup.clone();glib::idle_add_local_once(move||{if popup.parent().is_some(){popup.unparent();}});
+    });
+    popup
+}
+
+pub(crate) fn style_context_button(button:&gtk::Button) {
+    button.add_css_class("flat");button.add_css_class("context-menu-row");
+    if let Some(label)=button.child().and_downcast::<gtk::Label>() {label.set_xalign(0.);}
+}
+
+#[cfg(test)]
+mod context_menu_tests {
+    use super::*;
+    #[test]
+    #[ignore="requires private GTK display, xdotool and D-Bus"]
+    fn native_context_menu_is_compact_start_aligned_and_dispatches_before_cleanup() {
+        adw::init().unwrap();adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
+        let css=gtk::CssProvider::new();css.load_from_path(asset("style.css"));gtk::style_context_add_provider_for_display(&gdk::Display::default().unwrap(),&css,gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        let anchor=gtk::Button::with_label("Context menu");anchor.set_halign(gtk::Align::Center);anchor.set_valign(gtk::Align::Center);
+        let window=gtk::Window::builder().title("Monogram Context Fixture").default_width(500).default_height(400).child(&anchor).build();window.present();
+        let pump=||{let until=std::time::Instant::now()+std::time::Duration::from_millis(200);while std::time::Instant::now()<until{glib::MainContext::default().iteration(false);std::thread::sleep(std::time::Duration::from_millis(2));}};pump();
+        let ids=std::process::Command::new("xdotool").args(["search","--name","^Monogram Context Fixture$"]).output().unwrap();let id=String::from_utf8(ids.stdout).unwrap().lines().last().unwrap().to_owned();assert!(std::process::Command::new("xdotool").args(["windowfocus","--sync",&id]).status().unwrap().success());pump();
+        let chosen=Rc::new(RefCell::new(String::new()));let result=chosen.clone();
+        let popup=context_menu(&[("Open".into(),"open".into()),("Pin".into(),"pin".into()),("Mark read".into(),"read".into()),("Archive".into(),"archive".into()),("Mute".into(),"mute".into())],move|key|{result.replace(key.into());});
+        popup.set_parent(&anchor);popup.popup();pump();
+        fn labels(widget:&gtk::Widget, out:&mut Vec<gtk::Label>) {
+            if let Some(label)=widget.downcast_ref::<gtk::Label>() {out.push(label.clone());}
+            let mut child=widget.first_child();while let Some(widget)=child {child=widget.next_sibling();labels(&widget,out);}
+        }
+        let mut all=Vec::new();labels(popup.upcast_ref(),&mut all);let mut pin=None;
+        for title in ["Open","Pin","Mark read","Archive","Mute"] {
+            let label=all.iter().find(|label|label.text()==title).unwrap();
+            let mut row=label.clone().upcast::<gtk::Widget>();while row.css_name()!="modelbutton" {row=row.parent().unwrap();}
+            assert!(row.height()<=34,"{title} row is{}px tall",row.height());
+            assert!(row.width()>=130,"{title} menu row too narrow:{}px",row.width());
+            let bounds=label.compute_bounds(&row).unwrap();
+            assert!(bounds.x()<30.,"{title} label must start at the menu gutter: {:?}",bounds);
+            if title=="Pin" {pin=Some(row.clone());}
+            eprintln!("Native {title}:{}x{}px, label start aligned",row.width(),row.height());
+        }
+        if let Some(path)=std::env::var_os("MONOGRAM_CONTEXT_CAPTURE") {assert!(std::process::Command::new("import").arg("-window").arg("root").arg(path).status().unwrap().success());}
+        assert!(pin.unwrap().grab_focus());assert!(std::process::Command::new("xdotool").args(["key","--clearmodifiers","Return"]).status().unwrap().success());pump();
+        assert_eq!(chosen.borrow().as_str(),"pin","native menu action must survive menu close");assert!(popup.parent().is_none(),"closed popover must be cleaned up");
+        let button=gtk::Button::with_label("Add to Favorites");style_context_button(&button);assert_eq!(button.child().and_downcast::<gtk::Label>().unwrap().xalign(),0.);
+        window.close();
+    }
 }

@@ -103,7 +103,16 @@ impl Error {
             Self::Invalid(reason) => format!("invalid: {reason}"),
             Self::Native(code) => format!("ratchet: {code}"),
             Self::Unavailable(reason) => format!("unavailable: {reason}"),
-            other => format!("{:?}", std::mem::discriminant(other)),
+            Self::Storage(error) => format!("SQLite failure: {:?}", error.sqlite_error_code()),
+            Self::Crypto(error) => format!("OpenSSL failure codes: {:?}", error.errors().iter().map(|error| error.code()).collect::<Vec<_>>()),
+            Self::TrustRequired => "contact fingerprint is not approved".into(),
+            Self::OwnDeviceTrustRequired => "own-device fingerprint is not approved".into(),
+            Self::Changed => "local or remote encryption identity changed".into(),
+            Self::Incomplete => "incomplete persisted encryption state".into(),
+            Self::Vault => "local encryption key unavailable or keyring locked".into(),
+            Self::ContactAuthorization(_) => "contact denied encryption-key access".into(),
+            Self::Uncertain => "encrypted submission has uncertain delivery".into(),
+            Self::InvalidBundle(_) => "device bundle missing or invalid".into(),
         }
     }
 }

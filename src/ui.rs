@@ -82,6 +82,7 @@ pub struct Ui {
     pub anchor: RefCell<Option<String>>,
     pub bubbles: RefCell<HashMap<String, gtk::Widget>>,
     pub(crate) rendered_rows: RefCell<crate::messages::RenderedRows>,
+    pub(crate) recent_timelines: RefCell<std::collections::VecDeque<crate::messages::CachedTimeline>>,
     pub(crate) reply_scroll: RefCell<Option<adw::TimedAnimation>>,
     chat_refresh_pending: Cell<bool>,
     pub media_stack: gtk::Stack,
@@ -111,6 +112,7 @@ pub struct Ui {
     pub room_sync_retry: RefCell<HashMap<String, (Instant, u8)>>,
     pub(crate) active_audio: RefCell<Option<std::rc::Weak<crate::video_ui::Playback>>>,
     pub(crate) active_profile: RefCell<Option<gtk::Popover>>,
+    pub(crate) profile_controls: RefCell<Option<crate::profile_ui::ProfileControls>>,
     pub(crate) profile_cache: RefCell<HashMap<String,(Instant,crate::profiles::Profile)>>,
     pub(crate) requests_revision: Cell<u64>,
     pub request_secrets: RefCell<crate::request_logic::SecretJobs>,
@@ -132,7 +134,8 @@ pub struct Ui {
     pub big_emoji: Cell<bool>,
     pub auto_download_enabled: Cell<bool>,
     pub auto_download_limit: Cell<u64>,
-    pub typing: RefCell<HashMap<String, Instant>>,
+    pub typing: RefCell<HashMap<(String, String), Instant>>,
+    pub(crate) header_subtitle: RefCell<Option<gtk::Label>>,
     pub last_typing: Cell<Option<Instant>>,
     pub typing_input: RefCell<Option<(String, Instant, bool)>>,
     pub history_pages: RefCell<HashMap<String, (String, bool)>>,
@@ -269,15 +272,7 @@ impl Ui {
         bp.add_setter(&utility, "collapsed", Some(&true.to_value()));
         window.add_breakpoint(bp);
         let (tx, rx) = mpsc::channel();
-        let composer = gtk::TextView::builder()
-            .wrap_mode(gtk::WrapMode::WordChar)
-            .accepts_tab(false)
-            .hexpand(true)
-            .top_margin(6)
-            .bottom_margin(6)
-            .left_margin(4)
-            .right_margin(4)
-            .build();
+        let composer = crate::composer_view::ComposerView::new();
         let composer_inline = crate::inline_emoji_ui::ComposerInlineEmoji::new(&composer.buffer());
         let request_button = icon_button("contact-new-symbolic", "Requests and invitations");
         request_button.set_visible(false);
@@ -388,8 +383,7 @@ impl Ui {
                 .build(),
             send_button: icon_button("mail-send-symbolic", "Send"),
             input_scroll: gtk::ScrolledWindow::builder()
-                .min_content_height(32)
-                .max_content_height(108)
+                .min_content_height(0)
                 .propagate_natural_height(true)
                 .hexpand(true)
                 .build(),
@@ -404,6 +398,7 @@ impl Ui {
             anchor: RefCell::new(None),
             bubbles: RefCell::new(HashMap::new()),
             rendered_rows: RefCell::new(Default::default()),
+            recent_timelines: RefCell::new(Default::default()),
             reply_scroll: RefCell::new(None),
             chat_refresh_pending: Cell::new(false),
             media_stack: gtk::Stack::builder()
@@ -444,6 +439,7 @@ impl Ui {
             room_sync_retry: RefCell::new(HashMap::new()),
             active_audio: RefCell::new(None),
             active_profile: RefCell::new(None),
+            profile_controls: RefCell::new(None),
             profile_cache: RefCell::new(HashMap::new()),
             requests_revision: Cell::new(0),
             request_secrets: RefCell::new(Default::default()),
@@ -466,6 +462,7 @@ impl Ui {
             auto_download_enabled: Cell::new(true),
             auto_download_limit: Cell::new(crate::downloads::DEFAULT_AUTO_MAX),
             typing: RefCell::new(HashMap::new()),
+            header_subtitle: RefCell::new(None),
             last_typing: Cell::new(None),
             typing_input: RefCell::new(None),
             history_pages: RefCell::new(HashMap::new()),
@@ -601,11 +598,11 @@ impl Ui {
             ui.retry_request_cleanup();
             ui.typing
                 .borrow_mut()
-                .retain(|_, t| t.elapsed() < Duration::from_secs(10));
+                .retain(|_, t| t.elapsed() < crate::chat_states::TIMEOUT);
             if before != ui.typing.borrow().len()
                 && ui.pages.visible_child_name().as_deref() == Some("chat")
             {
-                ui.show_chat();
+                ui.update_chat_subtitle();
             }
             glib::ControlFlow::Continue
         });
@@ -888,6 +885,7 @@ impl Ui {
         self.window.add_action(&action);
     }
     fn actions(self: &Rc<Self>) {
+        crate::chat_navigation::install(self);
         self.install_reply_scroll_input();
         crate::lan_sync_ui::install(self);
         self.action("search", |s| {
@@ -1150,22 +1148,30 @@ impl Ui {
         }
     }
     pub fn set_folder(self: &Rc<Self>, name: &str) {
-        let (old, new) = {
-            let mut s = self.state.borrow_mut();
-            let old = s
-                .folder_order
-                .iter()
-                .position(|n| n == &s.folder)
-                .unwrap_or(0);
-            let new = s.folder_order.iter().position(|n| n == name).unwrap_or(0);
-            if s.folder == name {
-                return;
+        let changed = {
+            let mut state=self.state.borrow_mut();
+            if state.folder==name {None} else {
+                let old=state.folder_order.iter().position(|n|n==&state.folder).unwrap_or(0);
+                let new=state.folder_order.iter().position(|n|n==name).unwrap_or(0);
+                state.folder=name.into();Some(new>=old)
             }
-            s.folder = name.into();
-            (old, new)
         };
-        self.refresh_chats(Some(new >= old));
-        self.persist();
+        let mut child=self.folder_bar.first_child();
+        while let Some(widget)=child {
+            child=widget.next_sibling();
+            if let Some(button)=widget.downcast_ref::<gtk::ToggleButton>().filter(|button|button.widget_name()==name) {
+                button.set_active(true);
+                if let Some(scroll)=self.folder_bar.ancestor(gtk::ScrolledWindow::static_type()).and_downcast::<gtk::ScrolledWindow>() {
+                    if let Some(bounds)=button.compute_bounds(&self.folder_bar) {
+                        let adjustment=scroll.hadjustment();let start=f64::from(bounds.x());let end=start+f64::from(bounds.width());
+                        if start<adjustment.value(){adjustment.set_value(start);}
+                        else if end>adjustment.value()+adjustment.page_size(){adjustment.set_value(end-adjustment.page_size());}
+                    }
+                }
+                break;
+            }
+        }
+        if let Some(direction)=changed {self.refresh_chats(Some(direction));self.persist();}
     }
     pub fn refresh_chats(self: &Rc<Self>, direction: Option<bool>) {
         let list = gtk::ListBox::new();
@@ -1673,7 +1679,9 @@ impl Ui {
             .flatten();
         self.save_draft();
         let switched = self.state.borrow().active != id;
+        let newest = self.history_window.newest();
         self.timeline_scope_changed();
+        if switched { self.switch_cached_timeline(id, newest); }
         {
             let mut state = self.state.borrow_mut();
             if switched && !state.account.is_empty() {
@@ -1772,17 +1780,10 @@ impl Ui {
         title.append(&self.chat_avatar(chat, 28));
         let words = bx(true, 0);
         words.append(&text(chat.display_name(), "chat-title"));
-        let subtitle = if self
-            .typing
-            .borrow()
-            .get(&chat.jid)
-            .is_some_and(|t| t.elapsed() < Duration::from_secs(10))
-        {
-            "Typing…"
-        } else {
-            &chat.subtitle
-        };
-        words.append(&text(subtitle, "chat-subtitle dim-label"));
+        let subtitle = text("", "chat-subtitle dim-label");
+        words.append(&subtitle);
+        self.header_subtitle.replace(Some(subtitle));
+        self.update_chat_subtitle();
         title.append(&words);
         self.title.set_child(Some(&title));
         if let Some(a) = self
@@ -1793,6 +1794,16 @@ impl Ui {
             a.set_state(&chat.notifications.to_variant())
         }
     }
+    pub(crate) fn update_chat_subtitle(&self) {
+        let state = self.state.borrow();
+        let chat = state.current();
+        let composing = self.typing.borrow().iter().any(|((peer, _), at)|
+            peer == &chat.jid && at.elapsed() < crate::chat_states::TIMEOUT);
+        if let Some(label) = self.header_subtitle.borrow().as_ref() {
+            label.set_text(if composing { "typing..." } else { &chat.subtitle });
+        }
+    }
+
     pub fn show_page(&self, title: &str, widget: &impl IsA<gtk::Widget>) {
         self.search_toggle.set_active(false);
         if let Some(old) = self.pages.child_by_name("section") {
@@ -2313,6 +2324,11 @@ impl Ui {
             self.utility.set_sidebar(gtk::Widget::NONE);
         }
         self.stop_uploads();
+        self.recent_timelines.borrow_mut().clear();
+        self.rendered_rows.replace(Default::default());
+        self.bubbles.borrow_mut().clear();
+        while let Some(row) = self.timeline.first_child() { self.timeline.remove(&row); }
+        self.timeline.set_opacity(0.);
         self.images.borrow_mut().clear();
         self.avatars.borrow_mut().clear();
         self.clear_legacy_room_pins(&mut state);
@@ -2339,6 +2355,7 @@ impl Ui {
         self.legacy_crypto.replace(Default::default());
         if let Some(audio)=self.active_audio.borrow_mut().take().and_then(|a|a.upgrade()){audio.media.pause();}
         self.profile_cache.borrow_mut().clear();
+        self.profile_controls.borrow_mut().take();
         if let Some(popup)=self.active_profile.borrow_mut().take(){popup.popdown();if popup.parent().is_some(){popup.unparent();}}
         self.pq_crypto.replace(Default::default());
         self.pq_reviews.borrow_mut().clear();
@@ -2578,6 +2595,7 @@ impl Ui {
                     }
                 }
                 if !online {
+                    self.update_chat_subtitle();
                     let _ = self.store.interrupt_messages(owner);
                     let _ = self.store.interrupt_actions(owner);
                     let peers: Vec<_> = self
@@ -2670,6 +2688,9 @@ impl Ui {
                 self.resume_current_chat();
             }
             BackendEvent::RoomPresence(presence) => {
+                if !presence.joined {
+                    self.typing.borrow_mut().retain(|(peer, _), _| peer != &presence.jid);
+                }
                 let mut state = self.state.borrow_mut();
                 let room = state.chat_for(&presence.jid);
                 room.group = true;
@@ -2906,6 +2927,9 @@ impl Ui {
                 online,
                 visible,
             } => {
+                if visible && !online {
+                    self.typing.borrow_mut().retain(|(chat, _), _| chat != &peer);
+                }
                 let mut s = self.state.borrow_mut();
                 if let Some(c) = s.chats.iter_mut().find(|c| c.jid == peer) {
                     c.subtitle = if !visible {
@@ -2918,20 +2942,17 @@ impl Ui {
                     .into();
                 }
                 drop(s);
-                if self.pages.visible_child_name().as_deref() == Some("chat") {
-                    self.show_chat()
-                }
+                self.update_chat_subtitle();
+                self.refresh_profile_card();
                 return;
             }
-            BackendEvent::Typing { peer, composing } => {
+            BackendEvent::Typing { peer, sender, composing } => {
                 if composing {
-                    self.typing.borrow_mut().insert(peer, Instant::now());
+                    self.typing.borrow_mut().insert((peer, sender), Instant::now());
                 } else {
-                    self.typing.borrow_mut().remove(&peer);
+                    self.typing.borrow_mut().remove(&(peer, sender));
                 }
-                if self.pages.visible_child_name().as_deref() == Some("chat") {
-                    self.show_chat()
-                }
+                self.update_chat_subtitle();
                 return;
             }
             BackendEvent::SentPartially { peer, id, skipped } => {
@@ -2953,12 +2974,18 @@ impl Ui {
                 // Bounced typing, receipt and marker stanzas also arrive here; only one of our own
                 // messages is worth a toast (edits, reactions and removals toast in `delivery`).
                 let own_id = self.store.own_wire_id(owner, &peer, &id).ok().flatten();
+                if own_id.is_some() {
+                    let stage = if reason.starts_with("the server said") { "XMPP server response" } else { "Message submission" };
+                    if self.store.record_message_failure(owner, &peer, &id, stage, &reason).is_err() {
+                        self.notice("The send error could not be saved in Message Details");
+                    }
+                }
                 self.delivery(&peer, &id, "failed");
                 let Some(own_id) = own_id else {
                     return;
                 };
                 self.record_failure_reason(owner, &peer, &id, &reason);
-                let title = crate::text_safety::failed_send_toast(&reason);
+                let title = crate::text_safety::failed_send_toast(&crate::message_failures::safe_detail(&reason));
                 self.notice_send_failure(&peer, vec![own_id], &reason, title);
             }
             BackendEvent::History {
@@ -3422,6 +3449,50 @@ impl Ui {
 mod composer_tests {
     use super::*;
 
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn composer_newlines_grow_by_complete_lines_without_premature_scroll() {
+        adw::init().unwrap();
+        let app=adw::Application::builder().application_id("com.negzero.ComposerNewlineFixture").flags(gio::ApplicationFlags::NON_UNIQUE).build();app.register(None::<&gio::Cancellable>).unwrap();
+        let ui=Ui::new(&app,true);
+        let css=gtk::CssProvider::new();css.load_from_path(crate::widgets::asset("style.css"));gtk::style_context_add_provider_for_display(&gdk::Display::default().unwrap(),&css,gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        let fonts=gtk::CssProvider::new();gtk::style_context_add_provider_for_display(&gdk::Display::default().unwrap(),&fonts,gtk::STYLE_PROVIDER_PRIORITY_USER);
+        ui.window.set_default_size(900,700);ui.window.present();ui.composer.grab_focus();
+        let settle=||{let until=Instant::now()+Duration::from_millis(150);while Instant::now()<until{glib::MainContext::default().iteration(false);std::thread::sleep(Duration::from_millis(2));}};
+        settle();
+        let ids=std::process::Command::new("xdotool").args(["search","--name","^Monogram$"]).output().unwrap();let id=String::from_utf8(ids.stdout).unwrap().lines().last().unwrap().to_owned();assert!(std::process::Command::new("xdotool").args(["windowfocus","--sync",&id]).status().unwrap().success());settle();
+        let mut previous_line=0;
+        for font in [13,20] {
+            fonts.load_from_data(&format!(".composer textview {{font-size:{font}px;}}"));
+            ui.composer.buffer().set_text("asd");ui.composer.buffer().place_cursor(&ui.composer.buffer().end_iter());settle();settle();
+            let line=ui.composer.iter_location(&ui.composer.buffer().start_iter()).height();
+            assert!(line>previous_line);previous_line=line;
+            let padding=ui.composer.top_margin()+ui.composer.bottom_margin();
+            let mut previous_scroll=0.;
+            for lines in 1..=8 {
+                let started=Instant::now();
+                if lines>1 {assert!(std::process::Command::new("xdotool").args(["key","--clearmodifiers","shift+Return"]).status().unwrap().success());settle();settle();}
+                let expected=padding+line*lines.min(5);
+                assert_eq!(ui.input_scroll.height(),expected,"{font}px font, {lines} lines");
+                let adj=ui.input_scroll.vadjustment();
+                assert!((adj.page_size()-f64::from(expected)).abs()<1.,"viewport must reflect the new height immediately");
+                let caret=ui.composer.iter_location(&ui.composer.buffer().end_iter());let visible=ui.composer.visible_rect();
+                assert!(caret.y()>=visible.y() && caret.y()+caret.height()<=visible.y()+visible.height(),"caret clipped at{lines} lines: {caret:?} {visible:?}");
+                if lines<=5 {assert_eq!(adj.value(),0.,"fitting text must not scroll or center");}
+                else {assert!(adj.value()-previous_scroll<=f64::from(line)+1.,"one newline must not scroll farther than one line");assert!(visible.y()+visible.height()-caret.y()-caret.height()<=padding,"caret must stay near bottom, not centered");}
+                assert!(started.elapsed()<Duration::from_millis(400),"feedback exceeded400ms");
+                previous_scroll=adj.value();
+            }
+            eprintln!("Composer {font}px: full {line}px lines + {padding}px padding; five-line cap and minimal caret scrolling pass");
+        }
+        let started=Instant::now();
+        ui.composer.buffer().set_text(&"x\n".repeat(10_000));settle();
+        let line=ui.composer.iter_location(&ui.composer.buffer().start_iter()).height();
+        assert_eq!(ui.input_scroll.height(),ui.composer.top_margin()+ui.composer.bottom_margin()+5*line);
+        assert!(started.elapsed()<Duration::from_millis(400),"large paste blocked visible feedback");
+        ui.window.close();
+    }
+
     /// The composer is sized by its scroll window from its content in the same layout pass
     /// (propagate_natural_height). Hand-syncing the height from an idle callback let GTK paint a
     /// frame where the text had grown but the viewport had not, and fought GTK's scroll-to-caret.
@@ -3465,11 +3536,12 @@ mod composer_tests {
             let text = &long[..length];
             ui.composer.buffer().set_text(text);
             settle(120);
-            let expected = content(&ui).clamp(32, 108);
-            assert_eq!(height(&ui), expected, "{} chars: composer height must follow its content, capped at 108", text.len());
+            let expected = content(&ui);
+            assert_eq!(height(&ui), expected, "{} chars: composer height must follow its content, capped at five lines", text.len());
             lines_seen.insert(expected);
         }
-        assert!(lines_seen.len() >= 4 && lines_seen.contains(&108), "heights seen: {lines_seen:?}");
+        let cap=ui.composer.top_margin()+ui.composer.bottom_margin()+5*ui.composer.iter_location(&ui.composer.buffer().start_iter()).height();
+        assert!(lines_seen.len() >= 4 && lines_seen.contains(&cap), "heights seen: {lines_seen:?}; cap={cap}");
         ui.composer.buffer().set_text("");
         settle(120);
         assert!(height(&ui) <= 34, "cleared composer is {}px tall", height(&ui));

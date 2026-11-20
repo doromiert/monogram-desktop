@@ -45,6 +45,7 @@ pub struct Job {
     pub cancel: AtomicBool,
     pub source: gio::Cancellable,
     pub phase: Mutex<Phase>,
+    pub diagnostic: Mutex<Option<String>>,
 }
 impl Default for Job {
     fn default() -> Self {
@@ -52,6 +53,7 @@ impl Default for Job {
             cancel: AtomicBool::new(false),
             source: gio::Cancellable::new(),
             phase: Mutex::new(Phase::Discovering),
+            diagnostic: Mutex::new(None),
         }
     }
 }
@@ -616,6 +618,21 @@ async fn put_wire(
         }
     };
     job.check()?;
+    *job.diagnostic.lock().unwrap() = Some(match &result {
+        Some(Ok(response)) => format!("HTTP PUT status={}; body_complete={}", response.status().as_u16(), done.load(Ordering::Acquire)),
+        Some(Err(error)) => {
+            let mut detail = format!("HTTP PUT response; timeout={}; connect={}; body={}; request={}", error.is_timeout(), error.is_connect(), error.is_body(), error.is_request());
+            let mut cause = std::error::Error::source(error);
+            for _ in 0..4 {
+                let Some(error) = cause else { break };
+                detail.push_str("; cause=");
+                detail.push_str(&crate::message_failures::safe_detail(&error.to_string()));
+                cause = error.source();
+            }
+            detail
+        },
+        None => "HTTP PUT acknowledgement deadline exceeded after body transmission".into(),
+    });
     match result {
         Some(Ok(response)) if response.status().as_u16() == 409 => Err("Upload slot conflict"),
         Some(Ok(response))
@@ -748,7 +765,10 @@ pub async fn run(
                 let root = iq
                     .request(&provider.jid, Kind::Get, request)
                     .await
-                    .map_err(|_| "Upload slot request failed")?
+                    .map_err(|error| {
+                        *job.diagnostic.lock().unwrap() = Some(format!("XMPP upload slot request: {error:?}"));
+                        "Upload slot request failed"
+                    })?
                     .ok_or("Invalid upload slot")?;
                 slot(&root)
             }
@@ -1074,13 +1094,14 @@ mod tests {
                 .read_timeout(Duration::from_millis(150))
                 .build()
                 .unwrap();
+            let diagnostic_job = Arc::new(Job::default());
             assert!(
                 runtime
                     .block_on(put_with_slots(
                         &client,
                         "application/octet-stream",
                         &wire,
-                        Arc::new(Job::default()),
+                        diagnostic_job.clone(),
                         Duration::from_millis(50),
                         |attempt| std::future::ready(Ok(server.slot(&if route == "/reject" {
                             route.into()
@@ -1091,6 +1112,9 @@ mod tests {
                     .is_err()
             );
             assert_eq!(server.requests.lock().unwrap().len(), count);
+            if route == "/reject" {
+                assert!(diagnostic_job.diagnostic.lock().unwrap().as_deref().unwrap().contains("HTTP PUT status=403"));
+            }
         }
         let server = Https::new();
         let job = Arc::new(Job::default());

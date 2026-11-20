@@ -416,7 +416,7 @@ mod tests {
             while main.pending() {
                 main.iteration(false);
             }
-            if !ui.rendering_messages() && condition() {
+            if !ui.rendering_messages() && !ui.history_window.moving.get() && condition() {
                 return;
             }
             std::thread::sleep(Duration::from_millis(4));
@@ -424,7 +424,7 @@ mod tests {
         let state = ui.state.borrow();
         let chat = state.current();
         assert!(
-            !ui.rendering_messages() && condition(),
+            !ui.rendering_messages() && !ui.history_window.moving.get() && condition(),
             "Native history window did not settle: mapped={} bounds={:?} rows={} first={:?} last={:?} busy={} newest={}",
             ui.timeline.is_mapped(),
             ui.history_bounds(),

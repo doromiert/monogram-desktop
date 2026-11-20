@@ -1194,7 +1194,7 @@ impl Worker {
                     BackendEvent::Failed {
                         peer: peer.clone(),
                         id,
-                        reason: describe(&error),
+                        reason: format!("{} [{}]", describe(&error), error.diagnostic()),
                     }
                 });
                 // A failed send already carries its reason in the toast.

@@ -74,6 +74,11 @@ impl Ui {
                 ui.local_contacts.replace(records);
                 ui.local_contact_avatars.replace(images);
                 ui.apply_local_contact_names();
+                ui.refresh_profile_card();
+                if let Some(view)=ui.participants.borrow().as_ref() {
+                    let people=ui.room_rosters.borrow().get(&view.room).cloned().unwrap_or_default();
+                    view.update(people);
+                }
                 ui.refresh_chats(None);
                 if ui.pages.visible_child_name().as_deref() == Some("chat") {
                     ui.show_chat();

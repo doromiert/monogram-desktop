@@ -1669,11 +1669,7 @@ impl MediaViewer {
         menu.add_css_class("message-menu-panel");
         for (title, copy) in [("Copy Media", true), ("Save As…", false)] {
             let button = gtk::Button::with_label(title);
-            button.add_css_class("flat");
-            button.add_css_class("context-menu-row");
-            if let Some(label) = button.child().and_downcast::<gtk::Label>() {
-                label.set_xalign(0.);
-            }
+            crate::widgets::style_context_button(&button);
             let weak = Rc::downgrade(&ui);
             let viewer = Rc::downgrade(self);
             let popup = popover.downgrade();

@@ -23,7 +23,7 @@ pub fn bare(value: &str) -> Result<String, String> {
     Ok(jid.to_string())
 }
 /// The server's error condition and text from an error stanza, for example
-/// "service unavailable: Remote server not found".
+/// "service unavailable: Remote server not found [type=cancel]".
 fn stanza_error_reason(root: &Element) -> String {
     let Some(error) = root.children().find(|child| child.name() == "error") else {
         return String::new();
@@ -38,11 +38,18 @@ fn stanza_error_reason(root: &Element) -> String {
         .find(|child| child.name() == "text")
         .map(|child| child.text())
         .unwrap_or_default();
-    match (condition.is_empty(), detail.trim().is_empty()) {
+    let reason = match (condition.is_empty(), detail.trim().is_empty()) {
         (true, _) => detail,
         (false, true) => condition,
         (false, false) => format!("{condition}: {}", detail.trim()),
+    };
+    let mut info = Vec::new();
+    for name in ["type", "code"] {
+        if let Some(value) = error.attr(name) {
+            info.push(format!("{name}={}", crate::text_safety::visible(value, 40)));
+        }
     }
+    if info.is_empty() { reason } else { format!("{reason} [{}]", info.join(" ")) }
 }
 /// A reason that came from a server says so, so it cannot pass for the app's own words.
 fn server_said(reason: String) -> String {
@@ -666,6 +673,7 @@ pub enum BackendEvent {
     },
     Typing {
         peer: String,
+        sender: String,
         composing: bool,
     },
     Message {
@@ -1442,7 +1450,12 @@ impl Session {
                                 emit(archive::failed(page.peer));
                             }
                         },
-                        Some(Command::Typing{peer,composing})=>{if online{send(&mut client,Element::builder("message",NS).attr("type".try_into().expect("static XML attribute"),"chat").attr("to".try_into().expect("static XML attribute"),peer).append(el(if composing{"composing"}else{"paused"},"http://jabber.org/protocol/chatstates")).build()).await;}},
+                        Some(Command::Typing{peer,composing})=>{
+                            if online && (!rooms.known(&peer) || rooms.is_joined(&peer)) {
+                                let kind=if rooms.known(&peer){"groupchat"}else{"chat"};
+                                send(&mut client,Element::builder("message",NS).attr("type".try_into().expect("static XML attribute"),kind).attr("to".try_into().expect("static XML attribute"),peer).append(el(if composing{"composing"}else{"paused"},crate::chat_states::NS)).append(el("no-store","urn:xmpp:hints")).build()).await;
+                            }
+                        },
                         Some(Command::BlockingList{reply})=>{
                             if reply.is_closed(){continue}
                             if !online {let snapshot=blocking.snapshot();let _=reply.send(if snapshot.jids.is_some(){Ok(snapshot)}else{Err("Reconnect to load blocked contacts".into())});continue}
@@ -1554,6 +1567,7 @@ impl Session {
                                     }
                                     continue;
                                 }
+                                if let Some(event)=typing_event(&rooms,&root,&owner){emit(event);}
                                 if root.attr("type")==Some("groupchat"){
                                     deliver_room(&rooms,&legacy,&pq,&emit,&root,&owner,None);
                                     continue;
@@ -1578,7 +1592,6 @@ impl Session {
                                     }continue
                                 }
                                 if let Some((_peer,message,historical))=normalize(&root,&owner,None){let receipt_to=(!historical&&!message.own&&!message.wire_id.is_empty()&&root.get_child("request","urn:xmpp:receipts").is_some()).then(||from.to_string());deliver(&crypto,&legacy,&pq,&emit,&root,&owner,None,historical,receipt_to);}
-                                if let Some(composing)=crate::chat_states::incoming(&root){emit(BackendEvent::Typing{peer:bare_of(from),composing});}
                             }else if root.is("presence",NS){
                                 let room_presence=rooms.presence(&root);
                                 room_jobs.changed(&rooms,&bare_of(from));
@@ -1661,6 +1674,22 @@ impl Drop for Session {
         }
     }
 }
+fn typing_event(rooms: &crate::rooms::Rooms, xml: &Element, owner: &str) -> Option<BackendEvent> {
+    let composing = crate::chat_states::incoming(xml)?;
+    let (peer, sender) = if xml.attr("type") == Some("groupchat") {
+        rooms.typing_sender(xml)?
+    } else {
+        let sender = xml.attr("from")?.parse::<Jid>().ok()?;
+        let peer = sender.to_bare().to_string();
+        if peer == owner || rooms.known(&peer)
+            || xml.attr("to").is_some_and(|to| to.parse::<Jid>().ok()
+                .is_none_or(|to| to.to_bare().as_str() != owner))
+        { return None; }
+        (peer, sender.to_string())
+    };
+    Some(BackendEvent::Typing { peer, sender, composing })
+}
+
 fn fatal_error(error: &tokio_xmpp::Error) -> bool {
     use tokio_xmpp::Error;
     match error {
@@ -1886,6 +1915,40 @@ async fn send(client: &mut Client, root: Element) -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn typing_routes_live_direct_and_joined_room_senders() {
+        let owner = "alice@example.invalid";
+        let room = "room@conference.example.invalid";
+        let mut rooms = crate::rooms::Rooms::new(owner.into());
+        let xml = |kind: &str, from: &str, to: &str, extra: &str| -> Element {
+            format!("<message xmlns='jabber:client' {kind} from='{from}' to='{to}'><composing xmlns='http://jabber.org/protocol/chatstates'/>{extra}</message>").parse().unwrap()
+        };
+        for kind in ["type='chat'", "type='normal'", ""] {
+            let event = typing_event(&rooms, &xml(kind,"bob@example.invalid/phone",owner,""), owner);
+            assert!(matches!(event,Some(BackendEvent::Typing {peer,sender,composing:true}) if peer=="bob@example.invalid" && sender=="bob@example.invalid/phone"));
+        }
+        assert!(typing_event(&rooms,&xml("type='chat'",owner,owner,""),owner).is_none());
+        assert!(typing_event(&rooms,&xml("type='chat'","bob@example.invalid/phone","other@example.invalid",""),owner).is_none());
+        let actor = format!("{room}/Bob");
+        assert!(typing_event(&rooms,&xml("type='groupchat'",&actor,owner,""),owner).is_none());
+        rooms.join(room,Some("me")).unwrap();
+        let presence: Element = format!("<presence xmlns='jabber:client' from='{room}/me' to='{owner}'><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='participant'/><status code='110'/></x></presence>").parse().unwrap();
+        assert!(rooms.presence(&presence).unwrap().joined);
+        assert!(matches!(typing_event(&rooms,&xml("type='groupchat'",&actor,owner,""),owner),Some(BackendEvent::Typing {peer,sender,composing:true}) if peer==room && sender==actor));
+        // Room states use the occupant resource even when real JIDs are undisclosed.
+        for (kind,from,to,extra) in [
+            ("type='groupchat'",format!("{room}/me"),owner,""),
+            ("type='groupchat'",room.into(),owner,""),
+            ("type='chat'",actor.clone(),owner,""),
+            ("type='groupchat'",actor.clone(),"other@example.invalid",""),
+            ("type='groupchat'",actor.clone(),owner,"<delay xmlns='urn:xmpp:delay'/>"),
+        ] {
+            assert!(typing_event(&rooms,&xml(kind,&from,to,extra),owner).is_none());
+        }
+        rooms.disconnect();
+        assert!(typing_event(&rooms,&xml("type='groupchat'",&actor,owner,""),owner).is_none());
+    }
+
+    #[test]
     fn failed_sends_name_the_servers_error_condition_and_text() {
         let error = |inner: &str| -> Element {
             format!("<message xmlns='jabber:client' type='error' id='m1'>{inner}</message>").parse().unwrap()
@@ -1893,11 +1956,11 @@ mod tests {
         let stanzas = "urn:ietf:params:xml:ns:xmpp-stanzas";
         assert_eq!(
             stanza_error_reason(&error(&format!("<error type='cancel'><service-unavailable xmlns='{stanzas}'/><text xmlns='{stanzas}'>Remote server not found</text></error>"))),
-            "service unavailable: Remote server not found"
+            "service unavailable: Remote server not found [type=cancel]"
         );
         assert_eq!(
-            stanza_error_reason(&error(&format!("<error type='auth'><forbidden xmlns='{stanzas}'/></error>"))),
-            "forbidden"
+            stanza_error_reason(&error(&format!("<error type='auth' code='403'><forbidden xmlns='{stanzas}'/></error>"))),
+            "forbidden [type=auth code=403]"
         );
         assert_eq!(
             stanza_error_reason(&error(&format!("<error><text xmlns='{stanzas}'>Only text</text></error>"))),

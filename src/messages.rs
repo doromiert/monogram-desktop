@@ -20,6 +20,13 @@ pub(crate) struct RenderedRows {
     serial: u64,
     rendering: bool,
 }
+/// Three inactive, bounded viewports; detached media stops mapping/playback.
+pub(crate) struct CachedTimeline {
+    rendered: RenderedRows,
+    order: Vec<gtk::ListBoxRow>,
+    messages: Vec<Message>,
+}
+
 struct PreparedMessages {
     messages: Vec<Message>,
     days: Vec<String>,
@@ -426,6 +433,55 @@ impl Ui {
         self.render_messages(false);
     }
 
+    pub(crate) fn switch_cached_timeline(self: &Rc<Self>, id: &str, newest: bool) {
+        let state = self.state.borrow();
+        let scope = (state.account.clone(), state.chats.iter().find(|chat| chat.id == id).unwrap().jid.clone());
+        let mut cache = self.recent_timelines.borrow_mut();
+        cache.retain(|view| view.rendered.scope.0 == scope.0);
+        let next = cache.iter().position(|view| view.rendered.scope == scope).and_then(|index| cache.remove(index));
+        let serial = self.rendered_rows.borrow().serial.wrapping_add(1);
+        let previous = std::mem::take(&mut *self.rendered_rows.borrow_mut());
+        let mut order = Vec::new();
+        while let Some(child) = self.timeline.first_child() {
+            self.timeline.remove(&child);
+            if let Ok(row) = child.downcast::<gtk::ListBoxRow>() { order.push(row); }
+        }
+        if previous.scope == (state.account.clone(), state.current().jid.clone())
+            && previous.scope != scope && !previous.rendering && !previous.rows.is_empty()
+            && previous.rows.len() <= crate::history_window::PAGE as usize * 2
+            && newest && state.current().messages.len() <= crate::history_window::PAGE as usize * 2
+        {
+            cache.push_front(CachedTimeline { rendered: previous, order, messages: state.current().messages.clone() });
+            cache.truncate(3);
+        }
+        drop(state);
+        self.bubbles.borrow_mut().clear();
+        if let Some(mut view) = next {
+            view.rendered.serial = serial;
+            view.rendered.render_request = None;
+            for row in &view.order { self.timeline.append(row); }
+            for (id, row) in &view.rendered.rows {
+                self.bubbles.borrow_mut().insert(id.clone(), row.bubble.clone().upcast());
+            }
+            let mut state = self.state.borrow_mut();
+            let chat = state.chats.iter_mut().find(|chat| chat.id == id).unwrap();
+            // Keep newer updates received while this viewport was inactive.
+            for message in std::mem::take(&mut chat.messages) {
+                if let Some(old) = view.messages.iter_mut().find(|old| old.id == message.id) { *old = message; }
+                else { view.messages.push(message); }
+            }
+            view.messages.sort_by(|a, b| a.order_key().cmp(&b.order_key()));
+            chat.messages = view.messages;
+            self.rendered_rows.replace(view.rendered);
+            self.timeline.set_opacity(1.);
+            self.queue_message_scroll(ScrollTarget::Bottom);
+        } else {
+            self.rendered_rows.borrow_mut().serial = serial;
+            // Allocate in frame-sized batches, but expose only the final positioned viewport.
+            self.timeline.set_opacity(0.);
+        }
+    }
+
     pub fn render_messages(self: &Rc<Self>, bottom: bool) {
         if !bottom && self.update_cached_rows() {
             return;
@@ -541,6 +597,10 @@ impl Ui {
         let messages = &planned.messages;
         let group = planned.group;
         let scope = planned.scope.clone();
+        if self.rendered_rows.borrow().scope != scope {
+            self.timeline.set_opacity(0.);
+            self.recent_timelines.borrow_mut().retain(|view| view.rendered.scope.0 == scope.0);
+        }
         self.bubbles.borrow_mut().clear();
         let mut rendered = self.rendered_rows.borrow_mut();
         let big_emoji = self.big_emoji.get();
@@ -1201,6 +1261,7 @@ impl Ui {
                         ui.cancel_reply_scroll();
                         ui.history_window.moving.set(true);
                         if let ScrollTarget::Message(id)=target {
+                            if !ui.rendering_messages() && !ui.history_window.busy() { ui.timeline.set_opacity(1.); }
                             if let Some(value)=ui.highlight_position(id){ui.animate_reply_scroll(value);}
                             return None;
                         }
@@ -1224,6 +1285,7 @@ impl Ui {
                         });
                         ui.history_window.moving.set(false);
                     }
+                    if !ui.rendering_messages() && !ui.history_window.busy() { ui.timeline.set_opacity(1.); }
                     ui.schedule_history_maintenance();
                 }
                 None
@@ -1947,5 +2009,73 @@ mod editor_native_tests {
         key(&editor,"Return");wait(||ui.state.borrow().message("own-edit-fixture").is_some_and(|m|m.text=="Edited\n"));wait(||ui.bubbles.borrow().get("own-edit-fixture").and_then(text_view).is_none());
         key(&ui.composer,"Up");wait(||ui.bubbles.borrow().get("own-edit-fixture").and_then(text_view).is_some());
         let editor=text_view(&ui.bubbles.borrow()["own-edit-fixture"]).unwrap();key(&editor,"Escape");wait(||ui.bubbles.borrow().get("own-edit-fixture").and_then(text_view).is_none());ui.window.close();
+    }
+}
+
+#[cfg(test)]
+mod chat_switch_tests {
+    use super::*;
+    use gtk::gio;
+    fn pump() {
+        let context=glib::MainContext::default();
+        for _ in 0..30 {if !context.pending(){break;}context.iteration(false);}
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    fn settled(ui:&Rc<Ui>) -> bool {
+        !ui.rendering_messages() && !ui.history_window.busy() && ui.message_scroll.borrow().is_none() && ui.timeline.opacity()>0.99 && ui.at_message_end()
+    }
+    fn wait(ui:&Rc<Ui>) {
+        let start=std::time::Instant::now();
+        while start.elapsed()<Duration::from_secs(8) {pump();if settled(ui){return;}}
+        panic!("chat did not settle");
+    }
+    #[test]
+    #[ignore="requires a private GTK display and D-Bus"]
+    fn switching_chats_reuses_bounded_views_and_never_exposes_partial_cold_rows() {
+        let application=adw::Application::builder().application_id("com.negzero.MonogramDesktop.ChatCacheFixture").flags(gio::ApplicationFlags::NON_UNIQUE).build();application.register(None::<&gio::Cancellable>).unwrap();
+        let ui=Ui::new(&application,true);
+        let owner="owner@fixture.invalid";
+        ui.store.save_account(&Account{jid:owner.into(),host:String::new(),port:5222,direct_tls:false}).unwrap();
+        let mut fixture=State::live(owner,vec![]);
+        for n in 0..6 {
+            let peer=format!("chat{n}@fixture.invalid");let chat=fixture.chat_for(&peer);
+            for i in 0..36 {
+                chat.messages.push(Message{id:format!("{n}-{i:02}"),wire_id:format!("{n}-{i:02}"),sender:peer.clone(),text:format!("Message {i}\nAnother line of content\nThird line of content"),timestamp:format!("2026-11-20T12:{i:02}:00Z"),..Default::default()});
+            }
+        }
+        fixture.active=fixture.chats[0].id.clone();ui.store.save(&fixture).unwrap();ui.activate_state(ui.store.load_windowed(owner));ui.window.set_default_size(900,520);ui.window.present();wait(&ui);
+        let start=std::time::Instant::now();ui.select_chat("chat1@fixture.invalid");
+        let mut visible_partial=0;let mut first_feedback=None;
+        while start.elapsed()<Duration::from_secs(8) {
+            pump();
+            if ui.history.is_visible()||ui.timeline.opacity()>0.99 {first_feedback.get_or_insert(start.elapsed());}
+            if ui.timeline.opacity()>0.99 && ui.rendering_messages() {visible_partial+=1;}
+            if settled(&ui){break;}
+        }
+        assert!(settled(&ui));
+        eprintln!("Cold switch: {:?}, first feedback={:?}, partial viewport observations={visible_partial}",start.elapsed(),first_feedback);
+        assert!(first_feedback.unwrap()<Duration::from_millis(400));
+        if std::env::var_os("MONOGRAM_CACHE_BASELINE").is_none() {assert_eq!(visible_partial,0);}
+        let original=ui.rendered_rows.borrow().rows["1-35"].row.clone();
+        ui.select_chat("chat2@fixture.invalid");wait(&ui);
+        let start=std::time::Instant::now();ui.select_chat("chat1@fixture.invalid");
+        let immediate=ui.timeline.last_child().is_some();wait(&ui);
+        let reused=ui.rendered_rows.borrow().rows["1-35"].row==original;
+        eprintln!("Warm switch: {:?}, immediately attached={immediate}, reused same widget={reused}",start.elapsed());
+        if std::env::var_os("MONOGRAM_CACHE_BASELINE").is_none() {assert!(immediate&&reused);assert!(start.elapsed()<Duration::from_millis(400));}
+        for n in 2..6 {ui.select_chat(&format!("chat{n}@fixture.invalid"));wait(&ui);}
+        assert!(ui.recent_timelines.borrow().len()<=3);
+        assert!(ui.recent_timelines.borrow().iter().all(|view|view.rendered.rows.len()<=72));
+        ui.select_chat("chat1@fixture.invalid");wait(&ui);
+        eprintln!("Evicted viewport rebuilt correctly");
+        assert!(ui.bubbles.borrow().contains_key("1-35"));
+        let mut other=State::live("another@fixture.invalid",vec![]);
+        other.active=other.chat_for("chat1@fixture.invalid").id.clone();
+        ui.activate_state(other);
+        assert!(ui.recent_timelines.borrow().is_empty());
+        assert!(ui.timeline.first_child().is_none());
+        wait(&ui);
+        assert!(!ui.bubbles.borrow().contains_key("1-35"));
+        ui.window.close();
     }
 }

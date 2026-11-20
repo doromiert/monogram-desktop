@@ -39,10 +39,12 @@ impl Section {
 
 /// Rows for the list: sections in a fixed order, people sorted by name with the user first,
 /// each heading showing "visible/total" so a search shows how much of the room it covers.
+#[cfg(test)]
 fn rows(all: &[Participant], query: &str) -> Vec<Row> {
+    rows_named(all,query,|person|crate::text_safety::display_nick(&person.nick,person.own))
+}
+fn rows_named(all: &[Participant], query: &str, name:impl Fn(&Participant)->String) -> Vec<Row> {
     let query = query.trim().to_lowercase();
-    // Names are matched and sorted as they are shown, with invisible characters removed.
-    let name = |person: &Participant| crate::text_safety::display_nick(&person.nick, person.own);
     let matches = |person: &Participant| {
         query.is_empty()
             || name(person).to_lowercase().contains(&query)
@@ -98,6 +100,7 @@ fn presence_label(show: &str) -> &'static str {
 
 pub struct ParticipantsView {
     pub room: String,
+    ui: Weak<Ui>,
     root: adw::ToolbarView,
     model: gio::ListStore,
     search: gtk::SearchEntry,
@@ -123,7 +126,13 @@ impl ParticipantsView {
     }
     fn rebuild(&self) {
         let query = self.search.text();
-        let rows = rows(&self.all.borrow(), &query);
+        let owner=self.ui.upgrade();
+        let locals=owner.as_ref().map(|ui|ui.local_contacts.borrow());
+        let rows = rows_named(&self.all.borrow(), &query, |person| {
+            let local=person.jid.as_ref().and_then(|jid|locals.as_ref()?.get(jid))
+                .map(|record|record.nickname.as_str()).filter(|name|!name.is_empty());
+            crate::text_safety::display_nick(local.unwrap_or(&person.nick),person.own)
+        });
         let items: Vec<glib::BoxedAnyObject> =
             rows.iter().cloned().map(glib::BoxedAnyObject::new).collect();
         self.model.splice(0, self.model.n_items(), &items);
@@ -148,6 +157,7 @@ impl ParticipantsView {
 fn factory(ui: Weak<Ui>, room:String) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
     let profile_ui=ui.clone();
+    let bind_room=room.clone();
     factory.connect_setup(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().unwrap();
         item.set_activatable(false);
@@ -184,7 +194,7 @@ fn factory(ui: Weak<Ui>, room:String) -> gtk::SignalListItemFactory {
         button.connect_clicked(move|button|{
             let (Some(item),Some(ui))=(weak_item.upgrade(),weak_ui.upgrade())else{return;};
             if let Some(object)=item.item().and_downcast::<glib::BoxedAnyObject>() {
-                if let Row::Person(person)=object.borrow::<Row>().clone(){let peer=person.jid.unwrap_or_else(||format!("{room}/{}",person.nick));ui.profile_card(button,&peer,&person.nick);}
+                if let Row::Person(person)=object.borrow::<Row>().clone(){ui.participant_profile_card(button,&room,&person);}
             }
         });
         root.append(&button);
@@ -215,18 +225,9 @@ fn factory(ui: Weak<Ui>, room:String) -> gtk::SignalListItemFactory {
                 profile.set_visible(true);
                 person.set_visible(true);
                 let overlay = person.first_child().and_downcast::<gtk::Overlay>().unwrap();
-                let avatar = overlay.child().and_downcast::<adw::Avatar>().unwrap();
-                avatar.set_text(Some(&participant.nick));
-                let texture = participant.jid.as_ref().and_then(|jid| {
-                    ui.upgrade().and_then(|ui| {
-                        ui.avatars
-                            .borrow()
-                            .cache
-                            .get(jid)
-                            .and_then(|(_, texture)| texture.clone())
-                    })
-                });
-                avatar.set_custom_image(texture.as_ref());
+                let Some(owner)=ui.upgrade() else{return};
+                let chat=owner.participant_chat(&bind_room,&participant);
+                overlay.set_child(Some(&owner.chat_avatar(&chat,40)));
                 let dot = overlay.last_child().unwrap();
                 for class in ["presence-online", "presence-away", "presence-busy"] {
                     dot.remove_css_class(class);
@@ -240,7 +241,7 @@ fn factory(ui: Weak<Ui>, room:String) -> gtk::SignalListItemFactory {
                 let name = person.last_child().and_downcast::<gtk::Label>().unwrap();
                 // The "(You)" mark is added here, for the user's own entry only; other people's
                 // names are cleaned so they cannot imitate it or hide characters.
-                let nick = crate::text_safety::display_nick(&participant.nick, participant.own);
+                let nick = crate::text_safety::display_nick(chat.display_name(), participant.own);
                 let shown = if participant.own { format!("{nick} (You)") } else { nick };
                 name.set_label(&shown);
                 person.set_tooltip_text(Some(&match &participant.jid {
@@ -299,6 +300,18 @@ fn auto_action(state: &AutoState) -> Auto {
 }
 
 impl Ui {
+    /// Shared presentation for a room occupant's row and profile card. Direct
+    /// roster presence cannot override the presence observed inside this room.
+    pub(crate) fn participant_chat(&self,room:&str,person:&Participant)->crate::model::Chat {
+        let peer=person.jid.clone().unwrap_or_else(||format!("{room}/{}",person.nick));
+        let mut chat=self.state.borrow().chats.iter().find(|chat|chat.jid==peer).cloned()
+            .unwrap_or_else(||crate::model::Chat{jid:peer.clone(),group:person.jid.is_none(),..Default::default()});
+        chat.name=person.nick.clone();
+        chat.subtitle=presence_label(&person.show).into();
+        if let Some(local)=self.local_contacts.borrow().get(&peer) {chat.local_name=local.nickname.clone();}
+        chat
+    }
+
     fn participants_auto_enabled(&self) -> bool {
         self.participants_pref.get().unwrap_or_else(|| {
             let on = self.store.pref("participants-auto", "true") != "false";
@@ -413,6 +426,7 @@ impl Ui {
 
         let view = Rc::new(ParticipantsView {
             room: chat.jid.clone(),
+            ui: Rc::downgrade(self),
             root: pane.clone(),
             model,
             search: search.clone(),
@@ -453,6 +467,7 @@ impl Ui {
                 .borrow_mut()
                 .insert(room.into(), people.clone());
         }
+        self.refresh_profile_card();
         let view = self.participants.borrow().clone();
         if let Some(view) = view.filter(|view| view.room == room) {
             view.update(people);
@@ -735,5 +750,16 @@ mod tests {
         settle(300);
         assert_eq!(ui.participants.borrow().as_ref().map(|view| view.room.clone()).as_deref(), Some(ROOM));
         ui.window.close();
+    }
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+    #[test]
+    fn local_display_names_are_searchable_without_changing_room_identity() {
+        let person=Participant{nick:"Room Nick".into(),jid:Some("person@example.invalid".into()),affiliation:"member".into(),role:"participant".into(),show:String::new(),own:false};
+        let found=rows_named(&[person.clone()],"local",|_|"Local Nick".into());
+        assert!(matches!(found.last(),Some(Row::Person(actual)) if actual==&person));
     }
 }

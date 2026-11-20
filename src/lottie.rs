@@ -26,6 +26,7 @@ pub struct Decoder {
     pub width: u32,
     pub height: u32,
     pub frames: u32,
+    pub rest_frame: Option<u32>,
     pub fps: f64,
     started: Instant,
     failed: bool,
@@ -151,7 +152,7 @@ impl Decoder {
         Self::open_with(input, edge, cancel, false)
     }
     /// A bundled Noto emoji animation: larger and longer than a sticker, rendered with the
-    /// relaxed limits the helper applies to its `MGE1` requests.
+    /// relaxed limits the helper applies to its `MGE2` requests.
     pub fn open_emoji(input: VerifiedFile, edge: u32, cancel: &gio::Cancellable) -> Result<Self> {
         Self::open_with(input, edge, cancel, true)
     }
@@ -247,6 +248,7 @@ impl Decoder {
             width: edge,
             height: edge,
             frames: 0,
+            rest_frame: None,
             fps: 0.,
             started: Instant::now(),
             failed: false,
@@ -254,14 +256,14 @@ impl Decoder {
         let result = (|| {
             let deadline = Instant::now() + INITIAL_TIMEOUT;
             let mut request = Vec::with_capacity(12);
-            request.extend_from_slice(if emoji { b"MGE1" } else { b"MGT1" });
+            request.extend_from_slice(if emoji { b"MGE2" } else { b"MGT1" });
             request.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
             request.extend_from_slice(&edge.to_le_bytes());
             write_pipe(&mut decoder.input, &request, deadline, cancel)?;
             write_pipe(&mut decoder.input, &bytes, deadline, cancel)?;
             let mut header = [0; 20];
             read_pipe(&mut decoder.output, &mut header, deadline, cancel)?;
-            if &header[..4] != b"MGF1"
+            if &header[..4] != if emoji { b"MGF2" } else { b"MGF1" }
                 || number(&header[4..8]) != edge
                 || number(&header[8..12]) != edge
             {
@@ -277,6 +279,15 @@ impl Decoder {
                 || f64::from(frames) / fps > max_seconds
             {
                 return Err("Invalid TGS animation dimensions or duration");
+            }
+            if emoji {
+                let mut rest = [0; 4];
+                read_pipe(&mut decoder.output, &mut rest, deadline, cancel)?;
+                let rest = number(&rest);
+                if rest != u32::MAX {
+                    if rest >= frames { return Err("Invalid emoji rest frame"); }
+                    decoder.rest_frame = Some(rest);
+                }
             }
             decoder.frames = frames;
             decoder.fps = fps;
@@ -411,6 +422,33 @@ mod tests {
             assert!(open(true, bytes).is_err(), "{name} must be refused even for emoji");
         }
         assert!(open(true, b"not gzip".to_vec()).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires the built sandboxed renderer and bubblewrap"]
+    fn noto_rest_markers_reach_the_decoder_without_changing_sticker_mode() {
+        let pack = crate::noto_emoji::curated().unwrap();
+        let cancel = gio::Cancellable::new();
+        for (key, expected) in [("1f911", 110), ("1f604", 92), ("2764", 75)] {
+            let source = memory_source(pack.get(key).unwrap()).unwrap();
+            let mut decoder = Decoder::open_emoji(source, 96, &cancel).unwrap();
+            assert_eq!(decoder.rest_frame, Some(expected), "{key}");
+            let resting = decoder.frame_at(expected).unwrap().texture;
+            let last = decoder.frame_at(decoder.frames - 1).unwrap().texture;
+            assert_ne!(resting.save_to_png_bytes(), last.save_to_png_bytes(), "{key}: the static pose is not the outro frame");
+            if let Some(directory) = std::env::var_os("MONOGRAM_EMOJI_TEST_ARTIFACTS") {
+                let directory = PathBuf::from(directory);
+                std::fs::create_dir_all(&directory).unwrap();
+                resting.save_to_png(directory.join(format!("{key}-rest.png"))).unwrap();
+                last.save_to_png(directory.join(format!("{key}-outro.png"))).unwrap();
+            }
+        }
+        let source = memory_source(&fixture(512,512,30,30)).unwrap();
+        let sticker = Decoder::open(source,64,&cancel).unwrap();
+        assert_eq!(sticker.rest_frame,None);
+        let source = memory_source(&fixture(512,512,30,30)).unwrap();
+        let unmarked = Decoder::open_emoji(source,64,&cancel).unwrap();
+        assert_eq!(unmarked.rest_frame,None);
     }
 
     #[test]
