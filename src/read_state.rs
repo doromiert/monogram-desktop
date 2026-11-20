@@ -180,6 +180,8 @@ impl Ui {
   let deadline=Instant::now()+Duration::from_millis(1400);while Instant::now()<deadline{glib::MainContext::default().iteration(false);std::thread::sleep(Duration::from_millis(1));}assert_eq!(subtitle().text(),"Joined");
   ui.backend_event(ui.generation.get(),"other@example.invalid",crate::protocol::BackendEvent::Typing{peer:room.into(),sender:"room@conference.example.invalid/Eve".into(),composing:true});assert_eq!(subtitle().text(),"Joined");
   ui.select_chat(peer);ui.state.borrow_mut().current_mut().subtitle="Online".into();send(peer,"bob@example.invalid/phone",true);
+  // Hidden/unknown presence does not mean that the person stopped typing.
+  ui.backend_event(ui.generation.get(),owner,crate::protocol::BackendEvent::Presence{peer:peer.into(),online:false,visible:false});assert_eq!(subtitle().text(),"typing...");
   ui.backend_event(ui.generation.get(),owner,crate::protocol::BackendEvent::Presence{peer:peer.into(),online:false,visible:true});assert_eq!(subtitle().text(),"Offline");
   send(peer,"bob@example.invalid/phone",true);ui.backend_event(ui.generation.get(),owner,crate::protocol::BackendEvent::Status{online:false,error:false,text:"Disconnected".into()});assert_ne!(subtitle().text(),"typing...");
   eprintln!("Native typing headers: immediate mapped subtitle, direct/MUC aggregation, stop/expiry/status restoration, account isolation");ui.window.close();

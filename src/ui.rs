@@ -2774,7 +2774,7 @@ impl Ui {
                 online,
                 visible,
             } => {
-                if !online {
+                if visible && !online {
                     self.typing.borrow_mut().retain(|(chat, _), _| chat != &peer);
                 }
                 let mut s = self.state.borrow_mut();
