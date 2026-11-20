@@ -267,15 +267,7 @@ impl Ui {
         bp.add_setter(&utility, "collapsed", Some(&true.to_value()));
         window.add_breakpoint(bp);
         let (tx, rx) = mpsc::channel();
-        let composer = gtk::TextView::builder()
-            .wrap_mode(gtk::WrapMode::WordChar)
-            .accepts_tab(false)
-            .hexpand(true)
-            .top_margin(6)
-            .bottom_margin(6)
-            .left_margin(4)
-            .right_margin(4)
-            .build();
+        let composer = crate::composer_view::ComposerView::new();
         let composer_inline = crate::inline_emoji_ui::ComposerInlineEmoji::new(&composer.buffer());
         let request_button = icon_button("contact-new-symbolic", "Requests and invitations");
         request_button.set_visible(false);
@@ -386,8 +378,7 @@ impl Ui {
                 .build(),
             send_button: icon_button("mail-send-symbolic", "Send"),
             input_scroll: gtk::ScrolledWindow::builder()
-                .min_content_height(32)
-                .max_content_height(108)
+                .min_content_height(0)
                 .propagate_natural_height(true)
                 .hexpand(true)
                 .build(),
@@ -3248,6 +3239,50 @@ impl Ui {
 mod composer_tests {
     use super::*;
 
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn composer_newlines_grow_by_complete_lines_without_premature_scroll() {
+        adw::init().unwrap();
+        let app=adw::Application::builder().application_id("com.negzero.ComposerNewlineFixture").flags(gio::ApplicationFlags::NON_UNIQUE).build();app.register(None::<&gio::Cancellable>).unwrap();
+        let ui=Ui::new(&app,true);
+        let css=gtk::CssProvider::new();css.load_from_path(crate::widgets::asset("style.css"));gtk::style_context_add_provider_for_display(&gdk::Display::default().unwrap(),&css,gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        let fonts=gtk::CssProvider::new();gtk::style_context_add_provider_for_display(&gdk::Display::default().unwrap(),&fonts,gtk::STYLE_PROVIDER_PRIORITY_USER);
+        ui.window.set_default_size(900,700);ui.window.present();ui.composer.grab_focus();
+        let settle=||{let until=Instant::now()+Duration::from_millis(150);while Instant::now()<until{glib::MainContext::default().iteration(false);std::thread::sleep(Duration::from_millis(2));}};
+        settle();
+        let ids=std::process::Command::new("xdotool").args(["search","--name","^Monogram$"]).output().unwrap();let id=String::from_utf8(ids.stdout).unwrap().lines().last().unwrap().to_owned();assert!(std::process::Command::new("xdotool").args(["windowfocus","--sync",&id]).status().unwrap().success());settle();
+        let mut previous_line=0;
+        for font in [13,20] {
+            fonts.load_from_data(&format!(".composer textview {{font-size:{font}px;}}"));
+            ui.composer.buffer().set_text("asd");ui.composer.buffer().place_cursor(&ui.composer.buffer().end_iter());settle();settle();
+            let line=ui.composer.iter_location(&ui.composer.buffer().start_iter()).height();
+            assert!(line>previous_line);previous_line=line;
+            let padding=ui.composer.top_margin()+ui.composer.bottom_margin();
+            let mut previous_scroll=0.;
+            for lines in 1..=8 {
+                let started=Instant::now();
+                if lines>1 {assert!(std::process::Command::new("xdotool").args(["key","--clearmodifiers","shift+Return"]).status().unwrap().success());settle();settle();}
+                let expected=padding+line*lines.min(5);
+                assert_eq!(ui.input_scroll.height(),expected,"{font}px font, {lines} lines");
+                let adj=ui.input_scroll.vadjustment();
+                assert!((adj.page_size()-f64::from(expected)).abs()<1.,"viewport must reflect the new height immediately");
+                let caret=ui.composer.iter_location(&ui.composer.buffer().end_iter());let visible=ui.composer.visible_rect();
+                assert!(caret.y()>=visible.y() && caret.y()+caret.height()<=visible.y()+visible.height(),"caret clipped at{lines} lines: {caret:?} {visible:?}");
+                if lines<=5 {assert_eq!(adj.value(),0.,"fitting text must not scroll or center");}
+                else {assert!(adj.value()-previous_scroll<=f64::from(line)+1.,"one newline must not scroll farther than one line");assert!(visible.y()+visible.height()-caret.y()-caret.height()<=padding,"caret must stay near bottom, not centered");}
+                assert!(started.elapsed()<Duration::from_millis(400),"feedback exceeded400ms");
+                previous_scroll=adj.value();
+            }
+            eprintln!("Composer {font}px: full {line}px lines + {padding}px padding; five-line cap and minimal caret scrolling pass");
+        }
+        let started=Instant::now();
+        ui.composer.buffer().set_text(&"x\n".repeat(10_000));settle();
+        let line=ui.composer.iter_location(&ui.composer.buffer().start_iter()).height();
+        assert_eq!(ui.input_scroll.height(),ui.composer.top_margin()+ui.composer.bottom_margin()+5*line);
+        assert!(started.elapsed()<Duration::from_millis(400),"large paste blocked visible feedback");
+        ui.window.close();
+    }
+
     /// The composer is sized by its scroll window from its content in the same layout pass
     /// (propagate_natural_height). Hand-syncing the height from an idle callback let GTK paint a
     /// frame where the text had grown but the viewport had not, and fought GTK's scroll-to-caret.
@@ -3291,11 +3326,12 @@ mod composer_tests {
             let text = &long[..length];
             ui.composer.buffer().set_text(text);
             settle(120);
-            let expected = content(&ui).clamp(32, 108);
-            assert_eq!(height(&ui), expected, "{} chars: composer height must follow its content, capped at 108", text.len());
+            let expected = content(&ui);
+            assert_eq!(height(&ui), expected, "{} chars: composer height must follow its content, capped at five lines", text.len());
             lines_seen.insert(expected);
         }
-        assert!(lines_seen.len() >= 4 && lines_seen.contains(&108), "heights seen: {lines_seen:?}");
+        let cap=ui.composer.top_margin()+ui.composer.bottom_margin()+5*ui.composer.iter_location(&ui.composer.buffer().start_iter()).height();
+        assert!(lines_seen.len() >= 4 && lines_seen.contains(&cap), "heights seen: {lines_seen:?}; cap={cap}");
         ui.composer.buffer().set_text("");
         settle(120);
         assert!(height(&ui) <= 34, "cleared composer is {}px tall", height(&ui));
