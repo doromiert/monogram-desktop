@@ -2070,9 +2070,9 @@ impl Ui {
             .is_some_and(|m| m.upload.is_some())
         {
             let id = id.to_string();
-            self.choose_sending(move |ui, _| {
+            self.choose_sending(move |ui, mode| {
                 let peer = ui.state.borrow().current().jid.clone();
-                ui.start_upload(&peer, &id);
+                ui.start_upload_with_mode(&peer, &id, mode);
             });
             return;
         }

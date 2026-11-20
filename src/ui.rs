@@ -1981,7 +1981,7 @@ impl Ui {
             String::new()
         };
         let files_sent = live && !self.attachments.borrow().is_empty();
-        if files_sent && !self.send_files(value) {
+        if files_sent && !self.send_files(value, mode) {
             return;
         }
         let authored=self.composer_formatting().trim().styled();

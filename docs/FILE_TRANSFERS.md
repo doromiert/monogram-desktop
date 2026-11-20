@@ -1,5 +1,14 @@
 # Live attachment reception and downloads
 
+Automatic OMEMO2 upload approval is carried from the encryption preflight into
+the upload worker. Its intentionally uncacheable selection must not be looked
+up again to start or finish that same upload. Retry performs a fresh preflight;
+completion still fences account/session generation, encryption-settings revision,
+explicit mode, draft mode and local fingerprint. This preserves blind-trust
+behavior without permitting plaintext fallback or bypassing the final encrypted
+send. `approved_pq_upload_survives_uncacheable_selection_but_not_policy_changes`
+covers approval retention and rejection after policy changes.
+
 Desktop advertises SFS support, receives direct/room file messages in plaintext,
 Legacy OMEMO and direct OMEMO 2, and offers
 manual Download, Cancel, Retry and native Save As. The reference is mobile's

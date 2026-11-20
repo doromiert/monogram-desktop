@@ -37,10 +37,21 @@ struct Work {
     peer: String,
     id: String,
     generation: u64,
+    encryption_revision: u64,
     mode: Mode,
     fingerprint: String,
     draft: Draft,
 }
+impl Work {
+    fn policy_unchanged(&self, chat: &Chat, revision: u64) -> bool {
+        // PQ preflight approvals are not reusable cache entries. A cache miss does
+        // not revoke this upload's approval; settings and identity changes still do.
+        self.encryption_revision == revision
+            && chat.encryption_preference().forced().is_none_or(|mode| mode == self.mode)
+            && !chat.downgrade_blocked(self.mode)
+    }
+}
+
 struct Task {
     work: Work,
     iq: crate::iq::Client,
@@ -266,6 +277,16 @@ impl Ui {
         }
     }
     pub fn start_upload(self: &Rc<Self>, peer: &str, id: &str) {
+        if self.uploads.borrow().phase(id).is_some()
+            || self.state.borrow().current().jid != peer
+        {
+            return;
+        }
+        let peer = peer.to_owned();
+        let id = id.to_owned();
+        self.choose_sending(move |ui, mode| ui.start_upload_with_mode(&peer, &id, mode));
+    }
+    pub(crate) fn start_upload_with_mode(self: &Rc<Self>, peer: &str, id: &str, mode: Mode) {
         if self.peer_blocked(peer) {
             self.notice("Unblock this address before uploading. Your file is kept.");
             return;
@@ -282,17 +303,6 @@ impl Ui {
             return;
         };
         let Some(mut draft) = message.upload.clone() else {
-            return;
-        };
-        let mode = self
-            .state
-            .borrow()
-            .chats
-            .iter()
-            .find(|c| c.jid == peer)
-            .and_then(|chat| self.sending_mode(chat));
-        let Some(mode) = mode else {
-            self.notice("Check conversation encryption before uploading");
             return;
         };
         if mode != message.mode() {
@@ -325,6 +335,7 @@ impl Ui {
                 peer: peer.into(),
                 id: id.into(),
                 generation: self.generation.get(),
+                encryption_revision: self.encryption_revision.get(),
                 mode,
                 fingerprint,
                 draft,
@@ -353,15 +364,10 @@ impl Ui {
             else {
                 continue;
             };
-            let selected = self
-                .state
-                .borrow()
-                .chats
-                .iter()
-                .find(|c| c.jid == work.peer)
-                .and_then(|chat| self.sending_mode(chat));
             let mode = work.mode;
-            let unchanged = selected == Some(mode)
+            let unchanged = self.state.borrow().chats.iter()
+                .find(|chat| chat.jid == work.peer)
+                .is_some_and(|chat| work.policy_unchanged(chat, self.encryption_revision.get()))
                 && message.mode() == mode
                 && message.fingerprint == work.fingerprint
                 && self.fingerprint_for_send(mode).as_deref() == Some(work.fingerprint.as_str());
@@ -468,7 +474,7 @@ impl Ui {
         self.render_messages(false);
         self.refresh_chats(None);
     }
-    pub fn send_files(self: &Rc<Self>, caption: &str) -> bool {
+    pub fn send_files(self: &Rc<Self>, caption: &str, mode: Mode) -> bool {
         if self.peer_blocked(&self.state.borrow().current().jid) {
             self.notice("Unblock this address before uploading. Your files are kept.");
             return false;
@@ -477,9 +483,6 @@ impl Ui {
             self.notice("Connect before uploading. Your draft is kept.");
             return false;
         }
-        let Some(mode) = self.sending_mode(self.state.borrow().current()) else {
-            return false;
-        };
         let encrypted = mode.encrypted();
         let Some(fingerprint) = self.fingerprint_for_send(mode) else {
             self.notice("Enable the selected OMEMO version and review devices before uploading");
@@ -580,7 +583,7 @@ impl Ui {
             return false;
         }
         for id in ids {
-            self.start_upload(&peer, &id);
+            self.start_upload_with_mode(&peer, &id, mode);
         }
         true
     }
@@ -949,6 +952,34 @@ impl Ui {
 mod tests {
     use super::*;
     include!("../tests/media_upload_native.rs");
+    #[test]
+    fn approved_pq_upload_survives_uncacheable_selection_but_not_policy_changes() {
+        let mut chat = Chat::default();
+        chat.remember_selection(Mode::Pq);
+        assert_eq!(chat.selected_encryption(), None);
+        let work = Work {
+            owner: "owner@fixture.invalid".into(),
+            peer: "peer@fixture.invalid".into(),
+            id: "approved-upload".into(),
+            generation: 1,
+            encryption_revision: 3,
+            mode: Mode::Pq,
+            fingerprint: "original-identity".into(),
+            draft: Draft {
+                uri: "file:///fixture.png".into(),
+                name: "fixture.png".into(),
+                error: None,
+                sticker: false,
+                local_sticker: None,
+            },
+        };
+        assert!(work.policy_unchanged(&chat, 3));
+        assert!(!work.policy_unchanged(&chat, 4));
+        chat.sending_preference = Some(crate::encryption_policy::Preference::Legacy);
+        assert!(!work.policy_unchanged(&chat, 3));
+        chat.sending_preference = Some(crate::encryption_policy::Preference::Omemo2);
+        assert!(work.policy_unchanged(&chat, 3));
+    }
     #[test]
     fn pending_uploads_are_durable_but_never_immutable_wire_payloads() {
         let store = crate::storage::Store::open(true).unwrap();

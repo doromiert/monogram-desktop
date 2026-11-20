@@ -116,6 +116,7 @@ fn native_media_upload_previews_progress_cancel_and_retry() {
             peer: peer.into(),
             id: photo.id.clone(),
             generation: ui.generation.get(),
+            encryption_revision: ui.encryption_revision.get(),
             mode: Mode::Plain,
             fingerprint: String::new(),
             draft: photo.upload.clone().unwrap(),

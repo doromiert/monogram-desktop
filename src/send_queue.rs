@@ -471,7 +471,7 @@ impl Ui {
                     } else if !ui.store_queued_row(&owner, &peer, current.clone()) {
                         continue;
                     }
-                    ui.start_upload(&peer, &current.id);
+                    ui.start_upload_with_mode(&peer, &current.id, mode);
                     continue;
                 }
                 if !ui.store_queued_row(&owner, &peer, current.clone()) {
