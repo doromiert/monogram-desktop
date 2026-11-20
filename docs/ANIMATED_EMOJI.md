@@ -1,7 +1,7 @@
 # Animated emoji
 
 A message whose entire text is **exactly one emoji** that is bundled plays its Noto animation: once
-when it scrolls into view, and again when clicked. When it ends it holds Noto's marked `rest` pose; the final timeline frame can be part of the outro. Two or more emoji, any other text, links, formatting, custom emoji, or an emoji that
+when it scrolls into view, and again when clicked. Playback stops at Noto's marked `rest` pose and holds it, without entering the outro. Two or more emoji, any other text, links, formatting, custom emoji, or an emoji that
 is not in the pack all keep the ordinary static rendering.
 
 It only applies while the "big emoji" setting is on, and never when GNOME's animations are turned

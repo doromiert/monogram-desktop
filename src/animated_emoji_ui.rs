@@ -198,7 +198,8 @@ fn show(state: &State, texture: &gdk::Texture) {
 fn step(state: Rc<State>, decoder: crate::lottie::Decoder, started: std::time::Instant, delay: Duration) {
     glib::timeout_add_local_once(delay.max(Duration::from_millis(1)), move || {
         let index = (started.elapsed().as_secs_f64() * decoder.fps) as u32;
-        let ended = index >= decoder.frames;
+        let end = decoder.rest_frame.map_or(decoder.frames, |rest| rest + 1);
+        let ended = index >= end;
         let gone = state.picture.root().is_none() || !state.picture.is_mapped();
         if ended && !gone {
             let Some(rest) = decoder.rest_frame else {
@@ -374,13 +375,13 @@ mod tests {
             });
         }
         assert!(wait(Duration::from_secs(10), || picture.is_visible()), "first frame arrives");
-        // 🤑 is 143 frames at60fps; its rest pose is110, before the outro.
+        // Stop at the rest pose110 at60fps; frames111..142 are the outro.
         wait(Duration::from_secs(5), || false);
         let shown = changes.get();
         let played = last.get().unwrap().duration_since(first.get().unwrap());
         eprintln!("{shown} frames shown over {played:?}");
         assert!(shown >= 30, "only {shown} frames were shown");
-        assert!(played > Duration::from_millis(1800) && played < Duration::from_millis(3500), "ran for {played:?}, expected about 2.3 s");
+        assert!(played > Duration::from_millis(1700) && played < Duration::from_millis(2100), "ran for {played:?}, expected about1.85s through rest110, without the outro");
         // Keep the marked static pose, not a frame from the outro.
         let glyph = emoji.first_child().expect("the emoji glyph");
         assert!(picture.is_visible() && glyph.opacity() == 0., "the animation stays, the ordinary emoji does not come back");
