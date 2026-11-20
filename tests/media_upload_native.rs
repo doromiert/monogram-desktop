@@ -1,6 +1,87 @@
 // Included in upload_ui::tests to drive transfer phases without a network session.
 #[gtk::test]
 #[ignore = "requires a private GTK display and keyring"]
+fn approved_pq_upload_submits_after_snapshot_staging_without_a_cached_choice() {
+    use gtk::gio;
+    assert_eq!(std::env::var("MONOGRAM_KEYRING_FIXTURE").as_deref(), Ok("1"));
+    adw::init().unwrap();
+    let app = adw::Application::builder()
+        .application_id("com.negzero.MonogramUploadApprovalTest")
+        .flags(gio::ApplicationFlags::NON_UNIQUE).build();
+    app.register(None::<&gio::Cancellable>).unwrap();
+    adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
+    let ui = Ui::new(&app, true);
+    let owner = "owner@fixture.invalid";
+    let peer = "peer@fixture.invalid";
+    ui.store.save_account(&Account { jid:owner.into(), host:String::new(), port:5222, direct_tls:false }).unwrap();
+    ui.state.replace(State::live(owner, vec![]));
+    let mut photo = Message { id:"approved-photo".into(), wire_id:"approved-photo".into(),
+        own:true, sender:owner.into(), kind:"file".into(), delivery:"sending".into(),
+        upload:Some(Draft { uri:"file:///fixture.png".into(), name:"fixture.png".into(), error:None, sticker:false, local_sticker:None }),
+        ..Default::default() };
+    photo.set_encryption(Mode::Pq, "fixture-fingerprint".into());
+    let mut state = ui.state.borrow_mut();
+    let chat = state.chat_for(peer);
+    chat.remember_selection(Mode::Pq);
+    assert_eq!(chat.selected_encryption(), None);
+    chat.messages.push(photo.clone());
+    state.active = chat.id.clone();
+    ui.store.save(&state).unwrap();
+    drop(state);
+    ui.online.set(true);
+    ui.pq_crypto.borrow_mut().ready = true;
+    ui.pq_crypto.borrow_mut().fingerprint = photo.fingerprint.clone();
+    let (network, mut received) = tokio::sync::mpsc::unbounded_channel();
+    ui.session.replace(Some(crate::protocol::Session::fixture_channel(network.clone())));
+    let (finished, result) = mpsc::channel();
+    let snapshot = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join("approved-wire.part");
+    std::fs::write(&snapshot, b"fixture").unwrap();
+    let mut file = crate::file_share::Attachment::bare(&format!("aesgcm://files.fixture.invalid/photo#{}", "00".repeat(44))).unwrap();
+    file.name = "fixture.png".into();
+    file.mime = "image/png".into();
+    file.size = Some(7);
+    ui.uploads.borrow_mut().tasks.push_back(Task {
+        work:Work { owner:owner.into(), peer:peer.into(), id:photo.id.clone(), generation:ui.generation.get(),
+            encryption_revision:ui.encryption_revision.get(), mode:Mode::Pq, fingerprint:photo.fingerprint.clone(), draft:photo.upload.clone().unwrap() },
+        iq:crate::iq::Client::new(network), job:Arc::new(Job::default()), cancel:None, result:Some(result),
+    });
+    assert!(finished.send(Ok(Uploaded { attachment:file, snapshot })).is_ok());
+    ui.poll_uploads();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let context = glib::MainContext::default();
+    let mut submitted = false;
+    while std::time::Instant::now() < deadline && !submitted {
+        for _ in 0..100 { if !context.pending() { break } context.iteration(false); }
+        while let Ok(command) = received.try_recv() {
+            if let Command::Send { message, .. } = command {
+                assert_eq!(message.wire_id, photo.wire_id);
+                assert_eq!(message.mode(), Mode::Pq);
+                assert!(message.upload.is_none() && message.attachment.is_some());
+                submitted = true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(submitted, "approved PQ upload was rejected after caching instead of submitted");
+    let retained = ui.store.message(owner,peer,&photo.id).unwrap();
+    assert_eq!(retained.delivery, "sending");
+    ui.store.record_message_failure(owner,peer,&retained.wire_id,"XMPP server response","forbidden [type=auth code=403]").unwrap();
+    ui.window.set_default_size(900, 760);
+    ui.window.present();
+    ui.message_details(&retained);
+    if let Ok(path) = std::env::var("MONOGRAM_FAILURE_SCREENSHOT") {
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            for _ in 0..100 { if !context.pending() { break } context.iteration(false); }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(std::process::Command::new("import").args(["-window", "root", &path]).status().unwrap().success());
+    }
+    ui.window.close();
+}
+
+#[gtk::test]
+#[ignore = "requires a private GTK display and keyring"]
 fn native_media_upload_previews_progress_cancel_and_retry() {
     use gtk::gio;
     use std::time::Instant;

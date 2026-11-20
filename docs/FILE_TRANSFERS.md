@@ -9,6 +9,22 @@ behavior without permitting plaintext fallback or bypassing the final encrypted
 send. `approved_pq_upload_survives_uncacheable_selection_but_not_policy_changes`
 covers approval retention and rejection after policy changes.
 
+The final handoff after snapshot caching uses the same approval/revision guard.
+An already uploaded attachment retry performs a fresh preflight and reuses its
+encrypted reference when the mode and local identity match. A cache miss alone
+never means the file must be selected again. The isolated native test
+`approved_pq_upload_submits_after_snapshot_staging_without_a_cached_choice`
+drives a completed upload through caching to a fake `Command::Send` receiver.
+
+Message Details shows local failure history before routine message metadata,
+including stage, UTC time, safe HTTP PUT status/transport category, encryption
+validation reason and XMPP condition/type/code when supplied. Up to eight records
+per message survive retries and successful delivery; message/account deletion
+removes them. Copy buttons export the displayed diagnostics. URLs, credentials,
+key-shaped hexadecimal values and raw XML are excluded. Historical attempts
+whose errors were never saved cannot be reconstructed. Mobile retains equivalent
+durable failure details and exposes a native selectable/copyable diagnostic view.
+
 Desktop advertises SFS support, receives direct/room file messages in plaintext,
 Legacy OMEMO and direct OMEMO 2, and offers
 manual Download, Cancel, Retry and native Save As. The reference is mobile's

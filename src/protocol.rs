@@ -23,7 +23,7 @@ pub fn bare(value: &str) -> Result<String, String> {
     Ok(jid.to_string())
 }
 /// The server's error condition and text from an error stanza, for example
-/// "service unavailable: Remote server not found".
+/// "service unavailable: Remote server not found [type=cancel]".
 fn stanza_error_reason(root: &Element) -> String {
     let Some(error) = root.children().find(|child| child.name() == "error") else {
         return String::new();
@@ -38,11 +38,18 @@ fn stanza_error_reason(root: &Element) -> String {
         .find(|child| child.name() == "text")
         .map(|child| child.text())
         .unwrap_or_default();
-    match (condition.is_empty(), detail.trim().is_empty()) {
+    let reason = match (condition.is_empty(), detail.trim().is_empty()) {
         (true, _) => detail,
         (false, true) => condition,
         (false, false) => format!("{condition}: {}", detail.trim()),
+    };
+    let mut info = Vec::new();
+    for name in ["type", "code"] {
+        if let Some(value) = error.attr(name) {
+            info.push(format!("{name}={}", crate::text_safety::visible(value, 40)));
+        }
     }
+    if info.is_empty() { reason } else { format!("{reason} [{}]", info.join(" ")) }
 }
 /// A reason that came from a server says so, so it cannot pass for the app's own words.
 fn server_said(reason: String) -> String {
@@ -1883,11 +1890,11 @@ mod tests {
         let stanzas = "urn:ietf:params:xml:ns:xmpp-stanzas";
         assert_eq!(
             stanza_error_reason(&error(&format!("<error type='cancel'><service-unavailable xmlns='{stanzas}'/><text xmlns='{stanzas}'>Remote server not found</text></error>"))),
-            "service unavailable: Remote server not found"
+            "service unavailable: Remote server not found [type=cancel]"
         );
         assert_eq!(
-            stanza_error_reason(&error(&format!("<error type='auth'><forbidden xmlns='{stanzas}'/></error>"))),
-            "forbidden"
+            stanza_error_reason(&error(&format!("<error type='auth' code='403'><forbidden xmlns='{stanzas}'/></error>"))),
+            "forbidden [type=auth code=403]"
         );
         assert_eq!(
             stanza_error_reason(&error(&format!("<error><text xmlns='{stanzas}'>Only text</text></error>"))),

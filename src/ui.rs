@@ -2814,11 +2814,17 @@ impl Ui {
                     .ok()
                     .flatten()
                     .is_some();
+                if ours {
+                    let stage = if reason.starts_with("the server said") { "XMPP server response" } else { "Message submission" };
+                    if self.store.record_message_failure(owner, &peer, &id, stage, &reason).is_err() {
+                        self.notice("The send error could not be saved in Message Details");
+                    }
+                }
                 self.delivery(&peer, &id, "failed");
                 if !ours {
                     return;
                 }
-                let title = crate::text_safety::failed_send_toast(&reason);
+                let title = crate::text_safety::failed_send_toast(&crate::message_failures::safe_detail(&reason));
                 self.notice_resolving_authorization(&reason, title);
             }
             BackendEvent::History {

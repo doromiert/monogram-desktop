@@ -7,6 +7,8 @@ mod emoji_preferences;
 mod favorite_order_store;
 #[path = "../src/text_safety.rs"]
 mod text_safety;
+#[path = "../src/message_failures.rs"]
+mod message_failures;
 #[path = "../src/profiles.rs"]
 mod profiles;
 mod ui {

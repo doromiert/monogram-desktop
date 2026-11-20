@@ -1,5 +1,11 @@
 # Feature parity ledger
 
+Both clients retain per-message failure details across retries, including safe
+transport/encryption causes and server status/conditions. Desktop exposes a
+bounded history with Copy in Message Details; mobile exposes its native full
+diagnostic viewer. Prior unsaved failures cannot be reconstructed. The desktop
+post-cache OMEMO2 upload handoff is covered by an isolated native regression.
+
 Target: all shipped Monogram behavior, with desktop-specific presentation.
 Android baseline: `ec4a3fa3e9f7167e7e4976427dee290d3bbc3e02` / 0.2.197.
 

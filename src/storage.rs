@@ -95,6 +95,7 @@ impl Store {
         store.init_stories()?;
         store.init_contact_details()?;
         store.init_link_previews()?;
+        store.init_message_failures()?;
         for account in store.accounts(){store.migrate_chat_defaults(&account.jid)?;}
         store.db.execute_batch("CREATE INDEX IF NOT EXISTS queued_outbox ON messages(account,timestamp,id) WHERE json_extract(body,'$.outbox_pending')=1;")?;
         store.db.execute_batch("CREATE TABLE IF NOT EXISTS upload_captions(account TEXT NOT NULL,peer TEXT NOT NULL,id TEXT NOT NULL,parent TEXT NOT NULL,PRIMARY KEY(account,peer,id),FOREIGN KEY(account,peer,id) REFERENCES messages(account,peer,id) ON DELETE CASCADE);CREATE INDEX IF NOT EXISTS upload_caption_parent ON upload_captions(account,peer,parent);")?;

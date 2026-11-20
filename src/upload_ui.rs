@@ -107,7 +107,7 @@ impl Uploads {
     fn clear(&mut self) -> Vec<Work> {
         self.tasks.drain(..).map(|t| t.work.clone()).collect()
     }
-    fn poll(&mut self) -> Vec<(Work, Result<Uploaded, &'static str>)> {
+    fn poll(&mut self) -> Vec<(Work, Result<Uploaded, &'static str>, Option<String>)> {
         let mut complete = vec![];
         self.tasks.retain_mut(|task| {
             let Some(rx) = &task.result else {
@@ -115,11 +115,11 @@ impl Uploads {
             };
             match rx.try_recv() {
                 Ok(result) => {
-                    complete.push((task.work.clone(), result));
+                    complete.push((task.work.clone(), result, task.job.diagnostic.lock().unwrap().clone()));
                     false
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    complete.push((task.work.clone(), Err("Upload worker stopped")));
+                    complete.push((task.work.clone(), Err("Upload worker stopped"), task.job.diagnostic.lock().unwrap().clone()));
                     false
                 }
                 Err(mpsc::TryRecvError::Empty) => true,
@@ -252,6 +252,7 @@ impl Ui {
         if let Some(mut m) = self.store.message(owner, peer, id) {
             if let Some(draft) = &mut m.upload {
                 draft.error = Some(reason.into());
+                let _ = self.store.record_message_failure(owner, peer, &m.wire_id, "Upload", reason);
                 m.delivery = "failed".into();
                 self.upload_row(owner, peer, m);
             }
@@ -352,7 +353,7 @@ impl Ui {
         if completed.is_empty() {
             return;
         }
-        for (work, result) in completed {
+        for (work, result, diagnostic) in completed {
             if self.state.borrow().account != work.owner || self.generation.get() != work.generation
             {
                 continue;
@@ -381,7 +382,12 @@ impl Ui {
                 continue;
             }
             match result {
-                Err(reason) => self.fail_upload(&work.owner, &work.peer, &work.id, reason),
+                Err(reason) => {
+                    self.fail_upload(&work.owner, &work.peer, &work.id, reason);
+                    if let Some(detail) = diagnostic {
+                        let _ = self.store.record_message_failure(&work.owner, &work.peer, &message.wire_id, "HTTP upload", &detail);
+                    }
+                },
                 Ok(uploaded) => {
                     message.upload = None;
                     message.attachment = Some(uploaded.attachment.clone());
@@ -446,8 +452,7 @@ impl Ui {
                                 .chats
                                 .iter()
                                 .find(|chat| chat.jid == work.peer)
-                                .and_then(|chat| ui.sending_mode(chat))
-                                != Some(work.mode)
+                                .is_none_or(|chat| !work.policy_unchanged(chat, ui.encryption_revision.get()))
                             || !ui
                                 .store
                                 .message(&work.owner, &work.peer, &message.id)
@@ -457,6 +462,8 @@ impl Ui {
                                         && stored.attachment == message.attachment
                                 })
                         {
+                            let _ = ui.store.record_message_failure(&work.owner, &work.peer, &message.wire_id,
+                                "Final upload validation", "Connection, encryption settings, identity or the retained attachment changed before message submission");
                             ui.delivery(&work.peer, &message.wire_id, "failed");
                             return;
                         }
@@ -465,6 +472,8 @@ impl Ui {
                             quote: message.reply.clone(),
                             message: message.clone(),
                         }) {
+                            let _ = ui.store.record_message_failure(&work.owner, &work.peer, &message.wire_id,
+                                "Message submission", "The XMPP connection worker stopped before submission; the uploaded attachment is retained");
                             ui.delivery(&work.peer, &message.wire_id, "failed");
                         }
                     });

@@ -2056,6 +2056,30 @@ impl Ui {
                 );
             }
         }
+        let state = self.state.borrow();
+        let failures = self.store.message_failures(&state.account, &state.current().jid, &m.id);
+        drop(state);
+        let failures = failures.unwrap_or_default();
+        if !failures.is_empty() || m.delivery == "failed" {
+            let group = adw::PreferencesGroup::builder().title("Failure Details").build();
+            if failures.is_empty() {
+                group.add(&adw::ActionRow::builder().title("No failure reason was saved by the earlier build")
+                    .subtitle("Retry the retained message to record a new diagnostic.").use_markup(false).build());
+            }
+            for failure in failures {
+                let row = adw::ActionRow::builder().title(&failure.stage)
+                    .subtitle(format!("{} · {}", failure.time, failure.detail))
+                    .subtitle_lines(0).subtitle_selectable(true).use_markup(false).build();
+                let copy = icon_button("edit-copy-symbolic", "Copy failure details");
+                copy.set_valign(gtk::Align::Center);
+                let clipboard = self.window.clipboard();
+                let value = format!("Message: {}\nTime: {}\nStage: {}\n{}", m.wire_id, failure.time, failure.stage, failure.detail);
+                copy.connect_clicked(move |_| clipboard.set_text(&value));
+                row.add_suffix(&copy);
+                group.add(&row);
+            }
+            page.add(&group);
+        }
         page.add(&g);
         self.dialog("Message Details", &page, 520, 440);
     }
@@ -2076,16 +2100,24 @@ impl Ui {
             });
             return;
         }
+        let attachment = self.state.borrow().message(id).is_some_and(|m| m.attachment.is_some());
+        if attachment {
+            let id = id.to_owned();
+            self.choose_sending(move |ui, mode| ui.retry_prepared(&id, Some(mode)));
+        } else {
+            self.retry_prepared(id, None);
+        }
+    }
+    fn retry_prepared(self: &Rc<Self>, id: &str, approved: Option<crate::encryption_policy::Mode>) {
         let state = self.state.borrow();
         let file_mode_changed = state.message(id).is_some_and(|message| {
             message.attachment.is_some()
-                && (self.sending_mode(state.current()) != Some(message.mode())
-                    || self.fingerprint_for_send(message.mode()).as_deref()
-                        != Some(&message.fingerprint))
+                && (approved != Some(message.mode())
+                    || self.fingerprint_for_send(message.mode()).as_deref() != Some(&message.fingerprint))
         });
         drop(state);
         if file_mode_changed {
-            self.notice("Encryption changed. Select the file again to send a fresh copy.");
+            self.notice("This attachment uses another encryption mode or identity. Restore its encryption setting to retry; the retained file is kept.");
             return;
         }
         if !self.online.get() {
@@ -2095,6 +2127,7 @@ impl Ui {
         let owner = self.state.borrow().account.clone();
         let chat = self.state.borrow().active.clone();
         let id = id.to_string();
+        let revision = self.encryption_revision.get();
         let d=adw::AlertDialog::builder().heading("Retry Message?").body("It may already have been received. Retrying can create a duplicate on clients that do not deduplicate IDs.").build();
         d.add_responses(&[("cancel", "Cancel"), ("retry", "Retry")]);
         let weak = Rc::downgrade(self);
@@ -2102,6 +2135,10 @@ impl Ui {
             if r == "retry" {
                 if let Some(ui) = weak.upgrade() {
                     if ui.state.borrow().account != owner || ui.state.borrow().active != chat {
+                        return;
+                    }
+                    if ui.encryption_revision.get() != revision {
+                        ui.notice("Encryption settings changed while confirming. Retry the retained attachment again.");
                         return;
                     }
                     let mut s = ui.state.borrow_mut();
