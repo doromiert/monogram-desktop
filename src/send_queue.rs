@@ -1,6 +1,6 @@
 //! An unsent row is durable before choosing encryption or submitting a packet.
 use crate::{
-    encryption_policy::{Mode, Preference, Selection},
+    encryption_policy::Mode,
     model::*,
     protocol::Command,
     ui::Ui,

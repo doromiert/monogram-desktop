@@ -6,7 +6,7 @@ use crate::{
     widgets::*,
 };
 use adw::prelude::*;
-use gtk::{gdk, glib, prelude::*};
+use gtk::{gdk, glib};
 use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 
 pub fn model(message: &Message) -> Markup {
@@ -686,7 +686,7 @@ pub fn install_editor(
     }
     let all = whole.clone();
     let weak = Rc::downgrade(ui);
-    let weak_view = view.downgrade();
+    let _weak_view = view.downgrade();
     all.connect_activate(move |action, _| {
         let value = !action
             .state()
@@ -751,7 +751,7 @@ pub fn install_editor(
             gdk::Key::k | gdk::Key::K => "link",
             _ => return glib::Propagation::Proceed,
         };
-        if let Some(ui) = weak.upgrade() {
+        if let Some(_ui) = weak.upgrade() {
             if let Some(view) = weak_view.upgrade() {
                 if view.buffer().has_selection() {
                     let _ = view.activate_action(&format!("format.{action}"), None);

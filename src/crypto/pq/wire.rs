@@ -8,7 +8,7 @@ use super::{
 };
 use crate::crypto::{Error, Result, Secret, journal::Context};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use pq_signal::{IdentityKey, KexAuthEntry, PreKeySignalMessage};
+use pq_signal::{KexAuthEntry, PreKeySignalMessage};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use tokio_xmpp::minidom::Element;

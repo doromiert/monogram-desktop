@@ -5,7 +5,7 @@
 //! (see `sysinfo`), as a code block so the columns stay aligned. It is left in the composer for
 //! the user to read, edit and send: nothing about their machine leaves it without that step. The
 //! report contains no user name or host name.
-use crate::{formatting::Style, sysinfo, ui::Ui};
+use crate::{sysinfo, ui::Ui};
 use adw::prelude::*;
 use gtk::{gio, glib};
 use std::rc::Rc;
@@ -50,6 +50,7 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::formatting::Style;
     use std::time::{Duration, Instant};
 
     fn settle(milliseconds: u64) {

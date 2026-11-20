@@ -12,7 +12,6 @@ use std::{
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc as channel, oneshot};
 use tokio_xmpp::{jid::Jid, minidom::Element};
-const CLIENT: &str = "jabber:client";
 pub const ROSTER: &str = "jabber:iq:roster";
 type Result<T> = std::result::Result<T, String>;
 

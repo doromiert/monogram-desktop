@@ -1,5 +1,5 @@
 use crate::{
-    encryption_policy::{Mode, Preference, Selection},
+    encryption_policy::{Mode, Preference},
     model::Chat,
     protocol::Command,
     ui::Ui,
@@ -59,7 +59,7 @@ impl Ui {
     /// The encryption check failed. A Legacy OMEMO contact-authorization denial offers Resolve.
     pub(crate) fn report_encryption_check_failure(
         self: &Rc<Self>,
-        peer: &str,
+        _peer: &str,
         error: &crate::crypto::Error,
     ) {
         let reason = error.to_string();

@@ -461,9 +461,6 @@ impl Legacy {
             Ok(Some(Device { peer: peer.into(), id, key, trust: Trust::Trusted }))
         })
     }
-    pub async fn discover(&mut self, peer: &str) -> Result<(Vec<Device>, Vec<(u32, Error)>)> {
-        self.discover_for(peer, None).await
-    }
     pub(crate) async fn discover_for(
         &mut self,
         peer: &str,
@@ -764,10 +761,6 @@ impl Legacy {
     }
     pub fn pending(&mut self) -> Result<Vec<Received>> {
         self.journal.pending(&mut self.store)
-    }
-    fn pending_token(&mut self, digest: &[u8; 32]) -> Result<Option<Token>> {
-        self.store
-            .transaction(|tx| Ok(self.journal.find(tx, digest)?.and_then(|saved| saved.token)))
     }
     pub fn accept(&mut self, token: &Token) -> Result<bool> {
         self.journal.accept(&mut self.store, token)

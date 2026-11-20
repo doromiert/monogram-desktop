@@ -127,13 +127,6 @@ fn number(bytes: &[u8]) -> u32 {
 }
 /// Bundled animation bytes as an anonymous in-memory file, so they travel the same descriptor
 /// path as a downloaded sticker without ever touching the disk.
-/// How much a frame draws: the sum of its alpha channel. Zero for an empty frame.
-pub fn ink(texture: &gdk::Texture) -> u64 {
-    let (width, height) = (texture.width() as usize, texture.height() as usize);
-    let mut pixels = vec![0u8; width * height * 4];
-    texture.download(&mut pixels, width * 4);
-    pixels.chunks(4).map(|px| u64::from(px[3])).sum()
-}
 pub fn memory_source(bytes: &[u8]) -> Result<VerifiedFile> {
     use std::os::fd::FromRawFd;
     let fd = unsafe { libc::memfd_create(c"monogram-emoji".as_ptr(), libc::MFD_CLOEXEC) };
@@ -303,28 +296,6 @@ impl Decoder {
             % u64::from(self.frames)) as u32;
         self.frame_at(index)
     }
-    /// Where an emoji comes to rest when it has played. Noto animations enter, loop and then leave,
-    /// so the last frame is often empty: freezing there would make the emoji vanish. This walks back
-    /// from the end to the last frame that is fully visible (at least 90% of `peak`, the most ink
-    /// any frame showed), or keeps the last frame when it is plainly visible already. `None` when
-    /// the animation never rests (it only appears and leaves), so the ordinary emoji should show.
-    pub fn resting_frame(&mut self, peak: u64) -> Result<Option<Frame>> {
-        let last = self.frames.saturating_sub(1);
-        let entrance = self.frames / 4;
-        let mut index = last;
-        loop {
-            let frame = self.frame_at(index)?;
-            let seen = ink(&frame.texture);
-            let kept_ending = index == last && (peak == 0 || seen * 10 >= peak * 3);
-            if kept_ending || seen * 10 >= peak * 9 {
-                return Ok((kept_ending || index >= entrance).then_some(frame));
-            }
-            if index == 0 {
-                return Ok(None);
-            }
-            index -= 1;
-        }
-    }
     pub fn frame_at(&mut self, index: u32) -> Result<Frame> {
         if self.failed || index >= self.frames {
             return Err("Sticker renderer unavailable");
@@ -397,7 +368,10 @@ mod tests {
         gzip.finish().unwrap()
     }
     fn alpha_sum(texture: &gdk::Texture) -> u64 {
-        ink(texture)
+        let (width, height) = (texture.width() as usize, texture.height() as usize);
+        let mut pixels = vec![0u8; width * height * 4];
+        texture.download(&mut pixels, width * 4);
+        pixels.chunks(4).map(|px| u64::from(px[3])).sum()
     }
 
     #[test]
@@ -468,31 +442,6 @@ mod tests {
                 eprintln!("{key} edge {edge}: {} frames at {} fps, {:.1} ms/frame", decoder.frames, decoder.fps, began.elapsed().as_secs_f64() * 1000. / f64::from(frames));
             }
         }
-    }
-
-    /// Noto animations enter, loop and leave: many end on an empty frame. Whatever the emoji rests on
-    /// must be visible, and one that never rests is left to the ordinary emoji.
-    #[test]
-    #[ignore = "requires the built sandboxed renderer and bubblewrap"]
-    fn every_bundled_emoji_rests_on_a_visible_frame() {
-        let pack = crate::noto_emoji::curated().expect("bundled pack");
-        let cancel = gio::Cancellable::new();
-        let (mut blank_ending, mut without_rest) = (0, vec![]);
-        for key in pack.keys().map(str::to_owned).collect::<Vec<_>>() {
-            let source = memory_source(pack.get(&key).unwrap()).unwrap();
-            let mut decoder = Decoder::open_emoji(source, 64, &cancel).unwrap();
-            let inks: Vec<u64> = (0..decoder.frames).map(|i| ink(&decoder.frame_at(i).unwrap().texture)).collect();
-            let peak = *inks.iter().max().unwrap();
-            if inks[inks.len() - 1] * 10 < peak * 3 {
-                blank_ending += 1;
-            }
-            match decoder.resting_frame(peak).unwrap_or_else(|e| panic!("{key}: {e}")) {
-                Some(frame) => assert!(ink(&frame.texture) * 10 >= peak * 3, "{key} rests on a nearly empty frame"),
-                None => without_rest.push(key),
-            }
-        }
-        assert!(blank_ending > 10, "the pack is expected to contain animations that end empty");
-        assert!(without_rest.len() <= 5, "only a few may never rest: {without_rest:?}");
     }
 
     #[test]

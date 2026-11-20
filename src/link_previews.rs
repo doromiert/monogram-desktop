@@ -80,9 +80,6 @@ impl Privacy {
             changed,
         }))
     }
-    pub fn owner(&self) -> &str {
-        &self.0.owner
-    }
     pub fn set_permissions(&self, enabled: bool, encrypted: bool) {
         let flags = u64::from(enabled) | (u64::from(encrypted) << 1);
         let previous = self

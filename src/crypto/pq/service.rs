@@ -93,10 +93,6 @@ pub struct Handle {
     events: mpsc::Sender<Envelope>,
 }
 impl Handle {
-    /// Control requests only; incoming ciphertext must use the bounded `send` path.
-    pub fn sender(&self) -> channel::UnboundedSender<Request> {
-        self.tx.clone()
-    }
     pub fn start(
         owner: String,
         generation: u64,
