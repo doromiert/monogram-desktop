@@ -222,7 +222,7 @@ impl Ui {
         let (d, _) = self.dialog("Server Commands", &scroll(&body), 480, 520);
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
-            let reply = client.request(&server, iq::Kind::Get, adhoc::list_request()).await;
+            let reply = client.request_on_main_loop(&server, iq::Kind::Get, adhoc::list_request()).await;
             let Some(ui) = weak.upgrade() else { return };
             while let Some(child) = body.first_child() {
                 body.remove(&child);
@@ -325,7 +325,7 @@ impl Runner {
         if let Some(client) = ui.command_client() {
             let (server, request) = (self.server.clone(), adhoc::step(&self.node, &session, Action::Cancel, None));
             glib::MainContext::default().spawn_local(async move {
-                let _ = client.request(&server, iq::Kind::Set, request).await;
+                let _ = client.request_on_main_loop(&server, iq::Kind::Set, request).await;
             });
         }
     }
@@ -342,7 +342,7 @@ impl Runner {
         self.working();
         let runner = self.clone();
         glib::MainContext::default().spawn_local(async move {
-            let reply = client.request(&runner.server, iq::Kind::Set, request).await;
+            let reply = client.request_on_main_loop(&runner.server, iq::Kind::Set, request).await;
             runner.busy.set(false);
             if runner.ui.upgrade().is_none() {
                 return;

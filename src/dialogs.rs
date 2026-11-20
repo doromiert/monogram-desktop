@@ -1161,7 +1161,7 @@ impl Ui {
             let weak = weak.clone();
             glib::MainContext::default().spawn_local(async move {
                 let reply = crate::iq::Client::new(tx)
-                    .request(&owner, crate::iq::Kind::Set, crate::account_deletion::cancel_registration())
+                    .request_on_main_loop(&owner, crate::iq::Kind::Set, crate::account_deletion::cancel_registration())
                     .await;
                 let Some(ui) = weak.upgrade() else { return };
                 match reply {

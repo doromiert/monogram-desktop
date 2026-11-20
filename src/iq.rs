@@ -42,7 +42,7 @@ impl Client {
     pub fn new(tx: mpsc::UnboundedSender<Command>) -> Self {
         Self { tx }
     }
-    pub async fn request(&self, to: &str, kind: Kind, payload: Element) -> Reply {
+    fn dispatch(&self, to: &str, kind: Kind, payload: Element) -> Result<oneshot::Receiver<Reply>, Error> {
         if !valid_to(to) {
             return Err(Error::Invalid);
         }
@@ -55,9 +55,22 @@ impl Client {
                 reply,
             })
             .map_err(|_| Error::Closed)?;
+        Ok(received)
+    }
+    /// For code on a Tokio task: gives up after 25 seconds.
+    pub async fn request(&self, to: &str, kind: Kind, payload: Element) -> Reply {
+        let received = self.dispatch(to, kind, payload)?;
         tokio::time::timeout(Duration::from_secs(25), received)
             .await
             .map_err(|_| Error::Timeout)?
+            .map_err(|_| Error::Closed)?
+    }
+    /// For the GTK main loop, which has no Tokio runtime and so no Tokio timer (`request` panics
+    /// there). No timer is needed: the session sweeps stale jobs and answers them with
+    /// `Error::Timeout`, and drops them with `Error::Closed` when the connection ends.
+    pub async fn request_on_main_loop(&self, to: &str, kind: Kind, payload: Element) -> Reply {
+        self.dispatch(to, kind, payload)?
+            .await
             .map_err(|_| Error::Closed)?
     }
 }
@@ -392,5 +405,42 @@ mod tests {
         let (_req, mut rx) = register_request(&mut pending, "bob@example.com");
         pending.disconnect();
         assert_eq!(rx.try_recv().unwrap(), Err(Error::Closed));
+    }
+    #[test]
+    fn the_main_loop_request_needs_no_tokio_runtime() {
+        use futures_util::FutureExt;
+        // No runtime exists on this thread, as on the GTK main loop: `request` would panic here.
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let client = Client::new(tx);
+        let mut pending = Box::pin(client.request_on_main_loop("example.com", Kind::Get, cancel()));
+        assert!((&mut pending).now_or_never().is_none(), "waits for the server");
+        let Some(Command::Iq { to, reply, .. }) = rx.try_recv().ok() else {
+            panic!("the request was sent to the session");
+        };
+        assert_eq!(to, "example.com");
+        reply.send(Ok(None)).unwrap();
+        assert_eq!(pending.now_or_never(), Some(Ok(None)));
+    }
+    #[test]
+    fn the_main_loop_request_reports_a_dropped_session_and_a_bad_address() {
+        use futures_util::FutureExt;
+        let (tx, rx) = mpsc::unbounded_channel();
+        let client = Client::new(tx);
+        let bad = client.request_on_main_loop("not a jid", Kind::Get, cancel());
+        assert_eq!(bad.now_or_never(), Some(Err(Error::Invalid)));
+        drop(rx);
+        let gone = client.request_on_main_loop("example.com", Kind::Get, cancel());
+        assert_eq!(gone.now_or_never(), Some(Err(Error::Closed)));
+    }
+    #[test]
+    fn a_session_that_drops_the_job_answers_closed() {
+        use futures_util::FutureExt;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let client = Client::new(tx);
+        let mut pending = Box::pin(client.request_on_main_loop("example.com", Kind::Get, cancel()));
+        assert!((&mut pending).now_or_never().is_none());
+        drop(rx.try_recv().unwrap());
+        assert_eq!(pending.now_or_never(), Some(Err(Error::Closed)));
     }
 }
