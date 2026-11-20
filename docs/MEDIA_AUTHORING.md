@@ -67,6 +67,11 @@ geometry is rounded to even values. Trims apply to the source timeline and must 
    writes a new file under the cache directory (`monogram-desktop/edited`, private, pruned after 24
    hours and removed with its attachment) that replaces the attachment in the same position; the
    original is never modified. Cancel, Escape or closing stops a running edit.
+   **To do: annotation tools in Edit Picture.** Add freehand drawing, an arrow tool, a circle tool
+   and a square tool, with a colour and stroke width, undo and redo, and Reset. The marks must be
+   drawn into the edited copy by the confined helper, never by the GTK process, and the original
+   must stay untouched, as with crop and rotate. They need a pointer-free path as well (keyboard
+   placement or numeric rows), like the crop controls, and tests that run without a display.
 4. Video trim and compression with progress and cancel off the main thread.
 5. Albums: multi-select, ordering, shared caption.
 6. Camera capture through the desktop camera portal.
