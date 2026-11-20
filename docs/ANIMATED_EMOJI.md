@@ -1,7 +1,7 @@
 # Animated emoji
 
 A message whose entire text is **exactly one emoji** that is bundled plays its Noto animation: once
-when it scrolls into view, and again when clicked. When it ends it stays on the animation's final frame. Two or more emoji, any other text, links, formatting, custom emoji, or an emoji that
+when it scrolls into view, and again when clicked. When it ends it holds Noto's marked `rest` pose; the final timeline frame can be part of the outro. Two or more emoji, any other text, links, formatting, custom emoji, or an emoji that
 is not in the pack all keep the ordinary static rendering.
 
 It only applies while the "big emoji" setting is on, and never when GNOME's animations are turned
@@ -43,7 +43,7 @@ read past its end.
 
 Frames are rendered by the existing bubblewrap-confined tlottie helper
 (`monogram-sticker-renderer`), never in the GTK process. Emoji use a separate request type,
-`MGE1`, with larger limits than stickers need: square up to 1024 px, 360 frames and 6.1 seconds.
+`MGE2`/`MGF2` include a validated rest-frame index, with larger limits than stickers need: square up to 1024 px, 360 frames and 6.1 seconds.
 Stickers (`MGT1`) keep their exact 512x512, 180 frame, 3 second limits. The bundled bytes reach the
 helper through an anonymous in-memory file, so nothing is written to disk.
 
@@ -52,6 +52,7 @@ single-emoji messages cannot start a crowd of them; the rest wait their turn.
 
 Playback follows the animation's own clock: a slow frame makes the next one skip ahead, frames do
 not queue, and the sandbox process ends when the animation does or the row goes away or off screen.
+The helper reads the case-insensitive `rest` marker (relative to the in-point); GTK never parses the JSON. Animations without a valid, unique rest marker return to the ordinary emoji after playback. See [Noto’s documentation](https://googlefonts.github.io/noto-emoji-files/?view=docs).
 The widget has a fixed 96 px size from the start, so the bubble does not reflow when the first frame
 arrives.
 
