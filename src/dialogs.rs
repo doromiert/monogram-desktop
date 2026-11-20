@@ -881,6 +881,40 @@ impl Ui {
             }
         });
         options.add(&add);
+        if !self.state.borrow().account.is_empty() && self.online.get() {
+            let server = adw::PreferencesGroup::builder()
+                .title("Server")
+                .description("For the account you are signed in to.")
+                .build();
+            let invite = adw::ActionRow::builder()
+                .title("Create Invite Link")
+                .subtitle("Let someone create an account on this server and add you")
+                .activatable(true)
+                .build();
+            invite.add_prefix(&gtk::Image::from_icon_name("emblem-shared-symbolic"));
+            let weak = Rc::downgrade(self);
+            invite.connect_activated(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.create_invite_link();
+                }
+            });
+            server.add(&invite);
+            let commands = adw::ActionRow::builder()
+                .title("Server Commands…")
+                .subtitle("Run the commands your server offers")
+                .activatable(true)
+                .build();
+            commands.add_prefix(&gtk::Image::from_icon_name("utilities-terminal-symbolic"));
+            commands.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+            let weak = Rc::downgrade(self);
+            commands.connect_activated(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.server_commands();
+                }
+            });
+            server.add(&commands);
+            page.add(&server);
+        }
         if !self.state.borrow().account.is_empty() {
             let row = adw::ActionRow::builder()
                 .title("Disconnect")
