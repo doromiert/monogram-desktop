@@ -1,4 +1,5 @@
 use adw::prelude::*;
+mod account_deletion;
 mod action_store;
 mod attachment_ui;
 mod audio_ui;
