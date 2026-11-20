@@ -6,7 +6,46 @@ use std::{
     rc::Rc,
     time::{Duration, Instant},
 };
+pub(crate) struct ProfileControls {
+    owner: String,
+    peer: String,
+    fallback: String,
+    room: Option<(String,String)>,
+    title: gtk::Label,
+    status: gtk::Label,
+    banner: gtk::Overlay,
+}
+
 impl Ui {
+    fn profile_chat(&self, peer: &str, name: &str, room: Option<&(String,String)>) -> Chat {
+        if let Some((room,nick)) = room {
+            if let Some(person) = self.room_rosters.borrow().get(room)
+                .and_then(|people| people.iter().find(|person| &person.nick == nick))
+            {
+                return self.participant_chat(room,person);
+            }
+        }
+        let mut chat = self.state.borrow().chats.iter().find(|chat| chat.jid == peer).cloned()
+            .unwrap_or_else(||Chat { name:name.into(),jid:peer.into(),group:peer.contains('/'),..Default::default() });
+        if let Some(local) = self.local_contacts.borrow().get(peer) { chat.local_name=local.nickname.clone(); }
+        if room.is_some() { chat.name=name.into();chat.subtitle="Not in this room".into(); }
+        chat
+    }
+    pub(crate) fn participant_profile_card(self: &Rc<Self>, anchor:&impl IsA<gtk::Widget>, room:&str, person:&crate::rooms::members::Participant) {
+        let peer=person.jid.clone().unwrap_or_else(||format!("{room}/{}",person.nick));
+        self.profile_card_context(anchor,&peer,&person.nick,Some((room.into(),person.nick.clone())));
+    }
+    pub(crate) fn refresh_profile_card(&self) {
+        let controls=self.profile_controls.borrow();
+        let Some(card)=controls.as_ref().filter(|card|card.owner==self.state.borrow().account) else{return};
+        if self.active_profile.borrow().as_ref().is_none_or(|popup|!popup.is_visible()) {return;}
+        let chat=self.profile_chat(&card.peer,&card.fallback,card.room.as_ref());
+        card.title.set_label(&crate::text_safety::visible(chat.display_name(),128));
+        card.status.set_label(profile_status(&chat,card.room.is_some()));
+        if let Some(old)=card.banner.last_child().and_downcast::<adw::Avatar>() {card.banner.remove_overlay(&old);}
+        add_avatar(self,&card.banner,&chat);
+    }
+
     pub(crate) fn profile_button(
         self: &Rc<Self>,
         child: &impl IsA<gtk::Widget>,
@@ -53,6 +92,9 @@ impl Ui {
         peer: &str,
         name: &str,
     ) {
+        self.profile_card_context(anchor,peer,name,None);
+    }
+    fn profile_card_context(self:&Rc<Self>,anchor:&impl IsA<gtk::Widget>,peer:&str,name:&str,room:Option<(String,String)>) {
         if peer.is_empty() {
             return;
         }
@@ -62,20 +104,7 @@ impl Ui {
                 previous.unparent();
             }
         }
-        let chat = self
-            .state
-            .borrow()
-            .chats
-            .iter()
-            .find(|c| c.jid == peer)
-            .cloned()
-            .unwrap_or_else(|| Chat {
-                name: name.into(),
-                jid: peer.into(),
-                group: peer.contains('/'),
-                color: "purple".into(),
-                ..Default::default()
-            });
+        let chat = self.profile_chat(peer,name,room.as_ref());
         let popup = gtk::Popover::builder()
             .has_arrow(false)
             .autohide(true)
@@ -91,11 +120,7 @@ impl Ui {
         color.add_css_class("profile-card-banner");
         color.set_margin_bottom(32);
         banner.set_child(Some(&color));
-        let avatar = self.chat_avatar(&chat, 72);
-        avatar.set_halign(gtk::Align::Start);
-        avatar.set_valign(gtk::Align::End);
-        avatar.set_margin_start(12);
-        banner.add_overlay(&avatar);
+        add_avatar(self,&banner,&chat);
         body.append(&banner);
         let content = bx(true, 10);
         content.set_margin_start(12);
@@ -113,14 +138,7 @@ impl Ui {
         address.set_xalign(0.);
         address.set_max_width_chars(35);
         content.append(&address);
-        let presence = if chat.group {
-            "Room participant"
-        } else if !chat.subtitle.is_empty() {
-            &chat.subtitle
-        } else {
-            "Presence unavailable"
-        };
-        let status = wrap(presence, "caption");
+        let status = wrap(profile_status(&chat,room.is_some()), "caption");
         status.set_xalign(0.);
         content.append(&status);
         let fields = bx(true, 10);
@@ -183,6 +201,10 @@ impl Ui {
                 }
             }
         });
+        self.profile_controls.replace(Some(ProfileControls {
+            owner:self.state.borrow().account.clone(),peer:peer.into(),fallback:name.into(),room,
+            title:title.clone(),status:status.clone(),banner:banner.clone(),
+        }));
         self.active_profile.replace(Some(popup.clone()));
         popup.popup();
         if let Some(button) = preferred_focus {
@@ -264,5 +286,51 @@ fn render(body: &gtk::Box, card: &crate::profiles::Profile) {
         value.set_selectable(true);
         group.append(&value);
         body.append(&group);
+    }
+}
+
+fn profile_status(chat:&Chat, room:bool)->&str {
+    if room && !chat.subtitle.is_empty() { &chat.subtitle }
+    else if chat.group { "Room participant" }
+    else if !chat.subtitle.is_empty() { &chat.subtitle }
+    else { "Presence unavailable" }
+}
+fn add_avatar(ui:&Ui,banner:&gtk::Overlay,chat:&Chat) {
+    let avatar=ui.chat_avatar(chat,72);
+    avatar.set_halign(gtk::Align::Start);avatar.set_valign(gtk::Align::End);avatar.set_margin_start(12);
+    banner.add_overlay(&avatar);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{model::{Account,State},rooms::members::Participant};
+    use gtk::{gdk,gio};
+    #[test]
+    #[ignore="requires private GTK display and D-Bus"]
+    fn room_profile_matches_row_name_avatar_and_live_room_presence() {
+        let app=adw::Application::builder().application_id("com.negzero.ProfileConsistencyFixture").flags(gio::ApplicationFlags::NON_UNIQUE).build();app.register(None::<&gio::Cancellable>).unwrap();
+        let ui=Ui::new(&app,true);let owner="owner@example.invalid";let peer="friend@example.invalid";let room="room@conference.example.invalid";
+        ui.store.save_account(&Account{jid:owner.into(),host:String::new(),port:5222,direct_tls:false}).unwrap();
+        let mut state=State::live(owner,vec![]);let direct=state.chat_for(peer);direct.name=peer.into();direct.subtitle="Offline".into();
+        ui.activate_state(state);ui.window.set_default_size(1100,700);ui.window.present();
+        let pump=||{let until=Instant::now()+Duration::from_millis(200);while Instant::now()<until{glib::MainContext::default().iteration(false);std::thread::sleep(Duration::from_millis(2));}};pump();
+        let image:gdk::Texture=gdk::MemoryTexture::new(1,1,gdk::MemoryFormat::R8g8b8a8,&glib::Bytes::from_owned(vec![255,0,0,255]),4).upcast();
+        ui.avatars.borrow_mut().cache.insert(peer.into(),(Instant::now()+Duration::from_secs(300),Some(image.clone())));
+        let mut person=Participant{nick:"Room Nick".into(),jid:Some(peer.into()),affiliation:"member".into(),role:"participant".into(),show:String::new(),own:false};
+        ui.room_roster_changed(room,vec![person.clone()]);
+        let row=ui.participant_chat(room,&person);assert_eq!(row.display_name(),"Room Nick");assert_eq!(row.subtitle,"Online");
+        let row_avatar=ui.chat_avatar(&row,40);assert_eq!(row_avatar.custom_image().unwrap(),image.clone().upcast::<gdk::Paintable>());
+        ui.participant_profile_card(&ui.title,room,&person);pump();
+        let controls=ui.profile_controls.borrow();let card=controls.as_ref().unwrap();assert_eq!(card.title.label(),"Room Nick");assert_eq!(card.status.label(),"Online");
+        let avatar=card.banner.last_child().and_downcast::<adw::Avatar>().unwrap();assert_eq!(avatar.custom_image(),row_avatar.custom_image());drop(controls);
+        ui.backend_event(ui.generation.get(),owner,crate::protocol::BackendEvent::Presence{peer:peer.into(),online:false,visible:true});
+        assert_eq!(ui.profile_controls.borrow().as_ref().unwrap().status.label(),"Online","direct offline must not override known room presence");
+        person.show="away".into();ui.room_roster_changed(room,vec![person.clone()]);assert_eq!(ui.profile_controls.borrow().as_ref().unwrap().status.label(),"Away");
+        let mut local=crate::contact_details::LocalContact::default();local.peer=peer.into();local.nickname="Local Nick".into();ui.local_contacts.borrow_mut().insert(peer.into(),local);
+        ui.local_contact_avatars.borrow_mut().insert(peer.into(),image.clone());ui.refresh_profile_card();
+        assert_eq!(ui.participant_chat(room,&person).display_name(),"Local Nick");assert_eq!(ui.profile_controls.borrow().as_ref().unwrap().title.label(),"Local Nick");
+        ui.room_roster_changed(room,vec![]);assert_eq!(ui.profile_controls.borrow().as_ref().unwrap().status.label(),"Not in this room");
+        ui.active_profile.borrow().as_ref().unwrap().popdown();ui.window.close();
     }
 }

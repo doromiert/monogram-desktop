@@ -108,6 +108,7 @@ pub struct Ui {
     pub room_sync_retry: RefCell<HashMap<String, (Instant, u8)>>,
     pub(crate) active_audio: RefCell<Option<std::rc::Weak<crate::video_ui::Playback>>>,
     pub(crate) active_profile: RefCell<Option<gtk::Popover>>,
+    pub(crate) profile_controls: RefCell<Option<crate::profile_ui::ProfileControls>>,
     pub(crate) profile_cache: RefCell<HashMap<String,(Instant,crate::profiles::Profile)>>,
     pub(crate) requests_revision: Cell<u64>,
     pub request_secrets: RefCell<crate::request_logic::SecretJobs>,
@@ -432,6 +433,7 @@ impl Ui {
             room_sync_retry: RefCell::new(HashMap::new()),
             active_audio: RefCell::new(None),
             active_profile: RefCell::new(None),
+            profile_controls: RefCell::new(None),
             profile_cache: RefCell::new(HashMap::new()),
             requests_revision: Cell::new(0),
             request_secrets: RefCell::new(Default::default()),
@@ -2194,6 +2196,7 @@ impl Ui {
         self.legacy_crypto.replace(Default::default());
         if let Some(audio)=self.active_audio.borrow_mut().take().and_then(|a|a.upgrade()){audio.media.pause();}
         self.profile_cache.borrow_mut().clear();
+        self.profile_controls.borrow_mut().take();
         if let Some(popup)=self.active_profile.borrow_mut().take(){popup.popdown();if popup.parent().is_some(){popup.unparent();}}
         self.pq_crypto.replace(Default::default());
         self.pq_reviews.borrow_mut().clear();
@@ -2781,6 +2784,7 @@ impl Ui {
                 }
                 drop(s);
                 self.update_chat_subtitle();
+                self.refresh_profile_card();
                 return;
             }
             BackendEvent::Typing { peer, sender, composing } => {
