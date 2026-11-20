@@ -768,6 +768,7 @@ impl Ui {
         self.window.add_action(&action);
     }
     fn actions(self: &Rc<Self>) {
+        crate::chat_navigation::install(self);
         self.install_reply_scroll_input();
         crate::lan_sync_ui::install(self);
         self.action("search", |s| {

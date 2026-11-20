@@ -169,3 +169,10 @@
 - [x] Add MUC @nickname suggestions to composer and message editor using the existing emoji completion popover; Tab accepts, arrows choose, Escape dismisses, Enter retains its send/save behavior.
 - [x] Review native popover reuse, accessible plain-text nickname labels, room scoping and bounded synchronous filtering in source. Build passed; user requested no self-testing.
 - [ ] User acceptance of @nickname popup behavior; the last three user-sent messages were observed as sent with Legacy encryption after the automatic recipient-policy fix.
+
+## Current desktop reports (2026-11-20)
+
+- [x] Composer: grow by full display lines plus top/bottom padding, cap at five lines, and scroll minimally to the caret instead of centering after a newline.
+- [x] Animated Noto emoji: stop playback at the rest marker without entering the outro.
+- [x] Profile popouts: use the same presence, local nickname and avatar as the sidebar and refresh coherently.
+- [x] Add Alt+Left/Right visible-folder navigation and Alt+Up/Down chat navigation in folder order, including shortcut help.

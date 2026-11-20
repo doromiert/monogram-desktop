@@ -9,6 +9,7 @@ mod blocking_ui;
 mod clipboard_upload;
 mod chat_states;
 mod composer_view;
+mod chat_navigation;
 mod contact_access;
 mod contact_details;
 mod contact_details_ui;

@@ -1818,6 +1818,10 @@ impl Ui {
                     ("New conversation", "<Control>n"),
                     ("Search", "<Control>f"),
                     ("Attach files", "<Control>o"),
+                    ("Previous folder", "<Alt>Left"),
+                    ("Next folder", "<Alt>Right"),
+                    ("Previous chat", "<Alt>Up"),
+                    ("Next chat", "<Alt>Down"),
                 ],
             ),
             (
