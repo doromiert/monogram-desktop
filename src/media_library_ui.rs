@@ -1066,12 +1066,8 @@ impl PackLibraryPage {
         let menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
         menu.add_css_class("message-menu-panel");
         for button in [&import, &telegram, &create, &manage] {
-            button.add_css_class("flat");
-            button.add_css_class("context-menu-row");
+            crate::widgets::style_context_button(button);
             button.add_css_class("picker-menu-row");
-            if let Some(label) = button.child().and_downcast::<gtk::Label>() {
-                label.set_xalign(0.);
-            }
             menu.append(button);
         }
         let popover = gtk::Popover::builder()
@@ -1892,9 +1888,9 @@ let mut ids=Vec::new();let buttons=page.section_buttons.borrow();let mut child=p
             let(Some(page),Some(button))=(weak.upgrade(),target.upgrade())else{return;};
             let menu=gtk::Popover::builder().has_arrow(false).autohide(true).build();menu.add_css_class("message-menu");menu.set_parent(&button);menu.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32,y as i32,1,1)));
             let body=gtk::Box::new(gtk::Orientation::Vertical,0);body.add_css_class("message-menu-panel");
-            let favorite=gtk::Button::with_label(if page.favorites.borrow().contains(&id){"Remove from Favorites"}else{"Add to Favorites"});favorite.add_css_class("flat");favorite.add_css_class("context-menu-row");
+            let favorite=gtk::Button::with_label(if page.favorites.borrow().contains(&id){"Remove from Favorites"}else{"Add to Favorites"});crate::widgets::style_context_button(&favorite);
             let weak=Rc::downgrade(&page);let pop=menu.downgrade();favorite.connect_clicked(move|_|{if let Some(pop)=pop.upgrade(){pop.popdown();}if let Some(page)=weak.upgrade(){page.toggle_item_favorite(id);}});body.append(&favorite);
-            let send=gtk::Button::with_label(if page.kind==Kind::Emoji{"Insert Emoji"}else{"Send Sticker"});send.add_css_class("flat");send.add_css_class("context-menu-row");let target=button.downgrade();let pop=menu.downgrade();let skip=skip.clone();send.connect_clicked(move|_|{if let Some(pop)=pop.upgrade(){pop.popdown();}skip.set(false);if let Some(button)=target.upgrade(){button.emit_clicked();}});body.append(&send);
+            let send=gtk::Button::with_label(if page.kind==Kind::Emoji{"Insert Emoji"}else{"Send Sticker"});crate::widgets::style_context_button(&send);let target=button.downgrade();let pop=menu.downgrade();let skip=skip.clone();send.connect_clicked(move|_|{if let Some(pop)=pop.upgrade(){pop.popdown();}skip.set(false);if let Some(button)=target.upgrade(){button.emit_clicked();}});body.append(&send);
             menu.set_child(Some(&body));menu.connect_closed(|pop|{if pop.parent().is_some(){pop.unparent();}});menu.popup();
         });button.add_controller(secondary);
         self.preview_queue.borrow_mut().push(PackPreviewCell {

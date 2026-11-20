@@ -554,38 +554,10 @@ impl Ui {
         let weak = Rc::downgrade(self);
         right.connect_pressed(move |_, _, x, y| {
             if let (Some(ui), Some(parent)) = (weak.upgrade(), parent.upgrade()) {
-                let p = gtk::Popover::builder().has_arrow(false).build();
-                p.add_css_class("message-menu");
+                let weak=Rc::downgrade(&ui);
+                let p=crate::widgets::context_menu(&items,move|key|{if let Some(ui)=weak.upgrade(){ui.context_action(key);}});
                 p.set_parent(&parent);
-                p.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-                let content = bx(true, 2);
-                content.add_css_class("message-menu-panel");
-                for (title, key) in &items {
-                    let b = gtk::Button::with_label(title);
-                    b.add_css_class("flat");
-                    b.add_css_class("context-menu-row");
-                    let weak = Rc::downgrade(&ui);
-                    let pop = p.downgrade();
-                    let key = key.clone();
-                    b.connect_clicked(move |_| {
-                        if let Some(p) = pop.upgrade() {
-                            p.popdown();
-                            if p.parent().is_some() {
-                                p.unparent()
-                            }
-                        }
-                        if let Some(ui) = weak.upgrade() {
-                            ui.context_action(&key)
-                        }
-                    });
-                    content.append(&b)
-                }
-                p.set_child(Some(&content));
-                p.connect_closed(|p| {
-                    if p.parent().is_some() {
-                        p.unparent()
-                    }
-                });
+                p.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32,y as i32,1,1)));
                 p.popup();
             }
         });
