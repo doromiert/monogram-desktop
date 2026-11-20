@@ -1031,22 +1031,30 @@ impl Ui {
         }
     }
     pub fn set_folder(self: &Rc<Self>, name: &str) {
-        let (old, new) = {
-            let mut s = self.state.borrow_mut();
-            let old = s
-                .folder_order
-                .iter()
-                .position(|n| n == &s.folder)
-                .unwrap_or(0);
-            let new = s.folder_order.iter().position(|n| n == name).unwrap_or(0);
-            if s.folder == name {
-                return;
+        let changed = {
+            let mut state=self.state.borrow_mut();
+            if state.folder==name {None} else {
+                let old=state.folder_order.iter().position(|n|n==&state.folder).unwrap_or(0);
+                let new=state.folder_order.iter().position(|n|n==name).unwrap_or(0);
+                state.folder=name.into();Some(new>=old)
             }
-            s.folder = name.into();
-            (old, new)
         };
-        self.refresh_chats(Some(new >= old));
-        self.persist();
+        let mut child=self.folder_bar.first_child();
+        while let Some(widget)=child {
+            child=widget.next_sibling();
+            if let Some(button)=widget.downcast_ref::<gtk::ToggleButton>().filter(|button|button.widget_name()==name) {
+                button.set_active(true);
+                if let Some(scroll)=self.folder_bar.ancestor(gtk::ScrolledWindow::static_type()).and_downcast::<gtk::ScrolledWindow>() {
+                    if let Some(bounds)=button.compute_bounds(&self.folder_bar) {
+                        let adjustment=scroll.hadjustment();let start=f64::from(bounds.x());let end=start+f64::from(bounds.width());
+                        if start<adjustment.value(){adjustment.set_value(start);}
+                        else if end>adjustment.value()+adjustment.page_size(){adjustment.set_value(end-adjustment.page_size());}
+                    }
+                }
+                break;
+            }
+        }
+        if let Some(direction)=changed {self.refresh_chats(Some(direction));self.persist();}
     }
     pub fn refresh_chats(self: &Rc<Self>, direction: Option<bool>) {
         let list = gtk::ListBox::new();

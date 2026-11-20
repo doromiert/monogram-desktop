@@ -59,7 +59,12 @@ mod tests {
         state.folders.insert("Empty".into(),Default::default());ui.activate_state(state);ui.window.set_default_size(1100,700);ui.window.present();ui.composer.grab_focus();
         let pump=||{let until=Instant::now()+Duration::from_millis(180);while Instant::now()<until{glib::MainContext::default().iteration(false);std::thread::sleep(Duration::from_millis(2));}};pump();
         let ids=std::process::Command::new("xdotool").args(["search","--name","^Monogram$"]).output().unwrap();let id=String::from_utf8(ids.stdout).unwrap().lines().last().unwrap().to_owned();assert!(std::process::Command::new("xdotool").args(["windowfocus","--sync",&id]).status().unwrap().success());pump();
-        let key=|key:&str|{assert!(std::process::Command::new("xdotool").args(["key","--clearmodifiers",key]).status().unwrap().success());pump();};
+        let key=|key:&str|{
+            assert!(std::process::Command::new("xdotool").args(["key","--clearmodifiers",key]).status().unwrap().success());pump();
+            let mut child=ui.folder_bar.first_child();let mut active=Vec::new();
+            while let Some(widget)=child {child=widget.next_sibling();if let Some(button)=widget.downcast_ref::<gtk::ToggleButton>().filter(|button|button.is_active()){active.push(button.widget_name().to_string());}}
+            assert_eq!(active,vec![ui.state.borrow().folder.clone()],"visible selected tab must follow keyboard folder navigation");
+        };
         ui.composer.buffer().set_text("kept draft");key("alt+Down");assert_eq!(ui.state.borrow().active,second);assert_eq!(ui.state.borrow().chats.iter().find(|chat|chat.id==first).unwrap().draft,"kept draft");
         key("alt+Down");assert_eq!(ui.state.borrow().active,second);key("alt+Up");assert_eq!(ui.state.borrow().active,first);
         key("alt+Left");assert_eq!(ui.state.borrow().folder,"Few","hidden All is skipped");key("alt+Right");assert_eq!(ui.state.borrow().folder,"Empty");
