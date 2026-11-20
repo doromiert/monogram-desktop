@@ -129,7 +129,8 @@ pub struct Ui {
     pub big_emoji: Cell<bool>,
     pub auto_download_enabled: Cell<bool>,
     pub auto_download_limit: Cell<u64>,
-    pub typing: RefCell<HashMap<String, Instant>>,
+    pub typing: RefCell<HashMap<(String, String), Instant>>,
+    pub(crate) header_subtitle: RefCell<Option<gtk::Label>>,
     pub last_typing: Cell<Option<Instant>>,
     pub typing_input: RefCell<Option<(String, Instant, bool)>>,
     pub history_pages: RefCell<HashMap<String, (String, bool)>>,
@@ -462,6 +463,7 @@ impl Ui {
             auto_download_enabled: Cell::new(true),
             auto_download_limit: Cell::new(crate::downloads::DEFAULT_AUTO_MAX),
             typing: RefCell::new(HashMap::new()),
+            header_subtitle: RefCell::new(None),
             last_typing: Cell::new(None),
             typing_input: RefCell::new(None),
             history_pages: RefCell::new(HashMap::new()),
@@ -597,11 +599,11 @@ impl Ui {
             ui.retry_request_cleanup();
             ui.typing
                 .borrow_mut()
-                .retain(|_, t| t.elapsed() < Duration::from_secs(10));
+                .retain(|_, t| t.elapsed() < crate::chat_states::TIMEOUT);
             if before != ui.typing.borrow().len()
                 && ui.pages.visible_child_name().as_deref() == Some("chat")
             {
-                ui.show_chat();
+                ui.update_chat_subtitle();
             }
             glib::ControlFlow::Continue
         });
@@ -1657,17 +1659,10 @@ impl Ui {
         title.append(&self.chat_avatar(chat, 28));
         let words = bx(true, 0);
         words.append(&text(chat.display_name(), "chat-title"));
-        let subtitle = if self
-            .typing
-            .borrow()
-            .get(&chat.jid)
-            .is_some_and(|t| t.elapsed() < Duration::from_secs(10))
-        {
-            "Typing…"
-        } else {
-            &chat.subtitle
-        };
-        words.append(&text(subtitle, "chat-subtitle dim-label"));
+        let subtitle = text("", "chat-subtitle dim-label");
+        words.append(&subtitle);
+        self.header_subtitle.replace(Some(subtitle));
+        self.update_chat_subtitle();
         title.append(&words);
         self.title.set_child(Some(&title));
         if let Some(a) = self
@@ -1678,6 +1673,16 @@ impl Ui {
             a.set_state(&chat.notifications.to_variant())
         }
     }
+    pub(crate) fn update_chat_subtitle(&self) {
+        let state = self.state.borrow();
+        let chat = state.current();
+        let composing = self.typing.borrow().iter().any(|((peer, _), at)|
+            peer == &chat.jid && at.elapsed() < crate::chat_states::TIMEOUT);
+        if let Some(label) = self.header_subtitle.borrow().as_ref() {
+            label.set_text(if composing { "typing..." } else { &chat.subtitle });
+        }
+    }
+
     pub fn show_page(&self, title: &str, widget: &impl IsA<gtk::Widget>) {
         self.search_toggle.set_active(false);
         if let Some(old) = self.pages.child_by_name("section") {
@@ -2437,6 +2442,7 @@ impl Ui {
                     }
                 }
                 if !online {
+                    self.update_chat_subtitle();
                     let _ = self.store.interrupt_messages(owner);
                     let _ = self.store.interrupt_actions(owner);
                     let peers: Vec<_> = self
@@ -2529,6 +2535,9 @@ impl Ui {
                 self.resume_current_chat();
             }
             BackendEvent::RoomPresence(presence) => {
+                if !presence.joined {
+                    self.typing.borrow_mut().retain(|(peer, _), _| peer != &presence.jid);
+                }
                 let mut state = self.state.borrow_mut();
                 let room = state.chat_for(&presence.jid);
                 room.group = true;
@@ -2765,6 +2774,9 @@ impl Ui {
                 online,
                 visible,
             } => {
+                if !online {
+                    self.typing.borrow_mut().retain(|(chat, _), _| chat != &peer);
+                }
                 let mut s = self.state.borrow_mut();
                 if let Some(c) = s.chats.iter_mut().find(|c| c.jid == peer) {
                     c.subtitle = if !visible {
@@ -2777,20 +2789,16 @@ impl Ui {
                     .into();
                 }
                 drop(s);
-                if self.pages.visible_child_name().as_deref() == Some("chat") {
-                    self.show_chat()
-                }
+                self.update_chat_subtitle();
                 return;
             }
-            BackendEvent::Typing { peer, composing } => {
+            BackendEvent::Typing { peer, sender, composing } => {
                 if composing {
-                    self.typing.borrow_mut().insert(peer, Instant::now());
+                    self.typing.borrow_mut().insert((peer, sender), Instant::now());
                 } else {
-                    self.typing.borrow_mut().remove(&peer);
+                    self.typing.borrow_mut().remove(&(peer, sender));
                 }
-                if self.pages.visible_child_name().as_deref() == Some("chat") {
-                    self.show_chat()
-                }
+                self.update_chat_subtitle();
                 return;
             }
             BackendEvent::Uncertain { peer, id } => {

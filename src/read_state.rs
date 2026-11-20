@@ -155,6 +155,35 @@ impl Ui {
 #[cfg(test)] mod native_tests {
  use super::*;use crate::model::{Account,Message,State};use gtk::{gio,glib};use std::time::{Duration,Instant};
  fn pump(){let context=glib::MainContext::default();let deadline=Instant::now()+Duration::from_millis(350);while Instant::now()<deadline{context.iteration(false);std::thread::sleep(Duration::from_millis(1));}}
+ #[test]#[ignore="requires private GTK display and D-Bus"]
+ fn typing_headers_follow_live_senders_without_rebuilding_chat(){
+  let app=adw::Application::builder().application_id("com.negzero.MonogramTypingTest").flags(gio::ApplicationFlags::NON_UNIQUE).build();app.register(None::<&gio::Cancellable>).unwrap();
+  let ui=Ui::new(&app,true);let owner="alice@example.invalid";let peer="bob@example.invalid";let room="room@conference.example.invalid";
+  ui.store.save_account(&Account{jid:owner.into(),host:String::new(),port:5222,direct_tls:false}).unwrap();
+  let mut state=State::live(owner,vec![]);state.active=state.chat_for(peer).id.clone();state.current_mut().subtitle="Online".into();
+  let group=state.chat_for(room);group.group=true;group.room_joined=true;group.subtitle="Joined".into();
+  ui.activate_state(state);ui.select_chat(peer);ui.window.set_default_size(1100,700);ui.window.present();pump();
+  // select_chat reloads contact presence; seed the current normal status afterward.
+  ui.state.borrow_mut().current_mut().subtitle="Online".into();ui.update_chat_subtitle();
+  let subtitle=||ui.header_subtitle.borrow().as_ref().unwrap().clone();
+  let send=|conversation:&str,actor:&str,composing:bool|ui.backend_event(ui.generation.get(),owner,crate::protocol::BackendEvent::Typing{peer:conversation.into(),sender:actor.into(),composing});
+  let original=subtitle();let started=Instant::now();send(peer,"bob@example.invalid/phone",true);
+  assert_eq!(original.text(),"typing...");assert!(started.elapsed()<Duration::from_millis(400));assert!(original.is_mapped());assert_eq!(original,subtitle());
+  send(room,"room@conference.example.invalid/Alice",true);assert_eq!(original.text(),"typing...");
+  send(peer,"bob@example.invalid/laptop",true);send(peer,"bob@example.invalid/phone",false);assert_eq!(original.text(),"typing...");
+  send(peer,"bob@example.invalid/laptop",false);assert_eq!(original.text(),"Online");
+  ui.select_chat(room);ui.state.borrow_mut().current_mut().subtitle="Joined".into();ui.update_chat_subtitle();assert_eq!(subtitle().text(),"typing...");
+  send(room,"room@conference.example.invalid/Bob",true);send(room,"room@conference.example.invalid/Alice",false);assert_eq!(subtitle().text(),"typing...");
+  send(room,"room@conference.example.invalid/Bob",false);assert_eq!(subtitle().text(),"Joined");
+  send(room,"room@conference.example.invalid/Bob",true);
+  ui.typing.borrow_mut().values_mut().for_each(|at|*at=Instant::now()-crate::chat_states::TIMEOUT-Duration::from_secs(1));
+  let deadline=Instant::now()+Duration::from_millis(1400);while Instant::now()<deadline{glib::MainContext::default().iteration(false);std::thread::sleep(Duration::from_millis(1));}assert_eq!(subtitle().text(),"Joined");
+  ui.backend_event(ui.generation.get(),"other@example.invalid",crate::protocol::BackendEvent::Typing{peer:room.into(),sender:"room@conference.example.invalid/Eve".into(),composing:true});assert_eq!(subtitle().text(),"Joined");
+  ui.select_chat(peer);ui.state.borrow_mut().current_mut().subtitle="Online".into();send(peer,"bob@example.invalid/phone",true);
+  ui.backend_event(ui.generation.get(),owner,crate::protocol::BackendEvent::Presence{peer:peer.into(),online:false,visible:true});assert_eq!(subtitle().text(),"Offline");
+  send(peer,"bob@example.invalid/phone",true);ui.backend_event(ui.generation.get(),owner,crate::protocol::BackendEvent::Status{online:false,error:false,text:"Disconnected".into()});assert_ne!(subtitle().text(),"typing...");
+  eprintln!("Native typing headers: immediate mapped subtitle, direct/MUC aggregation, stop/expiry/status restoration, account isolation");ui.window.close();
+ }
  #[test]#[ignore="requires private GTK display, xdotool and D-Bus"]
  fn focused_history_arrivals_send_acknowledgement_and_typing_subtitle(){
   let app=adw::Application::builder().application_id("com.negzero.MonogramReadTest").flags(gio::ApplicationFlags::NON_UNIQUE).build();app.register(None::<&gio::Cancellable>).unwrap();
@@ -168,10 +197,10 @@ impl Ui {
   assert!(ui.receive_message(owner,peer.into(),Message{id:"fresh".into(),wire_id:"fresh-wire".into(),markable_id:"fresh-wire".into(),sender:peer.into(),text:"New while reading older history".into(),timestamp:"2026-11-14T12:00:00Z".into(),..Default::default()},false,None));pump();
   assert_eq!(ui.state.borrow().current().unread,0);assert_eq!(ui.store.unread_count(owner,peer),0);
   assert!(ui.store.pending_displayed(owner).unwrap().iter().any(|c|c.wire=="fresh-wire"));
-  ui.backend_event(ui.generation.get(),owner,crate::protocol::BackendEvent::Typing{peer:peer.into(),composing:true});pump();
-  fn has_typing(w:&gtk::Widget)->bool{if let Some(label)=w.downcast_ref::<gtk::Label>(){if label.text()=="Typing…"{return true;}}let mut c=w.first_child();while let Some(w)=c{c=w.next_sibling();if has_typing(&w){return true;}}false}
+  ui.backend_event(ui.generation.get(),owner,crate::protocol::BackendEvent::Typing{peer:peer.into(),sender:format!("{peer}/phone"),composing:true});pump();
+  fn has_typing(w:&gtk::Widget)->bool{if let Some(label)=w.downcast_ref::<gtk::Label>(){if label.text()=="typing..."{return true;}}let mut c=w.first_child();while let Some(w)=c{c=w.next_sibling();if has_typing(&w){return true;}}false}
   assert!(has_typing(ui.title.upcast_ref()));
-  ui.backend_event(ui.generation.get(),owner,crate::protocol::BackendEvent::Typing{peer:peer.into(),composing:false});pump();assert!(!has_typing(ui.title.upcast_ref()));
+  ui.backend_event(ui.generation.get(),owner,crate::protocol::BackendEvent::Typing{peer:peer.into(),sender:format!("{peer}/phone"),composing:false});pump();assert!(!has_typing(ui.title.upcast_ref()));
   // Sending acknowledges a conversation without requiring the newest row to be on screen.
   ui.state.borrow_mut().current_mut().unread=1;ui.mark_current_chat_read();assert_eq!(ui.state.borrow().current().unread,0);pump();
   // A closed modal must not block reads indefinitely, including room arrivals.

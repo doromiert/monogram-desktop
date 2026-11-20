@@ -603,6 +603,20 @@ impl Rooms {
         Some(message)
     }
 
+    /// Typing needs a joined room occupant, not an OMEMO real-JID disclosure.
+    pub fn typing_sender(&self, xml: &Element) -> Option<(String, String)> {
+        if xml.attr("type") != Some("groupchat") || !addressed_to(xml, &self.owner) {
+            return None;
+        }
+        let sender = xml.attr("from")?.parse::<Jid>().ok()?;
+        let room = sender.to_bare().to_string();
+        let Membership::Joined { occupant, .. } = self.membership.get(&room)? else {
+            return None;
+        };
+        (sender.resource().is_some() && sender != *occupant)
+            .then(|| (room, sender.to_string()))
+    }
+
     pub fn message(&self, xml: &Element) -> Option<(String, Message, bool)> {
         self.decode_message(xml, None)
     }

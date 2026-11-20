@@ -233,7 +233,7 @@ fn live_roundtrip() {
     });
     wait(
         &a,
-        |e| matches!(e,BackendEvent::Typing{peer,composing:true} if peer=="bob@localhost"),
+        |e| matches!(e,BackendEvent::Typing{peer,composing:true,..} if peer=="bob@localhost"),
     );
     alice.send(Command::History {
         peer: "bob@localhost".into(),
