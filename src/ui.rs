@@ -82,6 +82,7 @@ pub struct Ui {
     pub anchor: RefCell<Option<String>>,
     pub bubbles: RefCell<HashMap<String, gtk::Widget>>,
     pub(crate) rendered_rows: RefCell<crate::messages::RenderedRows>,
+    pub(crate) recent_timelines: RefCell<std::collections::VecDeque<crate::messages::CachedTimeline>>,
     pub(crate) reply_scroll: RefCell<Option<adw::TimedAnimation>>,
     chat_refresh_pending: Cell<bool>,
     pub media_stack: gtk::Stack,
@@ -394,6 +395,7 @@ impl Ui {
             anchor: RefCell::new(None),
             bubbles: RefCell::new(HashMap::new()),
             rendered_rows: RefCell::new(Default::default()),
+            recent_timelines: RefCell::new(Default::default()),
             reply_scroll: RefCell::new(None),
             chat_refresh_pending: Cell::new(false),
             media_stack: gtk::Stack::builder()
@@ -1562,7 +1564,9 @@ impl Ui {
             .flatten();
         self.save_draft();
         let switched = self.state.borrow().active != id;
+        let newest = self.history_window.newest();
         self.timeline_scope_changed();
+        if switched { self.switch_cached_timeline(id, newest); }
         {
             let mut state = self.state.borrow_mut();
             if switched && !state.account.is_empty() {
@@ -2180,6 +2184,11 @@ impl Ui {
             self.utility.set_sidebar(gtk::Widget::NONE);
         }
         self.stop_uploads();
+        self.recent_timelines.borrow_mut().clear();
+        self.rendered_rows.replace(Default::default());
+        self.bubbles.borrow_mut().clear();
+        while let Some(row) = self.timeline.first_child() { self.timeline.remove(&row); }
+        self.timeline.set_opacity(0.);
         self.images.borrow_mut().clear();
         self.avatars.borrow_mut().clear();
         for chat in &mut state.chats {

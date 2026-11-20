@@ -176,3 +176,9 @@
 - [x] Animated Noto emoji: stop playback at the rest marker without entering the outro.
 - [x] Profile popouts: use the same presence, local nickname and avatar as the sidebar and refresh coherently.
 - [x] Add Alt+Left/Right visible-folder navigation and Alt+Up/Down chat navigation in folder order, including shortcut help.
+
+## Folder selection and menu follow-up (2026-11-20)
+
+- [x] Keep the selected folder tab and its visibility synchronized after Alt-arrow navigation.
+- [x] Use Nautilus-style native context menus; compact rows and start-aligned actions everywhere.
+- [x] Remove the chat-switch top-to-bottom rebuild/loading effect, with measured responsiveness and bounded retention.
