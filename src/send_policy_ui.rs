@@ -35,6 +35,23 @@ impl Ui {
         chat.selected_encryption()
     }
 
+    /// Whether `mode`, chosen when a message was queued, is still what this chat would send with.
+    /// Automatic OMEMO 2/PQ choices are never cached (`Selection::current`), so for those the
+    /// lookup is `None` and only the preference can be compared.
+    pub fn mode_still_selected(&self, peer: &str, mode: Mode) -> bool {
+        let state = self.state.borrow();
+        let Some(chat) = state.chats.iter().find(|chat| chat.jid == peer) else {
+            return false;
+        };
+        match self.sending_mode(chat) {
+            Some(selected) => selected == mode,
+            None => {
+                chat.encryption_preference() == Preference::Automatic
+                    && matches!(mode, Mode::Omemo2 | Mode::Pq)
+            }
+        }
+    }
+
     pub fn fingerprint_for_send(&self, mode: Mode) -> Option<String> {
         match mode {
             Mode::Plain => Some(String::new()),

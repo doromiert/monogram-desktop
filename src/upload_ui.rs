@@ -291,10 +291,9 @@ impl Ui {
             .iter()
             .find(|c| c.jid == peer)
             .and_then(|chat| self.sending_mode(chat));
-        let Some(mode) = mode else {
-            self.notice("Check conversation encryption before uploading");
-            return;
-        };
+        // Automatic OMEMO 2/PQ choices are never cached, so `None` means "automatic": the row
+        // keeps the mode that was checked when the file was attached.
+        let mode = mode.unwrap_or_else(|| message.mode());
         if mode != message.mode() {
             self.notice(&format!("Restore {} to retry this upload, or cancel and attach the file again with the new mode.", message.mode().name()));
             return;
@@ -353,15 +352,8 @@ impl Ui {
             else {
                 continue;
             };
-            let selected = self
-                .state
-                .borrow()
-                .chats
-                .iter()
-                .find(|c| c.jid == work.peer)
-                .and_then(|chat| self.sending_mode(chat));
             let mode = work.mode;
-            let unchanged = selected == Some(mode)
+            let unchanged = self.mode_still_selected(&work.peer, mode)
                 && message.mode() == mode
                 && message.fingerprint == work.fingerprint
                 && self.fingerprint_for_send(mode).as_deref() == Some(work.fingerprint.as_str());
@@ -434,14 +426,7 @@ impl Ui {
                         if !ui.online.get()
                             || ui.fingerprint_for_send(work.mode).as_deref()
                                 != Some(work.fingerprint.as_str())
-                            || ui
-                                .state
-                                .borrow()
-                                .chats
-                                .iter()
-                                .find(|chat| chat.jid == work.peer)
-                                .and_then(|chat| ui.sending_mode(chat))
-                                != Some(work.mode)
+                            || !ui.mode_still_selected(&work.peer, work.mode)
                             || !ui
                                 .store
                                 .message(&work.owner, &work.peer, &message.id)
@@ -468,7 +453,7 @@ impl Ui {
         self.render_messages(false);
         self.refresh_chats(None);
     }
-    pub fn send_files(self: &Rc<Self>, caption: &str) -> bool {
+    pub fn send_files(self: &Rc<Self>, caption: &str, mode: crate::encryption_policy::Mode) -> bool {
         if self.peer_blocked(&self.state.borrow().current().jid) {
             self.notice("Unblock this address before uploading. Your files are kept.");
             return false;
@@ -477,9 +462,6 @@ impl Ui {
             self.notice("Connect before uploading. Your draft is kept.");
             return false;
         }
-        let Some(mode) = self.sending_mode(self.state.borrow().current()) else {
-            return false;
-        };
         let encrypted = mode.encrypted();
         let Some(fingerprint) = self.fingerprint_for_send(mode) else {
             self.notice("Enable the selected OMEMO version and review devices before uploading");

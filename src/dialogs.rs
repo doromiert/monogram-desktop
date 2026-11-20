@@ -2112,7 +2112,7 @@ impl Ui {
         let state = self.state.borrow();
         let file_mode_changed = state.message(id).is_some_and(|message| {
             message.attachment.is_some()
-                && (self.sending_mode(state.current()) != Some(message.mode())
+                && (!self.mode_still_selected(&state.current().jid, message.mode())
                     || self.fingerprint_for_send(message.mode()).as_deref()
                         != Some(&message.fingerprint))
         });
