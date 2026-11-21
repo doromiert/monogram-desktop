@@ -433,6 +433,83 @@ mod tests {
 
     #[test]
     #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
+    fn circles_arrows_and_freehand_lines_are_drawn_by_the_helper() {
+        let (_dir, source) = fixture("photo.png", &gradient_png());
+        let original = decode_png(&gradient_png());
+        let work = tempdir().unwrap();
+        let job = Job {
+            marks: vec![
+                Mark::Circle { rect: Rect { x: 4, y: 2, width: 20, height: 20 }, color: [0, 255, 0], stroke: 2 },
+                Mark::Arrow { from: (30, 6), to: (60, 6), color: [0, 0, 255], stroke: 2 },
+                Mark::Freehand { points: vec![(30, 20), (60, 20), (60, 30)], color: [255, 255, 0], stroke: 2 },
+            ],
+            ..Default::default()
+        };
+        let made = author(&source, &job, &work.0, NEVER).unwrap();
+        let marked = decode_png(&std::fs::read(&made.path).unwrap());
+        let painted = |points: &[(usize, usize)], colour: [u8; 3], what: &str| {
+            for (x, y) in points {
+                assert_eq!(pixel_at(&marked, *x, *y), colour, "{what} at ({x},{y})");
+            }
+        };
+        painted(&[(13, 2), (14, 2), (4, 11), (23, 11), (13, 21)], [0, 255, 0], "the ring");
+        painted(&[(31, 6), (45, 6), (59, 6), (60, 6), (54, 9), (54, 3)], [0, 0, 255], "the arrow");
+        painted(&[(30, 20), (45, 20), (60, 20), (60, 25), (60, 30)], [255, 255, 0], "the line");
+        for (x, y) in [(14, 12), (45, 12), (0, 0), (20, 28), (63, 0), (45, 26), (40, 31)] {
+            assert_eq!(pixel_at(&marked, x, y), pixel_at(&original, x, y), "({x},{y}) is untouched");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
+    fn arrows_and_lines_follow_the_crop_and_the_rotation() {
+        let (_dir, source) = fixture("photo.png", &gradient_png());
+        let work = tempdir().unwrap();
+        let job = Job {
+            crop: Some(Rect { x: 4, y: 2, width: 40, height: 20 }),
+            rotation: Rotation::Clockwise90,
+            marks: vec![
+                // Crop-local: a horizontal arrow along y = 8 from x = 6 to x = 30.
+                Mark::Arrow { from: (10, 10), to: (34, 10), color: [0, 0, 255], stroke: 2 },
+                Mark::Freehand { points: vec![(10, 18), (34, 18)], color: [255, 255, 0], stroke: 2 },
+            ],
+            ..Default::default()
+        };
+        let made = author(&source, &job, &work.0, NEVER).unwrap();
+        assert_eq!((made.width, made.height), (20, 40));
+        let marked = decode_png(&std::fs::read(&made.path).unwrap());
+        // Crop-local (x, y) goes to (19 - y, x) after a clockwise quarter turn, so the horizontal
+        // arrow (y = 8) became a vertical one at x = 11 and the line (y = 16) one at x = 3.
+        for y in [8, 14, 20, 28] {
+            assert_eq!(pixel_at(&marked, 11, y), [0, 0, 255], "arrow shaft at row {y}");
+        }
+        for y in [6, 14, 24, 30] {
+            assert_eq!(pixel_at(&marked, 3, y), [255, 255, 0], "line at row {y}");
+        }
+        // Between the two lines, four pixels from each, nothing is drawn.
+        let between = pixel_at(&marked, 7, 10);
+        assert!(between != [0, 0, 255] && between != [255, 255, 0], "{between:?}");
+    }
+
+    #[test]
+    #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
+    fn a_stroke_outside_the_picture_is_refused_before_the_sandbox_runs() {
+        let (_dir, source) = fixture("photo.png", &gradient_png());
+        let work = tempdir().unwrap();
+        for mark in [
+            Mark::Arrow { from: (0, 0), to: (65, 10), color: [0, 0, 0], stroke: 2 },
+            Mark::Freehand { points: vec![(1, 1), (10, 33)], color: [0, 0, 0], stroke: 2 },
+            Mark::Freehand { points: vec![], color: [0, 0, 0], stroke: 2 },
+            Mark::Circle { rect: Rect { x: 50, y: 0, width: 20, height: 20 }, color: [0, 0, 0], stroke: 2 },
+        ] {
+            let job = Job { marks: vec![mark], ..Default::default() };
+            assert!(author(&source, &job, &work.0, NEVER).is_err());
+        }
+        assert_eq!(std::fs::read_dir(&work.0).unwrap().count(), 0, "nothing was written");
+    }
+
+    #[test]
+    #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
     fn a_mark_outside_the_picture_is_refused_before_the_sandbox_runs() {
         let (_dir, source) = fixture("photo.png", &gradient_png());
         let work = tempdir().unwrap();

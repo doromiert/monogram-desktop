@@ -12,7 +12,7 @@ media: it never runs in the main process.
   `SourceInfo` the helper found in the file become a `Plan`, or an `Error`. Nothing is clamped
   silently; out-of-range requests are refused.
 - Hard limits (`Limits`): 512 MiB input, 64 megapixels and 16384 px per edge, 1 hour of video,
-  4096 px output edge, 256 MiB output, 16 KiB job description. Job and plan JSON reject unknown
+  4096 px output edge, 256 MiB output, 32 KiB job description. Job and plan JSON reject unknown
   fields.
 - The helper is `monogram-media-author`, started by `src/media_author_run.rs` inside bubblewrap:
   `--unshare-all` (no network), `--cap-drop ALL`, source mounted read-only at `/in/source`, one
@@ -68,20 +68,23 @@ geometry is rounded to even values. Trims apply to the source timeline and must 
    writes a new file under the cache directory (`monogram-desktop/edited`, private, pruned after 24
    hours and removed with its attachment) that replaces the attachment in the same position; the
    original is never modified. Cancel, Escape or closing stops a running edit.
-   **Marks (square done).** Edit Picture also has a **Mark Up** group: a Crop/Square tool switch,
-   a colour (Red, Yellow, Green, Blue, White, Black) and a line thickness (Thin, Medium, Thick,
-   a share of the picture's longest edge, never under 2 px). With the Square tool, dragging on the
-   picture draws an outline; "Outline the Crop Area" places one exactly around the crop with no
-   pointer, and "Undo Last Mark" takes back the newest. Marks are stored in view pixels, so they
-   turn with the picture, and `Editor::job` converts them to source pixels. They are part of the
-   `Job` and `Plan` (`Mark::Square`, at most 32, stroke 1 to 128 px, always inside the picture,
-   images only) and the confined helper draws them, never the GTK process: it converts to RGBA,
-   paints through `media_authoring::paint` in a pad probe, then crops, rotates and scales, so a
-   crop that leaves a mark out drops it. A mark that cannot be drawn fails the edit instead of
-   saving an unmarked picture. Tested without a display (geometry, limits, pixel painting), in the
-   real sandbox (pixels, and crop plus rotation) and in the dialog (drag, undo, saved file).
-   **To do: freehand drawing, an arrow tool and a circle tool**, each as another `Mark` shape with
-   the same colour and thickness, a pointer-free way to place it, and the same three layers of tests.
+   **Marks (done: square, circle, arrow and freehand).** Edit Picture also has a **Mark Up** group:
+   a tool switch (Crop, Square, Circle, Arrow, Draw), a colour (Red, Yellow, Green, Blue, White,
+   Black) and a line thickness (Thin, Medium, Thick, a share of the picture's longest edge, never
+   under 2 px). Dragging on the picture draws the chosen shape: a square or circle in the dragged
+   box, an arrow from where the drag began to where it ended, a freehand line along the pointer.
+   "Outline the Crop Area" places the chosen shape without a pointer (a square or circle around
+   the crop, an arrow across it from corner to corner, a line along its edge) and "Undo Last Mark"
+   takes back the newest. Marks are stored in view pixels, so they turn with the picture, and
+   `Editor::job` converts them to source pixels. They are part of the `Job` and `Plan`
+   (`Mark::{Square, Circle, Arrow, Freehand}`; at most 32 marks, 256 points per freehand line and
+   1024 points in all, stroke 1 to 128 px, every point inside the picture, images only) and the
+   confined helper draws them, never the GTK process: it converts to RGBA, paints through
+   `media_authoring::paint` in a pad probe, then crops, rotates and scales, so a crop that leaves
+   a mark out drops it. Long lines are thinned to the point cap, keeping both ends. A mark that
+   cannot be drawn fails the edit instead of saving an unmarked picture. Tested without a display
+   (geometry, limits, JSON, pixel painting of every shape), in the real sandbox (pixels for every
+   shape, and with crop plus rotation) and in the dialog (drags, undo, saved file).
 4. Video trim and compression with progress and cancel off the main thread.
 5. Albums: multi-select, ordering, shared caption.
 6. Camera capture through the desktop camera portal.

@@ -28,6 +28,9 @@ pub struct Limits {
     pub max_marks: usize,
     /// Thickest mark outline, in source pixels.
     pub max_stroke: u32,
+    /// Most path points one freehand mark may have, and all marks together.
+    pub max_path_points: usize,
+    pub max_points: usize,
 }
 impl Default for Limits {
     fn default() -> Self {
@@ -39,9 +42,11 @@ impl Default for Limits {
             max_source_duration_ms: 60 * 60 * 1000,
             min_trim_ms: 100,
             max_output_bytes: 256 * 1024 * 1024,
-            max_job_json: 16 * 1024,
+            max_job_json: 32 * 1024,
             max_marks: 32,
             max_stroke: 128,
+            max_path_points: 256,
+            max_points: 1024,
         }
     }
 }
@@ -76,23 +81,61 @@ impl Rotation {
     }
 }
 
+/// Which outline a rectangle-based mark has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shape {
+    Square,
+    /// The ellipse that just fits inside the rectangle: a circle when the rectangle is square.
+    Circle,
+}
+
+/// A position in the picture, `(x, y)` in pixels from its top-left corner. A point may sit on the
+/// far edge (`x == width`), so a stroke can reach the border.
+pub type Point = (u32, u32);
+
 /// A shape drawn on the picture. Marks are in *source* pixels (the upright picture, before crop
 /// and rotation), so a crop that leaves a mark out simply drops it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, tag = "shape", rename_all = "snake_case")]
 pub enum Mark {
     /// The outline of a rectangle, `stroke` pixels thick, drawn inward from `rect`'s edges.
     Square { rect: Rect, color: [u8; 3], stroke: u32 },
+    /// The outline of the ellipse inscribed in `rect`, `stroke` pixels thick, drawn inward.
+    Circle { rect: Rect, color: [u8; 3], stroke: u32 },
+    /// A line from `from` to `to` with a head at `to`.
+    Arrow { from: Point, to: Point, color: [u8; 3], stroke: u32 },
+    /// A line through `points` in order, with round ends.
+    Freehand { points: Vec<Point>, color: [u8; 3], stroke: u32 },
 }
 impl Mark {
-    fn rect(&self) -> Rect {
-        match self {
-            Self::Square { rect, .. } => *rect,
+    pub fn of(shape: Shape, rect: Rect, color: [u8; 3], stroke: u32) -> Self {
+        match shape {
+            Shape::Square => Self::Square { rect, color, stroke },
+            Shape::Circle => Self::Circle { rect, color, stroke },
         }
     }
     fn stroke(&self) -> u32 {
         match self {
-            Self::Square { stroke, .. } => *stroke,
+            Self::Square { stroke, .. }
+            | Self::Circle { stroke, .. }
+            | Self::Arrow { stroke, .. }
+            | Self::Freehand { stroke, .. } => *stroke,
+        }
+    }
+    fn color(&self) -> [u8; 3] {
+        match self {
+            Self::Square { color, .. }
+            | Self::Circle { color, .. }
+            | Self::Arrow { color, .. }
+            | Self::Freehand { color, .. } => *color,
+        }
+    }
+    /// How many path points the mark carries (what `Limits::max_points` counts).
+    fn points(&self) -> usize {
+        match self {
+            Self::Arrow { .. } => 2,
+            Self::Freehand { points, .. } => points.len(),
+            _ => 0,
         }
     }
 }
@@ -102,12 +145,31 @@ fn check_marks(marks: &[Mark], width: u32, height: u32, limits: &Limits) -> Resu
     if marks.len() > limits.max_marks {
         return Err(Error::TooManyMarks);
     }
+    let inside = |(x, y): Point| x <= width && y <= height;
+    let mut points = 0usize;
     for mark in marks {
-        let rect = mark.rect();
-        let right = rect.x.checked_add(rect.width).ok_or(Error::MarkOutside)?;
-        let bottom = rect.y.checked_add(rect.height).ok_or(Error::MarkOutside)?;
-        if rect.width == 0 || rect.height == 0 || right > width || bottom > height {
-            return Err(Error::MarkOutside);
+        match mark {
+            Mark::Square { rect, .. } | Mark::Circle { rect, .. } => {
+                let right = rect.x.checked_add(rect.width).ok_or(Error::MarkOutside)?;
+                let bottom = rect.y.checked_add(rect.height).ok_or(Error::MarkOutside)?;
+                if rect.width == 0 || rect.height == 0 || right > width || bottom > height {
+                    return Err(Error::MarkOutside);
+                }
+            }
+            Mark::Arrow { from, to, .. } => {
+                if !inside(*from) || !inside(*to) || from == to {
+                    return Err(Error::MarkOutside);
+                }
+            }
+            Mark::Freehand { points: path, .. } => {
+                if path.is_empty() || path.len() > limits.max_path_points || !path.iter().all(|point| inside(*point)) {
+                    return Err(Error::MarkOutside);
+                }
+            }
+        }
+        points += mark.points();
+        if points > limits.max_points {
+            return Err(Error::TooManyMarks);
         }
         if !(1..=limits.max_stroke).contains(&mark.stroke()) {
             return Err(Error::MarkStroke);
@@ -116,25 +178,92 @@ fn check_marks(marks: &[Mark], width: u32, height: u32, limits: &Limits) -> Resu
     Ok(())
 }
 
+/// Distance from `(px, py)` to the segment `a`-`b`.
+fn segment_distance(px: f64, py: f64, a: (f64, f64), b: (f64, f64)) -> f64 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let length_squared = dx * dx + dy * dy;
+    let along = if length_squared == 0. { 0. } else { (((px - a.0) * dx + (py - a.1) * dy) / length_squared).clamp(0., 1.) };
+    ((px - (a.0 + along * dx)).powi(2) + (py - (a.1 + along * dy)).powi(2)).sqrt()
+}
+
+/// The line segments that make up an arrow: the shaft and the two sides of the head.
+pub fn arrow_segments(from: Point, to: Point, stroke: u32) -> [((f64, f64), (f64, f64)); 3] {
+    let (a, b) = ((f64::from(from.0), f64::from(from.1)), (f64::from(to.0), f64::from(to.1)));
+    let length = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt().max(1.);
+    let head = (f64::from(stroke) * 5.).max(12.).min(length);
+    let back = (a.1 - b.1).atan2(a.0 - b.0);
+    let side = |turn: f64| (b, (b.0 + head * (back + turn).cos(), b.1 + head * (back + turn).sin()));
+    let spread = 28f64.to_radians();
+    [(a, b), side(spread), side(-spread)]
+}
+
 /// Draw `marks` into a tightly packed RGBA picture of `width` x `height`. Returns false, drawing
 /// nothing, when the buffer is not exactly that size. Everything is clipped to the picture.
 pub fn paint(rgba: &mut [u8], width: u32, height: u32, marks: &[Mark]) -> bool {
-    let (width, height) = (width as usize, height as usize);
-    if width.checked_mul(height).and_then(|pixels| pixels.checked_mul(4)) != Some(rgba.len()) {
+    let (w, h) = (width as usize, height as usize);
+    if w.checked_mul(h).and_then(|pixels| pixels.checked_mul(4)) != Some(rgba.len()) {
         return false;
     }
-    for mark in marks {
-        let Mark::Square { rect, color, stroke } = *mark;
-        let (left, top) = (rect.x as usize, rect.y as usize);
-        let (right, bottom) = ((left + rect.width as usize).min(width), (top + rect.height as usize).min(height));
-        let stroke = (stroke as usize).min(rect.width as usize).min(rect.height as usize);
-        for y in top..bottom {
-            let edge_row = y - top < stroke || bottom.saturating_sub(y) <= stroke;
-            for x in left..right {
-                if edge_row || x - left < stroke || right.saturating_sub(x) <= stroke {
-                    let at = (y * width + x) * 4;
-                    rgba[at..at + 4].copy_from_slice(&[color[0], color[1], color[2], 255]);
+    let put = |rgba: &mut [u8], x: usize, y: usize, color: [u8; 3]| {
+        let at = (y * w + x) * 4;
+        rgba[at..at + 4].copy_from_slice(&[color[0], color[1], color[2], 255]);
+    };
+    // Every pixel within half the stroke of any of `segments`, scanning only their bounding boxes.
+    let stroke_segments = |rgba: &mut [u8], segments: &[((f64, f64), (f64, f64))], thickness: f64, color: [u8; 3]| {
+        let reach = thickness / 2.;
+        for (a, b) in segments {
+            let x0 = (a.0.min(b.0) - reach - 1.).floor().max(0.) as usize;
+            let y0 = (a.1.min(b.1) - reach - 1.).floor().max(0.) as usize;
+            let x1 = ((a.0.max(b.0) + reach + 1.).ceil().max(0.) as usize).min(w);
+            let y1 = ((a.1.max(b.1) + reach + 1.).ceil().max(0.) as usize).min(h);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    if segment_distance(x as f64 + 0.5, y as f64 + 0.5, *a, *b) <= reach {
+                        put(rgba, x, y, color);
+                    }
                 }
+            }
+        }
+    };
+    for mark in marks {
+        let (color, thickness) = (mark.color(), mark.stroke());
+        match mark {
+            Mark::Square { rect, .. } | Mark::Circle { rect, .. } => {
+                let circle = matches!(mark, Mark::Circle { .. });
+                let (left, top) = (rect.x as usize, rect.y as usize);
+                let (right, bottom) = ((left + rect.width as usize).min(w), (top + rect.height as usize).min(h));
+                let stroke = (thickness as usize).min(rect.width as usize).min(rect.height as usize);
+                // Half the rectangle's size and its centre, for the ellipse test.
+                let (rx, ry) = (f64::from(rect.width) / 2., f64::from(rect.height) / 2.);
+                let (cx, cy) = (f64::from(rect.x) + rx, f64::from(rect.y) + ry);
+                let (inner_x, inner_y) = (rx - stroke as f64, ry - stroke as f64);
+                for y in top..bottom {
+                    let edge_row = y - top < stroke || bottom.saturating_sub(y) <= stroke;
+                    for x in left..right {
+                        let on = if circle {
+                            let (dx, dy) = (x as f64 + 0.5 - cx, y as f64 + 0.5 - cy);
+                            let inside = (dx / rx).powi(2) + (dy / ry).powi(2) <= 1.;
+                            let hollow = inner_x > 0. && inner_y > 0. && (dx / inner_x).powi(2) + (dy / inner_y).powi(2) < 1.;
+                            inside && !hollow
+                        } else {
+                            edge_row || x - left < stroke || right.saturating_sub(x) <= stroke
+                        };
+                        if on {
+                            put(rgba, x, y, color);
+                        }
+                    }
+                }
+            }
+            Mark::Arrow { from, to, .. } => {
+                stroke_segments(rgba, &arrow_segments(*from, *to, thickness), f64::from(thickness), color);
+            }
+            Mark::Freehand { points, .. } => {
+                let at = |point: &Point| (f64::from(point.0), f64::from(point.1));
+                let segments: Vec<_> = match points.as_slice() {
+                    [only] => vec![(at(only), at(only))],
+                    many => many.windows(2).map(|pair| (at(&pair[0]), at(&pair[1]))).collect(),
+                };
+                stroke_segments(rgba, &segments, f64::from(thickness), color);
             }
         }
     }
@@ -472,9 +601,11 @@ mod tests {
         max_source_duration_ms: 60 * 60 * 1000,
         min_trim_ms: 100,
         max_output_bytes: 256 * 1024 * 1024,
-        max_job_json: 16 * 1024,
+        max_job_json: 32 * 1024,
         max_marks: 32,
         max_stroke: 128,
+        max_path_points: 256,
+        max_points: 1024,
     };
     fn image(width: u32, height: u32) -> SourceInfo {
         SourceInfo { kind: Kind::Image, width, height, duration_ms: None, bytes: 1000 }
@@ -827,5 +958,191 @@ mod tests {
         assert!(rgba.iter().all(|byte| *byte == 0));
         assert!(!paint(&mut [], u32::MAX, u32::MAX, &[]), "a size that overflows is refused");
         assert!(paint(&mut rgba, 10, 10, &[]), "no marks is a successful no-op");
+    }
+
+    fn circle(x: u32, y: u32, width: u32, height: u32, stroke: u32) -> Mark {
+        Mark::Circle { rect: Rect { x, y, width, height }, color: [0, 255, 0], stroke }
+    }
+    fn arrow(from: Point, to: Point, stroke: u32) -> Mark {
+        Mark::Arrow { from, to, color: [0, 0, 255], stroke }
+    }
+    fn path(points: &[Point], stroke: u32) -> Mark {
+        Mark::Freehand { points: points.to_vec(), color: [255, 255, 0], stroke }
+    }
+    fn painted(rgba: &[u8]) -> usize {
+        rgba.chunks(4).filter(|px| px[3] == 255).count()
+    }
+
+    #[test]
+    fn a_circle_is_a_ring_inside_its_rectangle() {
+        let (w, h) = (40, 40);
+        let mut rgba = blank(w, h);
+        assert!(paint(&mut rgba, w, h, &[circle(4, 4, 32, 32, 3)]));
+        let green = [0, 255, 0, 255];
+        // The four points where the ring touches the rectangle, and just inside them.
+        for (x, y) in [(19, 4), (20, 4), (19, 35), (4, 19), (35, 20), (19, 6), (6, 19), (33, 20)] {
+            assert_eq!(pixel(&rgba, w, x, y), green, "({x},{y}) is on the ring");
+        }
+        // The middle, the corners of the rectangle and the outside are empty.
+        for (x, y) in [(20, 20), (12, 12), (4, 4), (35, 4), (4, 35), (35, 35), (0, 0), (39, 39), (19, 3), (19, 36)] {
+            assert_eq!(pixel(&rgba, w, x, y), [0, 0, 0, 0], "({x},{y}) is empty");
+        }
+        let ring = painted(&rgba);
+        assert!(ring > 200 && ring < 32 * 32, "a ring, not a disc or a square: {ring} pixels");
+        // Symmetric left to right and top to bottom.
+        for y in 0..h {
+            for x in 0..w {
+                assert_eq!(pixel(&rgba, w, x, y)[3], pixel(&rgba, w, w - 1 - x, y)[3], "mirror at ({x},{y})");
+                assert_eq!(pixel(&rgba, w, x, y)[3], pixel(&rgba, w, x, h - 1 - y)[3], "flip at ({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn an_ellipse_follows_a_wide_rectangle_and_a_thick_line_fills_it() {
+        let (w, h) = (40, 20);
+        let mut rgba = blank(w, h);
+        assert!(paint(&mut rgba, w, h, &[circle(0, 0, 40, 20, 2)]));
+        assert_eq!(pixel(&rgba, w, 19, 0)[3], 255, "top of the ellipse");
+        assert_eq!(pixel(&rgba, w, 0, 9)[3], 255, "left tip");
+        assert_eq!(pixel(&rgba, w, 20, 10)[3], 0, "hollow");
+        assert_eq!(pixel(&rgba, w, 0, 0)[3], 0, "the corner is outside an ellipse");
+        let mut thick = blank(10, 10);
+        assert!(paint(&mut thick, 10, 10, &[circle(0, 0, 10, 10, 100)]));
+        assert_eq!(pixel(&thick, 10, 5, 5)[3], 255, "a stroke wider than the circle fills it");
+        assert_eq!(pixel(&thick, 10, 0, 0)[3], 0, "but only the ellipse, not the corners");
+    }
+
+    #[test]
+    fn an_arrow_has_a_shaft_and_a_head_that_points_at_its_end() {
+        let (w, h) = (60, 30);
+        let mut rgba = blank(w, h);
+        assert!(paint(&mut rgba, w, h, &[arrow((5, 15), (50, 15), 2)]));
+        let blue = [0, 0, 255, 255];
+        for x in [5, 6, 20, 35, 49, 50] {
+            assert_eq!(pixel(&rgba, w, x, 15), blue, "({x},15) is on the shaft");
+        }
+        // The head's two sides run back from the tip, above and below the shaft.
+        assert_eq!(pixel(&rgba, w, 44, 12)[3], 255, "upper side of the head");
+        assert_eq!(pixel(&rgba, w, 44, 18)[3], 255, "lower side of the head");
+        assert_eq!(pixel(&rgba, w, 30, 8)[3], 0, "away from the shaft");
+        assert_eq!(pixel(&rgba, w, 30, 22)[3], 0);
+        assert_eq!(pixel(&rgba, w, 2, 15)[3], 0, "nothing behind the tail");
+        assert_eq!(pixel(&rgba, w, 56, 15)[3], 0, "nothing past the tip");
+        // A head is wider than the shaft and only at the tip end.
+        let column = |x: u32| (0..h).filter(|y| pixel(&rgba, w, x, *y)[3] == 255).count();
+        assert!(column(44) > column(20), "the head is wider than the shaft");
+    }
+
+    #[test]
+    fn an_arrow_points_the_right_way_in_every_direction() {
+        let (w, h) = (81, 81);
+        // (tip, unit direction the arrow travels): right, left, up, down.
+        for (tip, dir) in [((70i64, 40i64), (1i64, 0i64)), ((10, 40), (-1, 0)), ((40, 10), (0, -1)), ((40, 70), (0, 1))] {
+            let tail = (tip.0 - dir.0 * 50, tip.1 - dir.1 * 50);
+            let mut rgba = blank(w, h);
+            assert!(paint(&mut rgba, w, h, &[arrow((tail.0 as u32, tail.1 as u32), (tip.0 as u32, tip.1 as u32), 2)]));
+            let on = |x: i64, y: i64| pixel(&rgba, w, x as u32, y as u32)[3] == 255;
+            assert!(on(tip.0, tip.1) && on(tail.0, tail.1), "both ends of the shaft ({tip:?})");
+            // Eight pixels back from the tip the head's sides are about four pixels to each side.
+            let (back_x, back_y) = (tip.0 - dir.0 * 8, tip.1 - dir.1 * 8);
+            let side = (-dir.1, dir.0);
+            assert!(on(back_x + side.0 * 4, back_y + side.1 * 4), "one side of the head ({tip:?})");
+            assert!(on(back_x - side.0 * 4, back_y - side.1 * 4), "the other side ({tip:?})");
+            // Past the tip there is nothing, and four pixels either side of the shaft is empty at the tail.
+            assert!(!on(tail.0 + side.0 * 4, tail.1 + side.1 * 4), "the tail end is a plain line ({tip:?})");
+        }
+    }
+
+    #[test]
+    fn a_freehand_line_joins_its_points_with_round_ends() {
+        let (w, h) = (30, 30);
+        let mut rgba = blank(w, h);
+        assert!(paint(&mut rgba, w, h, &[path(&[(5, 5), (25, 5), (25, 25)], 4)]));
+        let yellow = [255, 255, 0, 255];
+        for (x, y) in [(5, 5), (15, 5), (25, 5), (25, 15), (25, 24), (24, 6), (15, 4), (15, 6)] {
+            assert_eq!(pixel(&rgba, w, x, y), yellow, "({x},{y}) is on the line");
+        }
+        for (x, y) in [(5, 25), (10, 15), (15, 15), (0, 0), (29, 29), (15, 9), (20, 20)] {
+            assert_eq!(pixel(&rgba, w, x, y)[3], 0, "({x},{y}) is off the line");
+        }
+        // A single point is a dot of the stroke's size.
+        let mut dot = blank(w, h);
+        assert!(paint(&mut dot, w, h, &[path(&[(15, 15)], 6)]));
+        assert_eq!(pixel(&dot, w, 15, 15)[3], 255);
+        assert!(painted(&dot) >= 20 && painted(&dot) <= 40, "about a 6 px disc: {}", painted(&dot));
+    }
+
+    #[test]
+    fn strokes_that_run_past_the_picture_are_clipped_without_a_panic() {
+        let mut rgba = blank(10, 10);
+        assert!(paint(&mut rgba, 10, 10, &[arrow((0, 0), (10, 10), 128), path(&[(0, 10), (10, 0)], 128)]));
+        assert!(painted(&rgba) <= 100);
+        let mut edge = blank(10, 10);
+        assert!(paint(&mut edge, 10, 10, &[path(&[(10, 10), (10, 0)], 2)]));
+        assert_eq!(pixel(&edge, 10, 9, 5)[3], 255, "a stroke on the far edge reaches the last pixel column");
+    }
+
+    #[test]
+    fn the_new_shapes_are_validated_against_the_picture() {
+        let check = |mark: Mark| plan(&Job { marks: vec![mark], ..Default::default() }, &image(40, 30), &LIMITS);
+        assert!(check(circle(0, 0, 40, 30, 2)).is_ok());
+        assert_eq!(check(circle(30, 0, 20, 10, 2)), Err(Error::MarkOutside));
+        assert_eq!(check(circle(0, 0, 10, 10, 0)), Err(Error::MarkStroke));
+        assert!(check(arrow((0, 0), (40, 30), 2)).is_ok(), "the far corner is allowed");
+        assert_eq!(check(arrow((0, 0), (41, 30), 2)), Err(Error::MarkOutside));
+        assert_eq!(check(arrow((5, 5), (5, 5), 2)), Err(Error::MarkOutside), "an arrow needs a length");
+        assert_eq!(check(arrow((0, 0), (10, 10), 129)), Err(Error::MarkStroke));
+        assert!(check(path(&[(1, 1)], 2)).is_ok());
+        assert_eq!(check(path(&[], 2)), Err(Error::MarkOutside));
+        assert_eq!(check(path(&[(1, 1), (40, 31)], 2)), Err(Error::MarkOutside));
+        assert_eq!(check(path(&[(1, 1), (u32::MAX, 0)], 2)), Err(Error::MarkOutside));
+        assert_eq!(check(path(&[(1, 1), (2, 2)], 0)), Err(Error::MarkStroke));
+    }
+
+    #[test]
+    fn path_points_are_capped_per_stroke_and_overall() {
+        let line = |count: usize| path(&(0..count).map(|i| ((i % 40) as u32, (i % 30) as u32)).collect::<Vec<_>>(), 2);
+        let check = |marks: Vec<Mark>| plan(&Job { marks, ..Default::default() }, &image(40, 30), &LIMITS);
+        assert!(check(vec![line(LIMITS.max_path_points)]).is_ok());
+        assert_eq!(check(vec![line(LIMITS.max_path_points + 1)]), Err(Error::MarkOutside));
+        // Four full strokes reach the overall cap; one more point past it is refused.
+        let full = || line(LIMITS.max_path_points);
+        assert_eq!(LIMITS.max_points, 4 * LIMITS.max_path_points);
+        assert!(check(vec![full(), full(), full(), full()]).is_ok());
+        assert_eq!(check(vec![full(), full(), full(), full(), path(&[(1, 1)], 2)]), Err(Error::TooManyMarks));
+        // An arrow counts as two points.
+        assert_eq!(check(vec![full(), full(), full(), line(LIMITS.max_path_points - 1), arrow((0, 0), (9, 9), 2)]), Err(Error::TooManyMarks));
+        assert!(check(vec![full(), full(), full(), line(LIMITS.max_path_points - 2), arrow((0, 0), (9, 9), 2)]).is_ok());
+    }
+
+    #[test]
+    fn a_full_set_of_marks_fits_in_the_job_description() {
+        let strokes: Vec<Mark> = (0..4).map(|_| path(&(0..256).map(|i| (3000 + i, 3000 + i)).collect::<Vec<_>>(), 100)).collect();
+        let job = Job { marks: strokes, ..Default::default() };
+        let json = serde_json::to_vec(&job).unwrap();
+        assert!(json.len() < LIMITS.max_job_json, "{} bytes", json.len());
+        assert_eq!(Job::from_json(&json, &LIMITS), Ok(job));
+    }
+
+    #[test]
+    fn every_shape_round_trips_through_json_and_unknown_fields_are_refused() {
+        let job = Job {
+            marks: vec![square(1, 2, 3, 4, 5), circle(1, 2, 3, 4, 5), arrow((1, 2), (3, 4), 5), path(&[(1, 2), (3, 4)], 5)],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&job).unwrap();
+        assert!(json.contains(r#""shape":"circle""#) && json.contains(r#""shape":"arrow""#) && json.contains(r#""shape":"freehand""#));
+        assert_eq!(Job::from_json(json.as_bytes(), &LIMITS), Ok(job));
+        for bad in [
+            r#"{"marks":[{"shape":"arrow","from":[1,2],"to":[3,4],"color":[0,0,0],"stroke":1,"extra":1}]}"#,
+            r#"{"marks":[{"shape":"arrow","from":[1,2,3],"to":[3,4],"color":[0,0,0],"stroke":1}]}"#,
+            r#"{"marks":[{"shape":"arrow","from":[-1,2],"to":[3,4],"color":[0,0,0],"stroke":1}]}"#,
+            r#"{"marks":[{"shape":"freehand","points":[[1,2],[3]],"color":[0,0,0],"stroke":1}]}"#,
+            r#"{"marks":[{"shape":"freehand","points":"nope","color":[0,0,0],"stroke":1}]}"#,
+            r#"{"marks":[{"shape":"circle","rect":{"x":0,"y":0,"width":1,"height":1},"color":[0,0,0]}]}"#,
+        ] {
+            assert_eq!(Job::from_json(bad.as_bytes(), &LIMITS), Err(Error::MalformedJob), "{bad}");
+        }
     }
 }

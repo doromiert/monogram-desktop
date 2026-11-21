@@ -2,8 +2,8 @@
 //! `picture_editor::Editor`; this widget only draws it and turns pointer and keyboard input into
 //! editor calls. The picture is drawn rotated with a snapshot transform, so no pixels are copied.
 use crate::{
-    media_authoring::{Rect, Rotation},
-    picture_editor::{hit, Editor, Handle, Weight, INKS},
+    media_authoring::{arrow_segments, Point, Rect, Rotation, Shape},
+    picture_editor::{hit, Editor, Handle, Kind, ViewMark, ViewShape, Weight, INKS},
 };
 use gtk::{gdk, glib, graphene, gsk, prelude::*, subclass::prelude::*};
 use std::cell::{Cell, RefCell};
@@ -16,7 +16,28 @@ pub enum Tool {
     Crop,
     /// Draw a square outline.
     Square,
+    /// Draw an ellipse outline.
+    Circle,
+    /// Draw an arrow.
+    Arrow,
+    /// Draw freehand.
+    Pen,
 }
+impl Tool {
+    /// What this tool draws; `None` for the crop.
+    pub fn kind(self) -> Option<Kind> {
+        match self {
+            Self::Crop => None,
+            Self::Square => Some(Kind::Square),
+            Self::Circle => Some(Kind::Circle),
+            Self::Arrow => Some(Kind::Arrow),
+            Self::Pen => Some(Kind::Freehand),
+        }
+    }
+}
+
+/// Most points a stroke in progress keeps, so a long drag cannot grow without bound.
+const MAX_SKETCH_POINTS: usize = 4096;
 
 const MARGIN: f64 = 14.;
 /// Pointer reach of a handle, in widget pixels.
@@ -38,7 +59,7 @@ mod imp {
         pub weight: Cell<Option<Weight>>,
         /// Where a square drag began, in view pixels, and the square so far.
         pub sketch: Cell<Option<(f64, f64)>>,
-        pub pending: Cell<Option<Rect>>,
+        pub pending: RefCell<Option<ViewShape>>,
     }
 
     #[glib::object_subclass]
@@ -155,9 +176,9 @@ impl CropArea {
         let imp = self.imp();
         imp.tool.set(tool);
         imp.sketch.set(None);
-        imp.pending.set(None);
+        imp.pending.replace(None);
         imp.drag.replace(None);
-        self.set_cursor_from_name(Some(if tool == Tool::Square { "crosshair" } else { "default" }));
+        self.set_cursor_from_name(Some(if tool == Tool::Crop { "default" } else { "crosshair" }));
         self.queue_draw();
     }
     /// The colour and line thickness new squares get.
@@ -227,9 +248,10 @@ impl CropArea {
     }
     fn begin_drag(&self, x: f64, y: f64) {
         self.grab_focus();
-        if self.imp().tool.get() == Tool::Square {
-            self.imp().sketch.set(self.view_point(x, y));
-            self.imp().pending.set(None);
+        if self.imp().tool.get() != Tool::Crop {
+            let start = self.view_point(x, y);
+            self.imp().sketch.set(start);
+            self.imp().pending.replace(None);
             return;
         }
         let (Some(crop), Some(start)) = (self.crop_px(), self.imp().editor.borrow().as_ref().map(Editor::rect)) else {
@@ -244,8 +266,28 @@ impl CropArea {
             let scale = self.imp().scale.get().max(f64::EPSILON);
             let Some((view_w, view_h)) = self.imp().editor.borrow().as_ref().map(Editor::view_size) else { return };
             let (ex, ey) = ((sx + dx / scale).clamp(0., f64::from(view_w)), (sy + dy / scale).clamp(0., f64::from(view_h)));
-            let (x0, y0, x1, y1) = (sx.min(ex).round(), sy.min(ey).round(), sx.max(ex).round(), sy.max(ey).round());
-            self.imp().pending.set(Some(Rect { x: x0 as u32, y: y0 as u32, width: (x1 - x0) as u32, height: (y1 - y0) as u32 }));
+            let whole = |value: f64| value.round() as u32;
+            let shape = match self.imp().tool.get() {
+                Tool::Crop => return,
+                Tool::Square | Tool::Circle => {
+                    let (x0, y0, x1, y1) = (sx.min(ex).round(), sy.min(ey).round(), sx.max(ex).round(), sy.max(ey).round());
+                    let rect = Rect { x: x0 as u32, y: y0 as u32, width: (x1 - x0) as u32, height: (y1 - y0) as u32 };
+                    ViewShape::Rect(if self.imp().tool.get() == Tool::Circle { Shape::Circle } else { Shape::Square }, rect)
+                }
+                Tool::Arrow => ViewShape::Arrow((whole(sx), whole(sy)), (whole(ex), whole(ey))),
+                Tool::Pen => {
+                    let mut path = match self.imp().pending.take() {
+                        Some(ViewShape::Freehand(path)) => path,
+                        _ => vec![(whole(sx), whole(sy))],
+                    };
+                    let here = (whole(ex), whole(ey));
+                    if path.last() != Some(&here) && path.len() < MAX_SKETCH_POINTS {
+                        path.push(here);
+                    }
+                    ViewShape::Freehand(path)
+                }
+            };
+            self.imp().pending.replace(Some(shape));
             self.queue_draw();
             return;
         }
@@ -257,16 +299,20 @@ impl CropArea {
     fn finish_sketch(&self) {
         let imp = self.imp();
         imp.sketch.set(None);
-        if let Some(rect) = imp.pending.take() {
+        if let Some(shape) = imp.pending.take() {
             let (color, weight) = self.pen();
             self.edit(|editor| {
-                editor.add_square(rect, color, weight);
+                match shape {
+                    ViewShape::Rect(shape, rect) => editor.add_mark(shape, rect, color, weight),
+                    ViewShape::Arrow(from, to) => editor.add_arrow(from, to, color, weight),
+                    ViewShape::Freehand(points) => editor.add_path(&points, color, weight),
+                };
             });
         }
         self.queue_draw();
     }
     fn update_cursor(&self, x: f64, y: f64) {
-        if self.imp().tool.get() == Tool::Square {
+        if self.imp().tool.get() != Tool::Crop {
             self.set_cursor_from_name(Some("crosshair"));
             return;
         }
@@ -300,6 +346,51 @@ impl CropArea {
         glib::Propagation::Stop
     }
 
+    /// One mark, drawn the way the helper will paint it: outlines for squares and circles, round
+    /// strokes for the arrow and the freehand line.
+    fn draw_mark(&self, snapshot: &gtk::Snapshot, mark: &ViewMark, (left, top, scale): (f64, f64, f64)) {
+        let colour = gdk::RGBA::new(f32::from(mark.color[0]) / 255., f32::from(mark.color[1]) / 255., f32::from(mark.color[2]) / 255., 1.);
+        let line = f64::from(mark.stroke) * scale;
+        let at = |p: &Point| (left + f64::from(p.0) * scale, top + f64::from(p.1) * scale);
+        let stroke_path = |segments: &[((f64, f64), (f64, f64))]| {
+            let path = gsk::PathBuilder::new();
+            for (a, b) in segments {
+                path.move_to(a.0 as f32, a.1 as f32);
+                path.line_to(b.0 as f32, b.1 as f32);
+            }
+            let pen = gsk::Stroke::new(line.max(1.5) as f32);
+            pen.set_line_cap(gsk::LineCap::Round);
+            pen.set_line_join(gsk::LineJoin::Round);
+            snapshot.append_stroke(&path.to_path(), &pen, &colour);
+        };
+        match &mark.shape {
+            ViewShape::Rect(shape, rect) => {
+                let (mx, my) = (left + f64::from(rect.x) * scale, top + f64::from(rect.y) * scale);
+                let (mw, mh) = (f64::from(rect.width) * scale, f64::from(rect.height) * scale);
+                let width = line.clamp(1.5, (mw.min(mh) / 2.).max(1.5)) as f32;
+                let bounds = graphene::Rect::new(mx as f32, my as f32, mw as f32, mh as f32);
+                let outline = if *shape == Shape::Circle {
+                    let corner = graphene::Size::new((mw / 2.) as f32, (mh / 2.) as f32);
+                    gsk::RoundedRect::new(bounds, corner, corner, corner, corner)
+                } else {
+                    gsk::RoundedRect::from_rect(bounds, 0.)
+                };
+                snapshot.append_border(&outline, &[width; 4], &[colour, colour, colour, colour]);
+            }
+            ViewShape::Arrow(from, to) => {
+                let segments: Vec<_> = arrow_segments(*from, *to, mark.stroke)
+                    .iter()
+                    .map(|(a, b)| ((left + a.0 * scale, top + a.1 * scale), (left + b.0 * scale, top + b.1 * scale)))
+                    .collect();
+                stroke_path(&segments);
+            }
+            ViewShape::Freehand(points) => {
+                let segments: Vec<_> = points.windows(2).map(|pair| (at(&pair[0]), at(&pair[1]))).collect();
+                stroke_path(&segments);
+            }
+        }
+    }
+
     fn draw(&self, snapshot: &gtk::Snapshot) {
         let (Some((left, top, scale)), Some(editor)) = (self.layout(), self.editor()) else { return };
         let (view_w, view_h) = editor.view_size();
@@ -327,19 +418,13 @@ impl CropArea {
         }
 
         // Marks sit on the picture, under the dimming, so what a crop would cut away stays dim.
-        let mut outlines: Vec<(Rect, [u8; 3], f64)> =
-            editor.marks().iter().map(|mark| (mark.rect, mark.color, f64::from(mark.stroke))).collect();
-        if let Some(rect) = self.imp().pending.get() {
+        let mut marks: Vec<ViewMark> = editor.marks().to_vec();
+        if let Some(shape) = self.imp().pending.borrow().clone() {
             let (color, weight) = self.pen();
-            outlines.push((rect, color, f64::from(editor.stroke_for(weight))));
+            marks.push(ViewMark { shape, color, stroke: editor.stroke_for(weight) });
         }
-        for (mark, color, stroke) in outlines {
-            let colour = gdk::RGBA::new(f32::from(color[0]) / 255., f32::from(color[1]) / 255., f32::from(color[2]) / 255., 1.);
-            let (mx, my) = (left + f64::from(mark.x) * scale, top + f64::from(mark.y) * scale);
-            let (mw, mh) = (f64::from(mark.width) * scale, f64::from(mark.height) * scale);
-            let line = (stroke * scale).clamp(1.5, mw.min(mh) / 2.).max(1.);
-            let outline = gsk::RoundedRect::from_rect(rect(mx, my, mw, mh), 0.);
-            snapshot.append_border(&outline, &[line as f32; 4], &[colour, colour, colour, colour]);
+        for mark in &marks {
+            self.draw_mark(snapshot, mark, (left, top, scale));
         }
 
         let Some((x, y, w, h)) = self.crop_px() else { return };
@@ -374,6 +459,7 @@ impl CropArea {
 mod tests {
     use super::*;
     use crate::picture_editor::{Editor, Weight, MIN_MARK};
+    use crate::picture_editor::ViewShape;
 
     fn settle() {
         let context = glib::MainContext::default();
@@ -400,7 +486,7 @@ mod tests {
         area.finish_sketch();
     }
     fn marks(area: &CropArea) -> Vec<(Rect, [u8; 3], u32)> {
-        area.editor().unwrap().marks().iter().map(|m| (m.rect, m.color, m.stroke)).collect()
+        area.editor().unwrap().marks().iter().map(|m| (m.bounds(), m.color, m.stroke)).collect()
     }
     fn near(rect: Rect, x: u32, y: u32, width: u32, height: u32) -> bool {
         let close = |a: u32, b: u32| a.abs_diff(b) <= 1;
@@ -468,11 +554,11 @@ mod tests {
         let (left, top, scale) = area.layout().unwrap();
         area.begin_drag(left + 10. * scale, top + 10. * scale);
         area.update_drag(50. * scale, 30. * scale);
-        assert!(area.imp().pending.get().is_some());
+        assert!(area.imp().pending.borrow().is_some());
         area.set_tool(Tool::Crop);
         area.finish_sketch();
         assert!(marks(&area).is_empty());
-        assert!(area.imp().pending.get().is_none());
+        assert!(area.imp().pending.borrow().is_none());
     }
 
     #[gtk::test]
@@ -502,5 +588,101 @@ mod tests {
         assert_eq!(marks(&area)[0].0, Rect { x: 100 - 10 - 20, y: 10, width: 20, height: 40 }, "turned a quarter with the picture");
         drag(&area, (10., 100.), (30., 30.));
         assert_eq!(marks(&area).len(), 2);
+    }
+
+    fn shapes(area: &CropArea) -> Vec<ViewShape> {
+        area.editor().unwrap().marks().iter().map(|m| m.shape.clone()).collect()
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn the_circle_tool_makes_a_circle_in_the_dragged_box() {
+        let (area, _window) = shown();
+        area.set_tool(Tool::Circle);
+        drag(&area, (20., 10.), (60., 40.));
+        let ViewShape::Rect(shape, rect) = shapes(&area)[0].clone() else { panic!("a rectangle shape") };
+        assert_eq!(shape, Shape::Circle);
+        assert!(near(rect, 20, 10, 60, 40), "{rect:?}");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn the_arrow_tool_points_from_where_the_drag_began_to_where_it_ended() {
+        let (area, _window) = shown();
+        area.set_tool(Tool::Arrow);
+        drag(&area, (30., 70.), (100., -50.));
+        let ViewShape::Arrow(from, to) = shapes(&area)[0].clone() else { panic!("an arrow") };
+        let close = |a: (u32, u32), b: (u32, u32)| a.0.abs_diff(b.0) <= 1 && a.1.abs_diff(b.1) <= 1;
+        assert!(close(from, (30, 70)) && close(to, (130, 20)), "{from:?} -> {to:?}");
+        // The arrow is not normalised: the tip is where the pointer let go, even up and to the left.
+        drag(&area, (100., 80.), (-60., -40.));
+        let ViewShape::Arrow(from, to) = shapes(&area)[1].clone() else { panic!("an arrow") };
+        assert!(close(from, (100, 80)) && close(to, (40, 40)), "{from:?} -> {to:?}");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn the_pen_follows_every_update_of_the_drag() {
+        let (area, _window) = shown();
+        area.set_tool(Tool::Pen);
+        let (left, top, scale) = area.layout().unwrap();
+        area.begin_drag(left + 10. * scale, top + 10. * scale);
+        for (dx, dy) in [(20., 0.), (40., 10.), (40., 30.), (10., 30.)] {
+            area.update_drag(dx * scale, dy * scale);
+        }
+        area.finish_sketch();
+        let ViewShape::Freehand(points) = shapes(&area)[0].clone() else { panic!("a stroke") };
+        let close = |a: (u32, u32), b: (u32, u32)| a.0.abs_diff(b.0) <= 1 && a.1.abs_diff(b.1) <= 1;
+        assert_eq!(points.len(), 5, "the start and four moves: {points:?}");
+        for (got, want) in points.iter().zip([(10, 10), (30, 10), (50, 20), (50, 40), (20, 40)]) {
+            assert!(close(*got, want), "{points:?}");
+        }
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn a_pen_click_and_a_jittering_pen_leave_no_stroke_and_a_new_drag_starts_fresh() {
+        let (area, _window) = shown();
+        area.set_tool(Tool::Pen);
+        drag(&area, (50., 50.), (0., 0.));
+        drag(&area, (50., 50.), (2., 1.));
+        assert!(marks(&area).is_empty());
+        drag(&area, (20., 20.), (50., 0.));
+        drag(&area, (20., 60.), (50., 0.));
+        let strokes = shapes(&area);
+        assert_eq!(strokes.len(), 2);
+        let ViewShape::Freehand(second) = &strokes[1] else { panic!("a stroke") };
+        assert!(second.iter().all(|p| p.1.abs_diff(60) <= 1), "the second stroke did not inherit the first's points: {second:?}");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn a_very_long_drag_stays_bounded_and_still_draws() {
+        let (area, _window) = shown();
+        area.set_editor(Editor::new(5000, 100));
+        area.set_tool(Tool::Pen);
+        let (left, top, scale) = area.layout().unwrap();
+        area.begin_drag(left, top);
+        for step in 1..=6000 {
+            area.update_drag(f64::from(step) * 0.7 * scale, f64::from(step % 90) * scale);
+        }
+        assert!(area.imp().pending.borrow().as_ref().is_some_and(|shape| matches!(shape, ViewShape::Freehand(p) if p.len() <= MAX_SKETCH_POINTS)));
+        area.finish_sketch();
+        let ViewShape::Freehand(points) = shapes(&area)[0].clone() else { panic!("a stroke") };
+        assert!(points.len() <= crate::picture_editor::MAX_PATH_POINTS);
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn each_tool_sets_the_matching_cursor_and_the_crop_tool_restores_it() {
+        let (area, _window) = shown();
+        for tool in [Tool::Square, Tool::Circle, Tool::Arrow, Tool::Pen] {
+            area.set_tool(tool);
+            assert_eq!(area.cursor().and_then(|c| c.name()).as_deref(), Some("crosshair"), "{tool:?}");
+            assert!(tool.kind().is_some());
+        }
+        area.set_tool(Tool::Crop);
+        assert_eq!(area.cursor().and_then(|c| c.name()).as_deref(), Some("default"));
+        assert!(Tool::Crop.kind().is_none());
     }
 }

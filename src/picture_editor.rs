@@ -5,7 +5,7 @@
 //! Coordinates: the crop is kept in *view* pixels, the picture as the user currently sees it
 //! (after rotation). `job()` converts it to the source-pixel crop plus rotation that the sandboxed
 //! helper applies, which crops first and rotates second (see `media_authoring`).
-use crate::media_authoring::{Job, Mark, Rect, Rotation};
+use crate::media_authoring::{Job, Mark, Point, Rect, Rotation, Shape};
 
 /// Smallest crop edge in pixels (or the picture edge when the picture is smaller).
 pub const MIN_EDGE: u32 = 16;
@@ -53,17 +53,54 @@ pub const INKS: [(&str, [u8; 3]); 6] = [
 /// Line thicknesses by name, in the order the picker lists them.
 pub const WEIGHTS: [(&str, Weight); 3] = [("Thin", Weight::Thin), ("Medium", Weight::Medium), ("Thick", Weight::Thick)];
 
-/// Most marks one picture may carry (the helper refuses more).
+/// Most marks, and most path points over all of them, one picture may carry (the helper refuses
+/// more).
 pub const MAX_MARKS: usize = 32;
+pub const MAX_POINTS: usize = 1024;
+/// Most points one freehand stroke keeps; a longer one is thinned evenly.
+pub const MAX_PATH_POINTS: usize = 256;
 /// Smallest mark, in view pixels. A click that barely moved is not a shape.
 pub const MIN_MARK: u32 = 8;
 
-/// A square the user drew, in view pixels, so it turns with the picture.
+/// What the user can draw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Square,
+    Circle,
+    Arrow,
+    Freehand,
+}
+
+/// The geometry of a mark, in view pixels, so it turns with the picture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ViewShape {
+    Rect(Shape, Rect),
+    Arrow(Point, Point),
+    Freehand(Vec<Point>),
+}
+
+/// Something the user drew.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewMark {
-    pub rect: Rect,
+    pub shape: ViewShape,
     pub color: [u8; 3],
     pub stroke: u32,
+}
+impl ViewMark {
+    /// The smallest rectangle that holds the mark.
+    pub fn bounds(&self) -> Rect {
+        let around = |points: &[Point]| {
+            let (x0, x1) = points.iter().fold((u32::MAX, 0), |(lo, hi), p| (lo.min(p.0), hi.max(p.0)));
+            let (y0, y1) = points.iter().fold((u32::MAX, 0), |(lo, hi), p| (lo.min(p.1), hi.max(p.1)));
+            Rect { x: x0, y: y0, width: x1 - x0, height: y1 - y0 }
+        };
+        match &self.shape {
+            ViewShape::Rect(_, rect) => *rect,
+            ViewShape::Arrow(a, b) => around(&[*a, *b]),
+            ViewShape::Freehand(points) if points.is_empty() => Rect::default(),
+            ViewShape::Freehand(points) => around(points),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,6 +120,17 @@ fn turn(rotation: Rotation, clockwise: bool) -> Rotation {
         (Clockwise90, true) | (Counterclockwise90, false) => Half,
         (Half, true) | (None, false) => Counterclockwise90,
         (Counterclockwise90, true) | (Clockwise90, false) => None,
+    }
+}
+
+/// Carry a point along with the picture when it turns a quarter, `(width, height)` being the size
+/// of the picture *before* the turn. Points are positions on the pixel grid, so the far edge maps
+/// to the far edge.
+fn turn_point((x, y): Point, (width, height): (u32, u32), clockwise: bool) -> Point {
+    if clockwise {
+        (height - y.min(height), x)
+    } else {
+        (y, width - x.min(width))
     }
 }
 
@@ -150,6 +198,15 @@ impl Editor {
     /// Add a square over `rect` (view pixels, clamped into the picture). Refused, returning false,
     /// when it is too small or the picture already has `MAX_MARKS`.
     pub fn add_square(&mut self, rect: Rect, color: [u8; 3], weight: Weight) -> bool {
+        self.add_mark(Shape::Square, rect, color, weight)
+    }
+
+    /// Like `add_square`, for a circle (the ellipse inscribed in `rect`).
+    pub fn add_circle(&mut self, rect: Rect, color: [u8; 3], weight: Weight) -> bool {
+        self.add_mark(Shape::Circle, rect, color, weight)
+    }
+
+    pub fn add_mark(&mut self, shape: Shape, rect: Rect, color: [u8; 3], weight: Weight) -> bool {
         let (view_w, view_h) = self.view_size();
         let x = rect.x.min(view_w.saturating_sub(1));
         let y = rect.y.min(view_h.saturating_sub(1));
@@ -158,13 +215,83 @@ impl Editor {
             return false;
         }
         let stroke = self.stroke_for(weight);
-        self.marks.push(ViewMark { rect, color, stroke });
+        self.marks.push(ViewMark { shape: ViewShape::Rect(shape, rect), color, stroke });
         true
     }
 
-    /// Outline the crop area as it is now: the way to place a square without a pointer.
-    pub fn mark_crop(&mut self, color: [u8; 3], weight: Weight) -> bool {
-        self.add_square(self.rect, color, weight)
+    fn clamp_point(&self, (x, y): Point) -> Point {
+        let (view_w, view_h) = self.view_size();
+        (x.min(view_w), y.min(view_h))
+    }
+
+    fn points_used(&self) -> usize {
+        self.marks
+            .iter()
+            .map(|mark| match &mark.shape {
+                ViewShape::Rect(..) => 0,
+                ViewShape::Arrow(..) => 2,
+                ViewShape::Freehand(points) => points.len(),
+            })
+            .sum()
+    }
+
+    /// Add an arrow from `from` to `to` (view pixels, clamped into the picture). Refused when it
+    /// is shorter than `MIN_MARK` or the picture is full.
+    pub fn add_arrow(&mut self, from: Point, to: Point, color: [u8; 3], weight: Weight) -> bool {
+        let (from, to) = (self.clamp_point(from), self.clamp_point(to));
+        let (dx, dy) = (i64::from(to.0) - i64::from(from.0), i64::from(to.1) - i64::from(from.1));
+        if self.marks.len() >= MAX_MARKS
+            || self.points_used() + 2 > MAX_POINTS
+            || dx * dx + dy * dy < i64::from(MIN_MARK) * i64::from(MIN_MARK)
+        {
+            return false;
+        }
+        let stroke = self.stroke_for(weight);
+        self.marks.push(ViewMark { shape: ViewShape::Arrow(from, to), color, stroke });
+        true
+    }
+
+    /// Add a freehand stroke through `points` (view pixels, clamped into the picture). Repeated
+    /// points collapse and a long stroke is thinned to `MAX_PATH_POINTS`, keeping both ends.
+    /// Refused when it never moves `MIN_MARK` away from where it began or the picture is full.
+    pub fn add_path(&mut self, points: &[Point], color: [u8; 3], weight: Weight) -> bool {
+        let mut path: Vec<Point> = Vec::with_capacity(points.len().min(MAX_PATH_POINTS * 2));
+        for point in points.iter().map(|point| self.clamp_point(*point)) {
+            if path.last() != Some(&point) {
+                path.push(point);
+            }
+        }
+        let Some(&first) = path.first() else { return false };
+        let reach = path.iter().any(|p| {
+            let (dx, dy) = (i64::from(p.0) - i64::from(first.0), i64::from(p.1) - i64::from(first.1));
+            dx * dx + dy * dy >= i64::from(MIN_MARK) * i64::from(MIN_MARK)
+        });
+        if !reach {
+            return false;
+        }
+        if path.len() > MAX_PATH_POINTS {
+            let last = path.len() - 1;
+            path = (0..MAX_PATH_POINTS).map(|i| path[i * last / (MAX_PATH_POINTS - 1)]).collect();
+        }
+        if self.marks.len() >= MAX_MARKS || self.points_used() + path.len() > MAX_POINTS {
+            return false;
+        }
+        let stroke = self.stroke_for(weight);
+        self.marks.push(ViewMark { shape: ViewShape::Freehand(path), color, stroke });
+        true
+    }
+
+    /// Mark the crop area as it is now, which places a mark without a pointer: a square or circle
+    /// around it, an arrow across it from corner to corner, or a stroke along its edge.
+    pub fn mark_crop(&mut self, kind: Kind, color: [u8; 3], weight: Weight) -> bool {
+        let r = self.rect;
+        let (right, bottom) = (r.x + r.width, r.y + r.height);
+        match kind {
+            Kind::Square => self.add_mark(Shape::Square, r, color, weight),
+            Kind::Circle => self.add_mark(Shape::Circle, r, color, weight),
+            Kind::Arrow => self.add_arrow((r.x, r.y), (right, bottom), color, weight),
+            Kind::Freehand => self.add_path(&[(r.x, r.y), (right, r.y), (right, bottom), (r.x, bottom), (r.x, r.y)], color, weight),
+        }
     }
 
     /// Take back the newest mark.
@@ -176,7 +303,18 @@ impl Editor {
     pub fn rotate(&mut self, clockwise: bool) {
         let before = self.view_size();
         for mark in &mut self.marks {
-            mark.rect = turn_rect(mark.rect, before, clockwise);
+            match &mut mark.shape {
+                ViewShape::Rect(_, rect) => *rect = turn_rect(*rect, before, clockwise),
+                ViewShape::Arrow(a, b) => {
+                    *a = turn_point(*a, before, clockwise);
+                    *b = turn_point(*b, before, clockwise);
+                }
+                ViewShape::Freehand(points) => {
+                    for point in points {
+                        *point = turn_point(*point, before, clockwise);
+                    }
+                }
+            }
         }
         self.rect = turn_rect(self.rect, before, clockwise);
         self.rotation = turn(self.rotation, clockwise);
@@ -319,6 +457,17 @@ impl Editor {
         }
     }
 
+    /// The same for a point.
+    fn point_to_source(&self, point: Point) -> Point {
+        let view = self.view_size();
+        match self.rotation {
+            Rotation::None => point,
+            Rotation::Clockwise90 => turn_point(point, view, false),
+            Rotation::Counterclockwise90 => turn_point(point, view, true),
+            Rotation::Half => turn_point(turn_point(point, view, true), (view.1, view.0), true),
+        }
+    }
+
     /// The crop, rotation and marks as the sandboxed helper wants them: source pixels, marks
     /// drawn first, then crop, then rotation.
     pub fn job(&self, max_edge: Option<u32>) -> Job {
@@ -327,7 +476,20 @@ impl Editor {
         let marks = self
             .marks
             .iter()
-            .map(|mark| Mark::Square { rect: self.to_source(mark.rect), color: mark.color, stroke: mark.stroke })
+            .map(|mark| match &mark.shape {
+                ViewShape::Rect(shape, rect) => Mark::of(*shape, self.to_source(*rect), mark.color, mark.stroke),
+                ViewShape::Arrow(a, b) => Mark::Arrow {
+                    from: self.point_to_source(*a),
+                    to: self.point_to_source(*b),
+                    color: mark.color,
+                    stroke: mark.stroke,
+                },
+                ViewShape::Freehand(points) => Mark::Freehand {
+                    points: points.iter().map(|point| self.point_to_source(*point)).collect(),
+                    color: mark.color,
+                    stroke: mark.stroke,
+                },
+            })
             .collect();
         Job { crop: (crop != whole).then_some(crop), rotation: self.rotation, trim: None, max_edge, marks }
     }
@@ -649,7 +811,7 @@ mod tests {
     fn a_square_is_clamped_into_the_picture_and_tiny_ones_are_refused() {
         let mut editor = Editor::new(200, 100);
         assert!(editor.add_square(Rect { x: 150, y: 80, width: 500, height: 500 }, RED, Weight::Medium));
-        assert_eq!(editor.marks()[0].rect, Rect { x: 150, y: 80, width: 50, height: 20 });
+        assert_eq!(editor.marks()[0].bounds(), Rect { x: 150, y: 80, width: 50, height: 20 });
         assert!(!editor.add_square(Rect { x: 10, y: 10, width: MIN_MARK - 1, height: 50 }, RED, Weight::Thin));
         assert!(!editor.add_square(Rect { x: 10, y: 10, width: 50, height: 0 }, RED, Weight::Thin));
         assert_eq!(editor.marks().len(), 1);
@@ -699,10 +861,10 @@ mod tests {
     fn a_square_can_be_placed_over_the_crop_without_a_pointer() {
         let mut editor = Editor::new(200, 100);
         editor.set_rect(20, 10, 100, 60);
-        assert!(editor.mark_crop(RED, Weight::Medium));
-        assert_eq!(editor.marks()[0].rect, editor.rect());
+        assert!(editor.mark_crop(Kind::Square, RED, Weight::Medium));
+        assert_eq!(editor.marks()[0].bounds(), editor.rect());
         editor.set_rect(0, 0, 50, 50);
-        assert_eq!(editor.marks()[0].rect, Rect { x: 20, y: 10, width: 100, height: 60 }, "the mark stays put");
+        assert_eq!(editor.marks()[0].bounds(), Rect { x: 20, y: 10, width: 100, height: 60 }, "the mark stays put");
     }
 
     #[test]
@@ -712,6 +874,7 @@ mod tests {
         editor.add_square(mark, RED, Weight::Thin);
         let source = |editor: &Editor| match editor.job(None).marks[0] {
             Mark::Square { rect, .. } => rect,
+            _ => unreachable!("a square stays a square"),
         };
         assert_eq!(source(&editor), mark);
         for clockwise in [true, false] {
@@ -725,7 +888,7 @@ mod tests {
         let mut half = editor.clone();
         half.rotate(true);
         half.rotate(true);
-        assert_eq!(half.marks()[0].rect, Rect { x: 200 - 10 - 30, y: 100 - 20 - 40, width: 30, height: 40 });
+        assert_eq!(half.marks()[0].bounds(), Rect { x: 200 - 10 - 30, y: 100 - 20 - 40, width: 30, height: 40 });
     }
 
     #[test]
@@ -753,5 +916,160 @@ mod tests {
         assert_eq!(colours.len(), INKS.len(), "no two names share a colour");
         let weights: Vec<Weight> = WEIGHTS.iter().map(|(_, weight)| *weight).collect();
         assert_eq!(weights, [Weight::Thin, Weight::Medium, Weight::Thick]);
+    }
+
+    fn shape_of(editor: &Editor, index: usize) -> ViewShape {
+        editor.marks()[index].shape.clone()
+    }
+
+    #[test]
+    fn a_circle_is_a_rectangle_mark_with_the_circle_shape() {
+        let mut editor = Editor::new(200, 100);
+        assert!(editor.add_circle(Rect { x: 10, y: 10, width: 60, height: 40 }, RED, Weight::Thin));
+        assert_eq!(shape_of(&editor, 0), ViewShape::Rect(Shape::Circle, Rect { x: 10, y: 10, width: 60, height: 40 }));
+        assert!(!editor.add_circle(Rect { x: 10, y: 10, width: 3, height: 40 }, RED, Weight::Thin), "too narrow");
+        assert!(matches!(editor.job(None).marks[0], Mark::Circle { .. }));
+    }
+
+    #[test]
+    fn an_arrow_is_clamped_and_must_have_a_length() {
+        let mut editor = Editor::new(200, 100);
+        assert!(editor.add_arrow((10, 10), (90, 40), RED, Weight::Medium));
+        assert_eq!(shape_of(&editor, 0), ViewShape::Arrow((10, 10), (90, 40)));
+        assert!(editor.add_arrow((10, 10), (9999, 9999), RED, Weight::Medium));
+        assert_eq!(shape_of(&editor, 1), ViewShape::Arrow((10, 10), (200, 100)), "the tip stops at the far corner");
+        assert!(!editor.add_arrow((50, 50), (50, 50), RED, Weight::Thin), "no length");
+        assert!(!editor.add_arrow((50, 50), (50 + MIN_MARK - 1, 50), RED, Weight::Thin), "a twitch");
+        assert!(editor.add_arrow((50, 50), (50 + MIN_MARK, 50), RED, Weight::Thin));
+        assert_eq!(editor.marks().len(), 3);
+    }
+
+    #[test]
+    fn a_freehand_stroke_collapses_repeats_and_must_travel() {
+        let mut editor = Editor::new(200, 100);
+        assert!(editor.add_path(&[(10, 10), (10, 10), (30, 10), (30, 10), (30, 40)], RED, Weight::Thin));
+        assert_eq!(shape_of(&editor, 0), ViewShape::Freehand(vec![(10, 10), (30, 10), (30, 40)]));
+        assert!(!editor.add_path(&[], RED, Weight::Thin));
+        assert!(!editor.add_path(&[(5, 5)], RED, Weight::Thin), "one point is a click");
+        assert!(!editor.add_path(&[(5, 5), (6, 6), (5, 6), (6, 5)], RED, Weight::Thin), "a wobble in place");
+        assert!(editor.add_path(&[(5, 5), (900, 900)], RED, Weight::Thin));
+        assert_eq!(shape_of(&editor, 1), ViewShape::Freehand(vec![(5, 5), (200, 100)]), "clamped into the picture");
+    }
+
+    #[test]
+    fn a_long_stroke_is_thinned_keeping_both_ends_and_the_order() {
+        let mut editor = Editor::new(5000, 100);
+        let long: Vec<Point> = (0..3000).map(|i| (i, i % 100)).collect();
+        assert!(editor.add_path(&long, RED, Weight::Thin));
+        let ViewShape::Freehand(kept) = shape_of(&editor, 0) else { panic!("a stroke") };
+        assert_eq!(kept.len(), MAX_PATH_POINTS);
+        assert_eq!((kept[0], *kept.last().unwrap()), (long[0], long[2999]));
+        assert!(kept.windows(2).all(|pair| pair[0].0 < pair[1].0), "still in drawing order");
+    }
+
+    #[test]
+    fn path_points_are_budgeted_over_the_whole_picture() {
+        assert_eq!(MAX_POINTS, crate::media_authoring::Limits::default().max_points);
+        assert_eq!(MAX_PATH_POINTS, crate::media_authoring::Limits::default().max_path_points);
+        let mut editor = Editor::new(5000, 100);
+        let stroke: Vec<Point> = (0..MAX_PATH_POINTS as u32).map(|i| (i * 10, i % 90)).collect();
+        for _ in 0..4 {
+            assert!(editor.add_path(&stroke, RED, Weight::Thin));
+        }
+        assert!(!editor.add_path(&[(0, 0), (50, 50)], RED, Weight::Thin), "the point budget is spent");
+        assert!(!editor.add_arrow((0, 0), (50, 50), RED, Weight::Thin));
+        assert!(editor.add_circle(Rect { x: 0, y: 0, width: 50, height: 50 }, RED, Weight::Thin), "shapes without points still fit");
+        assert!(editor.undo_mark() && editor.undo_mark(), "undoing frees the budget");
+        assert!(editor.add_path(&[(0, 0), (50, 50)], RED, Weight::Thin));
+    }
+
+    #[test]
+    fn marking_the_crop_gives_each_kind_a_sensible_shape() {
+        let mut editor = Editor::new(200, 100);
+        editor.set_rect(20, 10, 100, 60);
+        for kind in [Kind::Square, Kind::Circle, Kind::Arrow, Kind::Freehand] {
+            assert!(editor.mark_crop(kind, RED, Weight::Thin), "{kind:?}");
+        }
+        assert_eq!(shape_of(&editor, 0), ViewShape::Rect(Shape::Square, editor.rect()));
+        assert_eq!(shape_of(&editor, 1), ViewShape::Rect(Shape::Circle, editor.rect()));
+        assert_eq!(shape_of(&editor, 2), ViewShape::Arrow((20, 10), (120, 70)), "corner to corner");
+        assert_eq!(
+            shape_of(&editor, 3),
+            ViewShape::Freehand(vec![(20, 10), (120, 10), (120, 70), (20, 70), (20, 10)]),
+            "round the edge"
+        );
+        for mark in editor.marks() {
+            assert_eq!(mark.bounds(), editor.rect());
+        }
+    }
+
+    #[test]
+    fn every_kind_of_mark_turns_with_the_picture_and_comes_home_after_four_turns() {
+        for clockwise in [true, false] {
+            let mut editor = Editor::new(200, 100);
+            editor.add_mark(Shape::Circle, Rect { x: 10, y: 20, width: 30, height: 40 }, RED, Weight::Thin);
+            editor.add_arrow((15, 25), (150, 80), RED, Weight::Thin);
+            editor.add_path(&[(0, 0), (200, 0), (200, 100), (7, 99)], RED, Weight::Thin);
+            let before: Vec<ViewShape> = editor.marks().iter().map(|m| m.shape.clone()).collect();
+            for _ in 0..4 {
+                editor.rotate(clockwise);
+            }
+            let after: Vec<ViewShape> = editor.marks().iter().map(|m| m.shape.clone()).collect();
+            assert_eq!(before, after, "clockwise={clockwise}");
+        }
+    }
+
+    #[test]
+    fn a_turned_arrow_and_stroke_keep_their_place_on_the_picture() {
+        let mut editor = Editor::new(200, 100);
+        editor.add_arrow((10, 20), (150, 80), RED, Weight::Thin);
+        editor.add_path(&[(0, 0), (200, 100)], RED, Weight::Thin);
+        editor.rotate(true);
+        // A quarter clockwise on a 200x100 picture: (x, y) goes to (100 - y, x).
+        assert_eq!(shape_of(&editor, 0), ViewShape::Arrow((80, 10), (20, 150)));
+        assert_eq!(shape_of(&editor, 1), ViewShape::Freehand(vec![(100, 0), (0, 200)]));
+        editor.rotate(false);
+        assert_eq!(shape_of(&editor, 0), ViewShape::Arrow((10, 20), (150, 80)));
+    }
+
+    #[test]
+    fn points_reach_the_helper_in_source_pixels_for_every_rotation() {
+        let mut editor = Editor::new(200, 100);
+        editor.add_arrow((10, 20), (150, 80), RED, Weight::Thin);
+        editor.add_path(&[(3, 4), (199, 4), (199, 99)], RED, Weight::Thin);
+        let expected = editor.job(None).marks;
+        for clockwise in [true, false] {
+            let mut turned = editor.clone();
+            for turns in 1..=4 {
+                turned.rotate(clockwise);
+                assert_eq!(turned.job(None).marks, expected, "{turns} turn(s), clockwise={clockwise}");
+            }
+        }
+        assert!(matches!(&expected[0], Mark::Arrow { from: (10, 20), to: (150, 80), .. }));
+        assert!(matches!(&expected[1], Mark::Freehand { points, .. } if points == &[(3, 4), (199, 4), (199, 99)]));
+    }
+
+    #[test]
+    fn a_job_with_every_kind_of_mark_is_accepted_by_the_planner() {
+        let mut editor = Editor::new(400, 300);
+        editor.set_rect(20, 20, 300, 200);
+        for kind in [Kind::Square, Kind::Circle, Kind::Arrow, Kind::Freehand] {
+            assert!(editor.mark_crop(kind, RED, Weight::Medium));
+        }
+        editor.rotate(true);
+        let info = crate::media_authoring::SourceInfo { kind: crate::media_authoring::Kind::Image, width: 400, height: 300, duration_ms: None, bytes: 1000 };
+        let made = crate::media_authoring::plan(&editor.job(Some(1000)), &info, &crate::media_authoring::Limits::default()).unwrap();
+        assert_eq!(made.marks.len(), 4);
+    }
+
+    #[test]
+    fn bounds_cover_every_kind_of_mark() {
+        let mut editor = Editor::new(200, 100);
+        editor.add_arrow((150, 80), (10, 20), RED, Weight::Thin);
+        editor.add_path(&[(30, 90), (60, 10), (90, 50)], RED, Weight::Thin);
+        assert_eq!(editor.marks()[0].bounds(), Rect { x: 10, y: 20, width: 140, height: 60 });
+        assert_eq!(editor.marks()[1].bounds(), Rect { x: 30, y: 10, width: 60, height: 80 });
+        let empty = ViewMark { shape: ViewShape::Freehand(vec![]), color: RED, stroke: 2 };
+        assert_eq!(empty.bounds(), Rect::default());
     }
 }

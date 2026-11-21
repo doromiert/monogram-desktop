@@ -8,7 +8,7 @@
 use crate::{
     crop_area::{CropArea, Tool},
     media_author_run,
-    picture_editor::{Aspect, Editor, INKS, MIN_EDGE, WEIGHTS},
+    picture_editor::{Aspect, Editor, Kind, INKS, MIN_EDGE, WEIGHTS},
     ui::Ui,
     widgets::*,
 };
@@ -174,13 +174,13 @@ impl Ui {
 
         // Marks: drag on the picture with the Square tool, or outline the crop area from the keyboard.
         let tool = adw::ToggleGroup::new();
-        for (name, title) in [("crop", "Crop"), ("square", "Square")] {
+        for (name, title) in [("crop", "Crop"), ("square", "Square"), ("circle", "Circle"), ("arrow", "Arrow"), ("pen", "Draw")] {
             tool.add(adw::Toggle::builder().name(name).label(title).build());
         }
         tool.set_active_name(Some("crop"));
         tool.upcast_ref::<gtk::Widget>().update_property(&[gtk::accessible::Property::Label("Tool")]);
         tool.set_valign(gtk::Align::Center);
-        let tool_row = adw::ActionRow::builder().title("Tool").subtitle("Drag on the picture to draw with the Square tool").build();
+        let tool_row = adw::ActionRow::builder().title("Tool").subtitle("Pick a shape, then drag on the picture to draw it").build();
         tool_row.add_suffix(&tool);
         let combo = |title: &str, names: Vec<&str>| {
             adw::ComboRow::builder().title(title).model(&gtk::StringList::new(&names)).build()
@@ -190,7 +190,7 @@ impl Ui {
         weight.set_selected(1);
         let outline = adw::ActionRow::builder()
             .title("Outline the Crop Area")
-            .subtitle("Add a square exactly around the crop, without a pointer")
+            .subtitle("Place the chosen shape around the crop, without a pointer")
             .activatable(true)
             .build();
         let undo = adw::ActionRow::builder().title("Undo Last Mark").subtitle("No marks yet").activatable(true).build();
@@ -278,7 +278,13 @@ impl Ui {
             weight.connect_selected_notify(move |_| on_weight());
             let area = area.clone();
             tool.connect_active_name_notify(move |group| {
-                area.set_tool(if group.active_name().as_deref() == Some("square") { Tool::Square } else { Tool::Crop });
+                area.set_tool(match group.active_name().as_deref() {
+                    Some("square") => Tool::Square,
+                    Some("circle") => Tool::Circle,
+                    Some("arrow") => Tool::Arrow,
+                    Some("pen") => Tool::Pen,
+                    _ => Tool::Crop,
+                });
             });
         }
         {
@@ -286,9 +292,11 @@ impl Ui {
             outline.connect_activated(move |_| {
                 let color = INKS.get(ink.selected() as usize).map_or(INKS[0].1, |(_, color)| *color);
                 let thickness = WEIGHTS.get(weight.selected() as usize).map_or(WEIGHTS[1].1, |(_, weight)| *weight);
-                area.edit(|editor| {
-                    editor.mark_crop(color, thickness);
-                });
+                if let Some(kind) = area.tool().kind().or(Some(Kind::Square)) {
+                    area.edit(|editor| {
+                        editor.mark_crop(kind, color, thickness);
+                    });
+                }
             });
         }
         {
@@ -542,7 +550,7 @@ mod tests {
         outline.emit_by_name::<()>("activated", &[]);
         let editor = area.editor().unwrap();
         assert_eq!(editor.marks().len(), 1);
-        assert_eq!(editor.marks()[0].rect, editor.rect(), "the square is exactly around the crop");
+        assert_eq!(editor.marks()[0].bounds(), editor.rect(), "the square is exactly around the crop");
         assert!(undo.is_sensitive() && undo.subtitle().as_deref() == Some("1 mark"));
         outline.emit_by_name::<()>("activated", &[]);
         assert_eq!(undo.subtitle().as_deref(), Some("2 marks"));
@@ -568,15 +576,27 @@ mod tests {
         ink.set_selected(3);
         weight.set_selected(2);
         area.edit(|editor| {
-            editor.mark_crop(INKS[3].1, WEIGHTS[2].1);
+            editor.mark_crop(Kind::Square, INKS[3].1, WEIGHTS[2].1);
         });
         assert_eq!(area.editor().unwrap().marks()[0].color, INKS[3].1);
         let tool = find::<adw::ToggleGroup>(&root, &|w| w.downcast_ref::<adw::ToggleGroup>().is_some_and(|g| g.active_name().as_deref() == Some("crop"))).unwrap();
         assert_eq!(area.tool(), Tool::Crop);
-        tool.set_active_name(Some("square"));
-        assert_eq!(area.tool(), Tool::Square);
+        for (name, expected) in [("square", Tool::Square), ("circle", Tool::Circle), ("arrow", Tool::Arrow), ("pen", Tool::Pen), ("crop", Tool::Crop)] {
+            tool.set_active_name(Some(name));
+            assert_eq!(area.tool(), expected, "{name}");
+        }
+        // The pointer-free button places whatever shape the tool draws.
+        let outline = row_titled(&ui, "Outline the Crop Area");
+        for (name, check) in [("circle", 1usize), ("arrow", 2), ("pen", 3)] {
+            tool.set_active_name(Some(name));
+            outline.emit_by_name::<()>("activated", &[]);
+            assert_eq!(area.editor().unwrap().marks().len(), check + 1, "{name}");
+        }
+        use crate::picture_editor::ViewShape;
+        let shapes: Vec<ViewShape> = area.editor().unwrap().marks().iter().map(|m| m.shape.clone()).collect();
+        assert!(matches!(shapes[1], ViewShape::Rect(crate::media_authoring::Shape::Circle, _)));
+        assert!(matches!(shapes[2], ViewShape::Arrow(..)) && matches!(shapes[3], ViewShape::Freehand(..)));
         tool.set_active_name(Some("crop"));
-        assert_eq!(area.tool(), Tool::Crop);
         ui.window.close();
     }
 
