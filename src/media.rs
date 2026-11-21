@@ -1038,7 +1038,7 @@ impl MediaViewer {
                 ui.notice("This media is no longer available");
                 return;
             };
-            if !crate::picture_editor_ui::editable(&file.name) {
+            if !crate::picture_editor_ui::editable_attachment(&file) {
                 ui.notice("Only JPEG, PNG and WebP pictures can be edited");
                 return;
             }
@@ -1357,7 +1357,7 @@ impl MediaViewer {
         let editable = id
             .and_then(|id| ui.store.message(&self.owner, &self.peer, &id))
             .and_then(|message| message.attachment)
-            .is_some_and(|file| crate::picture_editor_ui::editable(&file.name));
+            .is_some_and(|file| crate::picture_editor_ui::editable_attachment(&file));
         self.edit.set_sensitive(editable);
         self.edit.set_tooltip_text(Some(if editable {
             "Edit a copy and add it to your message"

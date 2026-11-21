@@ -34,6 +34,17 @@ const PREVIEW_EDGE: u32 = 1600;
 const KEEP_EDITED: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Pictures the helper can edit: JPEG, PNG and WebP.
+/// Whether an attachment can be edited: a JPEG, PNG or WebP by its type or, failing that, by its
+/// name. Received pictures often have a name with no extension (a web address's last part), so
+/// the name alone would leave the Edit button off for pictures that open fine.
+pub fn editable_attachment(file: &crate::file_share::Attachment) -> bool {
+    if file.sticker {
+        return false;
+    }
+    let mime = file.mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    matches!(mime.as_str(), "image/jpeg" | "image/jpg" | "image/png" | "image/webp") || editable(&file.name)
+}
+
 pub fn editable(name: &str) -> bool {
     name.rsplit_once('.')
         .is_some_and(|(_, extension)| matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png" | "webp"))
@@ -1444,5 +1455,52 @@ mod tests {
     fn a_forgotten_edited_copy_is_swept_within_hours_not_days() {
         assert!(KEEP_EDITED >= Duration::from_secs(60 * 60), "long enough to retry a failed upload");
         assert!(KEEP_EDITED <= Duration::from_secs(12 * 60 * 60), "but temporary");
+    }
+
+    fn attachment(name: &str, mime: &str, sticker: bool) -> crate::file_share::Attachment {
+        crate::file_share::Attachment {
+            wire_url: String::new(),
+            name: name.into(),
+            mime: mime.into(),
+            size: None,
+            width: None,
+            height: None,
+            hashes: Default::default(),
+            manual: false,
+            sticker,
+        }
+    }
+
+    #[test]
+    fn a_picture_is_editable_by_its_type_even_when_its_name_has_no_extension() {
+        for (name, mime) in [
+            ("1f3c9a7e", "image/jpeg"),
+            ("photo", "image/png"),
+            ("IMG", "image/webp"),
+            ("pic", "image/jpeg; charset=binary"),
+            ("pic", "IMAGE/PNG"),
+            ("photo.JPG", ""),
+            ("photo.webp", "application/octet-stream"),
+            ("photo.jpeg", "image/gif"),
+        ] {
+            assert!(editable_attachment(&attachment(name, mime, false)), "{name} {mime}");
+        }
+    }
+
+    #[test]
+    fn what_the_editor_cannot_open_stays_off() {
+        for (name, mime, sticker) in [
+            ("anim.gif", "image/gif", false),
+            ("pic", "image/gif", false),
+            ("pic.avif", "image/avif", false),
+            ("pic.heic", "image/heic", false),
+            ("clip.mp4", "video/mp4", false),
+            ("notes.txt", "text/plain", false),
+            ("pic", "", false),
+            ("pic", "image/jpeg", true),
+            ("sticker.webp", "image/webp", true),
+        ] {
+            assert!(!editable_attachment(&attachment(name, mime, sticker)), "{name} {mime} sticker={sticker}");
+        }
     }
 }
