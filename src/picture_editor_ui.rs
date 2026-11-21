@@ -1,14 +1,14 @@
-//! The "Edit Picture" dialog: crop and rotate a picture attached to the composer.
+//! The "Edit Picture" dialog: crop, rotate and mark up a picture attached to the composer.
 //!
 //! The picture is only ever decoded in sandboxes: the preview by the glycin image loader, the
 //! edit itself by the confined GStreamer helper (`media_author_run`). The original file is never
 //! modified; the result is a new file under the cache directory that replaces the attachment.
 //! Every control works without a pointer: the crop can be nudged with the arrow keys and typed in
-//! numerically under "Precise Crop".
+//! numerically under "Precise Crop", and "Outline the Crop Area" places a square without dragging.
 use crate::{
-    crop_area::CropArea,
+    crop_area::{CropArea, Tool},
     media_author_run,
-    picture_editor::{Aspect, Editor, MIN_EDGE},
+    picture_editor::{Aspect, Editor, INKS, MIN_EDGE, WEIGHTS},
     ui::Ui,
     widgets::*,
 };
@@ -95,6 +95,7 @@ struct Controls {
     expander: adw::ExpanderRow,
     aspect: adw::ToggleGroup,
     done: gtk::Button,
+    undo: adw::ActionRow,
     syncing: Cell<bool>,
 }
 impl Controls {
@@ -123,6 +124,13 @@ impl Controls {
             Aspect::Ratio(16, 9) => "16:9",
             Aspect::Ratio(..) => "free",
         }));
+        let marks = editor.marks().len();
+        self.undo.set_sensitive(marks > 0);
+        self.undo.set_subtitle(&match marks {
+            0 => "No marks yet".to_string(),
+            1 => "1 mark".to_string(),
+            n => format!("{n} marks"),
+        });
         self.done.set_sensitive(true);
         self.syncing.set(false);
     }
@@ -164,6 +172,34 @@ impl Ui {
         let group = adw::PreferencesGroup::new();
         group.add(&expander);
 
+        // Marks: drag on the picture with the Square tool, or outline the crop area from the keyboard.
+        let tool = adw::ToggleGroup::new();
+        for (name, title) in [("crop", "Crop"), ("square", "Square")] {
+            tool.add(adw::Toggle::builder().name(name).label(title).build());
+        }
+        tool.set_active_name(Some("crop"));
+        tool.upcast_ref::<gtk::Widget>().update_property(&[gtk::accessible::Property::Label("Tool")]);
+        tool.set_valign(gtk::Align::Center);
+        let tool_row = adw::ActionRow::builder().title("Tool").subtitle("Drag on the picture to draw with the Square tool").build();
+        tool_row.add_suffix(&tool);
+        let combo = |title: &str, names: Vec<&str>| {
+            adw::ComboRow::builder().title(title).model(&gtk::StringList::new(&names)).build()
+        };
+        let ink = combo("Colour", INKS.iter().map(|(name, _)| *name).collect());
+        let weight = combo("Line thickness", WEIGHTS.iter().map(|(name, _)| *name).collect());
+        weight.set_selected(1);
+        let outline = adw::ActionRow::builder()
+            .title("Outline the Crop Area")
+            .subtitle("Add a square exactly around the crop, without a pointer")
+            .activatable(true)
+            .build();
+        let undo = adw::ActionRow::builder().title("Undo Last Mark").subtitle("No marks yet").activatable(true).build();
+        undo.set_sensitive(false);
+        let marks = adw::PreferencesGroup::builder().title("Mark Up").build();
+        for row in [tool_row.upcast_ref::<gtk::Widget>(), ink.upcast_ref(), weight.upcast_ref(), outline.upcast_ref(), undo.upcast_ref()] {
+            marks.add(row);
+        }
+
         let editor_page = bx(true, 12);
         editor_page.set_margin_start(12);
         editor_page.set_margin_end(12);
@@ -171,6 +207,7 @@ impl Ui {
         editor_page.append(&area);
         editor_page.append(&tools);
         editor_page.append(&group);
+        editor_page.append(&marks);
         stack.add_named(&editor_page, Some("editor"));
         stack.set_visible_child_name("loading");
 
@@ -194,7 +231,7 @@ impl Ui {
             .default_widget(&done_button)
             .build();
 
-        let controls = Rc::new(Controls { area: area.clone(), x, y, width, height, expander, aspect: aspect.clone(), done: done_button.clone(), syncing: Cell::new(false) });
+        let controls = Rc::new(Controls { area: area.clone(), x, y, width, height, expander, aspect: aspect.clone(), done: done_button.clone(), undo: undo.clone(), syncing: Cell::new(false) });
         {
             let controls = controls.clone();
             area.connect_changed(move || controls.refresh());
@@ -225,6 +262,40 @@ impl Ui {
                 };
                 controls.area.edit(|editor| editor.set_aspect(choice));
             });
+        }
+        {
+            let pen = {
+                let (area, ink, weight) = (area.clone(), ink.clone(), weight.clone());
+                Rc::new(move || {
+                    let color = INKS.get(ink.selected() as usize).map_or(INKS[0].1, |(_, color)| *color);
+                    let thickness = WEIGHTS.get(weight.selected() as usize).map_or(WEIGHTS[1].1, |(_, weight)| *weight);
+                    area.set_pen(color, thickness);
+                })
+            };
+            pen();
+            let (on_ink, on_weight) = (pen.clone(), pen.clone());
+            ink.connect_selected_notify(move |_| on_ink());
+            weight.connect_selected_notify(move |_| on_weight());
+            let area = area.clone();
+            tool.connect_active_name_notify(move |group| {
+                area.set_tool(if group.active_name().as_deref() == Some("square") { Tool::Square } else { Tool::Crop });
+            });
+        }
+        {
+            let (area, ink, weight) = (area.clone(), ink.clone(), weight.clone());
+            outline.connect_activated(move |_| {
+                let color = INKS.get(ink.selected() as usize).map_or(INKS[0].1, |(_, color)| *color);
+                let thickness = WEIGHTS.get(weight.selected() as usize).map_or(WEIGHTS[1].1, |(_, weight)| *weight);
+                area.edit(|editor| {
+                    editor.mark_crop(color, thickness);
+                });
+            });
+        }
+        {
+            let area = area.clone();
+            undo.connect_activated(move |_| area.edit(|editor| {
+                editor.undo_mark();
+            }));
         }
         for (button, clockwise) in [(&rotate_left, false), (&rotate_right, true)] {
             let area = area.clone();
@@ -449,6 +520,104 @@ mod tests {
 
     /// The preview (glycin) and the helper must agree on a phone photo's orientation, or the crop
     /// would be drawn over the wrong pixels: the fixture is stored 64x32 but tagged to show 32x64.
+    fn row_titled(ui: &Rc<Ui>, title: &str) -> adw::ActionRow {
+        let dialog = ui.window.visible_dialog().unwrap();
+        find::<adw::ActionRow>(dialog.child().unwrap().upcast_ref(), &|w| {
+            w.downcast_ref::<adw::ActionRow>().is_some_and(|row| row.title() == title)
+        })
+        .unwrap_or_else(|| panic!("a row titled {title}"))
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display, glycin loaders, the built helper and bubblewrap"]
+    fn the_mark_up_controls_outline_the_crop_and_undo_it_without_a_pointer() {
+        let ui = open_ui("com.negzero.PictureEditorMarks");
+        let source = copy_of("gradient-64x32.png", "photo.png");
+        ui.open_picture_editor(source, |_| {});
+        assert!(wait(15_000, || dialog_area(&ui).is_some_and(|a| a.editor().is_some())), "the picture loads");
+        let area = dialog_area(&ui).unwrap();
+        let (outline, undo) = (row_titled(&ui, "Outline the Crop Area"), row_titled(&ui, "Undo Last Mark"));
+        assert!(!undo.is_sensitive() && undo.subtitle().as_deref() == Some("No marks yet"));
+        area.edit(|editor| editor.set_rect(8, 4, 40, 20));
+        outline.emit_by_name::<()>("activated", &[]);
+        let editor = area.editor().unwrap();
+        assert_eq!(editor.marks().len(), 1);
+        assert_eq!(editor.marks()[0].rect, editor.rect(), "the square is exactly around the crop");
+        assert!(undo.is_sensitive() && undo.subtitle().as_deref() == Some("1 mark"));
+        outline.emit_by_name::<()>("activated", &[]);
+        assert_eq!(undo.subtitle().as_deref(), Some("2 marks"));
+        undo.emit_by_name::<()>("activated", &[]);
+        undo.emit_by_name::<()>("activated", &[]);
+        assert!(area.editor().unwrap().marks().is_empty());
+        assert!(!undo.is_sensitive(), "nothing left to undo");
+        ui.window.close();
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display, glycin loaders, the built helper and bubblewrap"]
+    fn the_colour_and_thickness_pickers_and_the_tool_switch_reach_the_canvas() {
+        let ui = open_ui("com.negzero.PictureEditorPens");
+        ui.open_picture_editor(copy_of("gradient-64x32.png", "photo.png"), |_| {});
+        assert!(wait(15_000, || dialog_area(&ui).is_some_and(|a| a.editor().is_some())));
+        let area = dialog_area(&ui).unwrap();
+        let dialog = ui.window.visible_dialog().unwrap();
+        let root: gtk::Widget = dialog.child().unwrap().upcast();
+        let combo = |title: &str| find::<adw::ComboRow>(&root, &|w| w.downcast_ref::<adw::ComboRow>().is_some_and(|r| r.title() == title)).unwrap();
+        let (ink, weight) = (combo("Colour"), combo("Line thickness"));
+        assert_eq!((ink.selected(), weight.selected()), (0, 1), "red, medium");
+        ink.set_selected(3);
+        weight.set_selected(2);
+        area.edit(|editor| {
+            editor.mark_crop(INKS[3].1, WEIGHTS[2].1);
+        });
+        assert_eq!(area.editor().unwrap().marks()[0].color, INKS[3].1);
+        let tool = find::<adw::ToggleGroup>(&root, &|w| w.downcast_ref::<adw::ToggleGroup>().is_some_and(|g| g.active_name().as_deref() == Some("crop"))).unwrap();
+        assert_eq!(area.tool(), Tool::Crop);
+        tool.set_active_name(Some("square"));
+        assert_eq!(area.tool(), Tool::Square);
+        tool.set_active_name(Some("crop"));
+        assert_eq!(area.tool(), Tool::Crop);
+        ui.window.close();
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display, glycin loaders, the built helper and bubblewrap"]
+    fn a_marked_picture_is_saved_with_the_square_in_it_and_the_original_is_untouched() {
+        let ui = open_ui("com.negzero.PictureEditorMarkedSave");
+        let source = copy_of("gradient-64x32.png", "photo.png");
+        let original = std::fs::read(&source).unwrap();
+        let result = Rc::new(std::cell::RefCell::new(None::<PathBuf>));
+        let sink = result.clone();
+        ui.open_picture_editor(source.clone(), move |edited| *sink.borrow_mut() = Some(edited));
+        assert!(wait(15_000, || dialog_area(&ui).is_some_and(|a| a.editor().is_some())));
+        let area = dialog_area(&ui).unwrap();
+        area.edit(|editor| {
+            editor.add_square(crate::media_authoring::Rect { x: 8, y: 4, width: 20, height: 12 }, [250, 10, 10], crate::picture_editor::Weight::Medium);
+        });
+        let dialog = ui.window.visible_dialog().unwrap();
+        let done = find::<gtk::Button>(dialog.child().unwrap().upcast_ref(), &|w| w.downcast_ref::<gtk::Button>().is_some_and(|b| b.label().as_deref() == Some("Done"))).unwrap();
+        assert!(done.is_sensitive(), "a mark alone is a change worth saving");
+        done.emit_clicked();
+        assert!(wait(20_000, || result.borrow().is_some()), "the edited copy arrives");
+        let edited = result.borrow().clone().unwrap();
+        let texture = gdk::Texture::from_filename(&edited).unwrap();
+        assert_eq!((texture.width(), texture.height()), (64, 32));
+        let mut rgba = vec![0u8; 64 * 32 * 4];
+        texture.download(&mut rgba, 64 * 4);
+        // `Texture::download` writes BGRA, so the channels come out blue first.
+        let at = |x: usize, y: usize| [rgba[(y * 64 + x) * 4 + 2], rgba[(y * 64 + x) * 4 + 1], rgba[(y * 64 + x) * 4]];
+        for (x, y) in [(8, 4), (27, 4), (8, 15), (27, 15), (17, 4)] {
+            let [r, g, b] = at(x, y);
+            assert!(r > 240 && g < 20 && b < 20, "({x},{y}) is red, got {:?}", at(x, y));
+        }
+        let [r, g, b] = at(17, 10);
+        assert!(!(r > 240 && g < 20 && b < 20), "the inside of the square is the picture");
+        assert_eq!(std::fs::read(&source).unwrap(), original, "the original is untouched");
+        settle(300);
+        discard_edited(Some(edited));
+        ui.window.close();
+    }
+
     #[gtk::test]
     #[ignore = "requires a native display, glycin loaders, the built helper and bubblewrap"]
     fn the_preview_and_the_helper_agree_on_exif_orientation() {

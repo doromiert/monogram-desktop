@@ -21,7 +21,13 @@ use gstreamer as gst;
 use gst::prelude::*;
 use media_authoring::{Format, Kind, Limits, Plan, Rotation, SourceInfo, SNIFF_BYTES};
 use serde::Deserialize;
-use std::io::Read;
+use std::{
+    io::Read,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 const SOURCE: &str = "/in/source";
 const OUTPUT_DIR: &str = "/out";
@@ -155,6 +161,38 @@ fn run(limits: &Limits) -> Result<(), i32> {
     }
 
     let mut chain = decode_chain(format)?;
+    // Marks are drawn first, on the upright picture, so crop and rotation carry them along.
+    let painted = Arc::new(AtomicBool::new(true));
+    if !plan.marks.is_empty() {
+        chain.push(make("videoconvert")?);
+        let rgba = make("capsfilter")?;
+        rgba.set_property("caps", gst::Caps::builder("video/x-raw").field("format", "RGBA").build());
+        let pad = rgba.static_pad("src").ok_or(5)?;
+        let (marks, ok) = (plan.marks.clone(), painted.clone());
+        pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+            let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_mut() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let size = pad
+                .current_caps()
+                .and_then(|caps| {
+                    let structure = caps.structure(0)?;
+                    Some((structure.get::<i32>("width").ok()?, structure.get::<i32>("height").ok()?))
+                })
+                .and_then(|(w, h)| Some((u32::try_from(w).ok()?, u32::try_from(h).ok()?)));
+            let drawn = size.is_some_and(|(width, height)| {
+                buffer
+                    .make_mut()
+                    .map_writable()
+                    .is_ok_and(|mut map| media_authoring::paint(map.as_mut_slice(), width, height, &marks))
+            });
+            if !drawn {
+                ok.store(false, Ordering::Release);
+            }
+            gst::PadProbeReturn::Ok
+        });
+        chain.push(rgba);
+    }
     let crop = make("videocrop")?;
     crop.set_property("left", plan.crop.x as i32);
     crop.set_property("top", plan.crop.y as i32);
@@ -198,6 +236,11 @@ fn run(limits: &Limits) -> Result<(), i32> {
     let pipeline = assemble(&chain)?;
     pipeline.set_state(gst::State::Playing).map_err(|_| 5)?;
     finish(&pipeline, gst::MessageType::Eos)?;
+    if !painted.load(Ordering::Acquire) {
+        // A mark that could not be drawn must not ship as an unmarked picture.
+        let _ = std::fs::remove_file(format!("{OUTPUT_DIR}/{name}"));
+        return Err(5);
+    }
     let written = std::fs::metadata(format!("{OUTPUT_DIR}/{name}")).map_err(|_| 7)?;
     if !written.is_file() || written.len() == 0 || written.len() > plan.max_output_bytes {
         return Err(7);

@@ -236,7 +236,7 @@ fn tempdir_in(parent: &Path) -> Result<Scratch, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media_authoring::{Rect, Rotation};
+    use crate::media_authoring::{Mark, Rect, Rotation};
 
     fn args(command: &Command) -> Vec<String> {
         command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect()
@@ -293,6 +293,7 @@ mod tests {
             output_width: 10,
             output_height: 10,
             max_output_bytes: 1024,
+            marks: vec![],
         };
         let png = |width: u32, height: u32| {
             let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
@@ -375,6 +376,72 @@ mod tests {
         let leftovers: Vec<_> = std::fs::read_dir(&work.0).unwrap().collect();
         assert_eq!(leftovers.len(), 1, "scratch directory removed, only the result remains");
         assert!(std::fs::read(&source).unwrap() == gradient_png(), "the original is untouched");
+    }
+
+    fn pixel_at(decoded: &(usize, usize, usize, Vec<u8>), x: usize, y: usize) -> [u8; 3] {
+        let (width, _, channels, pixels) = decoded;
+        let at = (y * width + x) * channels;
+        [pixels[at], pixels[at + 1], pixels[at + 2]]
+    }
+
+    #[test]
+    #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
+    fn a_square_is_drawn_by_the_helper_and_nothing_else_changes() {
+        let (_dir, source) = fixture("photo.png", &gradient_png());
+        let original = decode_png(&gradient_png());
+        let work = tempdir().unwrap();
+        let job = Job {
+            marks: vec![Mark::Square { rect: Rect { x: 8, y: 4, width: 20, height: 12 }, color: [255, 0, 0], stroke: 2 }],
+            ..Default::default()
+        };
+        let made = author(&source, &job, &work.0, NEVER).unwrap();
+        assert_eq!((made.width, made.height), (64, 32));
+        let marked = decode_png(&std::fs::read(&made.path).unwrap());
+        for (x, y) in [(8, 4), (27, 4), (8, 15), (27, 15), (9, 5), (17, 4), (17, 5), (8, 9), (27, 9)] {
+            assert_eq!(pixel_at(&marked, x, y), [255, 0, 0], "({x},{y}) is on the outline");
+        }
+        for (x, y) in [(17, 9), (12, 8), (7, 4), (28, 4), (8, 3), (8, 16), (0, 0), (63, 31), (40, 20)] {
+            assert_eq!(pixel_at(&marked, x, y), pixel_at(&original, x, y), "({x},{y}) is untouched");
+        }
+        assert!(std::fs::read(&source).unwrap() == gradient_png(), "the original is untouched");
+    }
+
+    #[test]
+    #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
+    fn marks_follow_the_crop_and_the_rotation() {
+        let (_dir, source) = fixture("photo.png", &gradient_png());
+        let work = tempdir().unwrap();
+        let job = Job {
+            crop: Some(Rect { x: 4, y: 2, width: 40, height: 20 }),
+            rotation: Rotation::Clockwise90,
+            // In source pixels: its top-left corner is (4, 2) inside the crop.
+            marks: vec![Mark::Square { rect: Rect { x: 8, y: 4, width: 20, height: 12 }, color: [0, 0, 255], stroke: 2 }],
+            ..Default::default()
+        };
+        let made = author(&source, &job, &work.0, NEVER).unwrap();
+        assert_eq!((made.width, made.height), (20, 40), "40x20 turned a quarter");
+        let marked = decode_png(&std::fs::read(&made.path).unwrap());
+        // Crop-local (x, y) goes to (20 - 1 - y, x) after a clockwise quarter turn.
+        let turned = |x: usize, y: usize| (19 - y, x);
+        for (x, y) in [(4, 2), (23, 2), (4, 13), (23, 13), (10, 2), (4, 8)] {
+            let (tx, ty) = turned(x, y);
+            assert_eq!(pixel_at(&marked, tx, ty), [0, 0, 255], "crop-local ({x},{y}) on the outline");
+        }
+        let (cx, cy) = turned(14, 8);
+        assert_ne!(pixel_at(&marked, cx, cy), [0, 0, 255], "the inside of the square is not painted");
+    }
+
+    #[test]
+    #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
+    fn a_mark_outside_the_picture_is_refused_before_the_sandbox_runs() {
+        let (_dir, source) = fixture("photo.png", &gradient_png());
+        let work = tempdir().unwrap();
+        let job = Job {
+            marks: vec![Mark::Square { rect: Rect { x: 60, y: 0, width: 20, height: 12 }, color: [255, 0, 0], stroke: 2 }],
+            ..Default::default()
+        };
+        assert!(author(&source, &job, &work.0, NEVER).is_err());
+        assert_eq!(std::fs::read_dir(&work.0).unwrap().count(), 0, "nothing was written");
     }
 
     /// Minimal PNG reader for 8-bit RGB/RGBA, non-interlaced files (what the helper writes), so

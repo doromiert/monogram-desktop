@@ -46,7 +46,8 @@ media: it never runs in the main process.
 
 ## Order of operations
 
-Crop in source coordinates, rotate, scale down to fit the output edge (never up). Video
+Draw marks (source coordinates, upright picture), then crop in source coordinates, rotate, scale
+down to fit the output edge (never up). Video
 geometry is rounded to even values. Trims apply to the source timeline and must keep at least
 100 ms.
 
@@ -67,11 +68,20 @@ geometry is rounded to even values. Trims apply to the source timeline and must 
    writes a new file under the cache directory (`monogram-desktop/edited`, private, pruned after 24
    hours and removed with its attachment) that replaces the attachment in the same position; the
    original is never modified. Cancel, Escape or closing stops a running edit.
-   **To do: annotation tools in Edit Picture.** Add freehand drawing, an arrow tool, a circle tool
-   and a square tool, with a colour and stroke width, undo and redo, and Reset. The marks must be
-   drawn into the edited copy by the confined helper, never by the GTK process, and the original
-   must stay untouched, as with crop and rotate. They need a pointer-free path as well (keyboard
-   placement or numeric rows), like the crop controls, and tests that run without a display.
+   **Marks (square done).** Edit Picture also has a **Mark Up** group: a Crop/Square tool switch,
+   a colour (Red, Yellow, Green, Blue, White, Black) and a line thickness (Thin, Medium, Thick,
+   a share of the picture's longest edge, never under 2 px). With the Square tool, dragging on the
+   picture draws an outline; "Outline the Crop Area" places one exactly around the crop with no
+   pointer, and "Undo Last Mark" takes back the newest. Marks are stored in view pixels, so they
+   turn with the picture, and `Editor::job` converts them to source pixels. They are part of the
+   `Job` and `Plan` (`Mark::Square`, at most 32, stroke 1 to 128 px, always inside the picture,
+   images only) and the confined helper draws them, never the GTK process: it converts to RGBA,
+   paints through `media_authoring::paint` in a pad probe, then crops, rotates and scales, so a
+   crop that leaves a mark out drops it. A mark that cannot be drawn fails the edit instead of
+   saving an unmarked picture. Tested without a display (geometry, limits, pixel painting), in the
+   real sandbox (pixels, and crop plus rotation) and in the dialog (drag, undo, saved file).
+   **To do: freehand drawing, an arrow tool and a circle tool**, each as another `Mark` shape with
+   the same colour and thickness, a pointer-free way to place it, and the same three layers of tests.
 4. Video trim and compression with progress and cancel off the main thread.
 5. Albums: multi-select, ordering, shared caption.
 6. Camera capture through the desktop camera portal.

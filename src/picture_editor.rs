@@ -5,7 +5,7 @@
 //! Coordinates: the crop is kept in *view* pixels, the picture as the user currently sees it
 //! (after rotation). `job()` converts it to the source-pixel crop plus rotation that the sandboxed
 //! helper applies, which crops first and rotates second (see `media_authoring`).
-use crate::media_authoring::{Job, Rect, Rotation};
+use crate::media_authoring::{Job, Mark, Rect, Rotation};
 
 /// Smallest crop edge in pixels (or the picture edge when the picture is smaller).
 pub const MIN_EDGE: u32 = 16;
@@ -32,6 +32,40 @@ pub enum Handle {
     Left,
 }
 
+/// How thick a mark's outline is, relative to the picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Weight {
+    Thin,
+    Medium,
+    Thick,
+}
+
+/// The colours a mark can be, by name.
+pub const INKS: [(&str, [u8; 3]); 6] = [
+    ("Red", [230, 40, 40]),
+    ("Yellow", [250, 200, 30]),
+    ("Green", [50, 180, 80]),
+    ("Blue", [50, 110, 230]),
+    ("White", [255, 255, 255]),
+    ("Black", [0, 0, 0]),
+];
+
+/// Line thicknesses by name, in the order the picker lists them.
+pub const WEIGHTS: [(&str, Weight); 3] = [("Thin", Weight::Thin), ("Medium", Weight::Medium), ("Thick", Weight::Thick)];
+
+/// Most marks one picture may carry (the helper refuses more).
+pub const MAX_MARKS: usize = 32;
+/// Smallest mark, in view pixels. A click that barely moved is not a shape.
+pub const MIN_MARK: u32 = 8;
+
+/// A square the user drew, in view pixels, so it turns with the picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewMark {
+    pub rect: Rect,
+    pub color: [u8; 3],
+    pub stroke: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Editor {
     source: (u32, u32),
@@ -39,6 +73,7 @@ pub struct Editor {
     /// In view pixels.
     rect: Rect,
     aspect: Aspect,
+    marks: Vec<ViewMark>,
 }
 
 fn turn(rotation: Rotation, clockwise: bool) -> Rotation {
@@ -71,6 +106,7 @@ impl Editor {
             rotation: Rotation::None,
             rect: Rect { x: 0, y: 0, width, height },
             aspect: Aspect::Free,
+            marks: Vec::new(),
         }
     }
     pub fn rotation(&self) -> Rotation {
@@ -90,15 +126,58 @@ impl Editor {
         }
     }
     pub fn is_unchanged(&self) -> bool {
-        self.rotation == Rotation::None && self.rect == Rect { x: 0, y: 0, width: self.source.0, height: self.source.1 }
+        self.marks.is_empty() && self.rotation == Rotation::None && self.rect == Rect { x: 0, y: 0, width: self.source.0, height: self.source.1 }
     }
     pub fn reset(&mut self) {
         *self = Self::new(self.source.0, self.source.1);
     }
 
-    /// Turn the picture a quarter; the crop turns with it.
+    pub fn marks(&self) -> &[ViewMark] {
+        &self.marks
+    }
+
+    /// Outline thickness in pixels: a share of the picture's longest edge, never under 2.
+    pub fn stroke_for(&self, weight: Weight) -> u32 {
+        let longest = self.source.0.max(self.source.1);
+        let per_mille = match weight {
+            Weight::Thin => 3,
+            Weight::Medium => 6,
+            Weight::Thick => 12,
+        };
+        (longest * per_mille / 1000).clamp(2, 128)
+    }
+
+    /// Add a square over `rect` (view pixels, clamped into the picture). Refused, returning false,
+    /// when it is too small or the picture already has `MAX_MARKS`.
+    pub fn add_square(&mut self, rect: Rect, color: [u8; 3], weight: Weight) -> bool {
+        let (view_w, view_h) = self.view_size();
+        let x = rect.x.min(view_w.saturating_sub(1));
+        let y = rect.y.min(view_h.saturating_sub(1));
+        let rect = Rect { x, y, width: rect.width.min(view_w - x), height: rect.height.min(view_h - y) };
+        if self.marks.len() >= MAX_MARKS || rect.width < MIN_MARK.min(view_w) || rect.height < MIN_MARK.min(view_h) {
+            return false;
+        }
+        let stroke = self.stroke_for(weight);
+        self.marks.push(ViewMark { rect, color, stroke });
+        true
+    }
+
+    /// Outline the crop area as it is now: the way to place a square without a pointer.
+    pub fn mark_crop(&mut self, color: [u8; 3], weight: Weight) -> bool {
+        self.add_square(self.rect, color, weight)
+    }
+
+    /// Take back the newest mark.
+    pub fn undo_mark(&mut self) -> bool {
+        self.marks.pop().is_some()
+    }
+
+    /// Turn the picture a quarter; the crop and the marks turn with it.
     pub fn rotate(&mut self, clockwise: bool) {
         let before = self.view_size();
+        for mark in &mut self.marks {
+            mark.rect = turn_rect(mark.rect, before, clockwise);
+        }
         self.rect = turn_rect(self.rect, before, clockwise);
         self.rotation = turn(self.rotation, clockwise);
         // Re-apply the lock: a locked 4:3 crop becomes 3:4 only if the user asks for it.
@@ -229,18 +308,28 @@ impl Editor {
         self.aspect = Aspect::Free;
     }
 
-    /// The crop and rotation as the sandboxed helper wants them: source pixels, crop first.
-    pub fn job(&self, max_edge: Option<u32>) -> Job {
+    /// A rectangle in view pixels as source pixels: the view is the source turned, so turn it back.
+    fn to_source(&self, rect: Rect) -> Rect {
         let view = self.view_size();
-        let crop = match self.rotation {
-            Rotation::None => self.rect,
-            // Undo the turn: the view is the source turned, so turn the rectangle back.
-            Rotation::Clockwise90 => turn_rect(self.rect, view, false),
-            Rotation::Counterclockwise90 => turn_rect(self.rect, view, true),
-            Rotation::Half => turn_rect(turn_rect(self.rect, view, true), (view.1, view.0), true),
-        };
+        match self.rotation {
+            Rotation::None => rect,
+            Rotation::Clockwise90 => turn_rect(rect, view, false),
+            Rotation::Counterclockwise90 => turn_rect(rect, view, true),
+            Rotation::Half => turn_rect(turn_rect(rect, view, true), (view.1, view.0), true),
+        }
+    }
+
+    /// The crop, rotation and marks as the sandboxed helper wants them: source pixels, marks
+    /// drawn first, then crop, then rotation.
+    pub fn job(&self, max_edge: Option<u32>) -> Job {
+        let crop = self.to_source(self.rect);
         let whole = Rect { x: 0, y: 0, width: self.source.0, height: self.source.1 };
-        Job { crop: (crop != whole).then_some(crop), rotation: self.rotation, trim: None, max_edge }
+        let marks = self
+            .marks
+            .iter()
+            .map(|mark| Mark::Square { rect: self.to_source(mark.rect), color: mark.color, stroke: mark.stroke })
+            .collect();
+        Job { crop: (crop != whole).then_some(crop), rotation: self.rotation, trim: None, max_edge, marks }
     }
 }
 
@@ -552,5 +641,117 @@ mod tests {
         assert_eq!(at(95., 150.), Some(Handle::Left), "the handle area reaches a little outside");
         // On a crop smaller than two handles, neither corner swallows the whole thing.
         assert!(hit((105., 105.), (100., 100., 10., 10.), 8.).is_some());
+    }
+
+    const RED: [u8; 3] = [255, 0, 0];
+
+    #[test]
+    fn a_square_is_clamped_into_the_picture_and_tiny_ones_are_refused() {
+        let mut editor = Editor::new(200, 100);
+        assert!(editor.add_square(Rect { x: 150, y: 80, width: 500, height: 500 }, RED, Weight::Medium));
+        assert_eq!(editor.marks()[0].rect, Rect { x: 150, y: 80, width: 50, height: 20 });
+        assert!(!editor.add_square(Rect { x: 10, y: 10, width: MIN_MARK - 1, height: 50 }, RED, Weight::Thin));
+        assert!(!editor.add_square(Rect { x: 10, y: 10, width: 50, height: 0 }, RED, Weight::Thin));
+        assert_eq!(editor.marks().len(), 1);
+        // A square starting past the edge is pulled back to the last pixel and then refused as tiny.
+        assert!(!editor.add_square(Rect { x: 9999, y: 9999, width: 40, height: 40 }, RED, Weight::Thin));
+    }
+
+    #[test]
+    fn at_most_the_helpers_limit_of_marks_can_be_added() {
+        let mut editor = Editor::new(200, 100);
+        for _ in 0..MAX_MARKS {
+            assert!(editor.add_square(Rect { x: 0, y: 0, width: 20, height: 20 }, RED, Weight::Thin));
+        }
+        assert!(!editor.add_square(Rect { x: 0, y: 0, width: 20, height: 20 }, RED, Weight::Thin));
+        assert_eq!(editor.marks().len(), MAX_MARKS);
+        assert_eq!(MAX_MARKS, crate::media_authoring::Limits::default().max_marks);
+    }
+
+    #[test]
+    fn line_thickness_follows_the_picture_size() {
+        let small = Editor::new(100, 80);
+        let large = Editor::new(4000, 3000);
+        assert_eq!(small.stroke_for(Weight::Thin), 2, "never thinner than two pixels");
+        assert!(large.stroke_for(Weight::Thin) < large.stroke_for(Weight::Medium));
+        assert!(large.stroke_for(Weight::Medium) < large.stroke_for(Weight::Thick));
+        assert_eq!(large.stroke_for(Weight::Medium), 24);
+        let huge = Editor::new(16384, 16384);
+        assert!(huge.stroke_for(Weight::Thick) <= crate::media_authoring::Limits::default().max_stroke);
+    }
+
+    #[test]
+    fn marks_count_as_a_change_and_undo_and_reset_remove_them() {
+        let mut editor = Editor::new(200, 100);
+        assert!(editor.is_unchanged());
+        assert!(!editor.undo_mark(), "nothing to undo");
+        editor.add_square(Rect { x: 10, y: 10, width: 30, height: 30 }, RED, Weight::Thin);
+        editor.add_square(Rect { x: 50, y: 10, width: 30, height: 30 }, [0, 0, 255], Weight::Thin);
+        assert!(!editor.is_unchanged());
+        assert!(editor.undo_mark());
+        assert_eq!(editor.marks().len(), 1);
+        assert_eq!(editor.marks()[0].color, RED, "the newest mark goes first");
+        editor.reset();
+        assert!(editor.marks().is_empty() && editor.is_unchanged());
+    }
+
+    #[test]
+    fn a_square_can_be_placed_over_the_crop_without_a_pointer() {
+        let mut editor = Editor::new(200, 100);
+        editor.set_rect(20, 10, 100, 60);
+        assert!(editor.mark_crop(RED, Weight::Medium));
+        assert_eq!(editor.marks()[0].rect, editor.rect());
+        editor.set_rect(0, 0, 50, 50);
+        assert_eq!(editor.marks()[0].rect, Rect { x: 20, y: 10, width: 100, height: 60 }, "the mark stays put");
+    }
+
+    #[test]
+    fn marks_reach_the_helper_in_source_pixels_for_every_rotation() {
+        let mark = Rect { x: 10, y: 20, width: 30, height: 40 };
+        let mut editor = Editor::new(200, 100);
+        editor.add_square(mark, RED, Weight::Thin);
+        let source = |editor: &Editor| match editor.job(None).marks[0] {
+            Mark::Square { rect, .. } => rect,
+        };
+        assert_eq!(source(&editor), mark);
+        for clockwise in [true, false] {
+            let mut turned = editor.clone();
+            for turns in 1..=4 {
+                turned.rotate(clockwise);
+                assert_eq!(source(&turned), mark, "{turns} turn(s), clockwise={clockwise}");
+            }
+            assert_eq!(turned.job(None).marks.len(), 1);
+        }
+        let mut half = editor.clone();
+        half.rotate(true);
+        half.rotate(true);
+        assert_eq!(half.marks()[0].rect, Rect { x: 200 - 10 - 30, y: 100 - 20 - 40, width: 30, height: 40 });
+    }
+
+    #[test]
+    fn the_job_carries_the_colour_and_thickness_of_each_mark() {
+        let mut editor = Editor::new(4000, 3000);
+        editor.add_square(Rect { x: 100, y: 100, width: 500, height: 400 }, [1, 2, 3], Weight::Thick);
+        let job = editor.job(Some(1280));
+        assert_eq!(job.marks, vec![Mark::Square { rect: Rect { x: 100, y: 100, width: 500, height: 400 }, color: [1, 2, 3], stroke: 48 }]);
+        assert_eq!(job.max_edge, Some(1280));
+        assert!(crate::media_authoring::plan(
+            &job,
+            &crate::media_authoring::SourceInfo { kind: crate::media_authoring::Kind::Image, width: 4000, height: 3000, duration_ms: None, bytes: 1000 },
+            &crate::media_authoring::Limits::default()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn the_colour_and_thickness_pickers_offer_distinct_named_choices() {
+        let names: Vec<&str> = INKS.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, ["Red", "Yellow", "Green", "Blue", "White", "Black"]);
+        let mut colours: Vec<[u8; 3]> = INKS.iter().map(|(_, colour)| *colour).collect();
+        colours.sort();
+        colours.dedup();
+        assert_eq!(colours.len(), INKS.len(), "no two names share a colour");
+        let weights: Vec<Weight> = WEIGHTS.iter().map(|(_, weight)| *weight).collect();
+        assert_eq!(weights, [Weight::Thin, Weight::Medium, Weight::Thick]);
     }
 }
