@@ -1038,17 +1038,18 @@ impl MediaViewer {
                 ui.notice("This media is no longer available");
                 return;
             };
-            if !crate::picture_editor_ui::editable_attachment(&file) {
-                ui.notice("Only JPEG, PNG and WebP pictures can be edited");
-                return;
-            }
             let path = match ui.downloads.borrow().status(&viewer.owner, &file) {
                 Some(crate::downloads::Status::Ready(path)) if path.is_file() => path,
                 _ => {
-                    ui.notice("Wait for this media to finish downloading");
+                    ui.notice("Wait for this picture to finish downloading, then edit it");
                     return;
                 }
             };
+            // Judged by what the file is, not what it is called.
+            if let Err(reason) = crate::picture_editor_ui::check_editable_file(&path) {
+                ui.notice(reason);
+                return;
+            }
             // The edit is a new picture: it never replaces the one in the chat. When Done is pressed
             // it is added to the message being written, where a caption can go with it and Send
             // sends it.
@@ -1350,20 +1351,19 @@ impl MediaViewer {
         a.play();
         self.animation.replace(Some(a));
     }
-    /// The Edit button works only on a picture the editor can open.
+    /// The Edit button is there for pictures (not videos) and always clickable: what the editor can
+    /// open is decided from the downloaded file's header when it is pressed, which can then say why
+    /// not, instead of a button greyed out for a reason nobody can see.
     fn refresh_edit(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
         let id = self.items.borrow().get(self.index.get()).map(|item| item.id.clone());
-        let editable = id
+        let picture = id
             .and_then(|id| ui.store.message(&self.owner, &self.peer, &id))
             .and_then(|message| message.attachment)
-            .is_some_and(|file| crate::picture_editor_ui::editable_attachment(&file));
-        self.edit.set_sensitive(editable);
-        self.edit.set_tooltip_text(Some(if editable {
-            "Edit a copy and add it to your message"
-        } else {
-            "Only JPEG, PNG and WebP pictures can be edited"
-        }));
+            .is_some_and(|file| file.image_candidate() && !file.video_candidate() && !file.sticker);
+        self.edit.set_visible(!self.owner.is_empty() && picture);
+        self.edit.set_sensitive(true);
+        self.edit.set_tooltip_text(Some("Edit a copy and add it to your message"));
     }
     fn move_by(self: &Rc<Self>, delta: i32) {
         if self.closing.get() {

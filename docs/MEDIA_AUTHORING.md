@@ -69,10 +69,13 @@ geometry is rounded to even values. Trims apply to the source timeline and must 
    helper still crops and rotates; a helper that refuses a request this build wrote reports "The
    picture editing helper is out of date. Rebuild with cargo build" instead of a generic failure.
 
-   **Gallery.** The picture gallery (the media viewer) has an Edit button for JPEG, PNG and WebP
-   pictures that are downloaded. Done does not change the picture in the chat: the edit is a new
-   picture, added to the message being written (so a caption can go with it) and sent with Send.
-   It is dropped, and its file deleted, if the conversation moved on in the meantime.
+   **Gallery.** The picture gallery (the media viewer) has an Edit button on pictures (not videos).
+   It is never greyed out: pressing it checks the downloaded file's header, not its name or the type
+   a sender claimed, and either opens the editor (JPEG, PNG and WebP) or says why not (still
+   downloading; or "Only JPEG, PNG and WebP pictures can be edited, and this is something else").
+   Done does not change the picture in the chat: the edit is a new picture, added to the message
+   being written (so a caption can go with it) and sent with Send. It is dropped, and its file
+   deleted, if the conversation moved on in the meantime.
 
    **Edited copies are temporary.** The result is a file under `~/.cache/monogram-desktop/edited`,
    private and named at random. It is deleted as soon as it is not needed: when the attachment

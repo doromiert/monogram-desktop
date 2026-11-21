@@ -34,15 +34,22 @@ const PREVIEW_EDGE: u32 = 1600;
 const KEEP_EDITED: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Pictures the helper can edit: JPEG, PNG and WebP.
-/// Whether an attachment can be edited: a JPEG, PNG or WebP by its type or, failing that, by its
-/// name. Received pictures often have a name with no extension (a web address's last part), so
-/// the name alone would leave the Edit button off for pictures that open fine.
-pub fn editable_attachment(file: &crate::file_share::Attachment) -> bool {
-    if file.sticker {
-        return false;
+/// What the editor can say about a downloaded file, judged by its header and nothing else: the
+/// name and the type a sender claims are only guesses, and a picture without an extension is
+/// common. `Ok` for a JPEG, PNG or WebP; otherwise the reason, in words for the user.
+pub fn check_editable_file(path: &Path) -> Result<(), &'static str> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|_| "This picture could not be opened")?;
+    let metadata = file.metadata().map_err(|_| "This picture could not be opened")?;
+    if !metadata.is_file() {
+        return Err("This picture could not be opened");
     }
-    let mime = file.mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
-    matches!(mime.as_str(), "image/jpeg" | "image/jpg" | "image/png" | "image/webp") || editable(&file.name)
+    let mut head = Vec::new();
+    file.take(crate::media_authoring::SNIFF_BYTES as u64).read_to_end(&mut head).map_err(|_| "This picture could not be read")?;
+    match crate::media_authoring::sniff_image(&head) {
+        Ok(_) => Ok(()),
+        Err(_) => Err("Only JPEG, PNG and WebP pictures can be edited, and this is something else"),
+    }
 }
 
 pub fn editable(name: &str) -> bool {
@@ -1457,50 +1464,42 @@ mod tests {
         assert!(KEEP_EDITED <= Duration::from_secs(12 * 60 * 60), "but temporary");
     }
 
-    fn attachment(name: &str, mime: &str, sticker: bool) -> crate::file_share::Attachment {
-        crate::file_share::Attachment {
-            wire_url: String::new(),
-            name: name.into(),
-            mime: mime.into(),
-            size: None,
-            width: None,
-            height: None,
-            hashes: Default::default(),
-            manual: false,
-            sticker,
+    fn temp_file(name: &str, bytes: &[u8]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("editable-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_picture_is_judged_by_its_header_whatever_it_is_called() {
+        for (fixture_name, called) in [
+            ("gradient-64x32.png", "1f3c9a7e"),
+            ("gradient-64x32.png", "photo.gif"),
+            ("smpte-64x32.jpg", "no-extension"),
+            ("smpte-64x32.jpg", "wrong.png"),
+            ("gradient-64x32.webp", "IMG_0001"),
+        ] {
+            let path = temp_file(called, &std::fs::read(fixture(fixture_name)).unwrap());
+            assert_eq!(check_editable_file(&path), Ok(()), "{fixture_name} called {called}");
         }
     }
 
     #[test]
-    fn a_picture_is_editable_by_its_type_even_when_its_name_has_no_extension() {
-        for (name, mime) in [
-            ("1f3c9a7e", "image/jpeg"),
-            ("photo", "image/png"),
-            ("IMG", "image/webp"),
-            ("pic", "image/jpeg; charset=binary"),
-            ("pic", "IMAGE/PNG"),
-            ("photo.JPG", ""),
-            ("photo.webp", "application/octet-stream"),
-            ("photo.jpeg", "image/gif"),
+    fn what_the_editor_cannot_open_is_refused_with_a_reason_even_when_the_name_looks_right() {
+        for (called, bytes) in [
+            ("looks-like.jpg", b"hello, this is text".to_vec()),
+            ("anim.gif", b"GIF89a\x01\x00\x01\x00\x00\x00\x00;".to_vec()),
+            ("empty.png", vec![]),
+            ("truncated.png", std::fs::read(fixture("gradient-64x32.png")).unwrap()[..20].to_vec()),
+            ("clip.mp4", b"\x00\x00\x00\x18ftypmp42".to_vec()),
         ] {
-            assert!(editable_attachment(&attachment(name, mime, false)), "{name} {mime}");
+            let path = temp_file(called, &bytes);
+            let reason = check_editable_file(&path).expect_err(called);
+            assert!(reason.contains("JPEG, PNG and WebP") || reason.contains("could not"), "{called}: {reason}");
         }
-    }
-
-    #[test]
-    fn what_the_editor_cannot_open_stays_off() {
-        for (name, mime, sticker) in [
-            ("anim.gif", "image/gif", false),
-            ("pic", "image/gif", false),
-            ("pic.avif", "image/avif", false),
-            ("pic.heic", "image/heic", false),
-            ("clip.mp4", "video/mp4", false),
-            ("notes.txt", "text/plain", false),
-            ("pic", "", false),
-            ("pic", "image/jpeg", true),
-            ("sticker.webp", "image/webp", true),
-        ] {
-            assert!(!editable_attachment(&attachment(name, mime, sticker)), "{name} {mime} sticker={sticker}");
-        }
+        assert!(check_editable_file(&std::env::temp_dir()).is_err(), "a folder is not a picture");
+        assert!(check_editable_file(Path::new("/definitely/not/here.png")).is_err());
     }
 }
