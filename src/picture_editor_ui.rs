@@ -8,7 +8,7 @@
 use crate::{
     crop_area::{CropArea, Tool},
     media_author_run,
-    picture_editor::{Aspect, Editor, Kind, INKS, MIN_EDGE, WEIGHTS},
+    picture_editor::{Aspect, Editor, Kind, Weight, INKS, MAX_STROKE, MIN_EDGE},
     ui::Ui,
     widgets::*,
 };
@@ -95,10 +95,15 @@ struct Controls {
     expander: adw::ExpanderRow,
     aspect: adw::ToggleGroup,
     done: gtk::Button,
-    undo: adw::ActionRow,
+    undo: gtk::Button,
+    size: gtk::Scale,
     syncing: Cell<bool>,
 }
 impl Controls {
+    /// Put the line size slider (and so the pen) at `pixels`.
+    fn set_size(&self, pixels: u32) {
+        self.size.set_value(f64::from(pixels));
+    }
     /// Show the model's current numbers in the controls without feeding them back.
     fn refresh(&self) {
         let Some(editor) = self.area.editor() else { return };
@@ -126,11 +131,11 @@ impl Controls {
         }));
         let marks = editor.marks().len();
         self.undo.set_sensitive(marks > 0);
-        self.undo.set_subtitle(&match marks {
-            0 => "No marks yet".to_string(),
-            1 => "1 mark".to_string(),
-            n => format!("{n} marks"),
-        });
+        self.undo.set_tooltip_text(Some(&match marks {
+            0 => "Undo (nothing drawn yet)".to_string(),
+            1 => "Undo the last mark (1 mark)".to_string(),
+            n => format!("Undo the last mark ({n} marks)"),
+        }));
         self.done.set_sensitive(true);
         self.syncing.set(false);
     }
@@ -148,6 +153,53 @@ impl Ui {
         stack.add_named(&failed, Some("error"));
 
         let area = CropArea::new();
+
+        // Drawing tools down the left edge. None selected means the crop frame is what you drag.
+        let tool_strip = bx(true, 6);
+        tool_strip.set_valign(gtk::Align::Center);
+        tool_strip.set_margin_start(6);
+        tool_strip.add_css_class("picture-tools");
+        let tool_buttons: Vec<(gtk::ToggleButton, Tool)> = [
+            ("document-edit-symbolic", "Draw freehand", Tool::Pen),
+            ("monogram-shape-circle-symbolic", "Circle", Tool::Circle),
+            ("monogram-shape-square-symbolic", "Square", Tool::Square),
+            ("monogram-shape-arrow-symbolic", "Arrow", Tool::Arrow),
+        ]
+        .into_iter()
+        .map(|(icon, tip, tool)| {
+            let button = gtk::ToggleButton::builder().icon_name(icon).tooltip_text(tip).build();
+            button.add_css_class("circular");
+            button.update_property(&[gtk::accessible::Property::Label(tip)]);
+            tool_strip.append(&button);
+            (button, tool)
+        })
+        .collect();
+
+        // Colour and size sit in the header, as in a drawing app.
+        let ink = gtk::ColorDialogButton::new(Some(gtk::ColorDialog::builder().title("Mark Colour").with_alpha(false).build()));
+        ink.set_rgba(&gdk::RGBA::new(
+            f32::from(INKS[0].1[0]) / 255.,
+            f32::from(INKS[0].1[1]) / 255.,
+            f32::from(INKS[0].1[2]) / 255.,
+            1.,
+        ));
+        ink.set_tooltip_text(Some("Mark colour"));
+        ink.update_property(&[gtk::accessible::Property::Label("Mark colour")]);
+        let size = gtk::Scale::with_range(gtk::Orientation::Horizontal, 1., f64::from(MAX_STROKE), 1.);
+        size.set_value(12.);
+        size.set_draw_value(true);
+        size.set_value_pos(gtk::PositionType::Right);
+        size.set_width_request(220);
+        size.update_property(&[gtk::accessible::Property::Label("Line size in pixels")]);
+        let size_box = bx(true, 6);
+        margins(&size_box, 12);
+        size_box.append(&label("Line size", "heading"));
+        size_box.append(&size);
+        let size_button = gtk::MenuButton::builder().label("12 px").tooltip_text("Line size").popover(&gtk::Popover::builder().child(&size_box).build()).build();
+        let undo = icon_button("edit-undo-symbolic", "Undo (nothing drawn yet)");
+        undo.set_sensitive(false);
+
+        // Everything about the frame lives in one popover so the canvas keeps the room.
         let rotate_left = icon_button("object-rotate-left-symbolic", "Rotate left");
         let rotate_right = icon_button("object-rotate-right-symbolic", "Rotate right");
         let reset = gtk::Button::with_label("Reset");
@@ -157,57 +209,49 @@ impl Ui {
         }
         aspect.set_active_name(Some("free"));
         aspect.upcast_ref::<gtk::Widget>().update_property(&[gtk::accessible::Property::Label("Crop shape")]);
-        let tools = adw::WrapBox::builder().child_spacing(6).line_spacing(6).halign(gtk::Align::Center).build();
-        tools.append(&rotate_left);
-        tools.append(&rotate_right);
-        tools.append(&aspect);
-        tools.append(&reset);
-
+        let turns = bx(false, 6);
+        turns.append(&rotate_left);
+        turns.append(&rotate_right);
+        turns.append(&reset);
         let spin = |title: &str| adw::SpinRow::builder().title(title).adjustment(&gtk::Adjustment::new(0., 0., 100_000., 1., 10., 0.)).build();
         let (x, y, width, height) = (spin("Left"), spin("Top"), spin("Width"), spin("Height"));
         let expander = adw::ExpanderRow::builder().title("Precise Crop").build();
         for row in [&x, &y, &width, &height] {
             expander.add_row(row);
         }
-        let group = adw::PreferencesGroup::new();
-        group.add(&expander);
-
-        // Marks: drag on the picture with the Square tool, or outline the crop area from the keyboard.
-        let tool = adw::ToggleGroup::new();
-        for (name, title) in [("crop", "Crop"), ("square", "Square"), ("circle", "Circle"), ("arrow", "Arrow"), ("pen", "Draw")] {
-            tool.add(adw::Toggle::builder().name(name).label(title).build());
-        }
-        tool.set_active_name(Some("crop"));
-        tool.upcast_ref::<gtk::Widget>().update_property(&[gtk::accessible::Property::Label("Tool")]);
-        tool.set_valign(gtk::Align::Center);
-        let tool_row = adw::ActionRow::builder().title("Tool").subtitle("Pick a shape, then drag on the picture to draw it").build();
-        tool_row.add_suffix(&tool);
-        let combo = |title: &str, names: Vec<&str>| {
-            adw::ComboRow::builder().title(title).model(&gtk::StringList::new(&names)).build()
-        };
-        let ink = combo("Colour", INKS.iter().map(|(name, _)| *name).collect());
-        let weight = combo("Line thickness", WEIGHTS.iter().map(|(name, _)| *name).collect());
-        weight.set_selected(1);
         let outline = adw::ActionRow::builder()
-            .title("Outline the Crop Area")
+            .title("Mark the Crop Area")
             .subtitle("Place the chosen shape around the crop, without a pointer")
             .activatable(true)
             .build();
-        let undo = adw::ActionRow::builder().title("Undo Last Mark").subtitle("No marks yet").activatable(true).build();
-        undo.set_sensitive(false);
-        let marks = adw::PreferencesGroup::builder().title("Mark Up").build();
-        for row in [tool_row.upcast_ref::<gtk::Widget>(), ink.upcast_ref(), weight.upcast_ref(), outline.upcast_ref(), undo.upcast_ref()] {
-            marks.add(row);
-        }
+        let crop_group = adw::PreferencesGroup::new();
+        crop_group.add(&expander);
+        crop_group.add(&outline);
+        let crop_box = bx(true, 12);
+        margins(&crop_box, 12);
+        crop_box.append(&label("Crop shape", "heading"));
+        crop_box.append(&aspect);
+        crop_box.append(&turns);
+        crop_box.append(&crop_group);
+        let crop_scroll = gtk::ScrolledWindow::builder()
+            .child(&crop_box)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(true)
+            .max_content_height(420)
+            .min_content_width(300)
+            .build();
+        let crop_button = gtk::MenuButton::builder()
+            .label("Crop")
+            .tooltip_text("Crop and rotate")
+            .popover(&gtk::Popover::builder().child(&crop_scroll).build())
+            .build();
 
-        let editor_page = bx(true, 12);
-        editor_page.set_margin_start(12);
-        editor_page.set_margin_end(12);
-        editor_page.set_margin_bottom(12);
+        let editor_page = bx(false, 0);
+        editor_page.append(&tool_strip);
+        area.set_margin_start(6);
+        area.set_margin_end(6);
+        area.set_margin_bottom(6);
         editor_page.append(&area);
-        editor_page.append(&tools);
-        editor_page.append(&group);
-        editor_page.append(&marks);
         stack.add_named(&editor_page, Some("editor"));
         stack.set_visible_child_name("loading");
 
@@ -215,9 +259,14 @@ impl Ui {
         let done_button = gtk::Button::with_label("Done");
         done_button.add_css_class("suggested-action");
         done_button.set_sensitive(false);
-        let header = adw::HeaderBar::builder().show_start_title_buttons(false).show_end_title_buttons(false).build();
+        // No title: the controls need the width, and the dialog is named by what it shows.
+        let header = adw::HeaderBar::builder().show_start_title_buttons(false).show_end_title_buttons(false).show_title(false).build();
         header.pack_start(&cancel_button);
+        header.pack_start(&ink);
+        header.pack_start(&size_button);
+        header.pack_start(&undo);
         header.pack_end(&done_button);
+        header.pack_end(&crop_button);
         let toasts = adw::ToastOverlay::new();
         toasts.set_child(Some(&stack));
         let view = adw::ToolbarView::new();
@@ -225,13 +274,13 @@ impl Ui {
         view.set_content(Some(&toasts));
         let dialog = adw::Dialog::builder()
             .title("Edit Picture")
-            .content_width(720)
-            .content_height(640)
+            .content_width(640)
+            .content_height(520)
             .child(&view)
             .default_widget(&done_button)
             .build();
 
-        let controls = Rc::new(Controls { area: area.clone(), x, y, width, height, expander, aspect: aspect.clone(), done: done_button.clone(), undo: undo.clone(), syncing: Cell::new(false) });
+        let controls = Rc::new(Controls { area: area.clone(), x, y, width, height, expander, aspect: aspect.clone(), done: done_button.clone(), undo: undo.clone(), size: size.clone(), syncing: Cell::new(false) });
         {
             let controls = controls.clone();
             area.connect_changed(move || controls.refresh());
@@ -264,44 +313,58 @@ impl Ui {
             });
         }
         {
+            // The colour and the size feed the pen; an exact size in pixels is used as chosen.
             let pen = {
-                let (area, ink, weight) = (area.clone(), ink.clone(), weight.clone());
+                let (area, ink, size, size_button) = (area.clone(), ink.clone(), size.clone(), size_button.clone());
                 Rc::new(move || {
-                    let color = INKS.get(ink.selected() as usize).map_or(INKS[0].1, |(_, color)| *color);
-                    let thickness = WEIGHTS.get(weight.selected() as usize).map_or(WEIGHTS[1].1, |(_, weight)| *weight);
-                    area.set_pen(color, thickness);
+                    let colour = ink.rgba();
+                    let channel = |value: f32| (value.clamp(0., 1.) * 255.).round() as u8;
+                    let pixels = size.value().round() as u32;
+                    size_button.set_label(&format!("{pixels} px"));
+                    area.set_pen([channel(colour.red()), channel(colour.green()), channel(colour.blue())], Weight::Px(pixels));
                 })
             };
             pen();
-            let (on_ink, on_weight) = (pen.clone(), pen.clone());
-            ink.connect_selected_notify(move |_| on_ink());
-            weight.connect_selected_notify(move |_| on_weight());
+            let (on_colour, on_size) = (pen.clone(), pen.clone());
+            ink.connect_rgba_notify(move |_| on_colour());
+            size.connect_value_changed(move |_| on_size());
+        }
+        {
+            // The tool buttons act as one group that can also be empty, which means cropping.
+            let changing = Rc::new(Cell::new(false));
+            let buttons: Rc<Vec<(gtk::ToggleButton, Tool)>> = Rc::new(tool_buttons.clone());
+            for (button, tool) in tool_buttons {
+                let (area, buttons, changing) = (area.clone(), buttons.clone(), changing.clone());
+                button.connect_toggled(move |this| {
+                    if changing.get() {
+                        return;
+                    }
+                    changing.set(true);
+                    if this.is_active() {
+                        for (other, _) in buttons.iter().filter(|(other, _)| other != this) {
+                            other.set_active(false);
+                        }
+                        area.set_tool(tool);
+                    } else {
+                        area.set_tool(Tool::Crop);
+                    }
+                    changing.set(false);
+                });
+            }
+        }
+        {
             let area = area.clone();
-            tool.connect_active_name_notify(move |group| {
-                area.set_tool(match group.active_name().as_deref() {
-                    Some("square") => Tool::Square,
-                    Some("circle") => Tool::Circle,
-                    Some("arrow") => Tool::Arrow,
-                    Some("pen") => Tool::Pen,
-                    _ => Tool::Crop,
+            outline.connect_activated(move |_| {
+                let kind = area.tool().kind().unwrap_or(Kind::Square);
+                let (color, weight) = area.pen_choice();
+                area.edit(|editor| {
+                    editor.mark_crop(kind, color, weight);
                 });
             });
         }
         {
-            let (area, ink, weight) = (area.clone(), ink.clone(), weight.clone());
-            outline.connect_activated(move |_| {
-                let color = INKS.get(ink.selected() as usize).map_or(INKS[0].1, |(_, color)| *color);
-                let thickness = WEIGHTS.get(weight.selected() as usize).map_or(WEIGHTS[1].1, |(_, weight)| *weight);
-                if let Some(kind) = area.tool().kind().or(Some(Kind::Square)) {
-                    area.edit(|editor| {
-                        editor.mark_crop(kind, color, thickness);
-                    });
-                }
-            });
-        }
-        {
             let area = area.clone();
-            undo.connect_activated(move |_| area.edit(|editor| {
+            undo.connect_clicked(move |_| area.edit(|editor| {
                 editor.undo_mark();
             }));
         }
@@ -347,7 +410,11 @@ impl Ui {
             match result {
                 Ok((info, texture)) if preview_matches(&info, &texture) => {
                     controls.area.set_texture(Some(texture));
-                    controls.area.set_editor(Editor::new(info.width, info.height));
+                    let editor = Editor::new(info.width, info.height);
+                    // A sensible first line size for this picture, shown on the slider.
+                    let first = editor.stroke_for(Weight::Medium);
+                    controls.area.set_editor(editor);
+                    controls.set_size(first);
                     controls.refresh();
                     stack.set_visible_child_name("editor");
                     controls.area.grab_focus();
@@ -535,27 +602,41 @@ mod tests {
         })
         .unwrap_or_else(|| panic!("a row titled {title}"))
     }
+    fn tip_starting(ui: &Rc<Ui>, prefix: &str) -> gtk::Button {
+        let dialog = ui.window.visible_dialog().unwrap();
+        find::<gtk::Button>(dialog.child().unwrap().upcast_ref(), &|w| {
+            w.downcast_ref::<gtk::Button>().is_some_and(|b| b.tooltip_text().is_some_and(|tip| tip.starts_with(prefix)))
+        })
+        .unwrap_or_else(|| panic!("a button with a tooltip starting {prefix}"))
+    }
+    fn tool_button(ui: &Rc<Ui>, tip: &str) -> gtk::ToggleButton {
+        let dialog = ui.window.visible_dialog().unwrap();
+        find::<gtk::ToggleButton>(dialog.child().unwrap().upcast_ref(), &|w| {
+            w.downcast_ref::<gtk::ToggleButton>().is_some_and(|b| b.tooltip_text().as_deref() == Some(tip))
+        })
+        .unwrap_or_else(|| panic!("a tool button {tip}"))
+    }
 
     #[gtk::test]
     #[ignore = "requires a native display, glycin loaders, the built helper and bubblewrap"]
-    fn the_mark_up_controls_outline_the_crop_and_undo_it_without_a_pointer() {
+    fn the_crop_area_mark_button_and_undo_work_without_a_pointer() {
         let ui = open_ui("com.negzero.PictureEditorMarks");
         let source = copy_of("gradient-64x32.png", "photo.png");
         ui.open_picture_editor(source, |_| {});
         assert!(wait(15_000, || dialog_area(&ui).is_some_and(|a| a.editor().is_some())), "the picture loads");
         let area = dialog_area(&ui).unwrap();
-        let (outline, undo) = (row_titled(&ui, "Outline the Crop Area"), row_titled(&ui, "Undo Last Mark"));
-        assert!(!undo.is_sensitive() && undo.subtitle().as_deref() == Some("No marks yet"));
+        let (outline, undo) = (row_titled(&ui, "Mark the Crop Area"), tip_starting(&ui, "Undo"));
+        assert!(!undo.is_sensitive(), "nothing to undo yet");
         area.edit(|editor| editor.set_rect(8, 4, 40, 20));
         outline.emit_by_name::<()>("activated", &[]);
         let editor = area.editor().unwrap();
         assert_eq!(editor.marks().len(), 1);
         assert_eq!(editor.marks()[0].bounds(), editor.rect(), "the square is exactly around the crop");
-        assert!(undo.is_sensitive() && undo.subtitle().as_deref() == Some("1 mark"));
+        assert!(undo.is_sensitive() && undo.tooltip_text().unwrap().contains("1 mark"));
         outline.emit_by_name::<()>("activated", &[]);
-        assert_eq!(undo.subtitle().as_deref(), Some("2 marks"));
-        undo.emit_by_name::<()>("activated", &[]);
-        undo.emit_by_name::<()>("activated", &[]);
+        assert!(undo.tooltip_text().unwrap().contains("2 marks"));
+        undo.emit_clicked();
+        undo.emit_clicked();
         assert!(area.editor().unwrap().marks().is_empty());
         assert!(!undo.is_sensitive(), "nothing left to undo");
         ui.window.close();
@@ -563,40 +644,78 @@ mod tests {
 
     #[gtk::test]
     #[ignore = "requires a native display, glycin loaders, the built helper and bubblewrap"]
-    fn the_colour_and_thickness_pickers_and_the_tool_switch_reach_the_canvas() {
+    fn the_tool_strip_picks_one_tool_at_a_time_and_none_means_cropping() {
+        let ui = open_ui("com.negzero.PictureEditorTools");
+        ui.open_picture_editor(copy_of("gradient-64x32.png", "photo.png"), |_| {});
+        assert!(wait(15_000, || dialog_area(&ui).is_some_and(|a| a.editor().is_some())));
+        let area = dialog_area(&ui).unwrap();
+        assert_eq!(area.tool(), Tool::Crop, "cropping until a tool is chosen");
+        let buttons = [("Draw freehand", Tool::Pen), ("Circle", Tool::Circle), ("Square", Tool::Square), ("Arrow", Tool::Arrow)];
+        for (tip, tool) in buttons {
+            let button = tool_button(&ui, tip);
+            button.set_active(true);
+            assert_eq!(area.tool(), tool, "{tip}");
+            for (other_tip, _) in buttons.iter().filter(|(other, _)| *other != tip) {
+                assert!(!tool_button(&ui, other_tip).is_active(), "{other_tip} lets go when {tip} is chosen");
+            }
+        }
+        tool_button(&ui, "Arrow").set_active(false);
+        assert_eq!(area.tool(), Tool::Crop, "clicking the active tool again goes back to the crop");
+        assert!(buttons.iter().all(|(tip, _)| !tool_button(&ui, tip).is_active()));
+        ui.window.close();
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display, glycin loaders, the built helper and bubblewrap"]
+    fn the_colour_and_the_size_slider_set_the_pen_and_the_size_button_shows_it() {
         let ui = open_ui("com.negzero.PictureEditorPens");
         ui.open_picture_editor(copy_of("gradient-64x32.png", "photo.png"), |_| {});
         assert!(wait(15_000, || dialog_area(&ui).is_some_and(|a| a.editor().is_some())));
         let area = dialog_area(&ui).unwrap();
         let dialog = ui.window.visible_dialog().unwrap();
         let root: gtk::Widget = dialog.child().unwrap().upcast();
-        let combo = |title: &str| find::<adw::ComboRow>(&root, &|w| w.downcast_ref::<adw::ComboRow>().is_some_and(|r| r.title() == title)).unwrap();
-        let (ink, weight) = (combo("Colour"), combo("Line thickness"));
-        assert_eq!((ink.selected(), weight.selected()), (0, 1), "red, medium");
-        ink.set_selected(3);
-        weight.set_selected(2);
+        let colour = find::<gtk::ColorDialogButton>(&root, &|w| w.is::<gtk::ColorDialogButton>()).expect("a colour button");
+        let size = find::<gtk::Scale>(&root, &|w| w.is::<gtk::Scale>()).expect("a size slider");
+        let size_button = find::<gtk::MenuButton>(&root, &|w| w.downcast_ref::<gtk::MenuButton>().is_some_and(|b| b.tooltip_text().as_deref() == Some("Line size"))).unwrap();
+        assert_eq!(colour.rgba().red(), f32::from(INKS[0].1[0]) / 255., "red to begin with");
+        assert_eq!(size_button.label().as_deref(), Some(&*format!("{} px", size.value().round() as u32)), "the button names the size");
+        size.set_value(30.);
+        assert_eq!(size_button.label().as_deref(), Some("30 px"));
+        colour.set_rgba(&gdk::RGBA::new(0., 0., 1., 1.));
+        tool_button(&ui, "Square").set_active(true);
         area.edit(|editor| {
-            editor.mark_crop(Kind::Square, INKS[3].1, WEIGHTS[2].1);
+            editor.mark_crop(Kind::Square, area.pen_choice().0, area.pen_choice().1);
         });
-        assert_eq!(area.editor().unwrap().marks()[0].color, INKS[3].1);
-        let tool = find::<adw::ToggleGroup>(&root, &|w| w.downcast_ref::<adw::ToggleGroup>().is_some_and(|g| g.active_name().as_deref() == Some("crop"))).unwrap();
-        assert_eq!(area.tool(), Tool::Crop);
-        for (name, expected) in [("square", Tool::Square), ("circle", Tool::Circle), ("arrow", Tool::Arrow), ("pen", Tool::Pen), ("crop", Tool::Crop)] {
-            tool.set_active_name(Some(name));
-            assert_eq!(area.tool(), expected, "{name}");
+        let mark = area.editor().unwrap().marks()[0].clone();
+        assert_eq!(mark.color, [0, 0, 255], "the chosen colour");
+        assert_eq!(mark.stroke, 30, "the slider's size, in picture pixels");
+        size.set_value(2.);
+        area.edit(|editor| {
+            editor.mark_crop(Kind::Circle, area.pen_choice().0, area.pen_choice().1);
+        });
+        assert_eq!(area.editor().unwrap().marks()[1].stroke, 2);
+        ui.window.close();
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display, glycin loaders, the built helper and bubblewrap"]
+    fn the_whole_editor_fits_a_small_window_and_keeps_the_canvas_visible() {
+        let ui = open_ui("com.negzero.PictureEditorSmall");
+        ui.window.set_default_size(360, 520);
+        ui.open_picture_editor(copy_of("gradient-64x32.png", "photo.png"), |_| {});
+        assert!(wait(15_000, || dialog_area(&ui).is_some_and(|a| a.editor().is_some())));
+        settle(300);
+        let area = dialog_area(&ui).unwrap();
+        let dialog = ui.window.visible_dialog().unwrap();
+        let (min_w, _, _, _) = dialog.measure(gtk::Orientation::Horizontal, -1);
+        let (min_h, _, _, _) = dialog.measure(gtk::Orientation::Vertical, -1);
+        assert!(min_w <= 460, "the dialog needs only {min_w}px of width");
+        assert!(min_h <= 420, "and {min_h}px of height");
+        assert!(area.width() >= 160 && area.height() >= 140, "the canvas keeps {}x{}", area.width(), area.height());
+        // Every control that matters is a header or strip button, not something below the canvas.
+        for tip in ["Draw freehand", "Circle", "Square", "Arrow"] {
+            assert!(tool_button(&ui, tip).is_mapped(), "{tip} is shown");
         }
-        // The pointer-free button places whatever shape the tool draws.
-        let outline = row_titled(&ui, "Outline the Crop Area");
-        for (name, check) in [("circle", 1usize), ("arrow", 2), ("pen", 3)] {
-            tool.set_active_name(Some(name));
-            outline.emit_by_name::<()>("activated", &[]);
-            assert_eq!(area.editor().unwrap().marks().len(), check + 1, "{name}");
-        }
-        use crate::picture_editor::ViewShape;
-        let shapes: Vec<ViewShape> = area.editor().unwrap().marks().iter().map(|m| m.shape.clone()).collect();
-        assert!(matches!(shapes[1], ViewShape::Rect(crate::media_authoring::Shape::Circle, _)));
-        assert!(matches!(shapes[2], ViewShape::Arrow(..)) && matches!(shapes[3], ViewShape::Freehand(..)));
-        tool.set_active_name(Some("crop"));
         ui.window.close();
     }
 

@@ -135,8 +135,8 @@ mod imp {
         fn measure(&self, orientation: gtk::Orientation, _for_size: i32) -> (i32, i32, i32, i32) {
             // Small enough for a narrow window, comfortable by default.
             match orientation {
-                gtk::Orientation::Horizontal => (240, 480, -1, -1),
-                _ => (200, 360, -1, -1),
+                gtk::Orientation::Horizontal => (200, 480, -1, -1),
+                _ => (160, 360, -1, -1),
             }
         }
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
@@ -186,6 +186,10 @@ impl CropArea {
         self.imp().ink.set(Some(color));
         self.imp().weight.set(Some(weight));
         self.queue_draw();
+    }
+    /// The colour and thickness new marks get now.
+    pub fn pen_choice(&self) -> ([u8; 3], Weight) {
+        self.pen()
     }
     fn pen(&self) -> ([u8; 3], Weight) {
         (self.imp().ink.get().unwrap_or(INKS[0].1), self.imp().weight.get().unwrap_or(Weight::Medium))
@@ -436,21 +440,39 @@ impl CropArea {
         snapshot.append_color(&dim, &rect(x + w, y, left + shown_w - (x + w), h));
 
         let white = gdk::RGBA::new(1., 1., 1., 1.);
-        let thirds = gdk::RGBA::new(1., 1., 1., 0.35);
-        for i in 1..3 {
-            let step = f64::from(i) / 3.;
-            snapshot.append_color(&thirds, &rect(x + w * step - 0.5, y, 1., h));
-            snapshot.append_color(&thirds, &rect(x, y + h * step - 0.5, w, 1.));
-        }
-        // A thicker frame while focused shows where keyboard input goes.
-        let border = if self.has_focus() { 3. } else { 2. };
+        let shade = gdk::RGBA::new(0., 0., 0., 0.45);
+        // A thin frame, thicker while focused so keyboard users can see where input goes.
+        let border = if self.has_focus() { 2. } else { 1. };
         let outline = gsk::RoundedRect::from_rect(rect(x, y, w, h), 0.);
         snapshot.append_border(&outline, &[border as f32; 4], &[white, white, white, white]);
-        // Handles at the corners and edge midpoints.
-        let shade = gdk::RGBA::new(0., 0., 0., 0.6);
-        for (hx, hy) in [(x, y), (x + w / 2., y), (x + w, y), (x, y + h / 2.), (x + w, y + h / 2.), (x, y + h), (x + w / 2., y + h), (x + w, y + h)] {
-            snapshot.append_color(&shade, &rect(hx - 6., hy - 6., 12., 12.));
-            snapshot.append_color(&white, &rect(hx - 5., hy - 5., 10., 10.));
+        // Only while cropping: corner brackets and edge grips to drag, each with a dark halo so
+        // they stay visible on a light picture.
+        if self.imp().tool.get() == Tool::Crop {
+            let (arm, thick) = (18.0_f64.min(w / 2.).min(h / 2.), 4.);
+            let bracket = |cx: f64, cy: f64, right: bool, down: bool| {
+                let ox = if right { cx - arm } else { cx };
+                let oy = if down { cy - thick } else { cy };
+                let ix = if right { cx - thick } else { cx };
+                let iy = if down { cy - arm } else { cy };
+                for (px, py, pw, ph) in [(ox, oy, arm, thick), (ix, iy, thick, arm)] {
+                    snapshot.append_color(&shade, &rect(px - 1., py - 1., pw + 2., ph + 2.));
+                    snapshot.append_color(&white, &rect(px, py, pw, ph));
+                }
+            };
+            bracket(x, y, false, false);
+            bracket(x + w, y, true, false);
+            bracket(x, y + h, false, true);
+            bracket(x + w, y + h, true, true);
+            let grip = 14.0_f64.min(w / 3.).min(h / 3.);
+            for (gx, gy, gw, gh) in [
+                (x + w / 2. - grip / 2., y - thick / 2., grip, thick),
+                (x + w / 2. - grip / 2., y + h - thick / 2., grip, thick),
+                (x - thick / 2., y + h / 2. - grip / 2., thick, grip),
+                (x + w - thick / 2., y + h / 2. - grip / 2., thick, grip),
+            ] {
+                snapshot.append_color(&shade, &rect(gx - 1., gy - 1., gw + 2., gh + 2.));
+                snapshot.append_color(&white, &rect(gx, gy, gw, gh));
+            }
         }
     }
 }

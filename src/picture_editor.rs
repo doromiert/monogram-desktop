@@ -38,6 +38,8 @@ pub enum Weight {
     Thin,
     Medium,
     Thick,
+    /// An exact thickness in picture pixels, as chosen with the size slider.
+    Px(u32),
 }
 
 /// The colours a mark can be, by name.
@@ -53,6 +55,8 @@ pub const INKS: [(&str, [u8; 3]); 6] = [
 /// Line thicknesses by name, in the order the picker lists them.
 pub const WEIGHTS: [(&str, Weight); 3] = [("Thin", Weight::Thin), ("Medium", Weight::Medium), ("Thick", Weight::Thick)];
 
+/// Thickest line, in picture pixels (the helper refuses more).
+pub const MAX_STROKE: u32 = 128;
 /// Most marks, and most path points over all of them, one picture may carry (the helper refuses
 /// more).
 pub const MAX_MARKS: usize = 32;
@@ -191,8 +195,9 @@ impl Editor {
             Weight::Thin => 3,
             Weight::Medium => 6,
             Weight::Thick => 12,
+            Weight::Px(pixels) => return pixels.clamp(1, MAX_STROKE),
         };
-        (longest * per_mille / 1000).clamp(2, 128)
+        (longest * per_mille / 1000).clamp(2, MAX_STROKE)
     }
 
     /// Add a square over `rect` (view pixels, clamped into the picture). Refused, returning false,
@@ -1071,5 +1076,20 @@ mod tests {
         assert_eq!(editor.marks()[1].bounds(), Rect { x: 30, y: 10, width: 60, height: 80 });
         let empty = ViewMark { shape: ViewShape::Freehand(vec![]), color: RED, stroke: 2 };
         assert_eq!(empty.bounds(), Rect::default());
+    }
+
+    #[test]
+    fn an_exact_size_is_used_as_chosen_within_the_helpers_limits() {
+        let editor = Editor::new(4000, 3000);
+        assert_eq!(editor.stroke_for(Weight::Px(12)), 12);
+        assert_eq!(editor.stroke_for(Weight::Px(1)), 1, "a hairline is allowed when asked for");
+        assert_eq!(editor.stroke_for(Weight::Px(0)), 1);
+        assert_eq!(editor.stroke_for(Weight::Px(9999)), MAX_STROKE);
+        assert_eq!(MAX_STROKE, crate::media_authoring::Limits::default().max_stroke);
+        let mut editor = Editor::new(400, 300);
+        assert!(editor.add_arrow((10, 10), (200, 100), RED, Weight::Px(7)));
+        assert_eq!(editor.marks()[0].stroke, 7);
+        assert!(editor.add_mark(Shape::Circle, Rect { x: 5, y: 5, width: 100, height: 80 }, RED, Weight::Px(500)));
+        assert_eq!(editor.marks()[1].stroke, MAX_STROKE);
     }
 }

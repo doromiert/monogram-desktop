@@ -56,26 +56,34 @@ geometry is rounded to even values. Trims apply to the source timeline and must 
 1. Plan model, validation and limits (done, unit tested).
 2. Sandboxed GStreamer helper: probe and image crop/rotate/scale (done, tested in the real
    sandbox).
-3. Native editor dialog for crop and rotate (done): an Edit button on each JPEG, PNG or WebP card
-   in the composer opens **Edit Picture** (`adw::Dialog`). `picture_editor.rs` holds the geometry
-   (crop in view pixels, rotation, aspect locks, handle dragging, clamping, source-pixel `Job`),
-   tested exhaustively without a display; `crop_area.rs` draws it and handles input;
+3. Native editor dialog for crop, rotate and marks (done): an Edit button on each JPEG, PNG or WebP
+   card in the composer opens **Edit Picture** (`adw::Dialog`). `picture_editor.rs` holds the
+   geometry (crop in view pixels, rotation, aspect locks, handle dragging, clamping, source-pixel
+   `Job`), tested exhaustively without a display; `crop_area.rs` draws it and handles input;
    `picture_editor_ui.rs` is the dialog. The preview is decoded by the glycin sandbox, the edit by
    the confined helper, and the dialog refuses to open if the two disagree on the picture's
-   orientation. Controls: rotate left and right, crop shape (Free, Original, Square, 4:3, 16:9),
-   Reset, and a "Precise Crop" group of numeric rows. Keyboard: arrow keys move the crop, Shift
-   with arrows resizes it; the numeric rows give a pointer-free, screen-reader-friendly path. Done
-   writes a new file under the cache directory (`monogram-desktop/edited`, private, pruned after 24
-   hours and removed with its attachment) that replaces the attachment in the same position; the
-   original is never modified. Cancel, Escape or closing stops a running edit.
-   **Marks (done: square, circle, arrow and freehand).** Edit Picture also has a **Mark Up** group:
-   a tool switch (Crop, Square, Circle, Arrow, Draw), a colour (Red, Yellow, Green, Blue, White,
-   Black) and a line thickness (Thin, Medium, Thick, a share of the picture's longest edge, never
-   under 2 px). Dragging on the picture draws the chosen shape: a square or circle in the dragged
+   orientation.
+
+   **Layout (built to fit a small window).** The picture takes all the room. Down its left edge is
+   a strip of drawing tools (freehand, circle, square, arrow); with none chosen, you are cropping
+   and drag the frame's corner brackets and edge grips. The header holds Cancel, the mark colour (a
+   `GtkColorDialogButton`, so the GNOME colour chooser), the line size (a button showing "12 px"
+   that opens a slider, 1 to 128 px, starting at a size that suits the picture), Undo, a **Crop**
+   menu and Done. The Crop menu holds the crop shape (Free, Original, Square, 4:3, 16:9), rotate
+   left and right, Reset, "Precise Crop" numeric rows and "Mark the Crop Area". The dialog needs
+   under 460 px of width and 420 px of height, tested. Keyboard: arrow keys move the crop, Shift
+   with arrows resizes it; the numeric rows and "Mark the Crop Area" give a pointer-free,
+   screen-reader-friendly path. Done writes a new file under the cache directory
+   (`monogram-desktop/edited`, private, pruned after 24 hours and removed with its attachment) that
+   replaces the attachment in the same position; the original is never modified. Cancel, Escape or
+   closing stops a running edit.
+
+   **Marks (done: square, circle, arrow and freehand).** Choosing a tool from the strip and dragging
+   on the picture draws that shape in the chosen colour and size: a square or circle in the dragged
    box, an arrow from where the drag began to where it ended, a freehand line along the pointer.
-   "Outline the Crop Area" places the chosen shape without a pointer (a square or circle around
-   the crop, an arrow across it from corner to corner, a line along its edge) and "Undo Last Mark"
-   takes back the newest. Marks are stored in view pixels, so they turn with the picture, and
+   "Mark the Crop Area" (in the Crop menu) places the chosen shape without a pointer (a square or
+   circle around the crop, an arrow across it from corner to corner, a line along its edge) and
+   Undo in the header takes back the newest. Marks are stored in view pixels, so they turn with the picture, and
    `Editor::job` converts them to source pixels. They are part of the `Job` and `Plan`
    (`Mark::{Square, Circle, Arrow, Freehand}`; at most 32 marks, 256 points per freehand line and
    1024 points in all, stroke 1 to 128 px, every point inside the picture, images only) and the
