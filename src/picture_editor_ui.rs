@@ -86,6 +86,35 @@ fn busy_page(text: &str) -> gtk::Box {
     page
 }
 
+/// The editor's keyboard shortcuts as (id, what it does, accelerators). Binding and the Shortcuts
+/// window both read this, so the two cannot disagree. Alternatives are separated by `|`.
+pub(crate) const EDITOR_SHORTCUTS: [(&str, &str, &str); 15] = [
+    ("undo", "Undo the last mark", "<Control>z"),
+    ("redo", "Redo", "<Control><Shift>z|<Control>y"),
+    ("tool-draw", "Draw freehand", "b"),
+    ("tool-circle", "Circle", "o"),
+    ("tool-square", "Square", "r"),
+    ("tool-arrow", "Arrow", "a"),
+    ("tool-crop", "Crop frame (no drawing tool)", "v"),
+    ("crop-menu", "Crop and rotate menu", "c"),
+    ("size-menu", "Line size", "s"),
+    ("colour", "Mark colour", "k"),
+    ("thinner", "Thinner line", "bracketleft"),
+    ("thicker", "Thicker line", "bracketright"),
+    ("rotate-left", "Rotate left", "<Control>Left"),
+    ("rotate-right", "Rotate right", "<Control>Right"),
+    ("done", "Done", "<Control>Return"),
+];
+
+/// The crop shapes, as (name, icon, full name).
+const ASPECT_CHOICES: [(&str, &str, &str); 5] = [
+    ("free", "monogram-crop-free-symbolic", "Free"),
+    ("original", "monogram-crop-original-symbolic", "Original proportions"),
+    ("square", "monogram-crop-square-symbolic", "Square"),
+    ("4:3", "monogram-crop-4-3-symbolic", "4:3"),
+    ("16:9", "monogram-crop-16-9-symbolic", "16:9"),
+];
+
 struct Controls {
     area: CropArea,
     x: adw::SpinRow,
@@ -96,6 +125,7 @@ struct Controls {
     aspect: adw::ToggleGroup,
     done: gtk::Button,
     undo: gtk::Button,
+    redo: gtk::Button,
     size: gtk::Scale,
     syncing: Cell<bool>,
 }
@@ -133,9 +163,10 @@ impl Controls {
         self.undo.set_sensitive(marks > 0);
         self.undo.set_tooltip_text(Some(&match marks {
             0 => "Undo (nothing drawn yet)".to_string(),
-            1 => "Undo the last mark (1 mark)".to_string(),
-            n => format!("Undo the last mark ({n} marks)"),
+            1 => "Undo the last mark (1 mark) · Ctrl+Z".to_string(),
+            n => format!("Undo the last mark ({n} marks) · Ctrl+Z"),
         }));
+        self.redo.set_visible(editor.can_redo());
         self.done.set_sensitive(true);
         self.syncing.set(false);
     }
@@ -160,10 +191,10 @@ impl Ui {
         tool_strip.set_margin_start(6);
         tool_strip.add_css_class("picture-tools");
         let tool_buttons: Vec<(gtk::ToggleButton, Tool)> = [
-            ("document-edit-symbolic", "Draw freehand", Tool::Pen),
-            ("monogram-shape-circle-symbolic", "Circle", Tool::Circle),
-            ("monogram-shape-square-symbolic", "Square", Tool::Square),
-            ("monogram-shape-arrow-symbolic", "Arrow", Tool::Arrow),
+            ("document-edit-symbolic", "Draw freehand (B)", Tool::Pen),
+            ("monogram-shape-circle-symbolic", "Circle (O)", Tool::Circle),
+            ("monogram-shape-square-symbolic", "Square (R)", Tool::Square),
+            ("monogram-shape-arrow-symbolic", "Arrow (A)", Tool::Arrow),
         ]
         .into_iter()
         .map(|(icon, tip, tool)| {
@@ -198,14 +229,19 @@ impl Ui {
         let size_button = gtk::MenuButton::builder().label("12 px").tooltip_text("Line size").popover(&gtk::Popover::builder().child(&size_box).build()).build();
         let undo = icon_button("edit-undo-symbolic", "Undo (nothing drawn yet)");
         undo.set_sensitive(false);
+        // Only there once something has been undone, and gone again when nothing can be redone.
+        let redo = icon_button("edit-redo-symbolic", "Redo (Ctrl+Shift+Z)");
+        redo.set_visible(false);
 
         // Everything about the frame lives in one popover so the canvas keeps the room.
         let rotate_left = icon_button("object-rotate-left-symbolic", "Rotate left");
         let rotate_right = icon_button("object-rotate-right-symbolic", "Rotate right");
         let reset = gtk::Button::with_label("Reset");
         let aspect = adw::ToggleGroup::new();
-        for (name, title) in [("free", "Free"), ("original", "Original"), ("square", "Square"), ("4:3", "4:3"), ("16:9", "16:9")] {
-            aspect.add(adw::Toggle::builder().name(name).label(title).build());
+        // Icons, not words: a word has to be cut to fit a small popover, an icon does not. The full
+        // name is the tooltip and what a screen reader says.
+        for (name, icon, title) in ASPECT_CHOICES {
+            aspect.add(adw::Toggle::builder().name(name).icon_name(icon).tooltip(title).build());
         }
         aspect.set_active_name(Some("free"));
         aspect.upcast_ref::<gtk::Widget>().update_property(&[gtk::accessible::Property::Label("Crop shape")]);
@@ -246,6 +282,7 @@ impl Ui {
             .popover(&gtk::Popover::builder().child(&crop_scroll).build())
             .build();
 
+        let mut ui_tool_buttons: Vec<(gtk::ToggleButton, Tool)> = Vec::new();
         let editor_page = bx(false, 0);
         editor_page.append(&tool_strip);
         area.set_margin_start(6);
@@ -265,6 +302,7 @@ impl Ui {
         header.pack_start(&ink);
         header.pack_start(&size_button);
         header.pack_start(&undo);
+        header.pack_start(&redo);
         header.pack_end(&done_button);
         header.pack_end(&crop_button);
         let toasts = adw::ToastOverlay::new();
@@ -280,7 +318,7 @@ impl Ui {
             .default_widget(&done_button)
             .build();
 
-        let controls = Rc::new(Controls { area: area.clone(), x, y, width, height, expander, aspect: aspect.clone(), done: done_button.clone(), undo: undo.clone(), size: size.clone(), syncing: Cell::new(false) });
+        let controls = Rc::new(Controls { area: area.clone(), x, y, width, height, expander, aspect: aspect.clone(), done: done_button.clone(), undo: undo.clone(), redo: redo.clone(), size: size.clone(), syncing: Cell::new(false) });
         {
             let controls = controls.clone();
             area.connect_changed(move || controls.refresh());
@@ -331,6 +369,7 @@ impl Ui {
         }
         {
             // The tool buttons act as one group that can also be empty, which means cropping.
+            ui_tool_buttons.extend(tool_buttons.iter().cloned());
             let changing = Rc::new(Cell::new(false));
             let buttons: Rc<Vec<(gtk::ToggleButton, Tool)>> = Rc::new(tool_buttons.clone());
             for (button, tool) in tool_buttons {
@@ -363,9 +402,13 @@ impl Ui {
             });
         }
         {
-            let area = area.clone();
-            undo.connect_clicked(move |_| area.edit(|editor| {
+            let for_undo = area.clone();
+            undo.connect_clicked(move |_| for_undo.edit(|editor| {
                 editor.undo_mark();
+            }));
+            let for_redo = area.clone();
+            redo.connect_clicked(move |_| for_redo.edit(|editor| {
+                editor.redo_mark();
             }));
         }
         for (button, clockwise) in [(&rotate_left, false), (&rotate_right, true)] {
@@ -389,6 +432,75 @@ impl Ui {
             // Closing any way (Escape, window manager) also stops a running edit.
             let cancel = cancel.clone();
             dialog.connect_closed(move |_| cancel.store(true, Ordering::Release));
+        }
+
+        {
+            let controller = gtk::ShortcutController::new();
+            let bind = |id: &str, action: Box<dyn Fn()>| {
+                let (_, _, accelerators) = EDITOR_SHORTCUTS.iter().find(|(name, _, _)| *name == id).expect("a listed shortcut");
+                let trigger = gtk::ShortcutTrigger::parse_string(accelerators).expect("a valid accelerator");
+                controller.add_shortcut(gtk::Shortcut::new(
+                    Some(trigger),
+                    Some(gtk::CallbackAction::new(move |_, _| {
+                        action();
+                        glib::Propagation::Stop
+                    })),
+                ));
+            };
+            let area_for = |area: &CropArea| area.clone();
+            let (a, c) = (area_for(&area), controls.clone());
+            bind("undo", Box::new(move || {
+                if c.undo.is_sensitive() {
+                    a.edit(|editor| {
+                        editor.undo_mark();
+                    });
+                }
+            }));
+            let a = area.clone();
+            bind("redo", Box::new(move || a.edit(|editor| {
+                editor.redo_mark();
+            })));
+            // A tool key picks the tool, and pressing it again lets go of it, as clicking does.
+            let buttons: Rc<Vec<(gtk::ToggleButton, Tool)>> = Rc::new(
+                ui_tool_buttons.clone(),
+            );
+            for (id, tool) in [("tool-draw", Tool::Pen), ("tool-circle", Tool::Circle), ("tool-square", Tool::Square), ("tool-arrow", Tool::Arrow)] {
+                let buttons = buttons.clone();
+                bind(id, Box::new(move || {
+                    if let Some((button, _)) = buttons.iter().find(|(_, candidate)| *candidate == tool) {
+                        button.set_active(!button.is_active());
+                    }
+                }));
+            }
+            let buttons_for_crop = buttons.clone();
+            bind("tool-crop", Box::new(move || {
+                for (button, _) in buttons_for_crop.iter() {
+                    button.set_active(false);
+                }
+            }));
+            let crop_menu = crop_button.clone();
+            bind("crop-menu", Box::new(move || crop_menu.popup()));
+            let size_menu = size_button.clone();
+            bind("size-menu", Box::new(move || size_menu.popup()));
+            let colour = ink.clone();
+            bind("colour", Box::new(move || {
+                colour.activate();
+            }));
+            let scale = size.clone();
+            bind("thinner", Box::new(move || scale.set_value((scale.value() - 1.).max(1.))));
+            let scale = size.clone();
+            bind("thicker", Box::new(move || scale.set_value((scale.value() + 1.).min(f64::from(MAX_STROKE)))));
+            let a = area.clone();
+            bind("rotate-left", Box::new(move || a.edit(|editor| editor.rotate(false))));
+            let a = area.clone();
+            bind("rotate-right", Box::new(move || a.edit(|editor| editor.rotate(true))));
+            let finish = done_button.clone();
+            bind("done", Box::new(move || {
+                if finish.is_sensitive() {
+                    finish.emit_clicked();
+                }
+            }));
+            view.add_controller(controller);
         }
 
         // Probe and preview off the GTK thread: both decode untrusted pixels in sandboxes.
@@ -612,7 +724,7 @@ mod tests {
     fn tool_button(ui: &Rc<Ui>, tip: &str) -> gtk::ToggleButton {
         let dialog = ui.window.visible_dialog().unwrap();
         find::<gtk::ToggleButton>(dialog.child().unwrap().upcast_ref(), &|w| {
-            w.downcast_ref::<gtk::ToggleButton>().is_some_and(|b| b.tooltip_text().as_deref() == Some(tip))
+            w.downcast_ref::<gtk::ToggleButton>().is_some_and(|b| b.tooltip_text().is_some_and(|t| t.starts_with(tip)))
         })
         .unwrap_or_else(|| panic!("a tool button {tip}"))
     }
@@ -882,5 +994,221 @@ mod tests {
         prune(&dir, KEEP_EDITED);
         assert!(!old.exists() && fresh.exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn every_crop_shape_and_tool_has_an_icon_file_that_ships_with_the_app() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icons/hicolor/scalable/actions");
+        let mut icons: Vec<&str> = ASPECT_CHOICES.iter().map(|(_, icon, _)| *icon).collect();
+        icons.extend(["monogram-shape-circle-symbolic", "monogram-shape-square-symbolic", "monogram-shape-arrow-symbolic"]);
+        for icon in icons {
+            let svg = std::fs::read_to_string(dir.join(format!("{icon}.svg"))).unwrap_or_else(|_| panic!("{icon}.svg is missing"));
+            assert!(svg.contains("<svg") && svg.contains("viewBox=\"0 0 16 16\""), "{icon} is a 16 px symbolic icon");
+            assert!(icon.ends_with("-symbolic"), "{icon} must be symbolic so it follows the theme colour");
+        }
+    }
+
+    #[test]
+    fn the_crop_shapes_have_distinct_names_icons_and_readable_titles() {
+        let mut names: Vec<&str> = ASPECT_CHOICES.iter().map(|(name, _, _)| *name).collect();
+        let mut icons: Vec<&str> = ASPECT_CHOICES.iter().map(|(_, icon, _)| *icon).collect();
+        names.sort();
+        icons.sort();
+        names.dedup();
+        icons.dedup();
+        assert_eq!((names.len(), icons.len()), (5, 5));
+        assert!(ASPECT_CHOICES.iter().all(|(_, _, title)| title.len() >= 2), "no one-letter titles");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display, glycin loaders, the built helper and bubblewrap"]
+    fn the_crop_shapes_are_icons_with_full_names_and_still_pick_the_shape() {
+        crate::widgets::install_icons();
+        let ui = open_ui("com.negzero.PictureEditorShapes");
+        ui.open_picture_editor(copy_of("gradient-64x32.png", "photo.png"), |_| {});
+        assert!(wait(15_000, || dialog_area(&ui).is_some_and(|a| a.editor().is_some())));
+        let area = dialog_area(&ui).unwrap();
+        let dialog = ui.window.visible_dialog().unwrap();
+        let group = find::<adw::ToggleGroup>(dialog.child().unwrap().upcast_ref(), &|w| w.is::<adw::ToggleGroup>()).expect("the crop shapes");
+        let theme = gtk::IconTheme::for_display(&gdk::Display::default().unwrap());
+        for (name, icon, title) in ASPECT_CHOICES {
+            let toggle = group.toggle_by_name(name).unwrap_or_else(|| panic!("a {name} toggle"));
+            assert_eq!(toggle.icon_name().as_deref(), Some(icon));
+            assert!(toggle.label().is_none(), "{name} has no text to cut short");
+            assert_eq!(toggle.tooltip().as_str(), title, "the tooltip carries the whole name");
+            assert!(theme.has_icon(icon), "{icon} is found by the icon theme");
+        }
+        group.set_active_name(Some("square"));
+        let rect = area.editor().unwrap().rect();
+        assert_eq!(rect.width, rect.height, "choosing Square squares the crop");
+        group.set_active_name(Some("free"));
+        ui.window.close();
+    }
+
+    /// Run the shortcut bound to `accelerator` (as written in `EDITOR_SHORTCUTS`) the way a key press would.
+    fn press(ui: &Rc<Ui>, accelerator: &str) {
+        let dialog = ui.window.visible_dialog().unwrap();
+        let view = dialog.child().unwrap();
+        let controllers = view.observe_controllers();
+        for index in 0..controllers.n_items() {
+            let Some(controller) = controllers.item(index).and_downcast::<gtk::ShortcutController>() else { continue };
+            for position in 0..controller.n_items() {
+                let Some(shortcut) = controller.item(position).and_downcast::<gtk::Shortcut>() else { continue };
+                let wanted: Vec<&str> = accelerator.split('|').collect();
+                let has = |text: &str| text.split('|').any(|part| wanted.contains(&part));
+                if shortcut.trigger().is_some_and(|trigger| has(trigger.to_str().as_str())) {
+                    shortcut.action().expect("an action").activate(gtk::ShortcutActionFlags::empty(), &view, None);
+                    return;
+                }
+            }
+        }
+        panic!("no shortcut bound to {accelerator}");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn the_shortcuts_are_valid_unique_and_do_not_collide_with_typing_or_the_dialog() {
+        gtk::init().ok();
+        let mut seen = std::collections::BTreeSet::new();
+        for (id, name, accelerators) in EDITOR_SHORTCUTS {
+            assert!(name.len() > 3, "{id} needs a readable name");
+            for accelerator in accelerators.split('|') {
+                assert!(gtk::ShortcutTrigger::parse_string(accelerator).is_some(), "{id}: {accelerator} must parse");
+                assert!(seen.insert(accelerator), "{accelerator} is bound twice");
+            }
+        }
+        let ids: std::collections::BTreeSet<_> = EDITOR_SHORTCUTS.iter().map(|(id, _, _)| *id).collect();
+        assert_eq!(ids.len(), EDITOR_SHORTCUTS.len(), "ids are unique");
+        // Escape closes the dialog and Return is Done's default; neither may be taken.
+        assert!(!seen.contains("Escape") && !seen.contains("Return"));
+        // Plain keys are single letters or brackets, so they never hide a Ctrl shortcut of the app.
+        for accelerator in &seen {
+            let plain = !accelerator.contains('<');
+            assert!(!plain || accelerator.len() == 1 || accelerator.starts_with("bracket"), "{accelerator}");
+        }
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display, glycin loaders, the built helper and bubblewrap"]
+    fn redo_appears_only_after_an_undo_and_goes_again_when_nothing_is_left_to_redo() {
+        let ui = open_ui("com.negzero.PictureEditorRedo");
+        ui.open_picture_editor(copy_of("gradient-64x32.png", "photo.png"), |_| {});
+        assert!(wait(15_000, || dialog_area(&ui).is_some_and(|a| a.editor().is_some())));
+        let area = dialog_area(&ui).unwrap();
+        let (undo, redo) = (tip_starting(&ui, "Undo"), tip_starting(&ui, "Redo"));
+        assert!(!redo.is_visible(), "hidden before anything is undone");
+        let mark = |area: &CropArea| area.edit(|e| {
+            e.add_arrow((2, 2), (40, 20), [230, 40, 40], Weight::Px(2));
+        });
+        mark(&area);
+        mark(&area);
+        assert!(!redo.is_visible(), "drawing alone does not show it");
+        undo.emit_clicked();
+        assert!(redo.is_visible(), "shown after an undo");
+        undo.emit_clicked();
+        assert!(redo.is_visible());
+        redo.emit_clicked();
+        assert_eq!(area.editor().unwrap().marks().len(), 1);
+        assert!(redo.is_visible(), "one more can be redone");
+        redo.emit_clicked();
+        assert_eq!(area.editor().unwrap().marks().len(), 2);
+        assert!(!redo.is_visible(), "gone once everything is back");
+        undo.emit_clicked();
+        assert!(redo.is_visible());
+        mark(&area);
+        assert!(!redo.is_visible(), "drawing something new takes it away");
+        ui.window.close();
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display, glycin loaders, the built helper and bubblewrap"]
+    fn the_keyboard_shortcuts_drive_tools_undo_redo_size_and_rotation() {
+        let ui = open_ui("com.negzero.PictureEditorKeys");
+        ui.open_picture_editor(copy_of("gradient-64x32.png", "photo.png"), |_| {});
+        assert!(wait(15_000, || dialog_area(&ui).is_some_and(|a| a.editor().is_some())));
+        let area = dialog_area(&ui).unwrap();
+        // Tools: each key picks its tool, pressing it again lets go, V goes back to cropping.
+        for (key, tool) in [("b", Tool::Pen), ("o", Tool::Circle), ("r", Tool::Square), ("a", Tool::Arrow)] {
+            press(&ui, key);
+            assert_eq!(area.tool(), tool, "key {key}");
+            press(&ui, key);
+            assert_eq!(area.tool(), Tool::Crop, "key {key} again");
+        }
+        press(&ui, "a");
+        press(&ui, "v");
+        assert_eq!(area.tool(), Tool::Crop, "V drops the drawing tool");
+        // Undo and redo.
+        area.edit(|e| {
+            e.add_arrow((2, 2), (40, 20), [230, 40, 40], Weight::Px(2));
+        });
+        press(&ui, "<Control>z");
+        assert!(area.editor().unwrap().marks().is_empty());
+        press(&ui, "<Control><Shift>z|<Control>y");
+        assert_eq!(area.editor().unwrap().marks().len(), 1);
+        press(&ui, "<Control>z");
+        press(&ui, "<Control>z");
+        assert!(area.editor().unwrap().marks().is_empty(), "undo with nothing to undo is harmless");
+        // Rotation.
+        assert_eq!(area.editor().unwrap().view_size(), (64, 32));
+        press(&ui, "<Control>Right");
+        assert_eq!(area.editor().unwrap().view_size(), (32, 64));
+        press(&ui, "<Control>Left");
+        assert_eq!(area.editor().unwrap().view_size(), (64, 32));
+        // Line size.
+        let dialog = ui.window.visible_dialog().unwrap();
+        let size = find::<gtk::Scale>(dialog.child().unwrap().upcast_ref(), &|w| w.is::<gtk::Scale>()).unwrap();
+        size.set_value(10.);
+        press(&ui, "bracketright");
+        assert_eq!(size.value(), 11.);
+        press(&ui, "bracketleft");
+        press(&ui, "bracketleft");
+        assert_eq!(size.value(), 9.);
+        size.set_value(1.);
+        press(&ui, "bracketleft");
+        assert_eq!(size.value(), 1., "never below one pixel");
+        size.set_value(f64::from(MAX_STROKE));
+        press(&ui, "bracketright");
+        assert_eq!(size.value(), f64::from(MAX_STROKE), "never above the helper's limit");
+        ui.window.close();
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display, glycin loaders, the built helper and bubblewrap"]
+    fn the_done_shortcut_saves_and_the_menus_open_from_the_keyboard() {
+        let ui = open_ui("com.negzero.PictureEditorKeysDone");
+        let source = copy_of("gradient-64x32.png", "photo.png");
+        let result = Rc::new(std::cell::RefCell::new(None::<PathBuf>));
+        let sink = result.clone();
+        ui.open_picture_editor(source, move |edited| *sink.borrow_mut() = Some(edited));
+        assert!(wait(15_000, || dialog_area(&ui).is_some_and(|a| a.editor().is_some())));
+        let area = dialog_area(&ui).unwrap();
+        let dialog = ui.window.visible_dialog().unwrap();
+        let root: gtk::Widget = dialog.child().unwrap().upcast();
+        let menu = |tip: &str| find::<gtk::MenuButton>(&root, &|w| w.downcast_ref::<gtk::MenuButton>().is_some_and(|b| b.tooltip_text().as_deref() == Some(tip))).unwrap();
+        press(&ui, "c");
+        settle(200);
+        assert!(menu("Crop and rotate").popover().is_some_and(|p| p.is_visible()), "C opens the crop menu");
+        menu("Crop and rotate").popdown();
+        press(&ui, "s");
+        settle(200);
+        assert!(menu("Line size").popover().is_some_and(|p| p.is_visible()), "S opens the size slider");
+        menu("Line size").popdown();
+        area.edit(|e| e.rotate(true));
+        press(&ui, "<Control>Return");
+        assert!(wait(20_000, || result.borrow().is_some()), "Ctrl+Enter is Done");
+        discard_edited(result.borrow().clone());
+        settle(300);
+        ui.window.close();
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn the_app_shortcuts_window_lists_the_editor_keys() {
+        let ui = open_ui("com.negzero.PictureEditorKeysWindow");
+        ui.shortcuts();
+        settle(200);
+        let dialog = ui.window.visible_dialog().expect("the shortcuts window");
+        assert!(dialog.is::<adw::ShortcutsDialog>());
+        ui.window.close();
     }
 }

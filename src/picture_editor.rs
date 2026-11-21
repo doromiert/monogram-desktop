@@ -89,6 +89,9 @@ pub struct ViewMark {
     pub shape: ViewShape,
     pub color: [u8; 3],
     pub stroke: u32,
+    /// For a freehand line drawn with a pen: how hard it pressed at each point, 1 to 255. Empty
+    /// for a mouse or any other shape, which draw one width all along.
+    pub pressure: Vec<u8>,
 }
 impl ViewMark {
     /// The smallest rectangle that holds the mark.
@@ -115,6 +118,8 @@ pub struct Editor {
     rect: Rect,
     aspect: Aspect,
     marks: Vec<ViewMark>,
+    /// Marks taken back, newest last, in the same view pixels as `marks`.
+    undone: Vec<ViewMark>,
 }
 
 fn turn(rotation: Rotation, clockwise: bool) -> Rotation {
@@ -159,6 +164,7 @@ impl Editor {
             rect: Rect { x: 0, y: 0, width, height },
             aspect: Aspect::Free,
             marks: Vec::new(),
+            undone: Vec::new(),
         }
     }
     pub fn rotation(&self) -> Rotation {
@@ -220,7 +226,7 @@ impl Editor {
             return false;
         }
         let stroke = self.stroke_for(weight);
-        self.marks.push(ViewMark { shape: ViewShape::Rect(shape, rect), color, stroke });
+        self.add(ViewMark { shape: ViewShape::Rect(shape, rect), color, stroke, pressure: vec![] });
         true
     }
 
@@ -252,7 +258,7 @@ impl Editor {
             return false;
         }
         let stroke = self.stroke_for(weight);
-        self.marks.push(ViewMark { shape: ViewShape::Arrow(from, to), color, stroke });
+        self.add(ViewMark { shape: ViewShape::Arrow(from, to), color, stroke, pressure: vec![] });
         true
     }
 
@@ -260,10 +266,24 @@ impl Editor {
     /// points collapse and a long stroke is thinned to `MAX_PATH_POINTS`, keeping both ends.
     /// Refused when it never moves `MIN_MARK` away from where it began or the picture is full.
     pub fn add_path(&mut self, points: &[Point], color: [u8; 3], weight: Weight) -> bool {
+        self.add_pressured_path(points, &[], color, weight)
+    }
+
+    /// Like `add_path` for a pen: `pressure` has one value (1 to 255) per point, or is empty for
+    /// a line of one width. A repeated point keeps its first pressure, and thinning keeps the
+    /// pressure of the points it keeps. A list that does not match the points is refused.
+    pub fn add_pressured_path(&mut self, points: &[Point], pressure: &[u8], color: [u8; 3], weight: Weight) -> bool {
+        if !pressure.is_empty() && (pressure.len() != points.len() || pressure.contains(&0)) {
+            return false;
+        }
         let mut path: Vec<Point> = Vec::with_capacity(points.len().min(MAX_PATH_POINTS * 2));
-        for point in points.iter().map(|point| self.clamp_point(*point)) {
+        let mut levels: Vec<u8> = Vec::new();
+        for (index, point) in points.iter().map(|point| self.clamp_point(*point)).enumerate() {
             if path.last() != Some(&point) {
                 path.push(point);
+                if let Some(level) = pressure.get(index) {
+                    levels.push(*level);
+                }
             }
         }
         let Some(&first) = path.first() else { return false };
@@ -276,14 +296,24 @@ impl Editor {
         }
         if path.len() > MAX_PATH_POINTS {
             let last = path.len() - 1;
-            path = (0..MAX_PATH_POINTS).map(|i| path[i * last / (MAX_PATH_POINTS - 1)]).collect();
+            let keep: Vec<usize> = (0..MAX_PATH_POINTS).map(|i| i * last / (MAX_PATH_POINTS - 1)).collect();
+            path = keep.iter().map(|i| path[*i]).collect();
+            if !levels.is_empty() {
+                levels = keep.iter().map(|i| levels[*i]).collect();
+            }
         }
         if self.marks.len() >= MAX_MARKS || self.points_used() + path.len() > MAX_POINTS {
             return false;
         }
         let stroke = self.stroke_for(weight);
-        self.marks.push(ViewMark { shape: ViewShape::Freehand(path), color, stroke });
+        self.add(ViewMark { shape: ViewShape::Freehand(path), color, stroke, pressure: levels });
         true
+    }
+
+    /// Keep a new mark. Drawing again ends the chance to redo what was undone.
+    fn add(&mut self, mark: ViewMark) {
+        self.marks.push(mark);
+        self.undone.clear();
     }
 
     /// Mark the crop area as it is now, which places a mark without a pointer: a square or circle
@@ -299,15 +329,41 @@ impl Editor {
         }
     }
 
-    /// Take back the newest mark.
+    /// Take back the newest mark; it can be brought back with `redo_mark` until something new is
+    /// drawn.
     pub fn undo_mark(&mut self) -> bool {
-        self.marks.pop().is_some()
+        match self.marks.pop() {
+            Some(mark) => {
+                self.undone.push(mark);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Bring back the mark most recently taken back.
+    pub fn redo_mark(&mut self) -> bool {
+        if self.marks.len() >= MAX_MARKS {
+            return false;
+        }
+        match self.undone.pop() {
+            Some(mark) => {
+                self.marks.push(mark);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether `redo_mark` has anything to bring back.
+    pub fn can_redo(&self) -> bool {
+        !self.undone.is_empty()
     }
 
     /// Turn the picture a quarter; the crop and the marks turn with it.
     pub fn rotate(&mut self, clockwise: bool) {
         let before = self.view_size();
-        for mark in &mut self.marks {
+        for mark in self.marks.iter_mut().chain(self.undone.iter_mut()) {
             match &mut mark.shape {
                 ViewShape::Rect(_, rect) => *rect = turn_rect(*rect, before, clockwise),
                 ViewShape::Arrow(a, b) => {
@@ -493,6 +549,7 @@ impl Editor {
                     points: points.iter().map(|point| self.point_to_source(*point)).collect(),
                     color: mark.color,
                     stroke: mark.stroke,
+                    pressure: mark.pressure.clone(),
                 },
             })
             .collect();
@@ -1074,7 +1131,7 @@ mod tests {
         editor.add_path(&[(30, 90), (60, 10), (90, 50)], RED, Weight::Thin);
         assert_eq!(editor.marks()[0].bounds(), Rect { x: 10, y: 20, width: 140, height: 60 });
         assert_eq!(editor.marks()[1].bounds(), Rect { x: 30, y: 10, width: 60, height: 80 });
-        let empty = ViewMark { shape: ViewShape::Freehand(vec![]), color: RED, stroke: 2 };
+        let empty = ViewMark { shape: ViewShape::Freehand(vec![]), color: RED, stroke: 2, pressure: vec![] };
         assert_eq!(empty.bounds(), Rect::default());
     }
 
@@ -1091,5 +1148,105 @@ mod tests {
         assert_eq!(editor.marks()[0].stroke, 7);
         assert!(editor.add_mark(Shape::Circle, Rect { x: 5, y: 5, width: 100, height: 80 }, RED, Weight::Px(500)));
         assert_eq!(editor.marks()[1].stroke, MAX_STROKE);
+    }
+
+    #[test]
+    fn an_undone_mark_can_be_brought_back_in_the_order_it_was_taken() {
+        let mut editor = Editor::new(200, 100);
+        for x in [10, 50, 90] {
+            editor.add_square(Rect { x, y: 10, width: 30, height: 30 }, RED, Weight::Thin);
+        }
+        assert!(!editor.can_redo(), "nothing undone yet");
+        assert!(!editor.redo_mark());
+        assert!(editor.undo_mark() && editor.undo_mark());
+        assert!(editor.can_redo());
+        assert_eq!(editor.marks().len(), 1);
+        assert!(editor.redo_mark());
+        assert_eq!(editor.marks()[1].bounds().x, 50, "the first one undone last comes back first");
+        assert!(editor.redo_mark());
+        assert_eq!(editor.marks()[2].bounds().x, 90);
+        assert!(!editor.can_redo() && !editor.redo_mark(), "everything is back");
+    }
+
+    #[test]
+    fn drawing_something_new_ends_the_chance_to_redo() {
+        for add in [
+            Box::new(|e: &mut Editor| e.add_square(Rect { x: 0, y: 0, width: 20, height: 20 }, RED, Weight::Thin)) as Box<dyn Fn(&mut Editor) -> bool>,
+            Box::new(|e: &mut Editor| e.add_circle(Rect { x: 0, y: 0, width: 20, height: 20 }, RED, Weight::Thin)),
+            Box::new(|e: &mut Editor| e.add_arrow((0, 0), (50, 50), RED, Weight::Thin)),
+            Box::new(|e: &mut Editor| e.add_path(&[(0, 0), (50, 50)], RED, Weight::Thin)),
+            Box::new(|e: &mut Editor| e.mark_crop(Kind::Square, RED, Weight::Thin)),
+        ] {
+            let mut editor = Editor::new(200, 100);
+            editor.add_square(Rect { x: 10, y: 10, width: 30, height: 30 }, RED, Weight::Thin);
+            editor.undo_mark();
+            assert!(editor.can_redo());
+            assert!(add(&mut editor));
+            assert!(!editor.can_redo(), "a new mark clears what could be redone");
+            assert!(!editor.redo_mark());
+        }
+        // A refused mark changes nothing: the redo stays.
+        let mut editor = Editor::new(200, 100);
+        editor.add_square(Rect { x: 10, y: 10, width: 30, height: 30 }, RED, Weight::Thin);
+        editor.undo_mark();
+        assert!(!editor.add_square(Rect { x: 0, y: 0, width: 2, height: 2 }, RED, Weight::Thin));
+        assert!(editor.can_redo(), "nothing was drawn, so the redo is still there");
+    }
+
+    #[test]
+    fn reset_forgets_what_could_be_redone_and_a_turn_carries_it_along() {
+        let mut editor = Editor::new(200, 100);
+        editor.add_arrow((10, 20), (150, 80), RED, Weight::Thin);
+        editor.undo_mark();
+        editor.rotate(true);
+        assert!(editor.redo_mark());
+        assert_eq!(shape_of(&editor, 0), ViewShape::Arrow((80, 10), (20, 150)), "turned with the picture while undone");
+        assert!(matches!(editor.job(None).marks[0], Mark::Arrow { from: (10, 20), to: (150, 80), .. }), "and still lands in the same place on the source");
+        editor.undo_mark();
+        editor.reset();
+        assert!(!editor.can_redo() && editor.marks().is_empty());
+    }
+
+    #[test]
+    fn redo_does_not_count_as_a_change_on_its_own() {
+        let mut editor = Editor::new(200, 100);
+        editor.add_square(Rect { x: 10, y: 10, width: 30, height: 30 }, RED, Weight::Thin);
+        editor.undo_mark();
+        assert!(editor.is_unchanged(), "an undone mark is not part of the picture");
+        editor.redo_mark();
+        assert!(!editor.is_unchanged());
+    }
+
+    #[test]
+    fn a_pen_stroke_keeps_a_pressure_for_each_point_it_keeps() {
+        let mut editor = Editor::new(200, 100);
+        assert!(editor.add_pressured_path(&[(10, 10), (10, 10), (60, 10), (60, 50)], &[40, 90, 160, 255], RED, Weight::Px(10)));
+        assert_eq!(shape_of(&editor, 0), ViewShape::Freehand(vec![(10, 10), (60, 10), (60, 50)]));
+        assert_eq!(editor.marks()[0].pressure, [40, 160, 255], "the repeated point keeps its first pressure");
+        assert!(matches!(&editor.job(None).marks[0], Mark::Freehand { pressure, .. } if pressure == &[40, 160, 255]));
+    }
+
+    #[test]
+    fn mismatched_or_zero_pressure_is_refused_and_a_mouse_line_has_none() {
+        let mut editor = Editor::new(200, 100);
+        assert!(!editor.add_pressured_path(&[(10, 10), (60, 60)], &[100], RED, Weight::Thin));
+        assert!(!editor.add_pressured_path(&[(10, 10), (60, 60)], &[100, 0], RED, Weight::Thin));
+        assert!(editor.marks().is_empty());
+        assert!(editor.add_path(&[(10, 10), (60, 60)], RED, Weight::Thin));
+        assert!(editor.marks()[0].pressure.is_empty());
+    }
+
+    #[test]
+    fn thinning_a_long_pen_stroke_keeps_each_kept_pressure_with_its_point() {
+        let mut editor = Editor::new(5000, 100);
+        let points: Vec<Point> = (0..3000).map(|i| (i, i % 100)).collect();
+        let levels: Vec<u8> = (0..3000).map(|i| (i % 250) as u8 + 1).collect();
+        assert!(editor.add_pressured_path(&points, &levels, RED, Weight::Thin));
+        let ViewShape::Freehand(kept) = shape_of(&editor, 0) else { panic!("a stroke") };
+        let pressure = &editor.marks()[0].pressure;
+        assert_eq!((kept.len(), pressure.len()), (MAX_PATH_POINTS, MAX_PATH_POINTS));
+        for (point, level) in kept.iter().zip(pressure) {
+            assert_eq!(*level, levels[point.0 as usize], "pressure stayed with its point at x={}", point.0);
+        }
     }
 }

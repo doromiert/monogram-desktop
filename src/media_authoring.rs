@@ -104,8 +104,16 @@ pub enum Mark {
     Circle { rect: Rect, color: [u8; 3], stroke: u32 },
     /// A line from `from` to `to` with a head at `to`.
     Arrow { from: Point, to: Point, color: [u8; 3], stroke: u32 },
-    /// A line through `points` in order, with round ends.
-    Freehand { points: Vec<Point>, color: [u8; 3], stroke: u32 },
+    /// A line through `points` in order, with round ends. `pressure` is how hard a pen pressed at
+    /// each point, 1 to 255, and the line is that fraction of `stroke` wide there. Empty means the
+    /// same width all along (a mouse); otherwise there is exactly one value per point.
+    Freehand {
+        points: Vec<Point>,
+        color: [u8; 3],
+        stroke: u32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pressure: Vec<u8>,
+    },
 }
 impl Mark {
     pub fn of(shape: Shape, rect: Rect, color: [u8; 3], stroke: u32) -> Self {
@@ -161,9 +169,12 @@ fn check_marks(marks: &[Mark], width: u32, height: u32, limits: &Limits) -> Resu
                     return Err(Error::MarkOutside);
                 }
             }
-            Mark::Freehand { points: path, .. } => {
+            Mark::Freehand { points: path, pressure, .. } => {
                 if path.is_empty() || path.len() > limits.max_path_points || !path.iter().all(|point| inside(*point)) {
                     return Err(Error::MarkOutside);
+                }
+                if !pressure.is_empty() && (pressure.len() != path.len() || pressure.contains(&0)) {
+                    return Err(Error::MarkPressure);
                 }
             }
         }
@@ -184,6 +195,15 @@ fn segment_distance(px: f64, py: f64, a: (f64, f64), b: (f64, f64)) -> f64 {
     let length_squared = dx * dx + dy * dy;
     let along = if length_squared == 0. { 0. } else { (((px - a.0) * dx + (py - a.1) * dy) / length_squared).clamp(0., 1.) };
     ((px - (a.0 + along * dx)).powi(2) + (py - (a.1 + along * dy)).powi(2)).sqrt()
+}
+
+/// Distance from `(px, py)` to the segment `a`-`b`, and how far along it the nearest point is (0 at
+/// `a`, 1 at `b`).
+fn segment_nearest(px: f64, py: f64, a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let length_squared = dx * dx + dy * dy;
+    let along = if length_squared == 0. { 0. } else { (((px - a.0) * dx + (py - a.1) * dy) / length_squared).clamp(0., 1.) };
+    (((px - (a.0 + along * dx)).powi(2) + (py - (a.1 + along * dy)).powi(2)).sqrt(), along)
 }
 
 /// The line segments that make up an arrow: the shaft and the two sides of the head.
@@ -257,13 +277,34 @@ pub fn paint(rgba: &mut [u8], width: u32, height: u32, marks: &[Mark]) -> bool {
             Mark::Arrow { from, to, .. } => {
                 stroke_segments(rgba, &arrow_segments(*from, *to, thickness), f64::from(thickness), color);
             }
-            Mark::Freehand { points, .. } => {
+            Mark::Freehand { points, pressure, .. } => {
                 let at = |point: &Point| (f64::from(point.0), f64::from(point.1));
-                let segments: Vec<_> = match points.as_slice() {
-                    [only] => vec![(at(only), at(only))],
-                    many => many.windows(2).map(|pair| (at(&pair[0]), at(&pair[1]))).collect(),
+                let half = f64::from(thickness) / 2.;
+                // Half the line's width at point `i`: full for no pressure data, else its fraction,
+                // never under half a pixel so the line cannot vanish.
+                let radius = |i: usize| match pressure.get(i) {
+                    Some(level) => (half * f64::from(*level) / 255.).max(0.5),
+                    None => half,
                 };
-                stroke_segments(rgba, &segments, f64::from(thickness), color);
+                let spans: Vec<_> = match points.as_slice() {
+                    [only] => vec![(at(only), at(only), radius(0), radius(0))],
+                    many => many.windows(2).enumerate().map(|(i, pair)| (at(&pair[0]), at(&pair[1]), radius(i), radius(i + 1))).collect(),
+                };
+                for (a, b, ra, rb) in spans {
+                    let reach = ra.max(rb);
+                    let x0 = (a.0.min(b.0) - reach - 1.).floor().max(0.) as usize;
+                    let y0 = (a.1.min(b.1) - reach - 1.).floor().max(0.) as usize;
+                    let x1 = ((a.0.max(b.0) + reach + 1.).ceil().max(0.) as usize).min(w);
+                    let y1 = ((a.1.max(b.1) + reach + 1.).ceil().max(0.) as usize).min(h);
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            let (distance, along) = segment_nearest(x as f64 + 0.5, y as f64 + 0.5, a, b);
+                            if distance <= ra + (rb - ra) * along {
+                                put(rgba, x, y, color);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -283,7 +324,7 @@ pub struct Job {
     /// Scale down so the longest edge fits. Never scales up.
     pub max_edge: Option<u32>,
     /// Shapes to draw, in source pixels. Pictures only.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub marks: Vec<Mark>,
 }
 impl Job {
@@ -322,6 +363,7 @@ pub enum Error {
     TooManyMarks,
     MarkOutside,
     MarkStroke,
+    MarkPressure,
     MarksOnVideo,
 }
 impl fmt::Display for Error {
@@ -340,6 +382,7 @@ impl fmt::Display for Error {
             Self::TooManyMarks => "There are too many marks on this picture",
             Self::MarkOutside => "A mark is outside the picture",
             Self::MarkStroke => "A mark's line thickness is not supported",
+            Self::MarkPressure => "A drawn line's pressure values do not match its points",
             Self::MarksOnVideo => "Videos cannot be drawn on",
         })
     }
@@ -443,8 +486,9 @@ pub struct Plan {
     pub output_height: u32,
     /// The helper must stop and delete its output beyond this size.
     pub max_output_bytes: u64,
-    /// Drawn first, in source pixels, so crop and rotation carry them along.
-    #[serde(default)]
+    /// Drawn first, in source pixels, so crop and rotation carry them along. Left out when empty so
+    /// a plain crop or rotation still reaches a helper built before marks existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub marks: Vec<Mark>,
 }
 
@@ -967,7 +1011,7 @@ mod tests {
         Mark::Arrow { from, to, color: [0, 0, 255], stroke }
     }
     fn path(points: &[Point], stroke: u32) -> Mark {
-        Mark::Freehand { points: points.to_vec(), color: [255, 255, 0], stroke }
+        Mark::Freehand { points: points.to_vec(), color: [255, 255, 0], stroke, pressure: vec![] }
     }
     fn painted(rgba: &[u8]) -> usize {
         rgba.chunks(4).filter(|px| px[3] == 255).count()
@@ -1144,5 +1188,80 @@ mod tests {
         ] {
             assert_eq!(Job::from_json(bad.as_bytes(), &LIMITS), Err(Error::MalformedJob), "{bad}");
         }
+    }
+
+    fn pen(points: &[Point], pressure: &[u8], stroke: u32) -> Mark {
+        Mark::Freehand { points: points.to_vec(), color: [255, 255, 0], stroke, pressure: pressure.to_vec() }
+    }
+    fn height_of_line_at(rgba: &[u8], w: u32, h: u32, x: u32) -> usize {
+        (0..h).filter(|y| pixel(rgba, w, x, *y)[3] == 255).count()
+    }
+
+    #[test]
+    fn a_pen_line_is_as_wide_as_the_pressure_says() {
+        let (w, h) = (80, 40);
+        let mut rgba = blank(w, h);
+        // Light at the left, hard at the right, a 20 px stroke.
+        assert!(paint(&mut rgba, w, h, &[pen(&[(5, 20), (75, 20)], &[26, 255], 20)]));
+        let light = height_of_line_at(&rgba, w, h, 8);
+        let middle = height_of_line_at(&rgba, w, h, 40);
+        let hard = height_of_line_at(&rgba, w, h, 72);
+        assert!(light >= 1 && light <= 4, "a light touch is thin: {light}");
+        assert!(hard >= 17 && hard <= 21, "a hard press is the full 20: {hard}");
+        assert!(light < middle && middle < hard, "it widens smoothly: {light} {middle} {hard}");
+    }
+
+    #[test]
+    fn without_pressure_a_line_keeps_one_width_and_equal_pressure_matches_it() {
+        let (w, h) = (60, 30);
+        let (mut plain, mut full) = (blank(w, h), blank(w, h));
+        assert!(paint(&mut plain, w, h, &[path(&[(5, 15), (55, 15)], 8)]));
+        assert!(paint(&mut full, w, h, &[pen(&[(5, 15), (55, 15)], &[255, 255], 8)]));
+        assert_eq!(plain, full, "full pressure everywhere is the same as no pressure data");
+        assert_eq!(height_of_line_at(&plain, w, h, 10), height_of_line_at(&plain, w, h, 50));
+    }
+
+    #[test]
+    fn a_pen_line_never_vanishes_and_a_single_touch_makes_a_dot() {
+        let (w, h) = (40, 20);
+        let mut rgba = blank(w, h);
+        assert!(paint(&mut rgba, w, h, &[pen(&[(5, 10), (35, 10)], &[1, 1], 20)]));
+        assert!(painted(&rgba) >= 30, "the faintest pressure still leaves a line: {}", painted(&rgba));
+        let mut dot = blank(w, h);
+        assert!(paint(&mut dot, w, h, &[pen(&[(20, 10)], &[255], 10)]));
+        assert_eq!(pixel(&dot, w, 20, 10)[3], 255);
+        assert!(painted(&dot) >= 60, "a 10 px dot: {}", painted(&dot));
+    }
+
+    #[test]
+    fn pressure_values_must_match_the_points_and_be_usable() {
+        let check = |mark: Mark| plan(&Job { marks: vec![mark], ..Default::default() }, &image(40, 30), &LIMITS);
+        assert!(check(pen(&[(1, 1), (9, 9)], &[10, 200], 4)).is_ok());
+        assert!(check(pen(&[(1, 1), (9, 9)], &[], 4)).is_ok(), "no pressure is a mouse line");
+        assert_eq!(check(pen(&[(1, 1), (9, 9)], &[10], 4)), Err(Error::MarkPressure), "too few");
+        assert_eq!(check(pen(&[(1, 1), (9, 9)], &[10, 20, 30], 4)), Err(Error::MarkPressure), "too many");
+        assert_eq!(check(pen(&[(1, 1), (9, 9)], &[10, 0], 4)), Err(Error::MarkPressure), "zero is not a pressure");
+    }
+
+    #[test]
+    fn pressure_round_trips_and_is_left_out_when_there_is_none() {
+        let with = Job { marks: vec![pen(&[(1, 2), (3, 4)], &[10, 250], 5)], ..Default::default() };
+        let json = serde_json::to_string(&with).unwrap();
+        assert!(json.contains(r#""pressure":[10,250]"#));
+        assert_eq!(Job::from_json(json.as_bytes(), &LIMITS), Ok(with));
+        let without = Job { marks: vec![path(&[(1, 2), (3, 4)], 5)], ..Default::default() };
+        assert!(!serde_json::to_string(&without).unwrap().contains("pressure"), "older helpers never see the field");
+        let old = r#"{"marks":[{"shape":"freehand","points":[[1,2],[3,4]],"color":[0,0,0],"stroke":1}]}"#;
+        assert!(Job::from_json(old.as_bytes(), &LIMITS).is_ok(), "a request without pressure still reads");
+        assert_eq!(Job::from_json(br#"{"marks":[{"shape":"freehand","points":[[1,2]],"color":[0,0,0],"stroke":1,"pressure":[300]}]}"#, &LIMITS), Err(Error::MalformedJob), "a level is a byte");
+    }
+
+    #[test]
+    fn a_plan_without_marks_carries_no_marks_field_for_an_older_helper() {
+        let made = plan(&Job::default(), &image(40, 30), &LIMITS).unwrap();
+        let json = serde_json::to_string(&made).unwrap();
+        assert!(!json.contains("marks"), "{json}");
+        let marked = plan(&Job { marks: vec![square(0, 0, 5, 5, 1)], ..Default::default() }, &image(40, 30), &LIMITS).unwrap();
+        assert!(serde_json::to_string(&marked).unwrap().contains("marks"));
     }
 }

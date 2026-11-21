@@ -40,6 +40,9 @@ pub enum Error {
     Refused(media_authoring::Error),
     /// The helper rejected or could not process the file.
     Failed,
+    /// The helper refused a request this build wrote: it is an older build that does not know a
+    /// field. `cargo run` rebuilds only the app, so the helper next to it can lag behind.
+    OutOfDate,
     TimedOut,
     Cancelled,
     /// The helper claimed success but its output did not match the plan.
@@ -51,6 +54,7 @@ impl std::fmt::Display for Error {
             Self::Unavailable => f.write_str("Picture editing is unavailable"),
             Self::Refused(error) => error.fmt(f),
             Self::Failed => f.write_str("This picture could not be edited"),
+            Self::OutOfDate => f.write_str("The picture editing helper is out of date. Rebuild with cargo build, then restart"),
             Self::TimedOut => f.write_str("Editing this picture took too long"),
             Self::Cancelled => f.write_str("Editing was cancelled"),
             Self::BadOutput => f.write_str("The edited picture could not be verified"),
@@ -93,11 +97,11 @@ fn sandbox_command(
 }
 
 /// Wait for the helper, killing it on cancellation or after the deadline.
-fn wait(child: &mut Child, cancel: &dyn Fn() -> bool) -> Result<bool, Error> {
+fn wait(child: &mut Child, cancel: &dyn Fn() -> bool) -> Result<Option<i32>, Error> {
     let started = Instant::now();
     loop {
         if let Some(status) = child.try_wait().map_err(|_| Error::Failed)? {
-            return Ok(status.success());
+            return Ok(status.code());
         }
         let stop = if cancel() {
             Some(Error::Cancelled)
@@ -144,9 +148,14 @@ fn execute(
         let _ = (&mut stdout).take(4096).read_to_end(&mut reply);
         reply
     });
-    if !wait(&mut child, cancel)? {
-        let _ = reader.join();
-        return Err(Error::Failed);
+    match wait(&mut child, cancel)? {
+        Some(0) => {}
+        code => {
+            let _ = reader.join();
+            // Exit code 3 is "bad request": this build checked the plan itself, so the helper
+            // must be older than the app.
+            return Err(if code == Some(3) { Error::OutOfDate } else { Error::Failed });
+        }
     }
     reader.join().map_err(|_| Error::Failed)
 }
@@ -441,7 +450,7 @@ mod tests {
             marks: vec![
                 Mark::Circle { rect: Rect { x: 4, y: 2, width: 20, height: 20 }, color: [0, 255, 0], stroke: 2 },
                 Mark::Arrow { from: (30, 6), to: (60, 6), color: [0, 0, 255], stroke: 2 },
-                Mark::Freehand { points: vec![(30, 20), (60, 20), (60, 30)], color: [255, 255, 0], stroke: 2 },
+                Mark::Freehand { points: vec![(30, 20), (60, 20), (60, 30)], color: [255, 255, 0], stroke: 2, pressure: vec![] },
             ],
             ..Default::default()
         };
@@ -471,7 +480,7 @@ mod tests {
             marks: vec![
                 // Crop-local: a horizontal arrow along y = 8 from x = 6 to x = 30.
                 Mark::Arrow { from: (10, 10), to: (34, 10), color: [0, 0, 255], stroke: 2 },
-                Mark::Freehand { points: vec![(10, 18), (34, 18)], color: [255, 255, 0], stroke: 2 },
+                Mark::Freehand { points: vec![(10, 18), (34, 18)], color: [255, 255, 0], stroke: 2, pressure: vec![] },
             ],
             ..Default::default()
         };
@@ -498,8 +507,8 @@ mod tests {
         let work = tempdir().unwrap();
         for mark in [
             Mark::Arrow { from: (0, 0), to: (65, 10), color: [0, 0, 0], stroke: 2 },
-            Mark::Freehand { points: vec![(1, 1), (10, 33)], color: [0, 0, 0], stroke: 2 },
-            Mark::Freehand { points: vec![], color: [0, 0, 0], stroke: 2 },
+            Mark::Freehand { points: vec![(1, 1), (10, 33)], color: [0, 0, 0], stroke: 2, pressure: vec![] },
+            Mark::Freehand { points: vec![], color: [0, 0, 0], stroke: 2, pressure: vec![] },
             Mark::Circle { rect: Rect { x: 50, y: 0, width: 20, height: 20 }, color: [0, 0, 0], stroke: 2 },
         ] {
             let job = Job { marks: vec![mark], ..Default::default() };

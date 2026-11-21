@@ -1897,10 +1897,18 @@ impl Ui {
                 "Messages",
                 vec![("Send", "Return"), ("New line", "<Shift>Return")],
             ),
+            (
+                "Edit Picture",
+                crate::picture_editor_ui::EDITOR_SHORTCUTS
+                    .iter()
+                    .map(|(_, name, keys)| (*name, *keys))
+                    .collect(),
+            ),
         ] {
             let section = adw::ShortcutsSection::new(Some(title));
             for (name, key) in items {
-                section.add(adw::ShortcutsItem::new(name, key))
+                // Alternatives are written `a|b` for binding; the window lists them side by side.
+                section.add(adw::ShortcutsItem::new(name, &key.replace('|', " ")))
             }
             d.add(section)
         }

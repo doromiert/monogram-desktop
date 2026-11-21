@@ -64,6 +64,11 @@ geometry is rounded to even values. Trims apply to the source timeline and must 
    the confined helper, and the dialog refuses to open if the two disagree on the picture's
    orientation.
 
+   **Helper version.** `cargo run` rebuilds only the app, so `monogram-media-author` next to it can
+   be older than the app. A plan without marks is written without the `marks` field so an older
+   helper still crops and rotates; a helper that refuses a request this build wrote reports "The
+   picture editing helper is out of date. Rebuild with cargo build" instead of a generic failure.
+
    **Layout (built to fit a small window).** The picture takes all the room. Down its left edge is
    a strip of drawing tools (freehand, circle, square, arrow); with none chosen, you are cropping
    and drag the frame's corner brackets and edge grips. The header holds Cancel, the mark colour (a
@@ -71,19 +76,30 @@ geometry is rounded to even values. Trims apply to the source timeline and must 
    that opens a slider, 1 to 128 px, starting at a size that suits the picture), Undo, a **Crop**
    menu and Done. The Crop menu holds the crop shape (Free, Original, Square, 4:3, 16:9), rotate
    left and right, Reset, "Precise Crop" numeric rows and "Mark the Crop Area". The dialog needs
-   under 460 px of width and 420 px of height, tested. Keyboard: arrow keys move the crop, Shift
+   under 460 px of width and 420 px of height, tested. The crop shapes are icons with the full name
+   as tooltip and accessible label, never cut-off text. A 3x3 grid shows over the crop while the
+   pointer is over the picture (and during a resize), only while cropping. Keyboard: arrow keys move the crop, Shift
    with arrows resizes it; the numeric rows and "Mark the Crop Area" give a pointer-free,
    screen-reader-friendly path. Done writes a new file under the cache directory
    (`monogram-desktop/edited`, private, pruned after 24 hours and removed with its attachment) that
    replaces the attachment in the same position; the original is never modified. Cancel, Escape or
    closing stops a running edit.
 
+   **Keyboard.** Ctrl+Z undo, Ctrl+Shift+Z or Ctrl+Y redo, B draw, O circle, R square, A arrow
+   (pressing a tool key again lets go of it), V crop frame, C Crop menu, S line size, K colour,
+   [ and ] thinner and thicker, Ctrl+Left and Ctrl+Right rotate, Ctrl+Enter Done, Escape cancels.
+   The list lives in `EDITOR_SHORTCUTS`, which both binds the keys and fills the app's Shortcuts
+   window, so they cannot disagree. Plain letters never fire while a text field has focus.
+
    **Marks (done: square, circle, arrow and freehand).** Choosing a tool from the strip and dragging
    on the picture draws that shape in the chosen colour and size: a square or circle in the dragged
-   box, an arrow from where the drag began to where it ended, a freehand line along the pointer.
+   box, an arrow from where the drag began to where it ended, a freehand line along the pointer. A pen's pressure sets the width along a freehand line (15 to
+   100 percent of the chosen size, stored per point in `Mark::Freehand::pressure`); a mouse draws one
+   width.
    "Mark the Crop Area" (in the Crop menu) places the chosen shape without a pointer (a square or
    circle around the crop, an arrow across it from corner to corner, a line along its edge) and
-   Undo in the header takes back the newest. Marks are stored in view pixels, so they turn with the picture, and
+   Undo in the header takes back the newest; Redo appears next to it only after an undo and goes
+   when nothing is left to redo or something new is drawn. Marks are stored in view pixels, so they turn with the picture, and
    `Editor::job` converts them to source pixels. They are part of the `Job` and `Plan`
    (`Mark::{Square, Circle, Arrow, Freehand}`; at most 32 marks, 256 points per freehand line and
    1024 points in all, stroke 1 to 128 px, every point inside the picture, images only) and the
