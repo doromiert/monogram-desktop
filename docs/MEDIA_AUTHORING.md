@@ -86,5 +86,15 @@ geometry is rounded to even values. Trims apply to the source timeline and must 
    (geometry, limits, JSON, pixel painting of every shape), in the real sandbox (pixels for every
    shape, and with crop plus rotation) and in the dialog (drags, undo, saved file).
 4. Video trim and compression with progress and cancel off the main thread.
-5. Albums: multi-select, ordering, shared caption.
+5. Albums. **Composer done:** several files can be chosen at once, each card shows its number in
+   the send order with "Send earlier" and "Send later" buttons (hidden for a single file, disabled
+   at either end, so the order can be changed from the keyboard), and one caption covers the set.
+   `Ui::move_attachment` reorders `attachments` and the cards together; edited copies keep their
+   place. **Not done:** a grouped display and a grouping on the wire. Today each file goes out as its
+   own message with the caption on the first, and the timeline only stacks consecutive bubbles from
+   one sender. No XEP defines an album. The standard way to put several files in one message is
+   XEP-0447 section 4.2 (several `<file-sharing/>` elements with different `id`s, each source in a
+   follow-up message that attaches to the first, with a fallback body), which needs a message to
+   hold a list of attachments. Doing that, and a grid to show it, is the remaining work, with the
+   same behaviour needed in mobile.
 6. Camera capture through the desktop camera portal.
