@@ -756,6 +756,8 @@ pub struct MediaViewer {
     generation: u64,
     preview_status: gtk::Label,
     fullscreen: gtk::Button,
+    /// Opens the picture in Edit Picture; the edited copy goes into the message being written.
+    edit: gtk::Button,
     previous: gtk::Button,
     next: gtk::Button,
     video_controls: gtk::Revealer,
@@ -886,10 +888,13 @@ impl MediaViewer {
         header.set_title_widget(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));
         let download = icon_button("folder-download-symbolic", "Download a copy");
         download.set_visible(!ui.state.borrow().account.is_empty());
+        let edit = icon_button("document-edit-symbolic", "Edit a copy and add it to your message");
+        edit.set_visible(!ui.state.borrow().account.is_empty());
         let fullscreen = icon_button("view-fullscreen-symbolic", "Fullscreen");
         let end_controls = bx(false, 0);
         let motion_button=crate::motion_photo_ui::button();
         end_controls.append(&motion_button);
+        end_controls.append(&edit);
         end_controls.append(&download);
         end_controls.append(&fullscreen);
         header.pack_end(&end_controls);
@@ -983,6 +988,7 @@ impl MediaViewer {
             preview_status,
             items: RefCell::new(items),
             fullscreen,
+            edit: edit.clone(),
             previous,
             next,
             video_controls,
@@ -1011,6 +1017,58 @@ impl MediaViewer {
             if let Some(v) = weak.upgrade() {
                 v.close()
             }
+        });
+        let weak = Rc::downgrade(&viewer);
+        edit.connect_clicked(move |_| {
+            let Some(viewer) = weak.upgrade() else { return };
+            let Some(ui) = viewer.ui.upgrade().filter(|ui| {
+                ui.generation.get() == viewer.generation
+                    && ui.state.borrow().account == viewer.owner
+                    && ui.state.borrow().current().jid == viewer.peer
+            }) else {
+                return;
+            };
+            let id = viewer.items.borrow()[viewer.index.get()].id.clone();
+            let Some(file) = ui
+                .store
+                .message(&viewer.owner, &viewer.peer, &id)
+                .filter(|message| !message.retracted)
+                .and_then(|message| message.attachment)
+            else {
+                ui.notice("This media is no longer available");
+                return;
+            };
+            if !crate::picture_editor_ui::editable(&file.name) {
+                ui.notice("Only JPEG, PNG and WebP pictures can be edited");
+                return;
+            }
+            let path = match ui.downloads.borrow().status(&viewer.owner, &file) {
+                Some(crate::downloads::Status::Ready(path)) if path.is_file() => path,
+                _ => {
+                    ui.notice("Wait for this media to finish downloading");
+                    return;
+                }
+            };
+            // The edit is a new picture: it never replaces the one in the chat. When Done is pressed
+            // it is added to the message being written, where a caption can go with it and Send
+            // sends it.
+            let (owner, peer, viewer_weak, ui_weak) = (viewer.owner.clone(), viewer.peer.clone(), weak.clone(), Rc::downgrade(&ui));
+            ui.open_picture_editor(path, move |edited| {
+                let Some(ui) = ui_weak.upgrade() else {
+                    crate::picture_editor_ui::discard_edited(Some(edited));
+                    return;
+                };
+                match ui.accept_edited_copy(&owner, &peer, edited) {
+                    Ok(()) => {
+                        if let Some(viewer) = viewer_weak.upgrade() {
+                            viewer.close();
+                        }
+                        ui.show_chat();
+                        ui.notice("Edited copy added to your message. Press Send to send it");
+                    }
+                    Err(reason) => ui.notice(reason),
+                }
+            });
         });
         let weak = Rc::downgrade(&viewer);
         download.connect_clicked(move |_| {
@@ -1260,6 +1318,7 @@ impl MediaViewer {
         }
     }
     pub fn open(self: &Rc<Self>) {
+        self.refresh_edit();
         if let Some(source) = self
             .source
             .borrow()
@@ -1291,6 +1350,21 @@ impl MediaViewer {
         a.play();
         self.animation.replace(Some(a));
     }
+    /// The Edit button works only on a picture the editor can open.
+    fn refresh_edit(&self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let id = self.items.borrow().get(self.index.get()).map(|item| item.id.clone());
+        let editable = id
+            .and_then(|id| ui.store.message(&self.owner, &self.peer, &id))
+            .and_then(|message| message.attachment)
+            .is_some_and(|file| crate::picture_editor_ui::editable(&file.name));
+        self.edit.set_sensitive(editable);
+        self.edit.set_tooltip_text(Some(if editable {
+            "Edit a copy and add it to your message"
+        } else {
+            "Only JPEG, PNG and WebP pictures can be edited"
+        }));
+    }
     fn move_by(self: &Rc<Self>, delta: i32) {
         if self.closing.get() {
             return;
@@ -1308,6 +1382,7 @@ impl MediaViewer {
             self.clear_close_targets();
         }
         self.index.set(index);
+        self.refresh_edit();
         self.update_position(delta);
         self.root.grab_focus();
         if !self.owner.is_empty() {
@@ -1399,6 +1474,7 @@ impl MediaViewer {
     }
     fn apply_media_window(self: &Rc<Self>, window: crate::media_store::MediaWindow) {
         self.index.set(window.index);
+        self.refresh_edit();
         let items: Vec<_> = window.messages.into_iter().map(MediaItem::live).collect();
         let mut frames = vec![];
         let mut pictures = vec![];

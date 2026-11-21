@@ -69,6 +69,24 @@ geometry is rounded to even values. Trims apply to the source timeline and must 
    helper still crops and rotates; a helper that refuses a request this build wrote reports "The
    picture editing helper is out of date. Rebuild with cargo build" instead of a generic failure.
 
+   **Gallery.** The picture gallery (the media viewer) has an Edit button for JPEG, PNG and WebP
+   pictures that are downloaded. Done does not change the picture in the chat: the edit is a new
+   picture, added to the message being written (so a caption can go with it) and sent with Send.
+   It is dropped, and its file deleted, if the conversation moved on in the meantime.
+
+   **Edited copies are temporary.** The result is a file under `~/.cache/monogram-desktop/edited`,
+   private and named at random. It is deleted as soon as it is not needed: when the attachment
+   is removed or replaced, when the picture has uploaded, when a message still waiting to upload
+   is deleted, or when a copy cannot be added. As a safety net for one forgotten (a crash), anything
+   older than six hours is swept whenever the editor opens.
+
+   **Pen pressure.** Pressure is read from the same drag gesture that handles the pointer, from
+   the event's pressure axis. An earlier version used a separate stylus gesture next to it, which
+   the drag gesture's claim on the pen's touch denied, so no pressure ever arrived. To see what a
+   device reports, run with `MONOGRAM_DEBUG_PEN=1`: every press and move prints the device name,
+   its source, its tool type and the pressure to stderr. A pen that reports no pressure draws one
+   width, like a mouse.
+
    **Layout (built to fit a small window).** The picture takes all the room. Down its left edge is
    a strip of drawing tools (freehand, text, circle, square, arrow); with none chosen, you are cropping
    and drag the frame's corner brackets and edge grips. The header holds Cancel, the mark colour (a

@@ -28,7 +28,10 @@ use std::{
 /// Longest edge of the preview texture; the crop works in source pixels regardless.
 const PREVIEW_EDGE: u32 = 1600;
 /// Edited copies are removed after this long, whether or not they were sent.
-const KEEP_EDITED: Duration = Duration::from_secs(24 * 60 * 60);
+/// Edited copies are temporary. They are deleted as soon as they are not needed (sent, removed,
+/// replaced, or the conversation moved on); this is only the safety net for one that is forgotten,
+/// e.g. after a crash. Long enough to retry a failed upload the same evening.
+const KEEP_EDITED: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Pictures the helper can edit: JPEG, PNG and WebP.
 pub fn editable(name: &str) -> bool {
@@ -68,6 +71,11 @@ fn is_edited_copy(path: &Path) -> bool {
     path.parent() == Some(edits_root().as_path())
         && path.components().all(|part| matches!(part, std::path::Component::Normal(_) | std::path::Component::RootDir | std::path::Component::Prefix(_)))
 }
+/// Remove the edited copy a `file:` URI names, if it is one. Anything else is left alone.
+pub fn discard_edited_uri(uri: &str) {
+    discard_edited(gio::File::for_uri(uri).path());
+}
+
 /// Remove `path` if (and only if) it is one of our edited copies.
 pub fn discard_edited(path: Option<PathBuf>) {
     if let Some(path) = path.filter(|path| is_edited_copy(path)) {
@@ -1405,5 +1413,36 @@ mod tests {
         settle(300);
         discard_edited(Some(edited));
         ui.window.close();
+    }
+
+    #[test]
+    fn a_file_uri_discards_only_our_edited_copies() {
+        let root = edits_root();
+        std::fs::create_dir_all(&root).unwrap();
+        let ours = root.join(format!("authored-uri-{}.png", uuid::Uuid::new_v4()));
+        std::fs::write(&ours, b"x").unwrap();
+        let theirs = std::env::temp_dir().join(format!("keep-uri-{}.png", uuid::Uuid::new_v4()));
+        std::fs::write(&theirs, b"x").unwrap();
+        let uri = |path: &Path| gio::File::for_path(path).uri().to_string();
+        discard_edited_uri(&uri(&theirs));
+        discard_edited_uri("https://example.org/picture.png");
+        discard_edited_uri("not a uri at all");
+        discard_edited_uri("");
+        assert!(theirs.exists(), "a file of the user's is never deleted");
+        // A path that climbs out of the folder, written as a URI, is not ours either.
+        let climbing = format!("{}/../{}", uri(&root), theirs.file_name().unwrap().to_string_lossy());
+        discard_edited_uri(&climbing);
+        assert!(theirs.exists());
+        assert!(ours.exists(), "nothing of ours was touched by those");
+        discard_edited_uri(&uri(&ours));
+        assert!(!ours.exists(), "ours goes");
+        discard_edited_uri(&uri(&ours));
+        let _ = std::fs::remove_file(theirs);
+    }
+
+    #[test]
+    fn a_forgotten_edited_copy_is_swept_within_hours_not_days() {
+        assert!(KEEP_EDITED >= Duration::from_secs(60 * 60), "long enough to retry a failed upload");
+        assert!(KEEP_EDITED <= Duration::from_secs(12 * 60 * 60), "but temporary");
     }
 }

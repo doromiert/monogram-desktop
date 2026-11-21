@@ -389,12 +389,17 @@ impl Ui {
                     }
                 },
                 Ok(uploaded) => {
+                    // The picture is on the server now: an edited copy has done its job.
+                    let spent = message.upload.as_ref().map(|draft| draft.uri.clone());
                     message.upload = None;
                     message.attachment = Some(uploaded.attachment.clone());
                     message.unsupported_attachment = true;
                     message.delivery = "sending".into();
                     if !self.upload_row(&work.owner, &work.peer, message.clone()) {
                         continue;
+                    }
+                    if let Some(uri) = spent {
+                        crate::picture_editor_ui::discard_edited_uri(&uri);
                     }
                     // Metadata is durable before moving the snapshot or submitting the stanza.
                     let weak = Rc::downgrade(self);

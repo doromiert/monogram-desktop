@@ -1519,6 +1519,10 @@ impl Ui {
                     return;
                 }
                 self.uploads.borrow_mut().cancel(id);
+                // Deleting a picture that was still waiting to upload also deletes its edited copy.
+                if let Some(draft) = message.as_ref().and_then(|m| m.upload.as_ref()) {
+                    crate::picture_editor_ui::discard_edited_uri(&draft.uri);
+                }
                 if message.as_ref().is_some_and(|m| m.upload.is_some()) {
                     let (account, id) = (s.account.clone(), id.clone());
                     gtk::gio::spawn_blocking(move || {

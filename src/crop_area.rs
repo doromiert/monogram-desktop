@@ -49,9 +49,29 @@ pub fn pressure_level(pressure: f64) -> u8 {
 /// Most points a stroke in progress keeps, so a long drag cannot grow without bound.
 const MAX_SKETCH_POINTS: usize = 4096;
 
-/// Whether the event the gesture is handling came from a pen.
-fn from_pen(gesture: &impl IsA<gtk::EventController>) -> bool {
-    gesture.current_event_device().is_some_and(|device| device.source() == gdk::InputSource::Pen)
+/// A pressure reading as 0 to 1, or `None` when there is none. A mouse, a finger and a pen that
+/// does not report pressure all give `None`, so their lines are one width; a reading that is not
+/// a number is treated as absent rather than as full pressure.
+pub fn usable_pressure(raw: Option<f64>) -> Option<f64> {
+    raw.filter(|value| value.is_finite()).map(|value| value.clamp(0., 1.))
+}
+
+/// How hard the pen presses in the event the gesture is handling. The drag gesture that already
+/// owns the press reads it from its own event: a second gesture beside it would be denied the
+/// pen's touch, which is what made pressure never arrive.
+fn event_pressure(gesture: &impl IsA<gtk::EventController>) -> Option<f64> {
+    let event = gesture.current_event()?;
+    let pressure = usable_pressure(event.axis(gdk::AxisUse::Pressure));
+    if std::env::var_os("MONOGRAM_DEBUG_PEN").is_some() {
+        eprintln!(
+            "pen: device={:?} source={:?} tool={:?} pressure={:?}",
+            event.device().map(|device| device.name()),
+            event.device().map(|device| device.source()),
+            event.device_tool().map(|tool| tool.tool_type()),
+            pressure
+        );
+    }
+    pressure
 }
 
 const MARGIN: f64 = 14.;
@@ -86,8 +106,9 @@ mod imp {
         pub pending: RefCell<Option<ViewShape>>,
         /// Pen pressure for each point of the line being drawn; empty for a mouse.
         pub pending_pressure: RefCell<Vec<u8>>,
-        /// Where in the widget a stylus stroke began, so later positions become drag offsets.
-        pub stylus_origin: Cell<Option<(f64, f64)>>,
+        /// Some point of the line so far came with a pressure reading. A line where none did (a
+        /// mouse) keeps no pressure at all, so it stays one width.
+        pub any_pressure: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -119,62 +140,24 @@ mod imp {
             let weak = area.downgrade();
             drag.connect_drag_begin(move |gesture, x, y| {
                 if let Some(area) = weak.upgrade() {
-                    // A pen drawing is handled below, with its pressure; a pen cropping drags as usual.
-                    if area.imp().tool.get() != Tool::Crop && from_pen(gesture) {
-                        return;
-                    }
-                    area.begin_sketch(x, y, None);
+                    area.begin_sketch(x, y, event_pressure(gesture));
                 }
             });
             let weak = area.downgrade();
             drag.connect_drag_update(move |gesture, dx, dy| {
                 if let Some(area) = weak.upgrade() {
-                    if area.imp().tool.get() != Tool::Crop && from_pen(gesture) {
-                        return;
-                    }
-                    area.update_drag(dx, dy);
+                    area.update_drag_pressed(dx, dy, event_pressure(gesture));
                 }
             });
             let weak = area.downgrade();
-            drag.connect_drag_end(move |gesture, _, _| {
+            drag.connect_drag_end(move |_, _, _| {
                 if let Some(area) = weak.upgrade() {
-                    if area.imp().tool.get() != Tool::Crop && from_pen(gesture) {
-                        return;
-                    }
                     area.imp().drag.replace(None);
                     area.finish_sketch();
                     area.queue_draw();
                 }
             });
             area.add_controller(drag);
-
-            // A pen reports how hard it presses; the line is as wide as the pressure says.
-            let stylus = gtk::GestureStylus::new();
-            let weak = area.downgrade();
-            stylus.connect_down(move |gesture, x, y| {
-                if let Some(area) = weak.upgrade().filter(|area| area.imp().tool.get() != Tool::Crop) {
-                    area.imp().stylus_origin.set(Some((x, y)));
-                    area.begin_sketch(x, y, gesture.axis(gdk::AxisUse::Pressure));
-                }
-            });
-            let weak = area.downgrade();
-            stylus.connect_motion(move |gesture, x, y| {
-                if let Some(area) = weak.upgrade() {
-                    if let Some((ox, oy)) = area.imp().stylus_origin.get() {
-                        area.update_drag_pressed(x - ox, y - oy, gesture.axis(gdk::AxisUse::Pressure));
-                    }
-                }
-            });
-            let weak = area.downgrade();
-            stylus.connect_up(move |gesture, x, y| {
-                if let Some(area) = weak.upgrade() {
-                    if let Some((ox, oy)) = area.imp().stylus_origin.take() {
-                        area.update_drag_pressed(x - ox, y - oy, gesture.axis(gdk::AxisUse::Pressure));
-                        area.finish_sketch();
-                    }
-                }
-            });
-            area.add_controller(stylus);
 
             let motion = gtk::EventControllerMotion::new();
             let weak = area.downgrade();
@@ -270,7 +253,7 @@ impl CropArea {
         imp.text_click.set(None);
         imp.pending.replace(None);
         imp.pending_pressure.replace(Vec::new());
-        imp.stylus_origin.set(None);
+        imp.any_pressure.set(false);
         imp.drag.replace(None);
         self.set_cursor_from_name(Some(if tool == Tool::Crop { "default" } else { "crosshair" }));
         self.queue_draw();
@@ -407,7 +390,8 @@ impl CropArea {
             let start = self.view_point(x, y);
             self.imp().sketch.set(start);
             self.imp().pending.replace(None);
-            self.imp().pending_pressure.replace(pressure.map(|p| vec![pressure_level(p)]).unwrap_or_default());
+            self.imp().pending_pressure.replace(vec![pressure.map_or(255, pressure_level)]);
+            self.imp().any_pressure.set(pressure.is_some());
             return;
         }
         let (Some(crop), Some(start)) = (self.crop_px(), self.imp().editor.borrow().as_ref().map(Editor::rect)) else {
@@ -445,11 +429,12 @@ impl CropArea {
                     let here = (whole(ex), whole(ey));
                     if path.last() != Some(&here) && path.len() < MAX_SKETCH_POINTS {
                         path.push(here);
+                        // One level per point: the reading if there is one, else the last one.
                         let mut levels = self.imp().pending_pressure.borrow_mut();
-                        // A pen stroke keeps one level per point; a mouse stroke keeps none.
-                        if !levels.is_empty() {
-                            let level = pressure.map_or_else(|| *levels.last().unwrap_or(&255), pressure_level);
-                            levels.push(level);
+                        let level = pressure.map_or_else(|| *levels.last().unwrap_or(&255), pressure_level);
+                        levels.push(level);
+                        if pressure.is_some() {
+                            self.imp().any_pressure.set(true);
                         }
                     }
                     ViewShape::Freehand(path)
@@ -476,7 +461,11 @@ impl CropArea {
             }
             return;
         }
-        let levels = imp.pending_pressure.take();
+        let mut levels = imp.pending_pressure.take();
+        // A line drawn without any pressure reading carries none.
+        if !imp.any_pressure.replace(false) {
+            levels.clear();
+        }
         if let Some(shape) = imp.pending.take() {
             let (color, weight) = self.pen();
             self.edit(|editor| {
@@ -1056,7 +1045,6 @@ mod tests {
         area.finish_sketch();
         assert!(area.editor().unwrap().marks().is_empty());
         assert!(area.imp().pending_pressure.borrow().is_empty());
-        assert!(area.imp().stylus_origin.get().is_none());
     }
 
     #[gtk::test]
@@ -1182,5 +1170,51 @@ mod tests {
         area.set_tool(Tool::Pen);
         area.finish_sketch();
         assert_eq!(asked.get(), 0);
+    }
+
+    #[test]
+    fn a_pressure_reading_is_kept_in_range_and_a_missing_or_broken_one_is_none() {
+        assert_eq!(usable_pressure(Some(0.5)), Some(0.5));
+        assert_eq!(usable_pressure(Some(0.)), Some(0.), "a touch at zero is still a reading");
+        assert_eq!(usable_pressure(Some(1.7)), Some(1.), "clamped, never above one");
+        assert_eq!(usable_pressure(Some(-0.2)), Some(0.));
+        assert_eq!(usable_pressure(None), None, "a mouse reports nothing");
+        assert_eq!(usable_pressure(Some(f64::NAN)), None, "garbage is not full pressure");
+        assert_eq!(usable_pressure(Some(f64::INFINITY)), None);
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn pressure_is_read_by_the_one_drag_gesture_and_no_second_gesture_competes_for_the_pen() {
+        let (area, _window) = shown();
+        let controllers = area.observe_controllers();
+        let (mut drags, mut stylus) = (0, 0);
+        for index in 0..controllers.n_items() {
+            let item = controllers.item(index).unwrap();
+            drags += usize::from(item.is::<gtk::GestureDrag>());
+            stylus += usize::from(item.is::<gtk::GestureStylus>());
+        }
+        assert_eq!((drags, stylus), (1, 0), "a stylus gesture beside the drag gesture is denied the pen's touch");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn a_stroke_whose_first_event_has_no_pressure_still_keeps_the_pressure_that_follows() {
+        let (area, _window) = shown();
+        area.set_editor(Editor::new(2000, 1000));
+        area.set_tool(Tool::Pen);
+        let (left, top, scale) = area.layout().unwrap();
+        // Some stacks send the press without axes and report pressure from the first move.
+        area.begin_sketch(left + 100. * scale, top + 100. * scale, None);
+        area.update_drag_pressed(200. * scale, 50. * scale, Some(0.4));
+        area.update_drag_pressed(400. * scale, 80. * scale, Some(0.9));
+        area.finish_sketch();
+        let mark = area.editor().unwrap().marks()[0].clone();
+        assert_eq!(mark.pressure, [255, pressure_level(0.4), pressure_level(0.9)], "the unreadable first point counts as full");
+        // And a stroke that never had any reading carries none, as before.
+        area.begin_sketch(left + 100. * scale, top + 500. * scale, None);
+        area.update_drag_pressed(300. * scale, 0., None);
+        area.finish_sketch();
+        assert!(area.editor().unwrap().marks()[1].pressure.is_empty());
     }
 }

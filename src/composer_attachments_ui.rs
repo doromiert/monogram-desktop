@@ -88,6 +88,25 @@ impl Ui {
         self.compose_changed();
     }
 
+    /// An edited copy made from a picture in the conversation `(owner, peer)`: add it to the
+    /// message being written, if that conversation is still the open one. Otherwise, or if it
+    /// cannot be added, the copy is deleted: an edited copy is temporary and never left behind.
+    pub fn accept_edited_copy(self: &Rc<Self>, owner: &str, peer: &str, edited: std::path::PathBuf) -> Result<(), &'static str> {
+        let still_here = {
+            let state = self.state.borrow();
+            state.account == owner && state.current().jid == peer
+        };
+        if !still_here {
+            crate::picture_editor_ui::discard_edited(Some(edited));
+            return Err("The conversation changed. Open the picture in its own chat to edit it");
+        }
+        if !self.stage_attachment_files(vec![gio::File::for_path(&edited)]) {
+            crate::picture_editor_ui::discard_edited(Some(edited));
+            return Err("The edited copy could not be added to your message");
+        }
+        Ok(())
+    }
+
     /// Swap `old` for `new` (an edited copy) keeping its position among the attachments.
     pub fn replace_attachment(self: &Rc<Self>, old: &gio::File, old_card: Option<gtk::Overlay>, new: gio::File) {
         let Some(index) = self.attachments.borrow().iter().position(|file| file == old) else {
@@ -515,5 +534,43 @@ mod tests {
         assert!(later.is_sensitive());
         ui.window.close();
     }
-}
 
+    fn edited_file() -> PathBuf {
+        let dir = glib::user_cache_dir().join("monogram-desktop").join("edited");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("authored-test-{}.png", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"an edited copy").unwrap();
+        path
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn an_edited_copy_from_the_gallery_joins_the_message_being_written() {
+        let ui = open_ui("com.negzero.AlbumEditedCopy");
+        let (owner, peer) = (ui.state.borrow().account.clone(), ui.state.borrow().current().jid.clone());
+        let edited = edited_file();
+        assert_eq!(ui.accept_edited_copy(&owner, &peer, edited.clone()), Ok(()));
+        assert_eq!(ui.attachments.borrow().len(), 1);
+        assert_eq!(ui.attachments.borrow()[0].path().as_deref(), Some(edited.as_path()));
+        assert!(edited.exists(), "kept while it waits to be sent");
+        // It can be removed like any attachment, and then it is gone for good.
+        crate::picture_editor_ui::discard_edited(Some(edited.clone()));
+        assert!(!edited.exists());
+        ui.window.close();
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn an_edited_copy_is_deleted_if_the_conversation_moved_on_or_it_cannot_be_added() {
+        let ui = open_ui("com.negzero.AlbumEditedCopyGone");
+        let (owner, peer) = (ui.state.borrow().account.clone(), ui.state.borrow().current().jid.clone());
+        let elsewhere = edited_file();
+        assert!(ui.accept_edited_copy(&owner, "someone-else@example.org", elsewhere.clone()).is_err());
+        assert!(!elsewhere.exists(), "not left behind for a chat that is no longer open");
+        assert!(ui.attachments.borrow().is_empty());
+        let other_account = edited_file();
+        assert!(ui.accept_edited_copy("other@example.org", &peer, other_account.clone()).is_err());
+        assert!(!other_account.exists());
+        ui.window.close();
+    }
+}
