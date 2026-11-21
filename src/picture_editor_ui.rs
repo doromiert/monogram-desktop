@@ -88,10 +88,11 @@ fn busy_page(text: &str) -> gtk::Box {
 
 /// The editor's keyboard shortcuts as (id, what it does, accelerators). Binding and the Shortcuts
 /// window both read this, so the two cannot disagree. Alternatives are separated by `|`.
-pub(crate) const EDITOR_SHORTCUTS: [(&str, &str, &str); 15] = [
+pub(crate) const EDITOR_SHORTCUTS: [(&str, &str, &str); 16] = [
     ("undo", "Undo the last mark", "<Control>z"),
     ("redo", "Redo", "<Control><Shift>z|<Control>y"),
     ("tool-draw", "Draw freehand", "b"),
+    ("tool-text", "Text", "t"),
     ("tool-circle", "Circle", "o"),
     ("tool-square", "Square", "r"),
     ("tool-arrow", "Arrow", "a"),
@@ -192,6 +193,7 @@ impl Ui {
         tool_strip.add_css_class("picture-tools");
         let tool_buttons: Vec<(gtk::ToggleButton, Tool)> = [
             ("document-edit-symbolic", "Draw freehand (B)", Tool::Pen),
+            ("monogram-text-symbolic", "Text (T)", Tool::Text),
             ("monogram-shape-circle-symbolic", "Circle (O)", Tool::Circle),
             ("monogram-shape-square-symbolic", "Square (R)", Tool::Square),
             ("monogram-shape-arrow-symbolic", "Arrow (A)", Tool::Arrow),
@@ -224,7 +226,8 @@ impl Ui {
         size.update_property(&[gtk::accessible::Property::Label("Line size in pixels")]);
         let size_box = bx(true, 6);
         margins(&size_box, 12);
-        size_box.append(&label("Line size", "heading"));
+        let size_heading = label("Line size", "heading");
+        size_box.append(&size_heading);
         size_box.append(&size);
         let size_button = gtk::MenuButton::builder().label("12 px").tooltip_text("Line size").popover(&gtk::Popover::builder().child(&size_box).build()).build();
         let undo = icon_button("edit-undo-symbolic", "Undo (nothing drawn yet)");
@@ -350,16 +353,25 @@ impl Ui {
                 controls.area.edit(|editor| editor.set_aspect(choice));
             });
         }
+        // The slider holds the line size for the drawing tools and the text size for the text tool,
+        // each remembered while the other is in use.
+        let sizes = Rc::new((Cell::new(12.0_f64), Cell::new(48.0_f64)));
         {
             // The colour and the size feed the pen; an exact size in pixels is used as chosen.
             let pen = {
-                let (area, ink, size, size_button) = (area.clone(), ink.clone(), size.clone(), size_button.clone());
+                let (area, ink, size, size_button, sizes) = (area.clone(), ink.clone(), size.clone(), size_button.clone(), sizes.clone());
                 Rc::new(move || {
                     let colour = ink.rgba();
                     let channel = |value: f32| (value.clamp(0., 1.) * 255.).round() as u8;
                     let pixels = size.value().round() as u32;
                     size_button.set_label(&format!("{pixels} px"));
-                    area.set_pen([channel(colour.red()), channel(colour.green()), channel(colour.blue())], Weight::Px(pixels));
+                    if area.tool() == Tool::Text {
+                        sizes.1.set(f64::from(pixels));
+                    } else {
+                        sizes.0.set(f64::from(pixels));
+                    }
+                    let line = sizes.0.get().round() as u32;
+                    area.set_pen([channel(colour.red()), channel(colour.green()), channel(colour.blue())], Weight::Px(line));
                 })
             };
             pen();
@@ -373,7 +385,8 @@ impl Ui {
             let changing = Rc::new(Cell::new(false));
             let buttons: Rc<Vec<(gtk::ToggleButton, Tool)>> = Rc::new(tool_buttons.clone());
             for (button, tool) in tool_buttons {
-                let (area, buttons, changing) = (area.clone(), buttons.clone(), changing.clone());
+                let (area, buttons, changing, sizes) = (area.clone(), buttons.clone(), changing.clone(), sizes.clone());
+                let (size, size_button, size_heading) = (size.clone(), size_button.clone(), size_heading.clone());
                 button.connect_toggled(move |this| {
                     if changing.get() {
                         return;
@@ -387,6 +400,18 @@ impl Ui {
                     } else {
                         area.set_tool(Tool::Crop);
                     }
+                    // The size slider means text size for the text tool and line size otherwise.
+                    let text = area.tool() == Tool::Text;
+                    let (line, words) = (sizes.0.get(), sizes.1.get());
+                    if text {
+                        size.set_range(8., 512.);
+                        size.set_value(words);
+                    } else {
+                        size.set_range(1., f64::from(MAX_STROKE));
+                        size.set_value(line);
+                    }
+                    size_heading.set_label(if text { "Text size" } else { "Line size" });
+                    size_button.set_tooltip_text(Some(if text { "Text size" } else { "Line size" }));
                     changing.set(false);
                 });
             }
@@ -464,7 +489,7 @@ impl Ui {
             let buttons: Rc<Vec<(gtk::ToggleButton, Tool)>> = Rc::new(
                 ui_tool_buttons.clone(),
             );
-            for (id, tool) in [("tool-draw", Tool::Pen), ("tool-circle", Tool::Circle), ("tool-square", Tool::Square), ("tool-arrow", Tool::Arrow)] {
+            for (id, tool) in [("tool-draw", Tool::Pen), ("tool-text", Tool::Text), ("tool-circle", Tool::Circle), ("tool-square", Tool::Square), ("tool-arrow", Tool::Arrow)] {
                 let buttons = buttons.clone();
                 bind(id, Box::new(move || {
                     if let Some((button, _)) = buttons.iter().find(|(_, candidate)| *candidate == tool) {
@@ -501,6 +526,46 @@ impl Ui {
                 }
             }));
             view.add_controller(controller);
+        }
+
+        {
+            // A click with the text tool opens a small entry there; Enter turns what was typed into
+            // text on the picture, in the chosen colour and text size.
+            let (area_weak, toasts_weak, sizes) = (area.downgrade(), toasts.downgrade(), sizes.clone());
+            area.connect_text_request(move |at, widget_point| {
+                let Some(area) = area_weak.upgrade() else { return };
+                let entry = gtk::Entry::builder().placeholder_text("Type text, then press Enter").width_chars(24).max_length(crate::picture_editor::MAX_TEXT_CHARS as i32).build();
+                entry.update_property(&[gtk::accessible::Property::Label("Text to add")]);
+                let popover = gtk::Popover::builder().child(&entry).autohide(true).build();
+                popover.set_parent(&area);
+                popover.set_pointing_to(Some(&gdk::Rectangle::new(widget_point.0 as i32, widget_point.1 as i32, 1, 1)));
+                popover.connect_closed(|popover| {
+                    let popover = popover.clone();
+                    glib::idle_add_local_once(move || popover.unparent());
+                });
+                let (toasts_weak, sizes, area_weak) = (toasts_weak.clone(), sizes.clone(), area.downgrade());
+                let target = popover.downgrade();
+                entry.connect_activate(move |entry| {
+                    let (Some(area), Some(popover)) = (area_weak.upgrade(), target.upgrade()) else { return };
+                    let words = entry.text().to_string();
+                    popover.popdown();
+                    if words.trim().is_empty() {
+                        return;
+                    }
+                    let (color, _) = area.pen_choice();
+                    let placed = Cell::new(false);
+                    if let Some(bitmap) = area.render_text(&words, sizes.1.get().round() as u32) {
+                        area.edit(|editor| placed.set(editor.add_text(at, &words, bitmap, color)));
+                    }
+                    if !placed.get() {
+                        if let Some(toasts) = toasts_weak.upgrade() {
+                            toasts.add_toast(adw::Toast::new("That text is too long or too large for this picture"));
+                        }
+                    }
+                });
+                popover.popup();
+                entry.grab_focus();
+            });
         }
 
         // Probe and preview off the GTK thread: both decode untrusted pixels in sandboxes.
@@ -612,6 +677,7 @@ fn preview_matches(info: &crate::media_authoring::SourceInfo, texture: &gdk::Tex
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::picture_editor::ViewShape;
 
     fn fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/authoring").join(name)
@@ -1000,7 +1066,7 @@ mod tests {
     fn every_crop_shape_and_tool_has_an_icon_file_that_ships_with_the_app() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icons/hicolor/scalable/actions");
         let mut icons: Vec<&str> = ASPECT_CHOICES.iter().map(|(_, icon, _)| *icon).collect();
-        icons.extend(["monogram-shape-circle-symbolic", "monogram-shape-square-symbolic", "monogram-shape-arrow-symbolic"]);
+        icons.extend(["monogram-text-symbolic", "monogram-shape-circle-symbolic", "monogram-shape-square-symbolic", "monogram-shape-arrow-symbolic"]);
         for icon in icons {
             let svg = std::fs::read_to_string(dir.join(format!("{icon}.svg"))).unwrap_or_else(|_| panic!("{icon}.svg is missing"));
             assert!(svg.contains("<svg") && svg.contains("viewBox=\"0 0 16 16\""), "{icon} is a 16 px symbolic icon");
@@ -1209,6 +1275,135 @@ mod tests {
         settle(200);
         let dialog = ui.window.visible_dialog().expect("the shortcuts window");
         assert!(dialog.is::<adw::ShortcutsDialog>());
+        ui.window.close();
+    }
+
+    fn size_slider(ui: &Rc<Ui>) -> gtk::Scale {
+        let dialog = ui.window.visible_dialog().unwrap();
+        find::<gtk::Scale>(dialog.child().unwrap().upcast_ref(), &|w| w.is::<gtk::Scale>()).expect("a size slider")
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display, glycin loaders, the built helper and bubblewrap"]
+    fn the_text_tool_is_in_the_strip_and_the_slider_becomes_a_text_size_while_it_is_chosen() {
+        let ui = open_ui("com.negzero.PictureEditorTextTool");
+        ui.open_picture_editor(copy_of("gradient-64x32.png", "photo.png"), |_| {});
+        assert!(wait(15_000, || dialog_area(&ui).is_some_and(|a| a.editor().is_some())));
+        let area = dialog_area(&ui).unwrap();
+        let size = size_slider(&ui);
+        let dialog = ui.window.visible_dialog().unwrap();
+        let root: gtk::Widget = dialog.child().unwrap().upcast();
+        let heading = |text: &str| find::<gtk::Label>(&root, &|w| w.downcast_ref::<gtk::Label>().is_some_and(|l| l.label() == text));
+        size.set_value(20.);
+        assert!(heading("Line size").is_some());
+        tool_button(&ui, "Text").set_active(true);
+        assert_eq!(area.tool(), Tool::Text);
+        assert!(heading("Text size").is_some() && heading("Line size").is_none(), "the slider is named for what it sets");
+        let (low, high) = (size.adjustment().lower(), size.adjustment().upper());
+        assert_eq!((low, high), (8., 512.), "text sizes are larger than line sizes");
+        size.set_value(72.);
+        tool_button(&ui, "Square").set_active(true);
+        assert_eq!((size.adjustment().lower(), size.adjustment().upper()), (1., f64::from(MAX_STROKE)));
+        assert_eq!(size.value(), 20., "the line size is where it was left");
+        tool_button(&ui, "Text").set_active(true);
+        assert_eq!(size.value(), 72., "and so is the text size");
+        tool_button(&ui, "Text").set_active(false);
+        assert_eq!(size.value(), 20.);
+        assert!(heading("Line size").is_some());
+        ui.window.close();
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display, glycin loaders, the built helper and bubblewrap"]
+    fn typing_in_the_text_popover_places_the_words_and_a_blank_or_huge_entry_does_not() {
+        let ui = open_ui("com.negzero.PictureEditorTextEntry");
+        ui.window.set_default_size(900, 700);
+        ui.open_picture_editor(copy_of("gradient-64x32.png", "photo.png"), |_| {});
+        assert!(wait(15_000, || dialog_area(&ui).is_some_and(|a| a.editor().is_some())));
+        settle(300);
+        let area = dialog_area(&ui).unwrap();
+        press(&ui, "t");
+        assert_eq!(area.tool(), Tool::Text, "T picks the text tool");
+        let entry = |area: &CropArea| find::<gtk::Entry>(area.upcast_ref(), &|w| w.is::<gtk::Entry>());
+        let type_in = |words: &str| {
+            assert!(area.request_text((4, 4)), "a click asks for text");
+            let field = entry(&area).expect("an entry opened");
+            field.set_text(words);
+            field.emit_activate();
+            settle(200);
+        };
+        size_slider(&ui).set_value(10.);
+        type_in("Hi");
+        assert_eq!(area.editor().unwrap().marks().len(), 1, "the words were placed");
+        let ViewShape::Text { text, rect, .. } = area.editor().unwrap().marks()[0].shape.clone() else { panic!("a text mark") };
+        assert_eq!(text, "Hi");
+        assert!(rect.width > 4 && rect.height > 4 && rect.x <= 4 && rect.y <= 4 + 1, "{rect:?}");
+        type_in("   ");
+        assert_eq!(area.editor().unwrap().marks().len(), 1, "blanks add nothing");
+        size_slider(&ui).set_value(500.);
+        type_in("Far too big for a 64 by 32 picture");
+        assert_eq!(area.editor().unwrap().marks().len(), 1, "text larger than the picture is refused");
+        ui.window.close();
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display, glycin loaders, the built helper and bubblewrap"]
+    fn text_is_saved_into_the_picture_and_the_original_is_untouched() {
+        let ui = open_ui("com.negzero.PictureEditorTextSave");
+        let source = copy_of("gradient-64x32.png", "photo.png");
+        let original = std::fs::read(&source).unwrap();
+        let result = Rc::new(std::cell::RefCell::new(None::<PathBuf>));
+        let sink = result.clone();
+        ui.open_picture_editor(source.clone(), move |edited| *sink.borrow_mut() = Some(edited));
+        assert!(wait(15_000, || dialog_area(&ui).is_some_and(|a| a.editor().is_some())));
+        settle(300);
+        let area = dialog_area(&ui).unwrap();
+        press(&ui, "t");
+        size_slider(&ui).set_value(20.);
+        assert!(area.request_text((2, 2)));
+        let field = find::<gtk::Entry>(area.upcast_ref(), &|w| w.is::<gtk::Entry>()).expect("an entry");
+        field.set_text("Hi");
+        field.emit_activate();
+        settle(200);
+        let rect = area.editor().unwrap().marks()[0].bounds();
+        let dialog = ui.window.visible_dialog().unwrap();
+        let done = find::<gtk::Button>(dialog.child().unwrap().upcast_ref(), &|w| w.downcast_ref::<gtk::Button>().is_some_and(|b| b.label().as_deref() == Some("Done"))).unwrap();
+        assert!(done.is_sensitive(), "text alone is a change worth saving");
+        done.emit_clicked();
+        assert!(wait(20_000, || result.borrow().is_some()));
+        let edited = result.borrow().clone().unwrap();
+        let (before, after) = (gdk::Texture::from_filename(&source).unwrap(), gdk::Texture::from_filename(&edited).unwrap());
+        assert_eq!((after.width(), after.height()), (64, 32));
+        let read = |texture: &gdk::Texture| {
+            let mut data = vec![0u8; 64 * 32 * 4];
+            texture.download(&mut data, 64 * 4);
+            data
+        };
+        let (a, b) = (read(&before), read(&after));
+        let at = |data: &[u8], x: u32, y: u32| {
+            let i = ((y * 64 + x) * 4) as usize;
+            [data[i + 2], data[i + 1], data[i]]
+        };
+        let mut white = 0; // pixels of the pen colour
+        let mut changed_outside = 0;
+        for y in 0..32 {
+            for x in 0..64 {
+                let inside = x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
+                // The text takes the pen colour, red to begin with: solid letter pixels are red.
+                let [r, g, bl] = at(&b, x, y);
+                if inside && r >= 225 && g <= 50 && bl <= 50 && at(&a, x, y) != at(&b, x, y) {
+                    white += 1;
+                }
+                if !inside && at(&a, x, y) != at(&b, x, y) {
+                    changed_outside += 1;
+                }
+            }
+        }
+        assert!(white >= 10, "red letters inside the box: {white} pixels");
+        assert_eq!(changed_outside, 0, "nothing changed outside the text's box");
+        assert_eq!(std::fs::read(&source).unwrap(), original, "the original is untouched");
+        settle(300);
+        discard_edited(Some(edited));
         ui.window.close();
     }
 }

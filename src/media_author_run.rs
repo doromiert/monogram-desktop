@@ -137,9 +137,13 @@ fn execute(
     let mut child = sandbox_command(&bwrap, &helper, &source, out_dir, &plugins, mode)
         .spawn()
         .map_err(|_| Error::Unavailable)?;
-    // The request is a few hundred bytes, far below the pipe buffer, so this cannot block.
+    // A request with text bitmaps can be larger than the pipe buffer, so it is written from its own
+    // thread; the helper reads it all before it starts, and closing the pipe ends it.
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(input);
+        let input = input.to_vec();
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
     }
     let mut stdout = child.stdout.take().ok_or(Error::Failed)?;
     let reader = std::thread::spawn(move || {
@@ -515,6 +519,54 @@ mod tests {
             assert!(author(&source, &job, &work.0, NEVER).is_err());
         }
         assert_eq!(std::fs::read_dir(&work.0).unwrap().count(), 0, "nothing was written");
+    }
+
+    #[test]
+    #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
+    fn text_is_composited_by_the_helper_at_exact_pixels() {
+        let (_dir, source) = fixture("photo.png", &gradient_png());
+        let original = decode_png(&gradient_png());
+        let work = tempdir().unwrap();
+        // A bitmap that is fully covered in the left half and empty in the right, for exact pixels.
+        let (tw, th) = (20usize, 10usize);
+        let coverage: Vec<u8> = (0..tw * th).map(|i| if i % tw < tw / 2 { 255 } else { 0 }).collect();
+        let job = Job {
+            marks: vec![
+                Mark::Text { rect: Rect { x: 8, y: 6, width: tw as u32, height: th as u32 }, color: [255, 255, 0], mask: media_authoring::encode_mask(&coverage) },
+            ],
+            ..Default::default()
+        };
+        let made = author(&source, &job, &work.0, NEVER).unwrap();
+        let marked = decode_png(&std::fs::read(&made.path).unwrap());
+        for (x, y) in [(8, 6), (17, 6), (8, 15), (17, 15), (12, 10)] {
+            assert_eq!(pixel_at(&marked, x, y), [255, 255, 0], "({x},{y}) is covered");
+        }
+        for (x, y) in [(18, 6), (27, 15), (7, 6), (8, 5), (8, 16), (0, 0), (40, 20)] {
+            assert_eq!(pixel_at(&marked, x, y), pixel_at(&original, x, y), "({x},{y}) is untouched");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
+    fn a_request_larger_than_the_pipe_buffer_still_reaches_the_helper() {
+        let (_dir, source) = fixture("photo.png", &gradient_png());
+        let work = tempdir().unwrap();
+        // A 64x32 picture can hold at most a 64x32 bitmap, so make the request big with many
+        // marks that all carry a poorly packing mask of the full size.
+        let mut seed = 99u32;
+        let noise: Vec<u8> = (0..64 * 32)
+            .map(|_| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                (seed >> 24) as u8
+            })
+            .collect();
+        let mask = media_authoring::encode_mask(&noise);
+        let marks: Vec<Mark> = (0..4).map(|_| Mark::Text { rect: Rect { x: 0, y: 0, width: 64, height: 32 }, color: [255, 0, 0], mask: mask.clone() }).collect();
+        let job = Job { marks, ..Default::default() };
+        let json = serde_json::to_vec(&job).unwrap();
+        assert!(json.len() > 8_000, "a sizeable request: {} bytes", json.len());
+        let made = author(&source, &job, &work.0, NEVER).unwrap();
+        assert_eq!((made.width, made.height), (64, 32));
     }
 
     #[test]

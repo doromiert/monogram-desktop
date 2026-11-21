@@ -3,7 +3,7 @@
 //! editor calls. The picture is drawn rotated with a snapshot transform, so no pixels are copied.
 use crate::{
     media_authoring::{arrow_segments, Point, Rect, Rotation, Shape},
-    picture_editor::{hit, Editor, Handle, Kind, ViewMark, ViewShape, Weight, INKS},
+    picture_editor::{hit, Editor, Handle, Kind, TextBitmap, ViewMark, ViewShape, Weight, INKS},
 };
 use gtk::{gdk, glib, graphene, gsk, prelude::*, subclass::prelude::*};
 use std::cell::{Cell, RefCell};
@@ -22,6 +22,8 @@ pub enum Tool {
     Arrow,
     /// Draw freehand.
     Pen,
+    /// Click to place a line of text.
+    Text,
 }
 impl Tool {
     /// What this tool draws; `None` for the crop.
@@ -32,6 +34,7 @@ impl Tool {
             Self::Circle => Some(Kind::Circle),
             Self::Arrow => Some(Kind::Arrow),
             Self::Pen => Some(Kind::Freehand),
+            Self::Text => Some(Kind::Text),
         }
     }
 }
@@ -69,6 +72,13 @@ mod imp {
         pub tool: Cell<Tool>,
         /// The pointer is over the picture (not while it is away).
         pub hovered: Cell<bool>,
+        /// Asked to put a text box at a view point, with the widget point it was clicked at.
+        #[allow(clippy::type_complexity)]
+        pub text_request: RefCell<Option<Box<dyn Fn((u32, u32), (f64, f64))>>>,
+        /// Textures of text marks already built, by bitmap and colour, so a redraw reuses them.
+        pub text_textures: RefCell<Vec<(usize, [u8; 3], gdk::Texture)>>,
+        /// Where a text click began, in view pixels, and in the widget.
+        pub text_click: Cell<Option<((u32, u32), (f64, f64))>>,
         pub ink: Cell<Option<[u8; 3]>>,
         pub weight: Cell<Option<Weight>>,
         /// Where a square drag began, in view pixels, and the square so far.
@@ -257,6 +267,7 @@ impl CropArea {
         let imp = self.imp();
         imp.tool.set(tool);
         imp.sketch.set(None);
+        imp.text_click.set(None);
         imp.pending.replace(None);
         imp.pending_pressure.replace(Vec::new());
         imp.stylus_origin.set(None);
@@ -288,6 +299,56 @@ impl CropArea {
         self.queue_draw();
         self.notify_changed();
     }
+    /// Call `request(view point, widget point)` when the text tool is clicked on the picture.
+    pub fn connect_text_request(&self, request: impl Fn((u32, u32), (f64, f64)) + 'static) {
+        self.imp().text_request.replace(Some(Box::new(request)));
+    }
+
+    /// Ask for text at `view` (view pixels), as a click there would. False when nothing listens or
+    /// the picture is not laid out.
+    pub fn request_text(&self, view: (u32, u32)) -> bool {
+        let Some((left, top, scale)) = self.layout() else { return false };
+        match self.imp().text_request.borrow().as_ref() {
+            Some(request) => {
+                request(view, (left + f64::from(view.0) * scale, top + f64::from(view.1) * scale));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Draw `text` at `px` pixels tall (a line's height) into a coverage bitmap, as the editor
+    /// shows it and the helper will composite it. Needs the display's renderer, so `None` when the
+    /// widget is not on screen, and `None` for text that is empty or would be too large.
+    pub fn render_text(&self, text: &str, px: u32) -> Option<TextBitmap> {
+        let words: String = text.chars().filter(|c| !c.is_control()).collect();
+        if words.trim().is_empty() || words.chars().count() > crate::picture_editor::MAX_TEXT_CHARS {
+            return None;
+        }
+        let px = px.clamp(4, 1024);
+        let layout = self.create_pango_layout(Some(&words));
+        let mut font = gtk::pango::FontDescription::from_string("Sans Bold");
+        font.set_absolute_size(f64::from(px) * f64::from(gtk::pango::SCALE));
+        layout.set_font_description(Some(&font));
+        let (width, height) = layout.pixel_size();
+        // A little room so antialiasing at the edges is not cut off.
+        let (pad, width, height) = (2, width.max(1) as u32 + 4, height.max(1) as u32 + 4);
+        if u64::from(width) * u64::from(height) > crate::picture_editor::MAX_TEXT_PIXELS {
+            return None;
+        }
+        let snapshot = gtk::Snapshot::new();
+        snapshot.translate(&graphene::Point::new(pad as f32, pad as f32));
+        snapshot.append_layout(&layout, &gdk::RGBA::new(1., 1., 1., 1.));
+        let node = snapshot.to_node()?;
+        let renderer = self.native()?.renderer()?;
+        let texture = renderer.render_texture(&node, Some(&graphene::Rect::new(0., 0., width as f32, height as f32)));
+        let mut pixels = vec![0u8; width as usize * height as usize * 4];
+        texture.download(&mut pixels, width as usize * 4);
+        // The texture is BGRA with premultiplied alpha; the coverage is its alpha channel.
+        let alpha: Vec<u8> = pixels.chunks_exact(4).map(|px| px[3]).collect();
+        alpha.iter().any(|a| *a > 0).then(|| TextBitmap { width, height, alpha: alpha.into() })
+    }
+
     pub fn connect_changed(&self, callback: impl Fn() + 'static) {
         self.imp().changed.replace(Some(Box::new(callback)));
     }
@@ -337,6 +398,11 @@ impl CropArea {
     /// with a drawing tool and grabs a crop handle with the crop tool.
     fn begin_sketch(&self, x: f64, y: f64, pressure: Option<f64>) {
         self.grab_focus();
+        if self.imp().tool.get() == Tool::Text {
+            let click = self.view_point(x, y).map(|(vx, vy)| ((vx.round() as u32, vy.round() as u32), (x, y)));
+            self.imp().text_click.set(click);
+            return;
+        }
         if self.imp().tool.get() != Tool::Crop {
             let start = self.view_point(x, y);
             self.imp().sketch.set(start);
@@ -364,7 +430,7 @@ impl CropArea {
             let (ex, ey) = ((sx + dx / scale).clamp(0., f64::from(view_w)), (sy + dy / scale).clamp(0., f64::from(view_h)));
             let whole = |value: f64| value.round() as u32;
             let shape = match self.imp().tool.get() {
-                Tool::Crop => return,
+                Tool::Crop | Tool::Text => return,
                 Tool::Square | Tool::Circle => {
                     let (x0, y0, x1, y1) = (sx.min(ex).round(), sy.min(ey).round(), sx.max(ex).round(), sy.max(ey).round());
                     let rect = Rect { x: x0 as u32, y: y0 as u32, width: (x1 - x0) as u32, height: (y1 - y0) as u32 };
@@ -401,6 +467,15 @@ impl CropArea {
     fn finish_sketch(&self) {
         let imp = self.imp();
         imp.sketch.set(None);
+        // A click with the text tool asks the dialog where to type.
+        if let Some((view, widget)) = imp.text_click.take() {
+            if imp.tool.get() == Tool::Text {
+                if let Some(request) = imp.text_request.borrow().as_ref() {
+                    request(view, widget);
+                }
+            }
+            return;
+        }
         let levels = imp.pending_pressure.take();
         if let Some(shape) = imp.pending.take() {
             let (color, weight) = self.pen();
@@ -409,6 +484,8 @@ impl CropArea {
                     ViewShape::Rect(shape, rect) => editor.add_mark(shape, rect, color, weight),
                     ViewShape::Arrow(from, to) => editor.add_arrow(from, to, color, weight),
                     ViewShape::Freehand(points) => editor.add_pressured_path(&points, &levels, color, weight),
+                    // Text is placed from the dialog once it has been typed.
+                    ViewShape::Text { .. } => false,
                 };
             });
         }
@@ -429,6 +506,15 @@ impl CropArea {
         self.set_cursor_from_name(name.or(Some("default")));
     }
     fn key(&self, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
+        // With the text tool, Enter asks for text at the corner of the crop: the way to place text
+        // without a pointer.
+        if matches!(key, gdk::Key::Return | gdk::Key::KP_Enter) && self.imp().tool.get() == Tool::Text {
+            if let Some(rect) = self.imp().editor.borrow().as_ref().map(Editor::rect) {
+                if self.request_text((rect.x, rect.y)) {
+                    return glib::Propagation::Stop;
+                }
+            }
+        }
         let (dx, dy) = match key {
             gdk::Key::Left | gdk::Key::KP_Left => (-1, 0),
             gdk::Key::Right | gdk::Key::KP_Right => (1, 0),
@@ -486,6 +572,59 @@ impl CropArea {
                     .map(|(a, b)| ((left + a.0 * scale, top + a.1 * scale), (left + b.0 * scale, top + b.1 * scale)))
                     .collect();
                 stroke_path(&segments);
+            }
+            ViewShape::Text { rect, bitmap, source_turns, .. } => {
+                let rotation = self.imp().editor.borrow().as_ref().map_or(Rotation::None, Editor::rotation);
+                let view_turns = match rotation {
+                    Rotation::None => 0,
+                    Rotation::Clockwise90 => 1,
+                    Rotation::Half => 2,
+                    Rotation::Counterclockwise90 => 3,
+                };
+                let key = std::rc::Rc::as_ptr(&bitmap.alpha) as *const u8 as usize;
+                let texture = {
+                    let mut cache = self.imp().text_textures.borrow_mut();
+                    match cache.iter().find(|(k, c, _)| *k == key && *c == mark.color) {
+                        Some((_, _, texture)) => texture.clone(),
+                        None => {
+                            // Premultiplied RGBA: the colour scaled by each pixel's coverage.
+                            let mut data = Vec::with_capacity(bitmap.alpha.len() * 4);
+                            for a in bitmap.alpha.iter() {
+                                let level = u16::from(*a);
+                                data.extend(mark.color.iter().map(|c| ((u16::from(*c) * level + 127) / 255) as u8));
+                                data.push(*a);
+                            }
+                            let texture = gdk::MemoryTexture::new(
+                                bitmap.width as i32,
+                                bitmap.height as i32,
+                                gdk::MemoryFormat::R8g8b8a8Premultiplied,
+                                &glib::Bytes::from_owned(data),
+                                bitmap.width as usize * 4,
+                            )
+                            .upcast::<gdk::Texture>();
+                            if cache.len() > 64 {
+                                cache.clear();
+                            }
+                            cache.push((key, mark.color, texture.clone()));
+                            texture
+                        }
+                    }
+                };
+                // Centre of the box in the widget; the bitmap is turned about it like the picture is.
+                let (cx, cy) = (
+                    left + (f64::from(rect.x) + f64::from(rect.width) / 2.) * scale,
+                    top + (f64::from(rect.y) + f64::from(rect.height) / 2.) * scale,
+                );
+                let (w, h) = (f64::from(bitmap.width) * scale, f64::from(bitmap.height) * scale);
+                snapshot.save();
+                snapshot.translate(&graphene::Point::new(cx as f32, cy as f32));
+                snapshot.rotate(f32::from((view_turns + source_turns) % 4) * 90.);
+                snapshot.append_scaled_texture(
+                    &texture,
+                    gsk::ScalingFilter::Linear,
+                    &graphene::Rect::new((-w / 2.) as f32, (-h / 2.) as f32, w as f32, h as f32),
+                );
+                snapshot.restore();
             }
             ViewShape::Freehand(points) if mark.pressure.len() == points.len() && !points.is_empty() => {
                 // A pen line: each piece as wide as the pressure over it, as the helper paints it.
@@ -608,6 +747,7 @@ mod tests {
     use super::*;
     use crate::picture_editor::{Editor, Weight, MIN_MARK};
     use crate::picture_editor::ViewShape;
+    use std::{cell::{Cell, RefCell}, rc::Rc};
 
     fn settle() {
         let context = glib::MainContext::default();
@@ -957,5 +1097,90 @@ mod tests {
         }
         area.set_tool(Tool::Crop);
         assert!(area.grid_visible(), "and it is back with the crop");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn text_is_drawn_into_a_coverage_bitmap_sized_by_the_words_and_the_size() {
+        let (area, _window) = shown();
+        let small = area.render_text("Hello", 20).expect("a bitmap");
+        let large = area.render_text("Hello", 40).expect("a bitmap");
+        assert_eq!(small.alpha.len() as u32, small.width * small.height);
+        assert!(small.alpha.iter().any(|a| *a == 255), "solid where the letters are");
+        assert!(small.alpha.iter().any(|a| *a == 0), "empty around them");
+        assert!(small.alpha.iter().filter(|a| **a > 0 && **a < 255).count() > 10, "antialiased edges");
+        assert!(large.width > small.width * 3 / 2 && large.height > small.height * 3 / 2, "twice the size is about twice the bitmap");
+        let longer = area.render_text("Hello, world", 20).unwrap();
+        assert!(longer.width > small.width * 2, "more words are wider");
+        // Padding keeps the first and last columns empty so antialiasing is not cut off.
+        let column_empty = |x: u32| (0..small.height).all(|y| small.alpha[(y * small.width + x) as usize] == 0);
+        assert!(column_empty(0) && column_empty(small.width - 1));
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn text_that_is_empty_control_only_too_long_or_too_big_makes_no_bitmap() {
+        let (area, _window) = shown();
+        assert!(area.render_text("", 20).is_none());
+        assert!(area.render_text("   ", 20).is_none());
+        assert!(area.render_text("\u{7}\n\t", 20).is_none(), "controls are not text");
+        assert!(area.render_text(&"x".repeat(crate::picture_editor::MAX_TEXT_CHARS + 1), 20).is_none());
+        assert!(area.render_text(&"x".repeat(crate::picture_editor::MAX_TEXT_CHARS), 1024).is_none(), "a bitmap over the pixel cap");
+        let tiny = area.render_text("a", 1).expect("sizes are clamped up to something readable");
+        assert!(tiny.height >= 8);
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn a_click_with_the_text_tool_asks_for_text_there_and_draws_nothing() {
+        let (area, _window) = shown();
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let sink = asked.clone();
+        area.connect_text_request(move |view, widget| sink.borrow_mut().push((view, widget)));
+        area.set_tool(Tool::Text);
+        let (left, top, scale) = area.layout().unwrap();
+        area.begin_sketch(left + 50. * scale, top + 30. * scale, None);
+        area.update_drag(5., 5.);
+        area.finish_sketch();
+        let asked = asked.borrow();
+        assert_eq!(asked.len(), 1, "one click, one request");
+        let ((vx, vy), (wx, wy)) = asked[0];
+        assert!(vx.abs_diff(50) <= 1 && vy.abs_diff(30) <= 1, "{vx},{vy}");
+        assert!((wx - (left + 50. * scale)).abs() < 1.5 && (wy - (top + 30. * scale)).abs() < 1.5);
+        assert!(area.editor().unwrap().marks().is_empty());
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn other_tools_never_ask_for_text_and_enter_asks_at_the_crop_corner() {
+        let (area, _window) = shown();
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let sink = asked.clone();
+        area.connect_text_request(move |view, _| sink.borrow_mut().push(view));
+        area.set_tool(Tool::Square);
+        drag(&area, (20., 20.), (60., 30.));
+        assert!(asked.borrow().is_empty());
+        area.edit(|e| e.set_rect(30, 12, 100, 60));
+        area.set_tool(Tool::Text);
+        assert!(area.key(gdk::Key::Return, gdk::ModifierType::empty()) == glib::Propagation::Stop);
+        assert_eq!(*asked.borrow(), [(30, 12)], "Enter is a click on the corner of the crop");
+        area.set_tool(Tool::Crop);
+        assert!(area.key(gdk::Key::Return, gdk::ModifierType::empty()) == glib::Propagation::Proceed, "only the text tool takes Enter");
+        assert!(!{ let blank = CropArea::new(); blank.request_text((1, 1)) }, "nothing listens, nothing happens");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn switching_away_from_the_text_tool_forgets_a_click_that_was_not_finished() {
+        let (area, _window) = shown();
+        let asked = Rc::new(Cell::new(0));
+        let sink = asked.clone();
+        area.connect_text_request(move |_, _| sink.set(sink.get() + 1));
+        area.set_tool(Tool::Text);
+        let (left, top, scale) = area.layout().unwrap();
+        area.begin_sketch(left + 10. * scale, top + 10. * scale, None);
+        area.set_tool(Tool::Pen);
+        area.finish_sketch();
+        assert_eq!(asked.get(), 0);
     }
 }

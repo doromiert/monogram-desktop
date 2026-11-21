@@ -70,7 +70,7 @@ geometry is rounded to even values. Trims apply to the source timeline and must 
    picture editing helper is out of date. Rebuild with cargo build" instead of a generic failure.
 
    **Layout (built to fit a small window).** The picture takes all the room. Down its left edge is
-   a strip of drawing tools (freehand, circle, square, arrow); with none chosen, you are cropping
+   a strip of drawing tools (freehand, text, circle, square, arrow); with none chosen, you are cropping
    and drag the frame's corner brackets and edge grips. The header holds Cancel, the mark colour (a
    `GtkColorDialogButton`, so the GNOME colour chooser), the line size (a button showing "12 px"
    that opens a slider, 1 to 128 px, starting at a size that suits the picture), Undo, a **Crop**
@@ -85,7 +85,21 @@ geometry is rounded to even values. Trims apply to the source timeline and must 
    replaces the attachment in the same position; the original is never modified. Cancel, Escape or
    closing stops a running edit.
 
-   **Keyboard.** Ctrl+Z undo, Ctrl+Shift+Z or Ctrl+Y redo, B draw, O circle, R square, A arrow
+   **Text.** With the Text tool (T), clicking the picture opens a small entry there; Enter puts the
+   words on the picture in the chosen colour. The slider then sets the text size (8 to 512 px of
+   line height) and remembers it apart from the line size. With the tool chosen and the picture
+   focused, Enter asks for text at the crop's corner, the pointer-free way. The words are drawn
+   into a coverage bitmap in the editor (so the sandbox needs no fonts), kept upright, and travel
+   as a `Mark::Text` whose deflated, base64 mask the helper composites over the picture with
+   source-over blending. The bitmap is turned to the source orientation when it is sent, so the
+   text reads upright where it was put however the picture is later rotated (tested for every
+   combination of turns, painting the real mask). Limits: 200 characters, 4 million bitmap pixels
+   per text and 8 million in all, enforced by the editor, by the plan and again by the helper, which
+   also refuses a mask that does not inflate to exactly its size. A request can now be about 1 MiB,
+   so it is written to the helper from its own thread. Text that is blank, too long or too large
+   for the picture is refused with a message.
+
+   **Keyboard.** Ctrl+Z undo, Ctrl+Shift+Z or Ctrl+Y redo, B draw, T text, O circle, R square, A arrow
    (pressing a tool key again lets go of it), V crop frame, C Crop menu, S line size, K colour,
    [ and ] thinner and thicker, Ctrl+Left and Ctrl+Right rotate, Ctrl+Enter Done, Escape cancels.
    The list lives in `EDITOR_SHORTCUTS`, which both binds the keys and fills the app's Shortcuts
@@ -101,7 +115,7 @@ geometry is rounded to even values. Trims apply to the source timeline and must 
    Undo in the header takes back the newest; Redo appears next to it only after an undo and goes
    when nothing is left to redo or something new is drawn. Marks are stored in view pixels, so they turn with the picture, and
    `Editor::job` converts them to source pixels. They are part of the `Job` and `Plan`
-   (`Mark::{Square, Circle, Arrow, Freehand}`; at most 32 marks, 256 points per freehand line and
+   (`Mark::{Square, Circle, Arrow, Freehand, Text}`; at most 32 marks, 256 points per freehand line and
    1024 points in all, stroke 1 to 128 px, every point inside the picture, images only) and the
    confined helper draws them, never the GTK process: it converts to RGBA, paints through
    `media_authoring::paint` in a pad probe, then crops, rotates and scales, so a crop that leaves

@@ -31,6 +31,9 @@ pub struct Limits {
     /// Most path points one freehand mark may have, and all marks together.
     pub max_path_points: usize,
     pub max_points: usize,
+    /// Most pixels in one text mark's bitmap, and in all of them together.
+    pub max_text_pixels: u64,
+    pub max_text_total: u64,
 }
 impl Default for Limits {
     fn default() -> Self {
@@ -42,11 +45,13 @@ impl Default for Limits {
             max_source_duration_ms: 60 * 60 * 1000,
             min_trim_ms: 100,
             max_output_bytes: 256 * 1024 * 1024,
-            max_job_json: 32 * 1024,
+            max_job_json: 1024 * 1024,
             max_marks: 32,
             max_stroke: 128,
             max_path_points: 256,
             max_points: 1024,
+            max_text_pixels: 4_000_000,
+            max_text_total: 8_000_000,
         }
     }
 }
@@ -104,6 +109,10 @@ pub enum Mark {
     Circle { rect: Rect, color: [u8; 3], stroke: u32 },
     /// A line from `from` to `to` with a head at `to`.
     Arrow { from: Point, to: Point, color: [u8; 3], stroke: u32 },
+    /// Text the editor already drew into a bitmap, so the sandbox needs no fonts. `mask` is the
+    /// coverage of each pixel of `rect` (0 to 255, row by row), deflated and base64 encoded;
+    /// the text is painted in `color` where the mask says.
+    Text { rect: Rect, color: [u8; 3], mask: String },
     /// A line through `points` in order, with round ends. `pressure` is how hard a pen pressed at
     /// each point, 1 to 255, and the line is that fraction of `stroke` wide there. Empty means the
     /// same width all along (a mouse); otherwise there is exactly one value per point.
@@ -128,6 +137,7 @@ impl Mark {
             | Self::Circle { stroke, .. }
             | Self::Arrow { stroke, .. }
             | Self::Freehand { stroke, .. } => *stroke,
+            Self::Text { .. } => 1,
         }
     }
     fn color(&self) -> [u8; 3] {
@@ -135,7 +145,8 @@ impl Mark {
             Self::Square { color, .. }
             | Self::Circle { color, .. }
             | Self::Arrow { color, .. }
-            | Self::Freehand { color, .. } => *color,
+            | Self::Freehand { color, .. }
+            | Self::Text { color, .. } => *color,
         }
     }
     /// How many path points the mark carries (what `Limits::max_points` counts).
@@ -148,6 +159,32 @@ impl Mark {
     }
 }
 
+/// Pack a coverage bitmap (one byte per pixel) for a text mark.
+pub fn encode_mask(alpha: &[u8]) -> String {
+    use base64::Engine;
+    use std::io::Write;
+    let mut deflater = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    let _ = deflater.write_all(alpha);
+    base64::engine::general_purpose::STANDARD.encode(deflater.finish().unwrap_or_default())
+}
+
+/// Unpack a text mark's bitmap. `None` unless it holds exactly `width * height` bytes: the
+/// inflater is stopped one byte past that, so a hostile mask cannot grow memory.
+pub fn decode_mask(mask: &str, width: u32, height: u32) -> Option<Vec<u8>> {
+    use base64::Engine;
+    use std::io::Read;
+    let size = u64::from(width).checked_mul(u64::from(height))?;
+    // Deflate cannot be smaller than a thousandth of its output for text, but may be larger than it
+    // for noise; allow a generous bound on the encoded form.
+    if size == 0 || mask.len() as u64 > size.saturating_mul(2).saturating_add(1024) {
+        return None;
+    }
+    let packed = base64::engine::general_purpose::STANDARD.decode(mask).ok()?;
+    let mut alpha = Vec::new();
+    flate2::read::ZlibDecoder::new(&packed[..]).take(size + 1).read_to_end(&mut alpha).ok()?;
+    (alpha.len() as u64 == size).then_some(alpha)
+}
+
 /// Check `marks` against the picture they will be drawn on.
 fn check_marks(marks: &[Mark], width: u32, height: u32, limits: &Limits) -> Result<(), Error> {
     if marks.len() > limits.max_marks {
@@ -155,6 +192,7 @@ fn check_marks(marks: &[Mark], width: u32, height: u32, limits: &Limits) -> Resu
     }
     let inside = |(x, y): Point| x <= width && y <= height;
     let mut points = 0usize;
+    let mut text_pixels = 0u64;
     for mark in marks {
         match mark {
             Mark::Square { rect, .. } | Mark::Circle { rect, .. } => {
@@ -168,6 +206,22 @@ fn check_marks(marks: &[Mark], width: u32, height: u32, limits: &Limits) -> Resu
                 if !inside(*from) || !inside(*to) || from == to {
                     return Err(Error::MarkOutside);
                 }
+            }
+            Mark::Text { rect, mask, .. } => {
+                let right = rect.x.checked_add(rect.width).ok_or(Error::MarkOutside)?;
+                let bottom = rect.y.checked_add(rect.height).ok_or(Error::MarkOutside)?;
+                if rect.width == 0 || rect.height == 0 || right > width || bottom > height {
+                    return Err(Error::MarkOutside);
+                }
+                let pixels = u64::from(rect.width) * u64::from(rect.height);
+                text_pixels += pixels;
+                if pixels > limits.max_text_pixels || text_pixels > limits.max_text_total {
+                    return Err(Error::MarkText);
+                }
+                if decode_mask(mask, rect.width, rect.height).is_none() {
+                    return Err(Error::MarkText);
+                }
+                continue;
             }
             Mark::Freehand { points: path, pressure, .. } => {
                 if path.is_empty() || path.len() > limits.max_path_points || !path.iter().all(|point| inside(*point)) {
@@ -277,6 +331,30 @@ pub fn paint(rgba: &mut [u8], width: u32, height: u32, marks: &[Mark]) -> bool {
             Mark::Arrow { from, to, .. } => {
                 stroke_segments(rgba, &arrow_segments(*from, *to, thickness), f64::from(thickness), color);
             }
+            Mark::Text { rect, mask, .. } => {
+                let Some(coverage) = decode_mask(mask, rect.width, rect.height) else {
+                    return false;
+                };
+                for row in 0..rect.height as usize {
+                    for column in 0..rect.width as usize {
+                        let (x, y) = (rect.x as usize + column, rect.y as usize + row);
+                        let level = u32::from(coverage[row * rect.width as usize + column]);
+                        if level == 0 || x >= w || y >= h {
+                            continue;
+                        }
+                        let at = (y * w + x) * 4;
+                        // Source-over: the text colour over what is already there, keeping any
+                        // transparency of the picture where the text is partly covering.
+                        let under = u32::from(rgba[at + 3]);
+                        let out = level * 255 + under * (255 - level);
+                        for channel in 0..3 {
+                            let mixed = u32::from(color[channel]) * level * 255 + u32::from(rgba[at + channel]) * under * (255 - level);
+                            rgba[at + channel] = (mixed / out.max(1)).min(255) as u8;
+                        }
+                        rgba[at + 3] = (out / 255).min(255) as u8;
+                    }
+                }
+            }
             Mark::Freehand { points, pressure, .. } => {
                 let at = |point: &Point| (f64::from(point.0), f64::from(point.1));
                 let half = f64::from(thickness) / 2.;
@@ -364,6 +442,7 @@ pub enum Error {
     MarkOutside,
     MarkStroke,
     MarkPressure,
+    MarkText,
     MarksOnVideo,
 }
 impl fmt::Display for Error {
@@ -382,6 +461,7 @@ impl fmt::Display for Error {
             Self::TooManyMarks => "There are too many marks on this picture",
             Self::MarkOutside => "A mark is outside the picture",
             Self::MarkStroke => "A mark's line thickness is not supported",
+            Self::MarkText => "A text mark is too large or damaged",
             Self::MarkPressure => "A drawn line's pressure values do not match its points",
             Self::MarksOnVideo => "Videos cannot be drawn on",
         })
@@ -645,11 +725,13 @@ mod tests {
         max_source_duration_ms: 60 * 60 * 1000,
         min_trim_ms: 100,
         max_output_bytes: 256 * 1024 * 1024,
-        max_job_json: 32 * 1024,
+        max_job_json: 1024 * 1024,
         max_marks: 32,
         max_stroke: 128,
         max_path_points: 256,
         max_points: 1024,
+        max_text_pixels: 4_000_000,
+        max_text_total: 8_000_000,
     };
     fn image(width: u32, height: u32) -> SourceInfo {
         SourceInfo { kind: Kind::Image, width, height, duration_ms: None, bytes: 1000 }
@@ -1263,5 +1345,122 @@ mod tests {
         assert!(!json.contains("marks"), "{json}");
         let marked = plan(&Job { marks: vec![square(0, 0, 5, 5, 1)], ..Default::default() }, &image(40, 30), &LIMITS).unwrap();
         assert!(serde_json::to_string(&marked).unwrap().contains("marks"));
+    }
+
+    fn text_mark(x: u32, y: u32, width: u32, height: u32, coverage: &[u8]) -> Mark {
+        Mark::Text { rect: Rect { x, y, width, height }, color: [255, 255, 255], mask: encode_mask(coverage) }
+    }
+
+    #[test]
+    fn a_mask_survives_packing_and_only_the_exact_size_unpacks() {
+        let coverage: Vec<u8> = (0..120).map(|i| (i * 2) as u8).collect();
+        let packed = encode_mask(&coverage);
+        assert_eq!(decode_mask(&packed, 12, 10), Some(coverage.clone()));
+        assert_eq!(decode_mask(&packed, 10, 12), Some(coverage.clone()), "only the pixel count matters here");
+        assert_eq!(decode_mask(&packed, 12, 9), None, "too many bytes for the size");
+        assert_eq!(decode_mask(&packed, 12, 11), None, "too few");
+        assert_eq!(decode_mask(&packed, 0, 10), None);
+        assert_eq!(decode_mask("not base64 !!", 12, 10), None);
+        assert_eq!(decode_mask("AAAA", 12, 10), None, "base64 of something that is not deflate");
+        assert_eq!(decode_mask("", 12, 10), None);
+        assert_eq!(decode_mask(&packed, u32::MAX, u32::MAX), None, "a size that overflows is refused");
+    }
+
+    #[test]
+    fn a_mask_that_inflates_far_past_its_size_is_stopped() {
+        // Small when packed, so the length check passes, but 200 000 bytes when inflated.
+        let bomb = encode_mask(&vec![0u8; 200_000]);
+        assert!(bomb.len() < 2_000, "it packs tiny: {} bytes", bomb.len());
+        assert_eq!(decode_mask(&bomb, 100, 100), None, "not 100x100, and never inflated past one byte over it");
+        // A truly enormous one is refused before it is even decoded.
+        let huge = encode_mask(&vec![0u8; 50_000_000]);
+        assert_eq!(decode_mask(&huge, 100, 100), None);
+        assert_eq!(decode_mask(&bomb, 200, 1000), Some(vec![0u8; 200_000]), "the same bytes are fine at their true size");
+    }
+
+    #[test]
+    fn text_is_composited_over_the_picture_in_its_colour_by_coverage() {
+        let (w, h) = (10, 6);
+        let mut rgba: Vec<u8> = (0..w * h).flat_map(|_| [0u8, 0, 200, 255]).collect();
+        // A 4x2 patch at (3, 2): full, half, a quarter, none; then the same in the second row.
+        let coverage = [255, 128, 64, 0, 255, 128, 64, 0];
+        assert!(paint(&mut rgba, w, h, &[text_mark(3, 2, 4, 2, &coverage)]));
+        assert_eq!(pixel(&rgba, w, 3, 2), [255, 255, 255, 255], "full coverage is the text colour");
+        let half = pixel(&rgba, w, 4, 2);
+        assert!(half[0] > 120 && half[0] < 135 && half[2] > 225, "half way between blue and white: {half:?}");
+        let quarter = pixel(&rgba, w, 5, 2);
+        assert!(quarter[0] > 55 && quarter[0] < 72, "{quarter:?}");
+        assert_eq!(pixel(&rgba, w, 6, 2), [0, 0, 200, 255], "no coverage leaves the picture alone");
+        assert_eq!(pixel(&rgba, w, 3, 3)[0], 255, "the second row too");
+        for (x, y) in [(2, 2), (7, 2), (3, 1), (3, 4), (0, 0)] {
+            assert_eq!(pixel(&rgba, w, x, y), [0, 0, 200, 255], "({x},{y}) is outside the patch");
+        }
+    }
+
+    #[test]
+    fn text_over_a_transparent_picture_keeps_the_transparency_it_does_not_cover() {
+        let (w, h) = (4, 1);
+        let mut rgba = blank(w, h);
+        assert!(paint(&mut rgba, w, h, &[text_mark(0, 0, 4, 1, &[255, 128, 0, 255])]));
+        assert_eq!(pixel(&rgba, w, 0, 0), [255, 255, 255, 255]);
+        let half = pixel(&rgba, w, 1, 0);
+        assert!(half[3] > 120 && half[3] < 135, "half covered is half opaque: {half:?}");
+        assert_eq!(half[0], 255, "and still the text colour, not darkened by the empty pixel");
+        assert_eq!(pixel(&rgba, w, 2, 0), [0, 0, 0, 0], "uncovered stays transparent");
+    }
+
+    #[test]
+    fn a_text_mark_is_checked_for_position_size_and_a_mask_that_fits() {
+        let check = |mark: Mark| plan(&Job { marks: vec![mark], ..Default::default() }, &image(40, 30), &LIMITS);
+        assert!(check(text_mark(0, 0, 40, 30, &vec![9; 1200])).is_ok());
+        assert_eq!(check(text_mark(35, 0, 10, 2, &[0; 20])), Err(Error::MarkOutside));
+        assert_eq!(check(text_mark(0, 0, 0, 2, &[])), Err(Error::MarkOutside));
+        assert_eq!(check(text_mark(0, 0, 4, 2, &[0; 7])), Err(Error::MarkText), "a mask one byte short");
+        assert_eq!(check(text_mark(0, 0, 4, 2, &[0; 9])), Err(Error::MarkText), "and one byte long");
+        let broken = Mark::Text { rect: Rect { x: 0, y: 0, width: 4, height: 2 }, color: [0, 0, 0], mask: "nonsense".into() };
+        assert_eq!(check(broken), Err(Error::MarkText));
+    }
+
+    #[test]
+    fn text_bitmaps_are_capped_each_and_together() {
+        let small = Limits { max_text_pixels: 100, max_text_total: 150, ..LIMITS };
+        let check = |marks: Vec<Mark>| plan(&Job { marks, ..Default::default() }, &image(400, 300), &small);
+        assert!(check(vec![text_mark(0, 0, 10, 10, &[1; 100])]).is_ok(), "exactly the cap");
+        assert_eq!(check(vec![text_mark(0, 0, 11, 10, &[1; 110])]), Err(Error::MarkText), "one over");
+        assert_eq!(check(vec![text_mark(0, 0, 10, 8, &[1; 80]), text_mark(20, 0, 10, 8, &[1; 80])]), Err(Error::MarkText), "160 pixels together");
+        assert!(check(vec![text_mark(0, 0, 10, 7, &[1; 70]), text_mark(20, 0, 10, 8, &[1; 80])]).is_ok(), "150 together is allowed");
+    }
+
+    #[test]
+    fn a_large_but_plain_text_job_still_fits_in_the_job_description() {
+        // A 2000x400 headline of mostly empty pixels packs small.
+        let mut coverage = vec![0u8; 2000 * 400];
+        for row in 100..300 {
+            for column in (50..1950).step_by(7) {
+                coverage[row * 2000 + column] = 255;
+            }
+        }
+        let job = Job { marks: vec![text_mark(10, 10, 2000, 400, &coverage)], ..Default::default() };
+        let json = serde_json::to_vec(&job).unwrap();
+        assert!(json.len() < LIMITS.max_job_json, "{} bytes", json.len());
+        assert!(json.len() < 100_000, "it should pack well, got {}", json.len());
+        assert!(plan(&job, &image(2100, 500), &LIMITS).is_ok());
+    }
+
+    #[test]
+    fn text_marks_round_trip_and_unknown_fields_are_refused() {
+        let job = Job { marks: vec![text_mark(1, 2, 3, 2, &[0, 128, 255, 9, 9, 9])], ..Default::default() };
+        let json = serde_json::to_string(&job).unwrap();
+        assert!(json.contains(r#""shape":"text""#));
+        assert_eq!(Job::from_json(json.as_bytes(), &LIMITS), Ok(job));
+        let bad = r#"{"marks":[{"shape":"text","rect":{"x":0,"y":0,"width":1,"height":1},"color":[0,0,0],"mask":"AA==","extra":1}]}"#;
+        assert_eq!(Job::from_json(bad.as_bytes(), &LIMITS), Err(Error::MalformedJob));
+    }
+
+    #[test]
+    fn painting_a_damaged_text_mask_fails_instead_of_drawing_garbage() {
+        let mut rgba = blank(8, 8);
+        let broken = Mark::Text { rect: Rect { x: 0, y: 0, width: 4, height: 2 }, color: [255, 0, 0], mask: "AAAA".into() };
+        assert!(!paint(&mut rgba, 8, 8, &[broken]));
     }
 }

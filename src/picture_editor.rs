@@ -5,7 +5,8 @@
 //! Coordinates: the crop is kept in *view* pixels, the picture as the user currently sees it
 //! (after rotation). `job()` converts it to the source-pixel crop plus rotation that the sandboxed
 //! helper applies, which crops first and rotates second (see `media_authoring`).
-use crate::media_authoring::{Job, Mark, Point, Rect, Rotation, Shape};
+use crate::media_authoring::{encode_mask, Job, Mark, Point, Rect, Rotation, Shape};
+use std::rc::Rc;
 
 /// Smallest crop edge in pixels (or the picture edge when the picture is smaller).
 pub const MIN_EDGE: u32 = 16;
@@ -73,6 +74,41 @@ pub enum Kind {
     Circle,
     Arrow,
     Freehand,
+    Text,
+}
+
+/// Text already drawn into a bitmap by the editor: `alpha` is the coverage of each of
+/// `width * height` pixels, row by row, with the text upright.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextBitmap {
+    pub width: u32,
+    pub height: u32,
+    pub alpha: Rc<[u8]>,
+}
+
+/// Longest text a mark can hold, in characters.
+pub const MAX_TEXT_CHARS: usize = 200;
+/// Most bitmap pixels in one text mark and in all of them (the helper refuses more).
+pub const MAX_TEXT_PIXELS: u64 = 4_000_000;
+pub const MAX_TEXT_TOTAL: u64 = 8_000_000;
+
+/// `alpha` (`width` x `height`) turned clockwise by `turns` quarter turns, with its new size.
+pub fn rotate_alpha(alpha: &[u8], width: u32, height: u32, turns: u8) -> (u32, u32, Vec<u8>) {
+    let (w, h) = (width as usize, height as usize);
+    let mut current = (width, height, alpha.to_vec());
+    for _ in 0..(turns % 4) {
+        let (cw, ch, data) = (current.0 as usize, current.1 as usize, &current.2);
+        let mut turned = vec![0u8; data.len()];
+        // A clockwise turn sends (x, y) to (ch - 1 - y, x) in a picture that is now ch wide.
+        for y in 0..ch {
+            for x in 0..cw {
+                turned[x * ch + (ch - 1 - y)] = data[y * cw + x];
+            }
+        }
+        current = (current.1, current.0, turned);
+    }
+    let _ = (w, h);
+    current
 }
 
 /// The geometry of a mark, in view pixels, so it turns with the picture.
@@ -81,6 +117,10 @@ pub enum ViewShape {
     Rect(Shape, Rect),
     Arrow(Point, Point),
     Freehand(Vec<Point>),
+    /// Text: where it sits in the view now, the words (for showing), the upright bitmap, and how
+    /// many clockwise quarter turns take that bitmap to the source picture's orientation. The
+    /// turns are fixed when the text is placed; turning the picture later moves the box only.
+    Text { rect: Rect, text: String, bitmap: TextBitmap, source_turns: u8 },
 }
 
 /// Something the user drew.
@@ -106,6 +146,7 @@ impl ViewMark {
             ViewShape::Arrow(a, b) => around(&[*a, *b]),
             ViewShape::Freehand(points) if points.is_empty() => Rect::default(),
             ViewShape::Freehand(points) => around(points),
+            ViewShape::Text { rect, .. } => *rect,
         }
     }
 }
@@ -239,11 +280,63 @@ impl Editor {
         self.marks
             .iter()
             .map(|mark| match &mark.shape {
-                ViewShape::Rect(..) => 0,
+                ViewShape::Rect(..) | ViewShape::Text { .. } => 0,
                 ViewShape::Arrow(..) => 2,
                 ViewShape::Freehand(points) => points.len(),
             })
             .sum()
+    }
+
+    fn text_pixels_used(&self) -> u64 {
+        self.marks
+            .iter()
+            .map(|mark| match &mark.shape {
+                ViewShape::Text { bitmap, .. } => u64::from(bitmap.width) * u64::from(bitmap.height),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// Clockwise quarter turns the picture is shown at.
+    fn quarter_turns(&self) -> u8 {
+        match self.rotation {
+            Rotation::None => 0,
+            Rotation::Clockwise90 => 1,
+            Rotation::Half => 2,
+            Rotation::Counterclockwise90 => 3,
+        }
+    }
+
+    /// Place `text`, drawn as `bitmap`, with its top-left corner at `at` (view pixels). The box is
+    /// moved to stay inside the picture. Refused, returning false, when the words are empty or
+    /// too long, the bitmap is empty or does not match its pixels, it is too large for the
+    /// picture or the helper's limits, or the picture already has `MAX_MARKS`.
+    pub fn add_text(&mut self, at: Point, text: &str, bitmap: TextBitmap, color: [u8; 3]) -> bool {
+        let words: String = text.chars().filter(|c| !c.is_control()).collect();
+        let (view_w, view_h) = self.view_size();
+        let pixels = u64::from(bitmap.width) * u64::from(bitmap.height);
+        if words.trim().is_empty()
+            || words.chars().count() > MAX_TEXT_CHARS
+            || bitmap.width == 0
+            || bitmap.height == 0
+            || bitmap.alpha.len() as u64 != pixels
+            || bitmap.width > view_w
+            || bitmap.height > view_h
+            || pixels > MAX_TEXT_PIXELS
+            || self.text_pixels_used() + pixels > MAX_TEXT_TOTAL
+            || self.marks.len() >= MAX_MARKS
+        {
+            return false;
+        }
+        let rect = Rect {
+            x: at.0.min(view_w - bitmap.width),
+            y: at.1.min(view_h - bitmap.height),
+            width: bitmap.width,
+            height: bitmap.height,
+        };
+        let source_turns = (4 - self.quarter_turns()) % 4;
+        self.add(ViewMark { shape: ViewShape::Text { rect, text: words, bitmap, source_turns }, color, stroke: 1, pressure: vec![] });
+        true
     }
 
     /// Add an arrow from `from` to `to` (view pixels, clamped into the picture). Refused when it
@@ -326,6 +419,8 @@ impl Editor {
             Kind::Circle => self.add_mark(Shape::Circle, r, color, weight),
             Kind::Arrow => self.add_arrow((r.x, r.y), (right, bottom), color, weight),
             Kind::Freehand => self.add_path(&[(r.x, r.y), (right, r.y), (right, bottom), (r.x, bottom), (r.x, r.y)], color, weight),
+            // Words need typing, so there is nothing to place on the crop by itself.
+            Kind::Text => false,
         }
     }
 
@@ -365,7 +460,7 @@ impl Editor {
         let before = self.view_size();
         for mark in self.marks.iter_mut().chain(self.undone.iter_mut()) {
             match &mut mark.shape {
-                ViewShape::Rect(_, rect) => *rect = turn_rect(*rect, before, clockwise),
+                ViewShape::Rect(_, rect) | ViewShape::Text { rect, .. } => *rect = turn_rect(*rect, before, clockwise),
                 ViewShape::Arrow(a, b) => {
                     *a = turn_point(*a, before, clockwise);
                     *b = turn_point(*b, before, clockwise);
@@ -545,6 +640,12 @@ impl Editor {
                     color: mark.color,
                     stroke: mark.stroke,
                 },
+                ViewShape::Text { rect, bitmap, source_turns, .. } => {
+                    let (width, height, alpha) = rotate_alpha(&bitmap.alpha, bitmap.width, bitmap.height, *source_turns);
+                    let at = self.to_source(*rect);
+                    debug_assert_eq!((at.width, at.height), (width, height));
+                    Mark::Text { rect: at, color: mark.color, mask: encode_mask(&alpha) }
+                }
                 ViewShape::Freehand(points) => Mark::Freehand {
                     points: points.iter().map(|point| self.point_to_source(*point)).collect(),
                     color: mark.color,
@@ -1248,5 +1349,143 @@ mod tests {
         for (point, level) in kept.iter().zip(pressure) {
             assert_eq!(*level, levels[point.0 as usize], "pressure stayed with its point at x={}", point.0);
         }
+    }
+
+    fn bitmap(width: u32, height: u32, alpha: &[u8]) -> TextBitmap {
+        TextBitmap { width, height, alpha: alpha.to_vec().into() }
+    }
+    /// An asymmetric 4x3 pattern, so a wrong turn cannot look right.
+    fn pattern() -> TextBitmap {
+        bitmap(4, 3, &[255, 255, 255, 0, 255, 0, 0, 0, 255, 128, 64, 32])
+    }
+
+    #[test]
+    fn turning_a_bitmap_a_quarter_at_a_time_matches_turning_it_by_hand() {
+        let (w, h, a) = (4, 3, [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(rotate_alpha(&a, w, h, 0), (4, 3, a.to_vec()));
+        // Clockwise: the left column read bottom to top becomes the top row.
+        assert_eq!(rotate_alpha(&a, w, h, 1), (3, 4, vec![9, 5, 1, 10, 6, 2, 11, 7, 3, 12, 8, 4]));
+        assert_eq!(rotate_alpha(&a, w, h, 2), (4, 3, vec![12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]));
+        assert_eq!(rotate_alpha(&a, w, h, 3), (3, 4, vec![4, 8, 12, 3, 7, 11, 2, 6, 10, 1, 5, 9]));
+        assert_eq!(rotate_alpha(&a, w, h, 4), (4, 3, a.to_vec()), "four turns come home");
+        assert_eq!(rotate_alpha(&a, w, h, 5), rotate_alpha(&a, w, h, 1), "turns count modulo four");
+        for turns in 0..4 {
+            let (tw, th, turned) = rotate_alpha(&a, w, h, turns);
+            let (bw, bh, back) = rotate_alpha(&turned, tw, th, 4 - turns);
+            assert_eq!((bw, bh, back), (w, h, a.to_vec()), "undoing {turns}");
+        }
+    }
+
+    #[test]
+    fn text_is_placed_kept_inside_and_refused_when_it_cannot_be() {
+        let mut editor = Editor::new(100, 60);
+        assert!(editor.add_text((10, 5), "Hi", pattern(), RED));
+        assert_eq!(editor.marks()[0].bounds(), Rect { x: 10, y: 5, width: 4, height: 3 });
+        assert!(editor.add_text((99, 59), "Hi", pattern(), RED));
+        assert_eq!(editor.marks()[1].bounds(), Rect { x: 96, y: 57, width: 4, height: 3 }, "moved back inside");
+        assert!(!editor.add_text((0, 0), "", pattern(), RED));
+        assert!(!editor.add_text((0, 0), "  \t\n", pattern(), RED), "only blanks");
+        assert!(!editor.add_text((0, 0), "\u{7}\u{1b}", pattern(), RED), "only controls");
+        assert!(!editor.add_text((0, 0), &"x".repeat(MAX_TEXT_CHARS + 1), pattern(), RED));
+        assert!(editor.add_text((0, 0), &"x".repeat(MAX_TEXT_CHARS), pattern(), RED));
+        assert!(!editor.add_text((0, 0), "Hi", bitmap(4, 3, &[1; 11]), RED), "a bitmap that does not match its size");
+        assert!(!editor.add_text((0, 0), "Hi", bitmap(0, 3, &[]), RED));
+        assert!(!editor.add_text((0, 0), "Hi", bitmap(101, 1, &[1; 101]), RED), "wider than the picture");
+        assert!(!editor.add_text((0, 0), "Hi", bitmap(1, 61, &[1; 61]), RED), "taller than the picture");
+        assert_eq!(editor.marks().len(), 3);
+    }
+
+    #[test]
+    fn text_bitmaps_are_budgeted_like_the_helper_budgets_them() {
+        assert_eq!((MAX_TEXT_PIXELS, MAX_TEXT_TOTAL), (crate::media_authoring::Limits::default().max_text_pixels, crate::media_authoring::Limits::default().max_text_total));
+        let mut editor = Editor::new(3000, 2000);
+        let big = |w: u32, h: u32| bitmap(w, h, &vec![1u8; (w * h) as usize]);
+        assert!(!editor.add_text((0, 0), "x", big(2001, 2000), RED), "over the per-mark cap");
+        assert!(editor.add_text((0, 0), "x", big(2000, 2000), RED));
+        assert!(editor.add_text((0, 0), "x", big(2000, 2000), RED));
+        assert!(!editor.add_text((0, 0), "x", big(10, 10), RED), "the total is spent");
+        editor.undo_mark();
+        assert!(editor.add_text((0, 0), "x", big(10, 10), RED), "undoing gives it back");
+        let mut many = Editor::new(100, 100);
+        for _ in 0..MAX_MARKS {
+            assert!(many.add_text((0, 0), "x", bitmap(1, 1, &[255]), RED));
+        }
+        assert!(!many.add_text((0, 0), "x", bitmap(1, 1, &[255]), RED), "the mark cap");
+    }
+
+    #[test]
+    fn text_has_nothing_to_place_without_a_pointer_and_does_not_redo_over_new_marks() {
+        let mut editor = Editor::new(100, 60);
+        assert!(!editor.mark_crop(Kind::Text, RED, Weight::Thin), "words need typing");
+        editor.add_text((5, 5), "Hi", pattern(), RED);
+        editor.undo_mark();
+        assert!(editor.can_redo());
+        assert!(editor.add_text((9, 9), "Yo", pattern(), RED));
+        assert!(!editor.can_redo(), "new text ends the redo, like any new mark");
+    }
+
+    /// The picture as shown: `alpha` (one byte per source pixel) turned by the editor's rotation.
+    fn shown_alpha(alpha: &[u8], width: u32, height: u32, rotation: Rotation) -> (u32, u32, Vec<u8>) {
+        let turns = match rotation {
+            Rotation::None => 0,
+            Rotation::Clockwise90 => 1,
+            Rotation::Half => 2,
+            Rotation::Counterclockwise90 => 3,
+        };
+        rotate_alpha(alpha, width, height, turns)
+    }
+
+    #[test]
+    fn text_comes_out_upright_where_it_was_put_whatever_the_picture_was_turned_to() {
+        let (source_w, source_h) = (14u32, 9u32);
+        for start in 0..4u8 {
+            for later in 0..4u8 {
+                let mut editor = Editor::new(source_w, source_h);
+                for _ in 0..start {
+                    editor.rotate(true);
+                }
+                let (vw, vh) = editor.view_size();
+                let bitmap = pattern();
+                assert!(editor.add_text((2, 1), "Hi", bitmap.clone(), RED), "start {start}");
+                for _ in 0..later {
+                    editor.rotate(true);
+                }
+                let job = editor.job(None);
+                // Paint the job on an empty source, then look at it the way the editor shows it.
+                let mut rgba = vec![0u8; (source_w * source_h * 4) as usize];
+                let info = crate::media_authoring::SourceInfo { kind: crate::media_authoring::Kind::Image, width: source_w, height: source_h, duration_ms: None, bytes: 100 };
+                let made = crate::media_authoring::plan(&job, &info, &crate::media_authoring::Limits::default()).expect("the helper would accept it");
+                assert!(crate::media_authoring::paint(&mut rgba, source_w, source_h, &made.marks));
+                let plane: Vec<u8> = rgba.chunks(4).map(|px| px[3]).collect();
+                let (shown_w, shown_h, shown) = shown_alpha(&plane, source_w, source_h, editor.rotation());
+                assert_eq!((shown_w, shown_h), editor.view_size());
+                // The text, turned by however much the picture turned after it was placed, at its box.
+                let (bw, bh, expected) = rotate_alpha(&bitmap.alpha, bitmap.width, bitmap.height, later);
+                let rect = editor.marks()[0].bounds();
+                assert_eq!((rect.width, rect.height), (bw, bh), "start {start} later {later}");
+                for y in 0..shown_h {
+                    for x in 0..shown_w {
+                        let inside = x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
+                        let want = if inside { expected[((y - rect.y) * bw + (x - rect.x)) as usize] } else { 0 };
+                        assert_eq!(shown[(y * shown_w + x) as usize], want, "start {start} later {later} at ({x},{y}) of {vw}x{vh}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn two_texts_and_a_line_keep_their_own_places_through_turns_and_undo() {
+        let mut editor = Editor::new(40, 30);
+        editor.add_text((1, 1), "A", pattern(), RED);
+        editor.add_arrow((5, 5), (30, 20), RED, Weight::Px(2));
+        editor.rotate(false);
+        editor.add_text((3, 2), "B", pattern(), RED);
+        editor.undo_mark();
+        editor.rotate(true);
+        let marks = editor.job(None).marks;
+        assert_eq!(marks.len(), 2);
+        assert!(matches!(&marks[0], Mark::Text { rect: Rect { x: 1, y: 1, width: 4, height: 3 }, .. }));
+        assert!(matches!(&marks[1], Mark::Arrow { from: (5, 5), to: (30, 20), .. }));
     }
 }
