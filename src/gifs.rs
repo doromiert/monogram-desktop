@@ -2,7 +2,7 @@
 //! Account-private GIF library and opt-in direct GIPHY, matching mobile MonogramGiphy.
 //! Only provider credentials enter Secret Service; no request URL or key is logged.
 use crate::{downloads, file_share::Attachment};
-use gtk::{gio, glib, prelude::*};
+use gtk::{gio, prelude::*};
 use openssl::hash::{Hasher, MessageDigest};
 use reqwest::{Url, header};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -163,9 +163,6 @@ impl Request {
         self.cancelled.store(true, Ordering::Release);
         self.decoder.cancel();
         self.changed.send_replace(true);
-    }
-    pub fn progress(&self) -> Progress {
-        self.progress.lock().unwrap().clone()
     }
     fn update(&self, stage: &str, bytes: u64, total: Option<u64>) {
         *self.progress.lock().unwrap() = Progress {
@@ -491,9 +488,6 @@ impl Library {
         request: Request,
     ) -> Result<GifItem> {
         self.change(item, Some(favorite), false, request).await
-    }
-    pub async fn remove_recent(&self, item: GifItem) -> Result<GifItem> {
-        self.change(item, None, true, Request::new()).await
     }
     async fn change(
         &self,

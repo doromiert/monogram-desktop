@@ -185,9 +185,23 @@ fn action_actor(message: &Message, chat: &Chat, owner: &str) -> String {
     };
     actor.replace(['\n', '\r'], " ")
 }
+/// The ordinary lock of an encrypted message that was sent without some room members, in the
+/// theme's accent colour (blue by default) so it stands out.
+fn partial_lock(m: &Message) -> gtk::Image {
+    let lock = gtk::Image::from_icon_name("channel-secure-symbolic");
+    lock.set_pixel_size(11);
+    lock.add_css_class("message-partial-lock");
+    lock.add_css_class("accent");
+    let tooltip = format!("{} with problems. See Message Details", m.mode().name());
+    lock.set_tooltip_text(Some(&tooltip));
+    lock.update_property(&[gtk::accessible::Property::Label(&tooltip)]);
+    lock
+}
 fn message_status(meta: &gtk::Box, m: &Message) {
     clear(meta);
-    if m.encrypted
+    if m.own && m.encrypted && !m.skipped_members.is_empty() {
+        meta.append(&partial_lock(m));
+    } else if m.encrypted
         && (!m.own
             || !matches!(
                 m.delivery.as_str(),
@@ -226,10 +240,12 @@ fn message_status(meta: &gtk::Box, m: &Message) {
             "failed" | "uncertain" => {
                 let image = gtk::Image::from_icon_name("dialog-warning-symbolic");
                 image.set_pixel_size(12);
-                image.set_tooltip_text(Some(if m.delivery == "failed" {
-                    "Send failed"
-                } else {
-                    "Delivery uncertain"
+                let see_details = !m.failure_reason.is_empty();
+                image.set_tooltip_text(Some(match (m.delivery == "failed", see_details) {
+                    (true, true) => "Send failed. See Message Details",
+                    (true, false) => "Send failed",
+                    (false, true) => "Delivery uncertain. See Message Details",
+                    (false, false) => "Delivery uncertain",
                 }));
                 meta.append(&image);
             }
@@ -312,6 +328,8 @@ impl Ui {
             || row.message.edited != message.edited
             || row.message.encrypted != message.encrypted
             || row.message.encryption_mode != message.encryption_mode
+            || row.message.skipped_members != message.skipped_members
+            || row.message.failure_reason != message.failure_reason
         {
             message_status(&row.status, message);
         }

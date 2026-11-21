@@ -226,7 +226,7 @@ impl From<pep::Error> for PreparationError {
 impl PreparationError {
     fn fallback(&self) -> bool {
         match self {
-            Self::NoDevices | Self::Crypto(Error::TrustRequired | Error::InvalidBundle) => true,
+            Self::NoDevices | Self::Crypto(Error::TrustRequired | Error::InvalidBundle(_)) => true,
             Self::Pep(error) => error.access_denied() || error.unsupported(),
             Self::Crypto(_) => false,
         }
@@ -339,7 +339,11 @@ impl Worker {
             .await
             .map_err(|error| match error {
                 pep::Error::Crypto(Error::Invalid(_) | Error::Crypto(_)) => {
-                    PreparationError::Crypto(Error::InvalidBundle)
+                    PreparationError::Crypto(Error::invalid_bundle(
+                        crate::encryption_policy::Mode::Omemo2.name(),
+                        peer,
+                        Some(id),
+                    ))
                 }
                 _ => error.into(),
             })?;
@@ -397,7 +401,7 @@ impl Worker {
                         }
                     }
                 }
-                Err(PreparationError::Crypto(Error::InvalidBundle))
+                Err(PreparationError::Crypto(Error::InvalidBundle(_)))
                     if optional && peer == self.owner => {}
                 Err(error) => return Err(error),
             }
@@ -1422,7 +1426,7 @@ mod tests {
             history.set_blind_trust(owner, peer, false).unwrap();
             assert!(matches!(probe(&alice, peer).await, Err(Error::OwnDeviceTrustRequired)));
             let (reply, selected) = oneshot::channel();
-            assert!(alice.send(Command::ChooseEncryption { peer: peer.into(), reply }));
+            assert!(alice.send(Command::ChooseEncryption { peer: peer.into(), reply, skip_unreachable: false }));
             assert!(matches!(tokio::time::timeout(Duration::from_secs(15), selected).await.unwrap().unwrap(), Err(Error::OwnDeviceTrustRequired)));
             history.set_blind_trust(owner, peer, true).unwrap();
             assert!(probe(&alice, peer).await.unwrap(), "Conversation blind trust approves authenticated own-device copies");

@@ -1389,7 +1389,7 @@ impl PackLibraryPage {
         self.selected.replace(Some(selected));
         let mut group = self.group_anchor.clone();
         if !self.external_selector {
-            for (id, title, items) in &sections {
+            for (id, title, _items) in &sections {
                 let icon = if *id == -1 {
                     "emoji_tabs_faves.webp"
                 } else {

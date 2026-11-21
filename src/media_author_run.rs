@@ -9,7 +9,7 @@ use crate::media_authoring::{self, Format, Job, Kind, Limits, Plan, SourceInfo};
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command},
     time::{Duration, Instant},
 };
 

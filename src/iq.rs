@@ -9,6 +9,8 @@ use std::{
 use tokio::sync::{mpsc, oneshot};
 use tokio_xmpp::minidom::Element;
 const CLIENT: &str = "jabber:client";
+/// XEP-0077, used to ask the account's own server to cancel the registration.
+pub const REGISTER_NS: &str = "jabber:iq:register";
 const STANZAS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
 fn valid_to(to: &str) -> bool {
     to.parse::<tokio_xmpp::jid::Jid>()
@@ -40,7 +42,7 @@ impl Client {
     pub fn new(tx: mpsc::UnboundedSender<Command>) -> Self {
         Self { tx }
     }
-    pub async fn request(&self, to: &str, kind: Kind, payload: Element) -> Reply {
+    fn dispatch(&self, to: &str, kind: Kind, payload: Element) -> Result<oneshot::Receiver<Reply>, Error> {
         if !valid_to(to) {
             return Err(Error::Invalid);
         }
@@ -53,15 +55,31 @@ impl Client {
                 reply,
             })
             .map_err(|_| Error::Closed)?;
+        Ok(received)
+    }
+    /// For code on a Tokio task: gives up after 25 seconds.
+    pub async fn request(&self, to: &str, kind: Kind, payload: Element) -> Reply {
+        let received = self.dispatch(to, kind, payload)?;
         tokio::time::timeout(Duration::from_secs(25), received)
             .await
             .map_err(|_| Error::Timeout)?
+            .map_err(|_| Error::Closed)?
+    }
+    /// For the GTK main loop, which has no Tokio runtime and so no Tokio timer (`request` panics
+    /// there). No timer is needed: the session sweeps stale jobs and answers them with
+    /// `Error::Timeout`, and drops them with `Error::Closed` when the connection ends.
+    pub async fn request_on_main_loop(&self, to: &str, kind: Kind, payload: Element) -> Reply {
+        self.dispatch(to, kind, payload)?
+            .await
             .map_err(|_| Error::Closed)?
     }
 }
 struct Job {
     peer: String,
     local_private: bool,
+    /// Addressed to the account's own server (XEP-0077): sent without `to`, and the answer may
+    /// name the account, nothing, or the server's domain.
+    server_request: bool,
     reply: oneshot::Sender<Reply>,
     started: Instant,
 }
@@ -88,8 +106,10 @@ impl Pending {
         }
         let id = format!("request-{}", new_id());
         let local_private = payload.is("query", "jabber:iq:private");
+        let server_request = payload.is("query", REGISTER_NS);
         let mut request = Element::builder("iq", CLIENT).attr("id".try_into().unwrap(), &id);
         if !local_private
+            && !server_request
             && !(payload.ns() == crate::blocking::NS
                 && matches!(payload.name(), "blocklist" | "block" | "unblock"))
         {
@@ -110,6 +130,7 @@ impl Pending {
             Job {
                 peer: to,
                 local_private,
+                server_request,
                 reply,
                 started: Instant::now(),
             },
@@ -133,7 +154,14 @@ impl Pending {
                 .parse::<tokio_xmpp::jid::Jid>()
                 .ok()
                 .is_some_and(|jid| jid.resource().is_some() && jid.to_bare().as_str() == owner);
-        if from != job.peer && !(from.is_empty() && job.peer == owner) && !own_resource {
+        let own_server = job.server_request
+            && job.peer == owner
+            && owner.split_once('@').is_some_and(|(_, domain)| from == domain);
+        if from != job.peer
+            && !(from.is_empty() && job.peer == owner)
+            && !own_resource
+            && !own_server
+        {
             return false;
         }
         if root
@@ -288,5 +316,131 @@ mod tests {
         drop(rx);
         pending.expire();
         assert!(pending.jobs.is_empty());
+    }
+    fn cancel() -> Element {
+        Element::builder("query", REGISTER_NS)
+            .append(Element::builder("remove", REGISTER_NS).build())
+            .build()
+    }
+    fn register_request(pending: &mut Pending, owner: &str) -> (Element, oneshot::Receiver<Reply>) {
+        let (tx, rx) = oneshot::channel();
+        (
+            pending
+                .start(owner.into(), Kind::Set, cancel(), tx)
+                .unwrap(),
+            rx,
+        )
+    }
+    fn result(id: &str, from: Option<&str>) -> Element {
+        let mut reply = Element::builder("iq", CLIENT)
+            .attr("type".try_into().unwrap(), "result")
+            .attr("id".try_into().unwrap(), id)
+            .build();
+        if let Some(from) = from {
+            reply.set_attr("".into(), "from".try_into().unwrap(), from);
+        }
+        reply
+    }
+    #[test]
+    fn account_deletion_goes_to_the_own_server_without_a_to_address() {
+        let mut pending = Pending::default();
+        let (req, _rx) = register_request(&mut pending, "bob@example.com");
+        assert_eq!(req.attr("type"), Some("set"));
+        assert_eq!(req.attr("to"), None, "XEP-0077 is addressed to the connected server");
+        let query = req.children().next().unwrap();
+        assert!(query.is("query", REGISTER_NS));
+        assert!(query.children().next().unwrap().is("remove", REGISTER_NS));
+    }
+    #[test]
+    fn account_deletion_accepts_the_servers_answer_from_the_account_or_its_domain() {
+        for from in [None, Some("bob@example.com"), Some("example.com")] {
+            let mut pending = Pending::default();
+            let (req, mut rx) = register_request(&mut pending, "bob@example.com");
+            let reply = result(req.attr("id").unwrap(), from);
+            assert!(pending.receive(&reply, "bob@example.com"), "from {from:?}");
+            assert_eq!(rx.try_recv().unwrap(), Ok(None));
+        }
+    }
+    #[test]
+    fn account_deletion_ignores_an_answer_from_anyone_else() {
+        for from in ["eve@example.com", "example.org", "bob@example.org", "example.com.evil.net"] {
+            let mut pending = Pending::default();
+            let (req, mut rx) = register_request(&mut pending, "bob@example.com");
+            let reply = result(req.attr("id").unwrap(), Some(from));
+            assert!(!pending.receive(&reply, "bob@example.com"), "from {from}");
+            assert!(rx.try_recv().is_err(), "a forged answer must not confirm the deletion");
+        }
+    }
+    #[test]
+    fn the_server_domain_is_not_trusted_for_other_requests() {
+        let mut pending = Pending::default();
+        let (req, mut rx) = request(&mut pending, "bob@example.com");
+        let reply = result(req.attr("id").unwrap(), Some("example.com"));
+        assert!(!pending.receive(&reply, "alice@example.org"));
+        assert!(!pending.receive(&reply, "bob@example.com"));
+        assert!(rx.try_recv().is_err());
+    }
+    #[test]
+    fn account_deletion_reports_a_server_refusal() {
+        let mut pending = Pending::default();
+        let (req, mut rx) = register_request(&mut pending, "bob@example.com");
+        let error = Element::builder("error", CLIENT)
+            .append(Element::builder("forbidden", STANZAS).build())
+            .build();
+        let mut reply = Element::builder("iq", CLIENT)
+            .attr("type".try_into().unwrap(), "error")
+            .attr("id".try_into().unwrap(), req.attr("id").unwrap())
+            .append(error)
+            .build();
+        reply.set_attr("".into(), "from".try_into().unwrap(), "example.com");
+        assert!(pending.receive(&reply, "bob@example.com"));
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Err(Error::Rejected { condition: "forbidden".into(), pubsub: None })
+        );
+    }
+    #[test]
+    fn a_dropped_connection_fails_the_deletion_request_as_closed() {
+        let mut pending = Pending::default();
+        let (_req, mut rx) = register_request(&mut pending, "bob@example.com");
+        pending.disconnect();
+        assert_eq!(rx.try_recv().unwrap(), Err(Error::Closed));
+    }
+    #[test]
+    fn the_main_loop_request_needs_no_tokio_runtime() {
+        use futures_util::FutureExt;
+        // No runtime exists on this thread, as on the GTK main loop: `request` would panic here.
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let client = Client::new(tx);
+        let mut pending = Box::pin(client.request_on_main_loop("example.com", Kind::Get, cancel()));
+        assert!((&mut pending).now_or_never().is_none(), "waits for the server");
+        let Some(Command::Iq { to, reply, .. }) = rx.try_recv().ok() else {
+            panic!("the request was sent to the session");
+        };
+        assert_eq!(to, "example.com");
+        reply.send(Ok(None)).unwrap();
+        assert_eq!(pending.now_or_never(), Some(Ok(None)));
+    }
+    #[test]
+    fn the_main_loop_request_reports_a_dropped_session_and_a_bad_address() {
+        use futures_util::FutureExt;
+        let (tx, rx) = mpsc::unbounded_channel();
+        let client = Client::new(tx);
+        let bad = client.request_on_main_loop("not a jid", Kind::Get, cancel());
+        assert_eq!(bad.now_or_never(), Some(Err(Error::Invalid)));
+        drop(rx);
+        let gone = client.request_on_main_loop("example.com", Kind::Get, cancel());
+        assert_eq!(gone.now_or_never(), Some(Err(Error::Closed)));
+    }
+    #[test]
+    fn a_session_that_drops_the_job_answers_closed() {
+        use futures_util::FutureExt;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let client = Client::new(tx);
+        let mut pending = Box::pin(client.request_on_main_loop("example.com", Kind::Get, cancel()));
+        assert!((&mut pending).now_or_never().is_none());
+        drop(rx.try_recv().unwrap());
+        assert_eq!(pending.now_or_never(), Some(Err(Error::Closed)));
     }
 }

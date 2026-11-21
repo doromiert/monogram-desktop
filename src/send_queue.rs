@@ -1,6 +1,6 @@
 //! An unsent row is durable before choosing encryption or submitting a packet.
 use crate::{
-    encryption_policy::{Mode, Preference, Selection},
+    encryption_policy::Mode,
     model::*,
     protocol::Command,
     ui::Ui,
@@ -220,6 +220,7 @@ impl Ui {
         message.preview_spoilers=Some(authored.spoiler_context());
         message.formatting=Some(authored);
         message.delivery = "queued".into();
+        message.failure_reason.clear();
         // Encryption is unknown until the sending policy has actually completed.
         message.encrypted = false;
         message.encryption_mode = None;
@@ -329,9 +330,13 @@ impl Ui {
         let result: Option<Result<Mode, String>> = selected.map(Ok);
         let receive = if result.is_none() {
             let (reply, receive) = tokio::sync::oneshot::channel();
+            let skip_unreachable = self.offers_send_anyway()
+                && (messages.iter().any(|message| message.skip_unreachable)
+                    || self.send_anyway_active(&peer));
             if self.command(Command::ChooseEncryption {
                 peer: peer.clone(),
                 reply,
+                skip_unreachable,
             }) {
                 Some(receive)
             } else {
@@ -379,11 +384,7 @@ impl Ui {
             };
             // The server must not be able to talk an encrypted room into plaintext.
             if selected.is_none() && ui.encryption_downgrade_blocked(&peer, mode) {
-                for mut message in messages {
-                    message.delivery = "failed".into();
-                    ui.store_queued_row(&owner, &peer, message);
-                }
-                ui.notice(crate::send_policy_ui::DOWNGRADE_NOTICE);
+                ui.fail_queued_downgrade(&owner, &peer, messages);
                 return;
             }
             let Some(fingerprint) = ui.fingerprint_for_send(mode) else {
@@ -494,6 +495,24 @@ impl Ui {
         });
     }
 
+    /// Automatic selection could only offer plaintext for a room that has used encryption: mark the
+    /// messages failed and, in a group, offer Send Anyway (still encrypted, without whoever has no
+    /// usable keys). Plaintext is never chosen for the user.
+    pub(crate) fn fail_queued_downgrade(
+        self: &Rc<Self>,
+        owner: &str,
+        peer: &str,
+        messages: Vec<Message>,
+    ) {
+        let ids: Vec<String> = messages.iter().map(|message| message.id.clone()).collect();
+        for mut message in messages {
+            message.delivery = "failed".into();
+            message.failure_reason = crate::send_policy_ui::DOWNGRADE_REASON.into();
+            self.store_queued_row(owner, peer, message);
+        }
+        self.notice_downgrade_blocked(peer, ids);
+    }
+
     /// The encryption check for queued messages failed: mark them failed and say why. A Legacy
     /// OMEMO contact-authorization denial offers Resolve.
     pub(crate) fn fail_queued_selection(
@@ -503,11 +522,14 @@ impl Ui {
         messages: Vec<Message>,
         error: &str,
     ) {
+        let ids: Vec<String> = messages.iter().map(|message| message.id.clone()).collect();
+        let reason = crate::text_safety::failure_reason(error);
         for mut message in messages {
             message.delivery = "failed".into();
+            message.failure_reason = reason.clone();
             self.store_queued_row(owner, peer, message);
         }
-        self.notice_resolving_authorization(error, error.to_owned());
+        self.notice_send_failure(peer, ids, error, crate::text_safety::NOT_SENT_TOAST.into());
     }
     pub fn store_queued_row(self: &Rc<Self>, owner: &str, peer: &str, message: Message) -> bool {
         if self.store.save_outbox_row(owner, peer, &message).is_err() {
@@ -530,6 +552,56 @@ impl Ui {
         true
     }
 
+    /// Send the messages `ids` of the room `peer` again, encrypted for every member whose keys can
+    /// be used and without the ones that cannot. The choice is stored on each message, so it
+    /// survives a restart, and it applies to these messages only.
+    pub(crate) fn send_anyway(self: &Rc<Self>, peer: &str, ids: &[String]) {
+        let (owner, room_id) = {
+            let state = self.state.borrow();
+            let Some(room) = state.chats.iter().find(|chat| chat.jid == peer && chat.group) else {
+                return;
+            };
+            (state.account.clone(), room.id.clone())
+        };
+        if self.state.borrow().current().jid != peer {
+            self.select_chat(&room_id);
+        }
+        // Later messages to this room skip the same members for a while, so the user is not asked
+        // again for every message.
+        self.send_anyway_until
+            .borrow_mut()
+            .insert(peer.to_owned(), std::time::Instant::now() + Self::SEND_ANYWAY_COOLDOWN);
+        for id in ids {
+            let message = {
+                let mut state = self.state.borrow_mut();
+                state.current_mut().messages.iter_mut().find(|message| message.id == *id).map(|message| {
+                    message.skip_unreachable = true;
+                    message.clone()
+                })
+            };
+            let Some(message) = message else { continue };
+            if message.outbox_pending {
+                self.store_queued_row(&owner, peer, message);
+                self.retry_queued_message(id);
+                continue;
+            }
+            // Already sent once and failed: send it again without asking, the user just chose to.
+            if !self.online.get() {
+                self.notice("Reconnect before sending");
+                return;
+            }
+            let mut message = message;
+            message.delivery = "sending".into();
+            message.failure_reason.clear();
+            if let Some(row) = self.state.borrow_mut().current_mut().messages.iter_mut().find(|row| row.id == *id) {
+                *row = message.clone();
+            }
+            if self.persist() {
+                self.command(Command::Send { peer: peer.into(), message, quote: String::new() });
+            }
+        }
+    }
+
     pub fn retry_queued_message(self: &Rc<Self>, id: &str) -> bool {
         let state = self.state.borrow();
         let Some(mut message) = state
@@ -547,6 +619,7 @@ impl Ui {
             return true;
         }
         message.delivery = "queued".into();
+        message.failure_reason.clear();
         if self.store_queued_row(&owner, &peer, message) {
             self.flush_send_queue();
         }
@@ -759,6 +832,585 @@ mod tests {
             "the check ran again and the message was prepared under the current settings"
         );
         assert!(!message.outbox_pending, "the message left the queue instead of failing in it");
+        ui.window.close();
+    }
+
+    fn find_button(widget: &gtk::Widget, label: &str) -> Option<gtk::Button> {
+        if let Some(button) = widget.downcast_ref::<gtk::Button>() {
+            if button.label().as_deref() == Some(label) {
+                return Some(button.clone());
+            }
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            if let Some(found) = find_button(&current, label) {
+                return Some(found);
+            }
+            child = current.next_sibling();
+        }
+        None
+    }
+    const ROOM: &str = "team@conference.example.org";
+    const OWNER: &str = "owner@fixture.invalid";
+    type Commands = tokio::sync::mpsc::UnboundedReceiver<Command>;
+    /// Route what the app sends to the server into a receiver the test can read.
+    fn capture(ui: &Ui) -> Commands {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        ui.session.replace(Some(crate::protocol::Session::fixture_channel(tx)));
+        rx
+    }
+    fn drain(rx: &mut Commands) -> Vec<Command> {
+        let mut out = vec![];
+        while let Ok(command) = rx.try_recv() {
+            out.push(command);
+        }
+        out
+    }
+    /// The `skip_unreachable` of the encryption check asked for `peer`, if one was asked.
+    fn probe_skip(commands: &[Command], peer: &str) -> Option<bool> {
+        commands.iter().find_map(|c| match c {
+            Command::ChooseEncryption { peer: p, skip_unreachable, .. } if p == peer => Some(*skip_unreachable),
+            _ => None,
+        })
+    }
+    /// The `skip_unreachable` of the message sent to `peer`, if one was sent.
+    fn sent_skip(commands: &[Command], peer: &str) -> Option<(bool, bool)> {
+        commands.iter().find_map(|c| match c {
+            Command::Send { peer: p, message, .. } if p == peer => Some((message.skip_unreachable, message.action.is_some())),
+            _ => None,
+        })
+    }
+    fn refusal() -> String {
+        crate::crypto::Error::ContactAuthorization("carol@example.org".into()).to_string()
+    }
+
+    /// A signed-in window in the group chat `ROOM`, holding one own message `id` that failed.
+    fn room_with_failed_message(app_id: &str, id: &str, outbox_pending: bool) -> (Rc<Ui>, Message) {
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id(app_id)
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let ui = Ui::new(&app, true);
+        ui.window.present();
+        ui.store
+            .save_account(&Account { jid: OWNER.into(), host: String::new(), port: 5222, direct_tls: false })
+            .unwrap();
+        let mut state = State::live(OWNER, vec![]);
+        let room = state.chat_for(ROOM);
+        room.group = true;
+        room.room_can_send = true;
+        // Automatic selection, as in a real chat: without a preference the smoke fixture would
+        // skip the encryption check these tests look at.
+        room.sending_preference = Some(crate::encryption_policy::Preference::Automatic);
+        let room_id = room.id.clone();
+        state.active = room_id;
+        ui.activate_state(state);
+        ui.online.set(true);
+        ui.legacy_crypto.borrow_mut().ready = true;
+        let message = Message {
+            id: id.into(),
+            wire_id: format!("wire-{id}"),
+            markable_id: format!("wire-{id}"),
+            sender: OWNER.into(),
+            text: "hello room".into(),
+            own: true,
+            delivery: "failed".into(),
+            outbox_pending,
+            timestamp: "2026-11-17T10:00:00Z".into(),
+            ..Default::default()
+        };
+        ui.state.borrow_mut().current_mut().messages.push(message.clone());
+        assert!(ui.persist());
+        let chat = ui.state.borrow().current().clone();
+        ui.store.save_chat_message(OWNER, &chat, Some(&message)).unwrap();
+        (ui, message)
+    }
+
+    /// The encryption check for a queued room message failed on one member's keys: the toast offers
+    /// Send Anyway (not Resolve), and choosing it retries the message without that member.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_queued_room_message_blocked_by_one_member_can_be_sent_anyway() {
+        let (ui, message) = room_with_failed_message("com.negzero.SendAnywayQueuedFixture", "waiting", true);
+        ui.fail_queued_selection(OWNER, ROOM, vec![message], &refusal());
+        settle(300);
+        assert!(shows_text(ui.toast.upcast_ref(), "Message not sent. See Message Details."), "a short toast");
+        assert!(!shows_text(ui.toast.upcast_ref(), "carol@example.org"), "the cause is not in the toast");
+        assert_eq!(
+            ui.store.message(OWNER, ROOM, "waiting").unwrap().failure_reason,
+            "Legacy OMEMO keys require contact authorization from carol@example.org",
+            "it is on the message, for Message Details"
+        );
+        assert!(find_button(ui.toast.upcast_ref(), "Resolve").is_none(), "a room offers Send Anyway instead");
+        let button = find_button(ui.toast.upcast_ref(), "Send Anyway").expect("Send Anyway button");
+        assert!(!ui.store.message(OWNER, ROOM, "waiting").unwrap().skip_unreachable, "not chosen yet");
+        let mut commands = capture(&ui);
+
+        button.emit_clicked();
+        settle(300);
+        let stored = ui.store.message(OWNER, ROOM, "waiting").unwrap();
+        assert!(stored.skip_unreachable, "the choice is stored on the message");
+        assert_ne!(stored.delivery, "failed", "the message was retried");
+        let sent = drain(&mut commands);
+        assert_eq!(probe_skip(&sent, ROOM), Some(true), "the encryption check is asked to leave members out");
+        assert_eq!(
+            ui.state.borrow().chats.iter().find(|c| c.jid == ROOM).unwrap().selected_encryption(),
+            None,
+            "the room is not locked to a protocol: automatic selection still chooses"
+        );
+        ui.window.close();
+    }
+
+    /// A room message that was sent and failed (not queued): the same offer, resent directly.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_failed_room_send_can_be_sent_anyway() {
+        use crate::protocol::BackendEvent;
+        let (ui, _) = room_with_failed_message("com.negzero.SendAnywayFailedFixture", "sent", false);
+        let (generation, owner) = (ui.generation.get(), ui.state.borrow().account.clone());
+        ui.backend_event(generation, &owner, BackendEvent::Failed { peer: ROOM.into(), id: "wire-sent".into(), reason: refusal() });
+        settle(300);
+        let button = find_button(ui.toast.upcast_ref(), "Send Anyway").expect("Send Anyway button");
+        let mut commands = capture(&ui);
+        button.emit_clicked();
+        settle(300);
+        assert_eq!(sent_skip(&drain(&mut commands), ROOM), Some((true, false)), "resent with the choice");
+        let row = ui.state.borrow().current().messages.iter().find(|m| m.id == "sent").cloned().unwrap();
+        assert!(row.skip_unreachable, "the choice is on the message that is resent");
+        assert_eq!(row.delivery, "sending", "resent without a confirmation dialog");
+        ui.window.close();
+    }
+
+    /// Nothing about unreviewed keys, a lost connection, or a one-to-one chat is skippable.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn send_anyway_is_offered_only_for_a_members_unusable_keys_in_a_group() {
+        let (ui, message) = room_with_failed_message("com.negzero.SendAnywayNegativeFixture", "m", true);
+        for reason in [
+            crate::crypto::Error::TrustRequired.to_string(),
+            crate::crypto::Error::OwnDeviceTrustRequired.to_string(),
+            "The connection is unavailable".to_owned(),
+            "Legacy OMEMO is not ready".to_owned(),
+        ] {
+            ui.fail_queued_selection(OWNER, ROOM, vec![message.clone()], &reason);
+            settle(300);
+            assert!(shows_text(ui.toast.upcast_ref(), "Message not sent. See Message Details."), "{reason}");
+            assert_eq!(ui.store.message(OWNER, ROOM, "m").unwrap().failure_reason, reason);
+            assert!(find_button(ui.toast.upcast_ref(), "Send Anyway").is_none(), "no Send Anyway for {reason:?}");
+            ui.toast.dismiss_all();
+            settle(500);
+        }
+        // One-to-one: the same refusal offers Resolve, as before.
+        let direct = ui.state.borrow_mut().chat_for("peer@fixture.invalid").id.clone();
+        ui.select_chat(&direct);
+        ui.fail_queued_selection(OWNER, "peer@fixture.invalid", vec![message], &refusal());
+        settle(300);
+        assert!(find_button(ui.toast.upcast_ref(), "Send Anyway").is_none());
+        assert!(find_button(ui.toast.upcast_ref(), "Resolve").is_some());
+        ui.window.close();
+    }
+
+    /// A room that is not members-only and non-anonymous can never be encrypted: Resolve opens
+    /// Conversation Security for that room (switching to it first), where the user chooses.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_room_that_cannot_be_encrypted_offers_resolve_to_conversation_security() {
+        use crate::protocol::BackendEvent;
+        let (ui, _) = room_with_failed_message("com.negzero.RoomNotPrivateFixture", "m", false);
+        let other = ui.state.borrow_mut().chat_for("peer@fixture.invalid").id.clone();
+        ui.select_chat(&other);
+        settle(300);
+        let (generation, owner) = (ui.generation.get(), ui.state.borrow().account.clone());
+        let reason = crate::rooms::Error::NotPrivate.to_string();
+        ui.backend_event(generation, &owner, BackendEvent::Failed { peer: ROOM.into(), id: "wire-m".into(), reason: reason.clone() });
+        settle(300);
+        assert!(shows_text(ui.toast.upcast_ref(), "Message not sent. See Message Details."));
+        assert_eq!(ui.store.message(OWNER, ROOM, "m").unwrap().failure_reason, reason, "the cause is on the message");
+        assert!(find_button(ui.toast.upcast_ref(), "Send Anyway").is_none());
+        find_button(ui.toast.upcast_ref(), "Resolve").expect("Resolve button").emit_clicked();
+        settle(500);
+        assert_eq!(ui.state.borrow().current().jid, ROOM, "the room is shown first");
+        let dialog = ui.window.visible_dialog().expect("a dialog is open");
+        assert_eq!(dialog.title(), "Conversation Security");
+        ui.window.close();
+    }
+
+    /// Someone in the room who is not a listed member or hides their address: the toast names them
+    /// and Resolve opens the participants.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn an_unlisted_occupant_offers_resolve_to_the_participants() {
+        use crate::protocol::BackendEvent;
+        let (ui, _) = room_with_failed_message("com.negzero.RoomOccupantFixture", "m", false);
+        let (generation, owner) = (ui.generation.get(), ui.state.borrow().account.clone());
+        let reason = crate::rooms::Error::OccupantNotListed("lurker".into()).to_string();
+        ui.backend_event(generation, &owner, BackendEvent::Failed { peer: ROOM.into(), id: "wire-m".into(), reason });
+        settle(300);
+        assert!(shows_text(ui.toast.upcast_ref(), "Message not sent. See Message Details."));
+        assert!(ui.store.message(OWNER, ROOM, "m").unwrap().failure_reason.starts_with("lurker is in this room but is not a listed member"), "the nickname and cause are on the message");
+        assert!(ui.participants.borrow().is_none());
+        find_button(ui.toast.upcast_ref(), "Resolve").expect("Resolve button").emit_clicked();
+        settle(300);
+        assert_eq!(ui.participants.borrow().as_ref().map(|view| view.room.clone()).as_deref(), Some(ROOM));
+        ui.window.close();
+    }
+
+    /// Automatic selection ended at plaintext for a room that has used encryption (the usual cause is
+    /// one member with no keys). The notice no longer blames the room and offers Send Anyway.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_blocked_downgrade_in_a_room_offers_send_anyway_not_plaintext() {
+        let (ui, message) = room_with_failed_message("com.negzero.DowngradeFixture", "waiting", true);
+        ui.fail_queued_downgrade(OWNER, ROOM, vec![message]);
+        settle(300);
+        assert!(shows_text(ui.toast.upcast_ref(), "Message not sent. See Message Details."));
+        assert!(ui.store.message(OWNER, ROOM, "waiting").unwrap().failure_reason.contains("could not be fully encrypted"), "the cause is on the message");
+        assert!(!shows_text(ui.toast.upcast_ref(), "no longer offers"), "no longer blames the room");
+        assert!(find_button(ui.toast.upcast_ref(), "Resolve").is_none());
+        let button = find_button(ui.toast.upcast_ref(), "Send Anyway").expect("Send Anyway button");
+        assert_eq!(ui.store.message(OWNER, ROOM, "waiting").unwrap().delivery, "failed");
+        let mut commands = capture(&ui);
+
+        button.emit_clicked();
+        settle(300);
+        let stored = ui.store.message(OWNER, ROOM, "waiting").unwrap();
+        assert!(stored.skip_unreachable);
+        assert_ne!(stored.delivery, "failed", "retried");
+        assert_eq!(probe_skip(&drain(&mut commands), ROOM), Some(true), "checked again, leaving members out");
+        let chat = ui.state.borrow().chats.iter().find(|c| c.jid == ROOM).cloned().unwrap();
+        assert_eq!(chat.selected_encryption(), None, "neither plaintext nor a locked protocol");
+        ui.window.close();
+    }
+
+    /// Without messages to resend (or outside a group) there is no button, only the explanation.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn the_downgrade_notice_has_no_button_without_messages_to_resend() {
+        let (ui, _) = room_with_failed_message("com.negzero.DowngradeNoButtonFixture", "m", true);
+        ui.notice_downgrade_blocked(ROOM, vec![]);
+        settle(300);
+        assert!(shows_text(ui.toast.upcast_ref(), "To send unencrypted anyway, choose Unencrypted in Conversation Security."));
+        assert!(!shows_text(ui.toast.upcast_ref(), "no longer offers"));
+        assert!(find_button(ui.toast.upcast_ref(), "Send Anyway").is_none());
+        ui.window.close();
+    }
+
+    fn find_css(widget: &gtk::Widget, class: &str) -> Vec<gtk::Widget> {
+        let mut found = vec![];
+        if widget.has_css_class(class) {
+            found.push(widget.clone());
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            found.extend(find_css(&current, class));
+            child = current.next_sibling();
+        }
+        found
+    }
+
+    /// A message sent without some room members: no toast, a coloured lock and the
+    /// tooltip "Sent partially" on its bubble, and the members with the reason in its details.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_partial_send_marks_the_bubble_and_explains_itself_in_the_details() {
+        use crate::protocol::BackendEvent;
+        let (ui, _) = room_with_failed_message("com.negzero.PartialSendFixture", "sent", false);
+        ui.window.set_default_size(1000, 700);
+        for (id, delivery) in [("sent", "sent"), ("plain", "sent")] {
+            let mut state = ui.state.borrow_mut();
+            if state.current().messages.iter().all(|m| m.id != id) {
+                let mut extra = state.current().messages[0].clone();
+                extra.id = id.into();
+                extra.wire_id = format!("wire-{id}");
+                extra.text = "another message".into();
+                extra.timestamp = "2026-11-17T10:01:00Z".into();
+                state.current_mut().messages.push(extra);
+            }
+            let message = state.current_mut().messages.iter_mut().find(|m| m.id == id).unwrap();
+            message.encrypted = true;
+            message.encryption_mode = Some(Mode::Legacy);
+            message.delivery = delivery.into();
+            let saved = message.clone();
+            let chat = state.current().clone();
+            drop(state);
+            ui.store.save_chat_message(OWNER, &chat, Some(&saved)).unwrap();
+        }
+        assert!(ui.persist());
+        ui.render_messages(true);
+        settle(500);
+        assert!(find_css(ui.window.upcast_ref(), "message-partial-lock").is_empty(), "nothing partial yet");
+
+        let (generation, owner) = (ui.generation.get(), ui.state.borrow().account.clone());
+        let why = "Legacy OMEMO keys require contact authorization from carol@example.org".to_owned();
+        ui.backend_event(
+            generation,
+            &owner,
+            BackendEvent::SentPartially { peer: ROOM.into(), id: "wire-sent".into(), skipped: vec![("carol@example.org".into(), why.clone())] },
+        );
+        settle(500);
+
+        // No toast: the long text lives in the details.
+        assert!(!shows_text(ui.toast.upcast_ref(), "Sent without"), "no toast");
+        assert!(!shows_text(ui.toast.upcast_ref(), "carol@example.org"), "no toast");
+        // Stored on the message, so it survives a restart.
+        assert_eq!(ui.store.message(OWNER, ROOM, "sent").unwrap().skipped_members, vec![("carol@example.org".to_owned(), why.clone())]);
+        assert!(ui.store.message(OWNER, ROOM, "plain").unwrap().skipped_members.is_empty());
+
+        // Exactly one bubble is marked: the ordinary lock, coloured, with the tooltip.
+        let marked = find_css(ui.window.upcast_ref(), "message-partial-lock");
+        assert_eq!(marked.len(), 1, "only the partially sent message");
+        assert_eq!(marked[0].tooltip_text().as_deref(), Some("Legacy OMEMO with problems. See Message Details"));
+        let lock = marked[0].downcast_ref::<gtk::Image>().expect("the lock is an image");
+        assert_eq!(lock.icon_name().as_deref(), Some("channel-secure-symbolic"), "the regular lock");
+        assert!(lock.has_css_class("accent"), "coloured with the theme's accent");
+        // It follows the theme: blue by default, and it changes with light and dark mode instead of
+        // being a fixed colour.
+        let manager = adw::StyleManager::default();
+        let mut colours = vec![];
+        for scheme in [adw::ColorScheme::ForceLight, adw::ColorScheme::ForceDark] {
+            manager.set_color_scheme(scheme);
+            settle(300);
+            let colour = lock.color();
+            assert!(colour.blue() > colour.red() && colour.blue() > colour.green(), "{scheme:?}: {colour:?} is blue");
+            colours.push(colour);
+        }
+        assert_ne!(colours[0], colours[1], "the colour follows light and dark themes");
+        manager.set_color_scheme(adw::ColorScheme::Default);
+        // The other encrypted message keeps its ordinary, uncoloured lock.
+        assert_eq!(find_css(ui.window.upcast_ref(), "accent").len(), 1, "only the partial lock is coloured");
+
+        // The details say who and why.
+        let message = ui.store.message(OWNER, ROOM, "sent").unwrap();
+        ui.message_details(&message);
+        settle(500);
+        let dialog = ui.window.visible_dialog().expect("details dialog");
+        let content = dialog.child().expect("dialog content");
+        assert!(shows_text(&content, "Sent Partially"));
+        assert!(shows_text(&content, "carol@example.org"));
+        assert!(shows_text(&content, &why));
+        ui.window.close();
+    }
+
+    /// Reacting in a room keeps working after Send Anyway. It used to lock the room to Legacy OMEMO,
+    /// which has no protected message actions, so every reaction was refused. A reaction sent while
+    /// some members' keys are unusable now goes out like the messages do.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn reacting_in_a_room_still_works_after_send_anyway() {
+        const REFUSAL: &str = "Legacy OMEMO does not support protected message actions here";
+        let (ui, _) = room_with_failed_message("com.negzero.ReactAfterSendAnywayFixture", "m", false);
+        let mut commands = capture(&ui);
+        ui.react("m", "\u{1f44d}");
+        settle(300);
+        assert!(!shows_text(ui.toast.upcast_ref(), REFUSAL), "reacting works before Send Anyway");
+        assert_eq!(sent_skip(&drain(&mut commands), ROOM), Some((false, true)), "a reaction was sent");
+        ui.toast.dismiss_all();
+        settle(500);
+
+        ui.send_anyway(ROOM, &["m".to_owned()]);
+        settle(300);
+        drain(&mut commands);
+        ui.toast.dismiss_all();
+        settle(500);
+        ui.react("m", "\u{2764}");
+        settle(300);
+        assert!(!shows_text(ui.toast.upcast_ref(), REFUSAL), "reacting still works after Send Anyway");
+        assert_eq!(
+            sent_skip(&drain(&mut commands), ROOM),
+            Some((true, true)),
+            "the reaction is sent, leaving out the members Send Anyway skips"
+        );
+        assert_eq!(
+            ui.state.borrow().chats.iter().find(|c| c.jid == ROOM).unwrap().selected_encryption(),
+            None,
+            "the room is not locked to Legacy OMEMO"
+        );
+        ui.window.close();
+    }
+
+    /// Send Anyway keeps applying to the room for a while, so the user is not asked for every
+    /// message; it ends, it is per room, and the setting turns it off.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn send_anyway_lasts_thirty_minutes_per_room_and_can_be_turned_off() {
+        assert_eq!(Ui::SEND_ANYWAY_COOLDOWN, std::time::Duration::from_secs(30 * 60));
+        let (ui, message) = room_with_failed_message("com.negzero.SendAnywayCooldownFixture", "m", true);
+        let mut commands = capture(&ui);
+        let send = |ui: &Ui, peer: &str| {
+            ui.command(Command::Send { peer: peer.into(), message: Message::default(), quote: String::new() });
+        };
+        send(&ui, ROOM);
+        assert_eq!(sent_skip(&drain(&mut commands), ROOM), Some((false, false)), "not chosen yet");
+
+        ui.fail_queued_selection(OWNER, ROOM, vec![message], &refusal());
+        settle(300);
+        find_button(ui.toast.upcast_ref(), "Send Anyway").expect("button").emit_clicked();
+        settle(300);
+        drain(&mut commands);
+        ui.toast.dismiss_all();
+        settle(500);
+
+        // Later messages to this room skip without asking, and so does their encryption check.
+        send(&ui, ROOM);
+        assert_eq!(sent_skip(&drain(&mut commands), ROOM), Some((true, false)), "later messages skip");
+        let fresh = Message { id: "fresh".into(), wire_id: "fresh".into(), own: true, outbox_pending: true, delivery: "queued".into(), ..Default::default() };
+        ui.prepare_queued_peer(ROOM.into(), vec![fresh]);
+        assert_eq!(probe_skip(&drain(&mut commands), ROOM), Some(true), "a new message's check skips too");
+        // Another conversation is unaffected.
+        send(&ui, "other@conference.example.org");
+        assert_eq!(sent_skip(&drain(&mut commands), "other@conference.example.org"), Some((false, false)));
+
+        // It ends.
+        ui.send_anyway_until
+            .borrow_mut()
+            .insert(ROOM.into(), std::time::Instant::now() - std::time::Duration::from_secs(1));
+        send(&ui, ROOM);
+        assert_eq!(sent_skip(&drain(&mut commands), ROOM), Some((false, false)), "after the cooldown");
+
+        // Turned off: nothing is skipped and no button is offered.
+        ui.send_anyway_until
+            .borrow_mut()
+            .insert(ROOM.into(), std::time::Instant::now() + Ui::SEND_ANYWAY_COOLDOWN);
+        ui.store.set_pref(&format!("offer_send_anyway:{OWNER}"), "false").unwrap();
+        send(&ui, ROOM);
+        assert_eq!(sent_skip(&drain(&mut commands), ROOM), Some((false, false)), "the setting is off");
+        let m = Message { id: "again".into(), wire_id: "again".into(), own: true, outbox_pending: true, ..Default::default() };
+        ui.fail_queued_selection(OWNER, ROOM, vec![m], &refusal());
+        settle(300);
+        assert!(find_button(ui.toast.upcast_ref(), "Send Anyway").is_none(), "no button when turned off");
+        ui.window.close();
+    }
+
+    /// The switch in Preferences controls the button.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn the_preferences_switch_turns_send_anyway_off() {
+        fn find_switch(widget: &gtk::Widget) -> Option<adw::SwitchRow> {
+            if let Some(row) = widget.downcast_ref::<adw::SwitchRow>() {
+                if row.title() == "Offer Send Anyway" {
+                    return Some(row.clone());
+                }
+            }
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                if let Some(found) = find_switch(&current) {
+                    return Some(found);
+                }
+                child = current.next_sibling();
+            }
+            None
+        }
+        let (ui, _) = room_with_failed_message("com.negzero.SendAnywaySwitchFixture", "m", true);
+        assert!(ui.offers_send_anyway(), "on by default");
+        ui.preferences();
+        settle(500);
+        let dialog = ui.window.visible_dialog().expect("preferences");
+        let row = find_switch(&dialog.child().expect("content")).expect("the Offer Send Anyway switch");
+        assert!(row.is_active());
+        row.set_active(false);
+        settle(200);
+        assert!(!ui.offers_send_anyway(), "the switch turns it off");
+        row.set_active(true);
+        settle(200);
+        assert!(ui.offers_send_anyway());
+        ui.window.close();
+    }
+
+    /// Earlier versions pinned a room to Legacy OMEMO for a day after Send Anyway. That is forgotten
+    /// once, for rooms only, so reactions work again without waiting a day.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn an_old_legacy_pin_on_a_room_is_cleared_once() {
+        use crate::encryption_policy::Selection;
+        let (ui, _) = room_with_failed_message("com.negzero.LegacyPinFixture", "m", false);
+        let pinned = || Some(Selection { mode: Mode::Legacy, time_ms: chrono::Utc::now().timestamp_millis() });
+        // The fixture already activated this account once; start from "not cleared yet".
+        ui.store.set_pref(&format!("legacy_room_pins_cleared:{OWNER}"), "false").unwrap();
+        let mut state = State::live(OWNER, vec![]);
+        let room = state.chat_for(ROOM);
+        room.group = true;
+        room.automatic_encryption = pinned();
+        let room_id = room.id.clone();
+        let direct = state.chat_for("peer@fixture.invalid");
+        direct.automatic_encryption = pinned();
+        state.active = room_id;
+        ui.activate_state(state);
+        let selection = |ui: &Ui, jid: &str| ui.state.borrow().chats.iter().find(|c| c.jid == jid).unwrap().automatic_encryption.map(|s| s.mode);
+        assert_eq!(selection(&ui, ROOM), None, "the room's old pin is forgotten");
+        assert_eq!(selection(&ui, "peer@fixture.invalid"), Some(Mode::Legacy), "a direct chat keeps its choice");
+
+        // Only once: a Legacy selection made later is left alone.
+        let mut state = State::live(OWNER, vec![]);
+        let room = state.chat_for(ROOM);
+        room.group = true;
+        room.automatic_encryption = pinned();
+        let room_id = room.id.clone();
+        state.active = room_id;
+        ui.activate_state(state);
+        assert_eq!(selection(&ui, ROOM), Some(Mode::Legacy), "not cleared a second time");
+        ui.window.close();
+    }
+
+    fn find_icons(widget: &gtk::Widget, name: &str) -> Vec<gtk::Image> {
+        let mut found = vec![];
+        if let Some(image) = widget.downcast_ref::<gtk::Image>() {
+            if image.icon_name().as_deref() == Some(name) {
+                found.push(image.clone());
+            }
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            found.extend(find_icons(&current, name));
+            child = current.next_sibling();
+        }
+        found
+    }
+
+    /// A long failure reason stays out of the toast, which cuts text off: the toast is short, the
+    /// bubble points to Message Details, and the details give the whole reason. It clears once the
+    /// message is sent.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_failed_message_keeps_its_long_reason_in_the_details_not_the_toast() {
+        use crate::protocol::BackendEvent;
+        let (ui, _) = room_with_failed_message("com.negzero.FailureDetailsFixture", "m", false);
+        ui.window.set_default_size(1000, 700);
+        ui.render_messages(true);
+        settle(500);
+        let (generation, owner) = (ui.generation.get(), ui.state.borrow().account.clone());
+        let long = "Someone in this room hides their address, so the message cannot be encrypted for them. ".repeat(3);
+        let long = long.trim();
+        ui.backend_event(generation, &owner, BackendEvent::Failed { peer: ROOM.into(), id: "wire-m".into(), reason: long.into() });
+        settle(500);
+
+        // The toast is short and does not carry the reason.
+        assert!(shows_text(ui.toast.upcast_ref(), "Message not sent. See Message Details."));
+        assert!(!shows_text(ui.toast.upcast_ref(), "hides their address"), "the reason is not in the toast");
+        // The failed bubble points to the details.
+        let warnings = find_icons(ui.window.upcast_ref(), "dialog-warning-symbolic");
+        assert!(
+            warnings.iter().any(|w| w.tooltip_text().as_deref() == Some("Send failed. See Message Details")),
+            "the bubble's tooltip points to the details: {:?}",
+            warnings.iter().map(|w| w.tooltip_text()).collect::<Vec<_>>()
+        );
+        // The details say the whole thing.
+        let message = ui.store.message(OWNER, ROOM, "m").unwrap();
+        assert_eq!(message.failure_reason, long);
+        ui.message_details(&message);
+        settle(500);
+        let dialog = ui.window.visible_dialog().expect("details");
+        let content = dialog.child().expect("content");
+        assert!(shows_text(&content, "What Went Wrong"));
+        assert!(shows_text(&content, long), "the full reason, not cut off");
+        dialog.force_close();
+        settle(300);
+
+        // Sent later: the old reason is gone.
+        ui.backend_event(generation, &owner, BackendEvent::Sent { peer: ROOM.into(), id: "wire-m".into() });
+        settle(300);
+        assert_eq!(ui.store.message(OWNER, ROOM, "m").unwrap().failure_reason, "", "cleared once sent");
         ui.window.close();
     }
 }

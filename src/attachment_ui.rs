@@ -4,7 +4,7 @@ use gtk::{gio, glib};
 use std::{
     cell::Cell,
     rc::Rc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 pub(crate) fn automatic_media_allowed(smoke: bool, own: bool, encrypted: bool, chat: &crate::model::Chat) -> bool {
     !smoke && (own || encrypted || chat.contact || chat.group && chat.room_joined)
@@ -128,7 +128,7 @@ impl Ui {
             if ui.state.borrow().account != owner {
                 return glib::ControlFlow::Break;
             }
-            let Some(controls) = visible.upgrade().filter(|controls| controls.is_visible()) else {
+            let Some(_controls) = visible.upgrade().filter(|controls| controls.is_visible()) else {
                 return glib::ControlFlow::Break;
             };
             let status = ui.downloads.borrow().status(&owner, &file);

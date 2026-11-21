@@ -244,17 +244,20 @@ impl Registry {
             .snapshot
             .as_ref()
             .ok_or(Error::RecipientsUnavailable)?;
-        if state.invalid
-            || !snapshot.affiliations.contains_key(owner)
-            || state.occupants.values().any(|(author, affiliation)| {
-                author.as_ref().is_none_or(|jid| {
-                    snapshot.affiliations.get(jid).is_none_or(|_| {
-                        !matches!(affiliation.as_str(), "member" | "admin" | "owner")
-                    })
-                })
-            })
-        {
+        if state.invalid || !snapshot.affiliations.contains_key(owner) {
             return Err(Error::RecipientsUnavailable);
+        }
+        let unlisted = state.occupants.iter().find(|(_, (author, affiliation))| {
+            author.as_ref().is_none_or(|jid| {
+                snapshot
+                    .affiliations
+                    .get(jid)
+                    .is_none_or(|_| !matches!(affiliation.as_str(), "member" | "admin" | "owner"))
+            })
+        });
+        if let Some((address, _)) = unlisted {
+            let nick = address.split_once('/').map_or(address.as_str(), |(_, nick)| nick);
+            return Err(Error::OccupantNotListed(crate::text_safety::display_nick(nick, false)));
         }
         Ok(RoomRecipients {
             room: room.into(),
@@ -313,7 +316,7 @@ fn require_private(info: &Element) -> Result<()> {
         || has("muc_anonymous")
         || has("muc_open")
     {
-        return Err(Error::RecipientsUnavailable);
+        return Err(Error::NotPrivate);
     }
     Ok(())
 }
@@ -462,11 +465,11 @@ mod tests {
         };
         assert!(matches!(
             require_private(&info(&["muc_open", "muc_semianonymous", "muc_unmoderated"])),
-            Err(Error::RecipientsUnavailable)
+            Err(Error::NotPrivate)
         ));
         assert!(matches!(
             require_private(&info(&["muc_membersonly"])),
-            Err(Error::RecipientsUnavailable)
+            Err(Error::NotPrivate)
         ));
         assert!(require_private(&info(&["muc_membersonly", "muc_nonanonymous"])).is_ok());
     }
@@ -734,5 +737,38 @@ mod tests {
                 .parse()
                 .unwrap();
         assert!(complete("room@conference.example.org", anonymous, lists).is_err());
+    }
+
+    /// A member list that loaded fine is still unusable when someone currently in the room hides
+    /// their address; the error names that occupant instead of the generic one.
+    #[test]
+    fn an_occupant_without_a_disclosed_address_is_named_in_the_error() {
+        let room = "room@conference.example.org";
+        let owner = "owner@example.org";
+        let mut rooms = Rooms::new(owner.into());
+        rooms.join(room, Some("own")).unwrap();
+        let presence = |nick: &str, jid: Option<&str>, affiliation: &str, own: bool| {
+            let jid = jid.map(|jid| format!(" jid='{jid}'")).unwrap_or_default();
+            let status = if own { "<status code='110'/>" } else { "" };
+            format!("<presence xmlns='jabber:client' from='{room}/{nick}'><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='{affiliation}' role='participant'{jid}/>{status}</x></presence>").parse::<Element>().unwrap()
+        };
+        rooms.presence(&presence("own", Some(owner), "owner", true));
+        let snapshot = MemberSnapshot {
+            room: room.into(),
+            affiliations: [(owner.into(), Affiliation::Owner), ("buddy@example.org".into(), Affiliation::Member)].into(),
+        };
+        let revision = rooms.begin_member_refresh(room).unwrap();
+        rooms.member_refresh_finished(room, revision, Ok(snapshot.clone()));
+        assert!(rooms.recipients(room).is_ok(), "the listed members alone are fine");
+
+        rooms.presence(&presence("lurker", None, "none", false));
+        let revision = rooms.begin_member_refresh(room).unwrap();
+        rooms.member_refresh_finished(room, revision, Ok(snapshot));
+        let error = rooms.recipients(room).unwrap_err();
+        assert_eq!(error, Error::OccupantNotListed("lurker".into()));
+        assert_eq!(
+            error.to_string(),
+            "lurker is in this room but is not a listed member or hides their address, so the message cannot be encrypted for them"
+        );
     }
 }

@@ -105,6 +105,9 @@ pub struct Ui {
     pub pq_reviews: RefCell<HashMap<String, Vec<crate::crypto::pq::service::Review>>>,
     pub encryption_checks: RefCell<HashMap<String, String>>,
     pub encryption_revision: Cell<u64>,
+    /// Rooms where the user chose Send Anyway, and until when: messages to them skip members whose
+    /// keys cannot be used without asking again. In memory only, so it ends with the session.
+    pub(crate) send_anyway_until: RefCell<HashMap<String, std::time::Instant>>,
     pub room_syncing: RefCell<Option<(u64, String, u64)>>,
     pub room_sync_retry: RefCell<HashMap<String, (Instant, u8)>>,
     pub(crate) active_audio: RefCell<Option<std::rc::Weak<crate::video_ui::Playback>>>,
@@ -431,6 +434,7 @@ impl Ui {
             pq_reviews: RefCell::new(HashMap::new()),
             encryption_checks: RefCell::new(HashMap::new()),
             encryption_revision: Cell::new(0),
+            send_anyway_until: RefCell::new(HashMap::new()),
             room_syncing: RefCell::new(None),
             room_sync_retry: RefCell::new(HashMap::new()),
             active_audio: RefCell::new(None),
@@ -704,6 +708,117 @@ impl Ui {
                 f(&ui)
             }
         });
+    }
+    /// Earlier versions pinned a room to Legacy OMEMO for a day when the user chose Send Anyway, and
+    /// Legacy OMEMO refuses reactions. Forget those cached choices once; the next send simply asks
+    /// again, and automatic selection picks the protocol as usual.
+    fn clear_legacy_room_pins(&self, state: &mut State) {
+        let key = format!("legacy_room_pins_cleared:{}", state.account);
+        if state.account.is_empty() || self.store.pref(&key, "false") == "true" {
+            return;
+        }
+        for chat in state.chats.iter_mut().filter(|chat| chat.group) {
+            if chat
+                .automatic_encryption
+                .is_some_and(|selection| selection.mode == crate::encryption_policy::Mode::Legacy)
+            {
+                chat.automatic_encryption = None;
+            }
+        }
+        let _ = self.store.set_pref(&key, "true");
+    }
+    /// The toast for a message that did not go out. In a group chat, when the cause is one member's
+    /// keys that cannot be used, it offers Send Anyway: the same message, still encrypted, for
+    /// everyone who can be reached. Otherwise it is [`Self::notice_resolving_authorization`].
+    pub(crate) fn notice_send_failure(
+        self: &Rc<Self>,
+        peer: &str,
+        ids: Vec<String>,
+        reason: &str,
+        title: String,
+    ) {
+        let in_group = self
+            .state
+            .borrow()
+            .chats
+            .iter()
+            .any(|chat| chat.jid == peer && chat.group);
+        if in_group {
+            if let Some(fix) = crate::rooms::fix_for(reason) {
+                let toast = adw::Toast::builder().title(title).button_label("Resolve").build();
+                let weak = Rc::downgrade(self);
+                let peer = peer.to_owned();
+                toast.connect_button_clicked(move |_| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.resolve_room_failure(&peer, fix);
+                    }
+                });
+                return self.show_toast(toast);
+            }
+        }
+        if !in_group
+            || ids.is_empty()
+            || !self.offers_send_anyway()
+            || !crate::crypto::skippable_reason(reason)
+        {
+            return self.notice_resolving_authorization(reason, title);
+        }
+        let toast = adw::Toast::builder()
+            .title(title)
+            .button_label("Send Anyway")
+            .build();
+        let weak = Rc::downgrade(self);
+        let peer = peer.to_owned();
+        toast.connect_button_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.send_anyway(&peer, &ids);
+            }
+        });
+        self.show_toast(toast);
+    }
+    /// The toast for a room whose automatic encryption ended at plaintext. In a group with messages
+    /// to resend it offers Send Anyway; otherwise it explains how to send unencrypted.
+    pub(crate) fn notice_downgrade_blocked(self: &Rc<Self>, peer: &str, ids: Vec<String>) {
+        let in_group = self
+            .state
+            .borrow()
+            .chats
+            .iter()
+            .any(|chat| chat.jid == peer && chat.group);
+        if !in_group || ids.is_empty() || !self.offers_send_anyway() {
+            return self.notice(crate::send_policy_ui::DOWNGRADE_NOTICE);
+        }
+        let toast = adw::Toast::builder()
+            .title(crate::send_policy_ui::DOWNGRADE_TOAST)
+            .button_label("Send Anyway")
+            .build();
+        let weak = Rc::downgrade(self);
+        let peer = peer.to_owned();
+        toast.connect_button_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.send_anyway(&peer, &ids);
+            }
+        });
+        self.show_toast(toast);
+    }
+    /// Open what deals with a room that cannot be encrypted: Conversation Security to choose how it
+    /// is sent, or the participants to see who is in it. The room is shown first if it is not open.
+    pub(crate) fn resolve_room_failure(self: &Rc<Self>, room: &str, fix: crate::rooms::Fix) {
+        let id = self
+            .state
+            .borrow()
+            .chats
+            .iter()
+            .find(|chat| chat.jid == room && chat.group)
+            .map(|chat| chat.id.clone());
+        let Some(id) = id else { return };
+        if self.state.borrow().current().jid != room {
+            self.select_chat(&id);
+        }
+        match fix {
+            crate::rooms::Fix::Security => self.security(),
+            crate::rooms::Fix::Participants => self.show_participants(),
+        }
     }
     /// A toast for `title`. When `reason` is a Legacy OMEMO contact-authorization refusal, it names
     /// the contact who refused and carries a Resolve button that opens Control Access for them
@@ -1836,8 +1951,33 @@ impl Ui {
             );
         }
     }
-    pub fn command(&self, c: Command) -> bool {
+    pub fn command(&self, mut c: Command) -> bool {
+        if let Command::Send { peer, message, .. } = &mut c {
+            self.apply_send_anyway_cooldown(peer, message);
+        }
         self.session.borrow().as_ref().is_some_and(|s| s.send(c))
+    }
+    /// How long Send Anyway keeps applying to a room after the user chose it.
+    pub(crate) const SEND_ANYWAY_COOLDOWN: Duration = Duration::from_secs(30 * 60);
+    /// Whether the Send Anyway button is offered at all (Preferences > Offer Send Anyway).
+    pub(crate) fn offers_send_anyway(&self) -> bool {
+        self.preference("offer_send_anyway", true)
+    }
+    /// Within the cooldown after Send Anyway, a message to that room is sent without the members
+    /// whose keys cannot be used, as the user already chose, instead of failing again.
+    pub(crate) fn apply_send_anyway_cooldown(&self, peer: &str, message: &mut Message) {
+        if self.send_anyway_active(peer) {
+            message.skip_unreachable = true;
+        }
+    }
+    /// Whether Send Anyway is on for `peer` right now: offered, chosen, and not yet expired.
+    pub(crate) fn send_anyway_active(&self, peer: &str) -> bool {
+        self.offers_send_anyway()
+            && self
+                .send_anyway_until
+                .borrow()
+                .get(peer)
+                .is_some_and(|until| *until > std::time::Instant::now())
     }
     pub fn send_content(self: &Rc<Self>, value: &str, kind: &str) -> Option<String> {
         if kind=="article" {return self.queue_formatted_text(value,Some(crate::formatting::Markup{body:value.into(),markdown:true,unstyled:true,..Default::default()}));}
@@ -2191,6 +2331,7 @@ impl Ui {
         self.timeline.set_opacity(0.);
         self.images.borrow_mut().clear();
         self.avatars.borrow_mut().clear();
+        self.clear_legacy_room_pins(&mut state);
         for chat in &mut state.chats {
             for m in &mut chat.messages {
                 if let Some(draft) = &mut m.upload {
@@ -2814,6 +2955,9 @@ impl Ui {
                 self.update_chat_subtitle();
                 return;
             }
+            BackendEvent::SentPartially { peer, id, skipped } => {
+                self.record_partial_send(owner, &peer, &id, &skipped);
+            }
             BackendEvent::Uncertain { peer, id } => {
                 self.delivery(&peer, &id, "uncertain");
                 self.notice("Encrypted delivery is uncertain. Retrying may duplicate it.");
@@ -2829,24 +2973,20 @@ impl Ui {
             BackendEvent::Failed { peer, id, reason } => {
                 // Bounced typing, receipt and marker stanzas also arrive here; only one of our own
                 // messages is worth a toast (edits, reactions and removals toast in `delivery`).
-                let ours = self
-                    .store
-                    .own_wire_id(owner, &peer, &id)
-                    .ok()
-                    .flatten()
-                    .is_some();
-                if ours {
+                let own_id = self.store.own_wire_id(owner, &peer, &id).ok().flatten();
+                if own_id.is_some() {
                     let stage = if reason.starts_with("the server said") { "XMPP server response" } else { "Message submission" };
                     if self.store.record_message_failure(owner, &peer, &id, stage, &reason).is_err() {
                         self.notice("The send error could not be saved in Message Details");
                     }
                 }
                 self.delivery(&peer, &id, "failed");
-                if !ours {
+                let Some(own_id) = own_id else {
                     return;
-                }
+                };
+                self.record_failure_reason(owner, &peer, &id, &reason);
                 let title = crate::text_safety::failed_send_toast(&crate::message_failures::safe_detail(&reason));
-                self.notice_resolving_authorization(&reason, title);
+                self.notice_send_failure(&peer, vec![own_id], &reason, title);
             }
             BackendEvent::History {
                 peer,
@@ -3197,6 +3337,54 @@ impl Ui {
             }
             Ok(None) => {}
             Err(_) => self.notice("Message delivery status could not be saved"),
+        }
+    }
+    /// Keep why the own message `id` failed on it, so Message Details can say what went wrong and the
+    /// toast can stay short.
+    pub(crate) fn record_failure_reason(self: &Rc<Self>, owner: &str, peer: &str, id: &str, reason: &str) {
+        let reason = crate::text_safety::failure_reason(reason);
+        match self.store.record_failure(owner, peer, id, &reason) {
+            Ok(Some(message)) => {
+                let mut state = self.state.borrow_mut();
+                let active = state.current().jid == peer;
+                let chat = state.chat_for(peer);
+                if let Some(row) = chat.messages.iter_mut().find(|m| m.id == message.id) {
+                    *row = message;
+                }
+                drop(state);
+                if active {
+                    self.render_messages(false);
+                }
+            }
+            Ok(None) => {}
+            Err(_) => self.notice("Could not record why this message failed"),
+        }
+    }
+    /// Remember on the message that it went out without `skipped` room members, so its bubble and
+    /// its details can say so. The list is bounded; it is shown, never acted on.
+    pub(crate) fn record_partial_send(
+        self: &Rc<Self>,
+        owner: &str,
+        peer: &str,
+        id: &str,
+        skipped: &[(String, String)],
+    ) {
+        let skipped: Vec<(String, String)> = skipped.iter().take(200).cloned().collect();
+        match self.store.record_skipped(owner, peer, id, &skipped) {
+            Ok(Some(message)) => {
+                let mut state = self.state.borrow_mut();
+                let active = state.current().jid == peer;
+                let chat = state.chat_for(peer);
+                if let Some(row) = chat.messages.iter_mut().find(|m| m.id == message.id) {
+                    *row = message;
+                }
+                drop(state);
+                if active {
+                    self.render_messages(false);
+                }
+            }
+            Ok(None) => {}
+            Err(_) => self.notice("Could not record who this message was not sent to"),
         }
     }
     pub(crate) fn update_history_spinner(&self) {

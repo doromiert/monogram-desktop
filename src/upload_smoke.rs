@@ -1,7 +1,7 @@
 //! Native chooser/composer upload acceptance on fictional XMPP/HTTPS only.
 use crate::{downloads::Status, model::*, ui::Ui, uploads::Phase};
 use adw::prelude::*;
-use gtk::{gdk, gio};
+use gtk::gio;
 use std::{
     cell::{Cell, RefCell},
     path::PathBuf,

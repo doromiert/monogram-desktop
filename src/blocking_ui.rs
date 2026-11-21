@@ -7,8 +7,8 @@ use crate::{
     widgets::{bx, clear, clear_list, icon_button, label},
 };
 use adw::prelude::*;
-use gtk::{glib, prelude::*};
-use std::{cell::Cell, rc::Rc};
+use gtk::glib;
+use std::rc::Rc;
 
 pub struct ListControls {
     owner: String,

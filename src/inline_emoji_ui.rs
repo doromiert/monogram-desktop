@@ -712,7 +712,6 @@ impl Ui {
         inserted
     }
 
-    pub(crate) fn inline_message_text(self:&Rc<Self>,body:&str,emoji:&InlineEmoji,status:Option<&gtk::Box>,links:&[crate::link_previews::ClickableUrl])->gtk::Widget{self.inline_message_text_formatted(body,emoji,status,links,None)}
     pub(crate) fn inline_message_text_formatted(
         self: &Rc<Self>,
         body: &str,

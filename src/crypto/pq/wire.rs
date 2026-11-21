@@ -8,7 +8,7 @@ use super::{
 };
 use crate::crypto::{Error, Result, Secret, journal::Context};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use pq_signal::{IdentityKey, KexAuthEntry, PreKeySignalMessage};
+use pq_signal::{KexAuthEntry, PreKeySignalMessage};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use tokio_xmpp::minidom::Element;
@@ -261,7 +261,13 @@ pub async fn encrypt(
             )?;
         }
         if !native::has_session(&tx, &target.peer, target.device)? {
-            let bundle = target.bundle.as_ref().ok_or(Error::InvalidBundle)?;
+            let bundle = target.bundle.as_ref().ok_or_else(|| {
+                Error::invalid_bundle(
+                    crate::encryption_policy::Mode::Pq.name(),
+                    &target.peer,
+                    Some(target.device),
+                )
+            })?;
             native::process_bundle(
                 &tx,
                 &target.peer,

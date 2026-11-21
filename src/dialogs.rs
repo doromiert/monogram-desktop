@@ -860,6 +860,11 @@ impl Ui {
             let owner = account.jid.clone();
             self.weak_button(&remove, move |s| s.remove_account(&owner));
             controls.append(&remove);
+            let delete = icon_button("edit-delete-symbolic", "Delete account on server…");
+            delete.add_css_class("destructive-action");
+            let owner = account.jid.clone();
+            self.weak_button(&delete, move |s| s.delete_account(&owner));
+            controls.append(&delete);
             row.add_suffix(&controls);
             g.add(&row)
         }
@@ -876,6 +881,40 @@ impl Ui {
             }
         });
         options.add(&add);
+        if !self.state.borrow().account.is_empty() && self.online.get() {
+            let server = adw::PreferencesGroup::builder()
+                .title("Server")
+                .description("For the account you are signed in to.")
+                .build();
+            let invite = adw::ActionRow::builder()
+                .title("Create Invite Link")
+                .subtitle("Let someone create an account on this server and add you")
+                .activatable(true)
+                .build();
+            invite.add_prefix(&gtk::Image::from_icon_name("emblem-shared-symbolic"));
+            let weak = Rc::downgrade(self);
+            invite.connect_activated(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.create_invite_link();
+                }
+            });
+            server.add(&invite);
+            let commands = adw::ActionRow::builder()
+                .title("Server Commands…")
+                .subtitle("Run the commands your server offers")
+                .activatable(true)
+                .build();
+            commands.add_prefix(&gtk::Image::from_icon_name("utilities-terminal-symbolic"));
+            commands.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+            let weak = Rc::downgrade(self);
+            commands.connect_activated(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.server_commands();
+                }
+            });
+            server.add(&commands);
+            page.add(&server);
+        }
         if !self.state.borrow().account.is_empty() {
             let row = adw::ActionRow::builder()
                 .title("Disconnect")
@@ -1036,53 +1075,101 @@ impl Ui {
             if response != "remove" {
                 return;
             }
+            if let Some(ui) = weak.upgrade() {
+                ui.remove_local_account(owner.clone());
+            }
+        });
+        d.present(Some(&self.window));
+    }
+    /// Forget `owner` on this device: saved sign-in, history, drafts and every cache. Does not
+    /// touch the server.
+    pub fn remove_local_account(self: &Rc<Self>, owner: String) {
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            let result = crate::credentials::remove(&owner).await;
+            let Some(ui) = weak.upgrade() else { return };
+            if let Err(error) = result {
+                ui.notice(&format!("Could not remove saved sign-in. {error}"));
+                return;
+            }
+            if ui.state.borrow().account == owner {
+                let demo = ui.demo.borrow().clone();
+                ui.activate_state(demo);
+            }
+            if ui.store.forget(&owner).is_err() {
+                ui.notice("Local account removal failed");
+                return;
+            }
+            if let Err(error) = crate::gifs::forget(&owner).await {
+                ui.notice(&format!("Could not remove saved GIFs. {error}"));
+            }
+            let cleanup_owner = owner.clone();
+            let cleanup = gtk::gio::spawn_blocking(move || {
+                (
+                    crate::downloads::forget(&cleanup_owner),
+                    crate::link_previews::forget(&cleanup_owner),
+                    crate::preview_cache::forget(&cleanup_owner),
+                )
+            });
+            let weak = Rc::downgrade(&ui);
+            drop(ui);
+            let cleanup = cleanup.await;
+            let Some(ui) = weak.upgrade() else { return };
+            match cleanup {
+                Ok((attachments, previews, stickers)) => {
+                    if let Err(reason) = attachments {
+                        ui.notice(reason);
+                    }
+                    if let Err(reason) = previews {
+                        ui.notice(reason);
+                    }
+                    if let Err(reason) = stickers {
+                        ui.notice(reason);
+                    }
+                }
+                Err(_) => ui.notice("Local cache removal failed"),
+            }
+            if !ui.smoke && ui.store.accounts().is_empty() {
+                ui.show_welcome();
+            } else {
+                ui.accounts_dialog();
+            }
+        });
+    }
+    /// Delete `owner` on its server, then forget it on this device. Only the signed-in, online
+    /// account can be deleted, and only after its full address is typed into the dialog.
+    pub fn delete_account(self: &Rc<Self>, owner: &str) {
+        if self.state.borrow().account != owner || !self.online.get() {
+            self.notice("Connect to this account first. The server only deletes the account you are signed in to.");
+            return;
+        }
+        let (d, entry) = account_deletion_dialog(owner);
+        let owner = owner.to_string();
+        let weak = Rc::downgrade(self);
+        d.connect_response(None, move |_, response| {
+            // The button is disabled until the address matches; check again so a changed
+            // response id or a stray activation can never skip the confirmation.
+            if response != "delete" || !crate::account_deletion::confirmation_matches(&owner, &entry.text()) {
+                return;
+            }
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(tx) = ui.session.borrow().as_ref().map(|s| s.tx.clone()) else {
+                ui.notice("Connect to this account first.");
+                return;
+            };
             let owner = owner.clone();
             let weak = weak.clone();
             glib::MainContext::default().spawn_local(async move {
-                let result = crate::credentials::remove(&owner).await;
+                let reply = crate::iq::Client::new(tx)
+                    .request_on_main_loop(&owner, crate::iq::Kind::Set, crate::account_deletion::cancel_registration())
+                    .await;
                 let Some(ui) = weak.upgrade() else { return };
-                if let Err(error) = result {
-                    ui.notice(&format!("Could not remove saved sign-in. {error}"));
-                    return;
-                }
-                if ui.state.borrow().account == owner {
-                    let demo = ui.demo.borrow().clone();
-                    ui.activate_state(demo);
-                }
-                if ui.store.forget(&owner).is_err() {
-                    ui.notice("Local account removal failed");
-                    return;
-                }
-                let cleanup_owner = owner.clone();
-                let cleanup = gtk::gio::spawn_blocking(move || {
-                    (
-                        crate::downloads::forget(&cleanup_owner),
-                        crate::link_previews::forget(&cleanup_owner),
-                        crate::preview_cache::forget(&cleanup_owner),
-                    )
-                });
-                let weak = Rc::downgrade(&ui);
-                drop(ui);
-                let cleanup = cleanup.await;
-                let Some(ui) = weak.upgrade() else { return };
-                match cleanup {
-                    Ok((attachments, previews, stickers)) => {
-                        if let Err(reason) = attachments {
-                            ui.notice(reason);
-                        }
-                        if let Err(reason) = previews {
-                            ui.notice(reason);
-                        }
-                        if let Err(reason) = stickers {
-                            ui.notice(reason);
-                        }
+                match reply {
+                    Ok(_) => {
+                        ui.notice("Account deleted on the server");
+                        ui.remove_local_account(owner);
                     }
-                    Err(_) => ui.notice("Local cache removal failed"),
-                }
-                if !ui.smoke && ui.store.accounts().is_empty() {
-                    ui.show_welcome();
-                } else {
-                    ui.accounts_dialog();
+                    Err(error) => ui.notice(&crate::account_deletion::failure_notice(&error)),
                 }
             });
         });
@@ -1499,6 +1586,12 @@ impl Ui {
                 "Message previews",
                 "Show text in desktop notifications",
                 false,
+            ),
+            (
+                "offer_send_anyway",
+                "Offer Send Anyway",
+                "In group chats, offer to send an encrypted message to the members who have keys, then keep doing so for 30 minutes",
+                true,
             ),
         ] {
             let row = adw::SwitchRow::builder()
@@ -2000,6 +2093,15 @@ impl Ui {
             ("Delivery", m.delivery.clone()),
             ("Message ID", m.wire_id.clone()),
         ] {
+            if title == "Message ID" && m.own && !m.failure_reason.is_empty() {
+                g.add(
+                    &adw::ActionRow::builder()
+                        .title("What Went Wrong")
+                        .subtitle(crate::text_safety::failure_reason(&m.failure_reason))
+                        .use_markup(false)
+                        .build(),
+                );
+            }
             g.add(
                 &adw::ActionRow::builder()
                     .title(title)
@@ -2007,6 +2109,24 @@ impl Ui {
                     .use_markup(false)
                     .build(),
             )
+        }
+        if m.own && !m.skipped_members.is_empty() {
+            g.add(
+                &adw::ActionRow::builder()
+                    .title("Sent Partially")
+                    .subtitle("This message is encrypted and was sent, but not to the room members listed below. Their keys could not be used, so they cannot read it.")
+                    .use_markup(false)
+                    .build(),
+            );
+            for (member, why) in &m.skipped_members {
+                g.add(
+                    &adw::ActionRow::builder()
+                        .title(crate::text_safety::visible(member, 128))
+                        .subtitle(crate::text_safety::visible(why, 200))
+                        .use_markup(false)
+                        .build(),
+                );
+            }
         }
         if !m.fingerprint.is_empty() {
             g.add(
@@ -2121,6 +2241,7 @@ impl Ui {
                     let peer = s.current().jid.clone();
                     if let Some(m) = s.current_mut().messages.iter_mut().find(|m| m.id == id) {
                         m.delivery = "sending".into();
+                        m.failure_reason.clear();
                         let message = m.clone();
                         drop(s);
                         if ui.persist() {
@@ -2674,6 +2795,38 @@ pub fn bind_amount(entry: &impl IsA<gtk::Editable>, review: &gtk::Button) {
         }
     });
 }
+/// The confirmation for deleting `owner` on its server. "Delete" stays disabled until the entry
+/// holds the full address, so the account cannot be deleted by accident.
+pub(crate) fn account_deletion_dialog(owner: &str) -> (adw::AlertDialog, gtk::Entry) {
+    let d = adw::AlertDialog::builder()
+        .heading("Delete Account?")
+        .body(format!(
+            "This permanently deletes {owner} on its server, with its contacts and server-stored messages. It cannot be undone, and the address may not be reusable. Everything for it on this device is removed too.\n\nTo confirm, type the full address below."
+        ))
+        .build();
+    let entry = gtk::Entry::builder()
+        .placeholder_text(owner)
+        .activates_default(false)
+        .build();
+    entry.update_property(&[gtk::accessible::Property::Label("Type the full address to confirm")]);
+    d.set_extra_child(Some(&entry));
+    d.add_responses(&[("cancel", "Cancel"), ("delete", "Delete Account")]);
+    d.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+    d.set_default_response(Some("cancel"));
+    d.set_close_response("cancel");
+    d.set_response_enabled("delete", false);
+    let owner = owner.to_string();
+    let weak = d.downgrade();
+    entry.connect_changed(move |entry| {
+        if let Some(d) = weak.upgrade() {
+            d.set_response_enabled(
+                "delete",
+                crate::account_deletion::confirmation_matches(&owner, &entry.text()),
+            );
+        }
+    });
+    (d, entry)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2687,5 +2840,36 @@ mod tests {
         }
         assert!(!positive_amount("0.0"));
         assert!(positive_amount("0.1"));
+    }
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn the_delete_button_stays_disabled_until_the_full_address_is_typed() {
+        gtk::init().expect("display");
+        let (d, entry) = account_deletion_dialog("bob@example.com");
+        assert!(!d.is_response_enabled("delete"), "disabled before anything is typed");
+        assert!(d.is_response_enabled("cancel"));
+        assert_eq!(d.default_response().as_deref(), Some("cancel"), "Enter must not delete");
+        assert_eq!(d.close_response(), "cancel", "Escape must not delete");
+        for partial in ["bob", "bob@", "example.com", "bob@example", "alice@example.com"] {
+            entry.set_text(partial);
+            assert!(!d.is_response_enabled("delete"), "{partial} must not enable Delete");
+        }
+        entry.set_text("bob@example.com");
+        assert!(d.is_response_enabled("delete"));
+        entry.set_text("bob@example.com ");
+        assert!(d.is_response_enabled("delete"), "trailing whitespace is forgiven");
+        entry.set_text("bob@example.co");
+        assert!(!d.is_response_enabled("delete"), "editing it again disables Delete");
+        entry.set_text("");
+        assert!(!d.is_response_enabled("delete"));
+    }
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn the_dialog_names_the_account_and_says_it_is_permanent() {
+        gtk::init().expect("display");
+        let (d, entry) = account_deletion_dialog("bob@example.com");
+        assert!(d.body().contains("bob@example.com"));
+        assert!(d.body().contains("permanently"));
+        assert_eq!(entry.placeholder_text().as_deref(), Some("bob@example.com"));
     }
 }

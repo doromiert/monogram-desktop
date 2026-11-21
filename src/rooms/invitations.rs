@@ -13,19 +13,6 @@ pub enum Kind {
     Direct,
 }
 impl Kind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Mediated => "mediated",
-            Self::Direct => "direct",
-        }
-    }
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "mediated" => Some(Self::Mediated),
-            "direct" => Some(Self::Direct),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Clone)]

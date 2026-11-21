@@ -580,6 +580,12 @@ pub enum BackendEvent {
         id: String,
         emoji: crate::packs::InlineEmoji,
     },
+    /// The room message `id` went out without some members: each is `(address, why)`.
+    SentPartially {
+        peer: String,
+        id: String,
+        skipped: Vec<(String, String)>,
+    },
     Uncertain {
         peer: String,
         id: String,
@@ -709,6 +715,7 @@ pub enum RoomPreparation {
     },
     Probe {
         reply: tokio::sync::oneshot::Sender<crate::crypto::Result<Mode>>,
+        skip_unreachable: bool,
     },
     Review,
     PqReview,
@@ -725,6 +732,9 @@ pub enum Command {
     ChooseEncryption {
         peer: String,
         reply: tokio::sync::oneshot::Sender<crate::crypto::Result<crate::encryption_policy::Mode>>,
+        /// For a room: leave out members whose Legacy OMEMO keys cannot be used, as the user chose
+        /// with Send Anyway. The protocol is still chosen automatically.
+        skip_unreachable: bool,
     },
     Crypto(crate::crypto::service::Request),
     Legacy(crate::crypto::legacy::service::Request),
@@ -1276,16 +1286,16 @@ impl Session {
                             match recipients {
                                 Ok(recipients)=>match purpose {
                                     RoomPreparation::Send{message,quote}=>{if message.mode()==Mode::Pq {pq.send(pq::Request::SendRoom{recipients,message,quote,epoch});}else{legacy.send(legacy::service::Request::SendRoom{recipients,message,quote,epoch});}},
-                                    RoomPreparation::Probe{reply}=>{
+                                    RoomPreparation::Probe{reply,skip_unreachable}=>{
                                         let (checked,response)=tokio::sync::oneshot::channel();
-                                        pq.send(pq::Request::ProbeRoom{recipients:recipients.clone(),reply:checked});
+                                        pq.send(pq::Request::ProbeRoom{recipients:recipients.clone(),reply:checked,skip_unreachable});
                                         let legacy_tx=legacy.sender();
                                         tokio::spawn(async move {
                                             let result=crate::encryption_policy::select(
                                                 async { response.await.unwrap_or(Err(crate::crypto::Error::Unavailable("OMEMO2 room check interrupted"))) },
                                                 async {
                                                     let (checked,response)=tokio::sync::oneshot::channel();
-                                                    legacy_tx.send(legacy::service::Request::ProbeRoom{recipients,reply:checked}).map_err(|_|crate::crypto::Error::Unavailable("Legacy room check interrupted"))?;
+                                                    legacy_tx.send(legacy::service::Request::ProbeRoom{recipients,reply:checked,skip_unreachable}).map_err(|_|crate::crypto::Error::Unavailable("Legacy room check interrupted"))?;
                                                     response.await.unwrap_or(Err(crate::crypto::Error::Unavailable("Legacy room check interrupted")))
                                                 },
                                             ).await;
@@ -1301,13 +1311,13 @@ impl Session {
                                     let mut report=true;
                                     match purpose {
                                         RoomPreparation::Send{message,..}=>{report=false;emit(BackendEvent::Failed{peer:peer.clone(),id:message.wire_id,reason:text.clone()})},
-                                        RoomPreparation::Probe{reply}=>{
+                                        RoomPreparation::Probe{reply,..}=>{
                                             report=false;
                                             // The server said the room has no complete member list (a public or
                                             // anonymous room), so end-to-end encryption cannot exist there: send plain.
                                             // Timeouts and other failures must never downgrade an encrypted room.
                                             let _=reply.send(match error {
-                                                crate::rooms::Error::RecipientsUnavailable=>Ok(Mode::Plain),
+                                                crate::rooms::Error::RecipientsUnavailable|crate::rooms::Error::NotPrivate|crate::rooms::Error::OccupantNotListed(_)=>Ok(Mode::Plain),
                                                 crate::rooms::Error::Request(crate::iq::Error::Timeout)=>Err(crate::crypto::Error::Unavailable("The room did not answer. Try again.")),
                                                 crate::rooms::Error::NotJoined|crate::rooms::Error::Joining=>Err(crate::crypto::Error::Unavailable("Join the room before sending.")),
                                                 _=>Err(crate::crypto::Error::Unavailable("Could not read the room's member list. Try again.")),
@@ -1353,13 +1363,13 @@ impl Session {
                                 let _ = reply.send(result);
                             });
                         },
-                        Some(Command::ChooseEncryption{peer,reply})=>{
+                        Some(Command::ChooseEncryption{peer,reply,skip_unreachable})=>{
                             if !online {
                                 let _ = reply.send(Err(crate::crypto::Error::Unavailable("Connection interrupted")));
                                 continue;
                             }
                             if rooms.known(&peer) {
-                                prepare_room(&rooms,peer,room_epoch,RoomPreparation::Probe{reply},&network);
+                                prepare_room(&rooms,peer,room_epoch,RoomPreparation::Probe{reply,skip_unreachable},&network);
                                 continue;
                             }
                             let (checked, first) = tokio::sync::oneshot::channel();

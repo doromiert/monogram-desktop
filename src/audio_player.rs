@@ -94,9 +94,6 @@ impl AudioPlayer {
     pub fn state(&self) -> PlayState {
         self.0.state.get()
     }
-    pub fn duration_ms(&self) -> u64 {
-        self.0.duration_ms
-    }
     /// True once, right after the audio played to its end.
     pub fn take_finished(&self) -> bool {
         self.0.finished.replace(false)

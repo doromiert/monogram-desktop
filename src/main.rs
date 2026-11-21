@@ -1,4 +1,7 @@
 use adw::prelude::*;
+mod account_deletion;
+mod adhoc;
+mod adhoc_ui;
 mod action_store;
 mod attachment_ui;
 mod audio_ui;
@@ -219,7 +222,7 @@ fn main() -> gtk::glib::ExitCode {
                     let Some(ui) = weak.upgrade() else { return };
                     let peer = ui.state.borrow().current().jid.clone();
                     let (reply, receive) = tokio::sync::oneshot::channel();
-                    if ui.command(protocol::Command::ChooseEncryption { peer, reply }) {
+                    if ui.command(protocol::Command::ChooseEncryption { peer, reply, skip_unreachable: false }) {
                         gtk::glib::MainContext::default().spawn_local(async move {
                             match receive.await {
                                 Ok(Ok(mode)) => eprintln!("Monogram diagnostic encryption choice: {mode:?}"),

@@ -454,6 +454,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[gtk::test]
+    #[ignore = "requires a native display: a headless frame clock does not tick the animation"]
     fn native_reaction_transition_frames_and_reduced_motion() {
         gtk::init().expect("native reaction test requires a display");
         let settings = gtk::Settings::default().expect("GTK settings");

@@ -16,15 +16,47 @@
 set -eu
 # Everything below, the compositor included, runs inside a private D-Bus session, so nothing
 # registers on or talks to your real session bus.
-# Programs the private bus starts on demand can outlive this script and keep its output pipe open,
-# which would hang whoever is reading it. So the session's output goes to a log file, which is
-# printed once the session is gone; the exit status is the tests'.
+# The private bus must not start anything on demand. With the stock session configuration it
+# activates desktop services (xdg-desktop-portal, ksecretd, ...) through your user systemd, and
+# those outlive the run: hundreds of idle processes after a few hundred runs. So the bus gets the
+# system session policy with every service directory removed, as tests/keyring_fixture.sh does;
+# a client that asks for a service that is not there just does without it.
+# Anything else that did get started would also keep the log pipe open and hang whoever reads it,
+# so the session's output goes to a log file, which is printed once the session is gone; the exit
+# status is the tests'.
 if [ -z "${HEADLESS_INNER:-}" ]; then
     log="$(mktemp "${TMPDIR:-/tmp}/headless-gtk.XXXXXX")"
+    conf="$(mktemp "${TMPDIR:-/tmp}/headless-gtk-bus.XXXXXX")"
     status=0
-    HEADLESS_INNER=1 HEADLESS_LOG="$log" dbus-run-session -- "$0" "$@" >/dev/null 2>&1 </dev/null || status=$?
+    # The stock session policy: /etc on most systems, /usr/share on Arch. HEADLESS_BUS_CONFIG
+    # overrides it. Without one the run is refused: a bus that can start services leaks processes.
+    source_config=""
+    for candidate in "${HEADLESS_BUS_CONFIG:-}" /etc/dbus-1/session.conf /usr/share/dbus-1/session.conf; do
+        if [ -n "$candidate" ] && [ -r "$candidate" ]; then
+            source_config="$candidate"
+            break
+        fi
+    done
+    if [ -z "$source_config" ] || ! python3 -I - "$source_config" "$conf" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+tree = ET.parse(sys.argv[1])
+root = tree.getroot()
+for child in list(root):
+    if child.tag in {"standard_session_servicedirs", "servicedir", "includedir", "include", "servicehelper"}:
+        root.remove(child)
+tree.write(sys.argv[2], encoding="utf-8", xml_declaration=True)
+PY
+    then
+        rm -f "$log" "$conf"
+        echo "headless-gtk-test: no D-Bus session.conf found to derive a no-activation bus from." >&2
+        echo "Set HEADLESS_BUS_CONFIG=/path/to/session.conf. Refusing to run: the stock bus starts" >&2
+        echo "desktop services (portals, ksecretd) that are never cleaned up." >&2
+        exit 1
+    fi
+    HEADLESS_INNER=1 HEADLESS_LOG="$log" dbus-run-session --config-file="$conf" -- "$0" "$@" >/dev/null 2>&1 </dev/null || status=$?
     cat "$log"
-    rm -f "$log"
+    rm -f "$log" "$conf"
     exit "$status"
 fi
 # Isolate configuration: KWin, GTK, GSettings and the app itself get a throwaway HOME and XDG tree
