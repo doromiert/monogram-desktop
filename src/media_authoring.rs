@@ -448,7 +448,8 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::JobTooLarge | Self::MalformedJob => "The edit request is not valid",
+            Self::JobTooLarge => "There is too much drawn or typed on this picture to save",
+            Self::MalformedJob => "The edit request is not valid",
             Self::SourceTooLarge => "This file is too large to edit",
             Self::SourceDimensions => "This picture or video has unsupported dimensions",
             Self::SourceDuration => "This video is too long to edit",

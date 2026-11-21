@@ -96,6 +96,17 @@ fn sandbox_command(
     crate::confined::sandbox_command(bwrap, helper, crate::confined::Input::Path(source), Some(out_dir), plugins, &[mode])
 }
 
+/// The JSON the helper reads on stdin. It refuses more than `max_job_json` bytes, so a request that
+/// is bigger (marks with large text bitmaps that do not pack) is refused here, with the real reason,
+/// rather than sent to be cut off and reported as a broken helper.
+fn build_request(plan: &Plan, info: &SourceInfo, limits: &Limits) -> Result<Vec<u8>, Error> {
+    let request = serde_json::to_vec(&serde_json::json!({ "plan": plan, "source": info })).map_err(|_| Error::Failed)?;
+    if request.len() > limits.max_job_json {
+        return Err(Error::Refused(media_authoring::Error::JobTooLarge));
+    }
+    Ok(request)
+}
+
 /// Wait for the helper, killing it on cancellation or after the deadline.
 fn wait(child: &mut Child, cancel: &dyn Fn() -> bool) -> Result<Option<i32>, Error> {
     let started = Instant::now();
@@ -187,8 +198,7 @@ pub fn author(
     let info = probe(source, cancel)?;
     let plan = media_authoring::plan(job, &info, &limits).map_err(Error::Refused)?;
     let scratch = tempdir_in(work_dir)?;
-    let request = serde_json::to_vec(&serde_json::json!({ "plan": plan, "source": info }))
-        .map_err(|_| Error::Failed)?;
+    let request = build_request(&plan, &info, &limits)?;
     let reply = execute(source, &scratch.0, "run", &request, cancel)?;
     let name = serde_json::from_slice::<serde_json::Value>(&reply)
         .ok()
@@ -720,5 +730,35 @@ mod tests {
             probe(Path::new("/nonexistent/photo.png"), NEVER).unwrap_err(),
             Error::Unavailable
         );
+    }
+
+    #[test]
+    fn a_request_the_helper_would_cut_off_is_refused_here_with_its_real_reason() {
+        use crate::media_authoring::{encode_mask, Mark};
+        let limits = Limits::default();
+        let info = SourceInfo { kind: Kind::Image, width: 3000, height: 3000, duration_ms: None, bytes: 1000 };
+        // Noise does not pack, so a few large text bitmaps make a request over a mebibyte.
+        let mut seed = 7u32;
+        let noise: Vec<u8> = (0..700_000)
+            .map(|_| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                (seed >> 24) as u8
+            })
+            .collect();
+        let mark = Mark::Text { rect: Rect { x: 0, y: 0, width: 1000, height: 700 }, color: [0, 0, 0], mask: encode_mask(&noise) };
+        let plan = |marks: Vec<Mark>| Plan {
+            kind: Kind::Image,
+            crop: Rect { x: 0, y: 0, width: 3000, height: 3000 },
+            rotation: Rotation::None,
+            trim: None,
+            output_width: 3000,
+            output_height: 3000,
+            max_output_bytes: 1 << 20,
+            marks,
+        };
+        assert!(build_request(&plan(vec![mark.clone()]), &info, &limits).is_ok(), "one bitmap fits");
+        let refused = build_request(&plan(vec![mark.clone(), mark.clone()]), &info, &limits);
+        assert!(matches!(refused, Err(Error::Refused(media_authoring::Error::JobTooLarge))), "{refused:?}");
+        assert_eq!(Error::Refused(media_authoring::Error::JobTooLarge).to_string(), "There is too much drawn or typed on this picture to save");
     }
 }

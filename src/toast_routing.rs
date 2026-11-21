@@ -56,7 +56,15 @@ fn overlay_in(dialog: &adw::Dialog) -> Option<adw::ToastOverlay> {
     Some(overlay)
 }
 
+/// Make a toast show its title as plain text. `AdwToast` parses Pango markup by default, and a
+/// toast title often carries text that is not ours (a server's error or a form label), which could
+/// then include a clickable `<a href>` link. Every toast goes through `show`, which calls this.
+pub fn plain_text(toast: &adw::Toast) {
+    toast.set_use_markup(false);
+}
+
 pub fn show(window: &adw::ApplicationWindow, fallback: &adw::ToastOverlay, toast: adw::Toast) {
+    plain_text(&toast);
     let dialog = window.visible_dialog();
     match route(dialog.as_ref()) {
         Route::Window => fallback.add_toast(toast),

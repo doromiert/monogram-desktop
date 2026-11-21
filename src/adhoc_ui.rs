@@ -651,4 +651,67 @@ mod tests {
         assert_eq!(label.label(), "Expired just now", "the text changed without being reopened");
         assert!(label.has_css_class("error") && !label.has_css_class("dim-label"));
     }
+
+    fn every_label<F: FnMut(&gtk::Label)>(widget: &gtk::Widget, found: &mut F) {
+        if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+            found(label);
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            every_label(&current, found);
+            child = current.next_sibling();
+        }
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn markup_in_a_servers_labels_is_never_parsed_for_any_kind_of_field() {
+        gtk::init().expect("display");
+        let nasty = "<a href='https://evil.example'>Click</a> <b>bold</b> &amp;";
+        let mut fields = Vec::new();
+        for kind in [Kind::Text, Kind::Private, Kind::Boolean, Kind::ListSingle, Kind::ListMulti, Kind::Multi, Kind::Jid, Kind::JidMulti, Kind::Fixed] {
+            fields.push(Field {
+                kind,
+                var: if kind == Kind::Fixed { String::new() } else { format!("v-{kind:?}") },
+                label: nasty.into(),
+                values: if kind == Kind::Fixed { vec![nasty.into()] } else { vec![] },
+                options: vec![("a".into(), nasty.into()), ("b".into(), "plain".into())],
+                required: false,
+            });
+        }
+        let form = Form { title: nasty.into(), instructions: vec![nasty.into()], fields, result: false };
+        let (widgets, _) = form_widgets(&form);
+        let mut parsed = Vec::new();
+        every_label(widgets.upcast_ref(), &mut |label| {
+            if label.uses_markup() && label.label().contains('<') {
+                parsed.push(label.label().to_string());
+            }
+        });
+        assert!(parsed.is_empty(), "labels that would parse the server's markup: {parsed:?}");
+        // The same for a result form.
+        let result = Form { result: true, ..form };
+        let rows = result_rows(&result);
+        let mut parsed = Vec::new();
+        every_label(rows.upcast_ref(), &mut |label| {
+            if label.uses_markup() && label.label().contains('<') {
+                parsed.push(label.label().to_string());
+            }
+        });
+        assert!(parsed.is_empty(), "result rows that would parse markup: {parsed:?}");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn a_toast_parses_markup_by_default_so_every_toast_is_made_plain_before_it_is_shown() {
+        adw::init().unwrap();
+        let nasty = "Fill in: <a href='https://evil.example'>Verify your account</a>";
+        let toast = adw::Toast::new(nasty);
+        assert!(toast.uses_markup(), "the library default: a server's label would be parsed");
+        crate::toast_routing::plain_text(&toast);
+        assert!(!toast.uses_markup(), "after plain_text it is shown as written");
+        assert_eq!(toast.title().as_deref(), Some(nasty), "the text itself is unchanged");
+        let built = adw::Toast::builder().title(nasty).button_label("Resolve").build();
+        crate::toast_routing::plain_text(&built);
+        assert!(!built.uses_markup(), "toasts with buttons too");
+    }
 }
