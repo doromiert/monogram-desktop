@@ -7,6 +7,10 @@ mod emoji_preferences;
 mod favorite_order_store;
 #[path = "../src/text_safety.rs"]
 mod text_safety;
+#[path = "../src/last_activity.rs"]
+mod last_activity;
+#[path = "../src/contact_status.rs"]
+mod contact_status;
 #[path = "../src/message_failures.rs"]
 mod message_failures;
 #[path = "../src/profiles.rs"]

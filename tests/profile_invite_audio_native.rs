@@ -438,6 +438,8 @@ fn media_reply_insets_keep_media_edges_thin() {
         let bubble = ui.bubbles.borrow()[id].clone();
         let reply = find::<gtk::Button>(&bubble, &|w| w.has_css_class("message-reply")).unwrap();
         let bounds = reply.compute_bounds(&bubble).unwrap();
+        // No other way to read a widget's CSS padding in GTK 4 (the deprecation says "use CSS").
+        #[allow(deprecated)]
         let padding = bubble.style_context().padding();
         eprintln!(
             "{id}: content width={}, padding={},{}, reply origin={},{}",

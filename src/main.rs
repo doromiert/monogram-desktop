@@ -123,12 +123,17 @@ mod upload_ui;
 mod uploads;
 mod video_ui;
 mod wallet;
+mod camera;
+mod camera_ui;
 mod components;
 mod contact_status;
 mod hat_color;
 mod last_activity;
 mod last_activity_ui;
 mod presence_privacy;
+mod slow_notice;
+mod voice;
+mod voice_ui;
 #[cfg(test)]
 mod runtime_guard;
 mod widgets;

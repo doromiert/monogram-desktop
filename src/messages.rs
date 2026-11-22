@@ -1409,7 +1409,6 @@ impl Ui {
     pub fn delete_confirmation(self: &Rc<Self>, ids: Vec<String>) {
         let owner = self.state.borrow().account.clone();
         let chat = self.state.borrow().active.clone();
-        self.notice("Preparing message deletion…");
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let Some(ui) = weak.upgrade() else {

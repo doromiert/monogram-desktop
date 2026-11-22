@@ -37,6 +37,14 @@ borderless within 256 × 256 pixels. Known metadata sizes the progress placehold
 before decode. Retained rows keep following account-owned download/decode jobs
 across reconnects and map/unmap cycles.
 
+Video previews in the timeline play muted. Clapper can announce its own "not muted" state shortly
+after a preview is ready, so a preview is put back to muted for 1.5 seconds after that, and then left
+alone: it is never muted again behind anyone's back. A player the viewer is showing (`expanded`) or
+a round video that was tapped is never touched at all. This used to be a check on every 150 ms poll
+for as long as the tile existed, which meant that opening a video in the viewer, or unmuting the app
+in the system mixer, was undone within a fraction of a second ("it keeps muting"). Tests:
+`video_ui::video_audio_tests`.
+
 Round-video messages use mobile's `round_video_*.mp4` filename marker only after
 verified local playback confirms a video track, positive duration, and square
 intrinsic dimensions up to 1280 pixels. Generic attachment MIME does not prevent

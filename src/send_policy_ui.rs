@@ -22,6 +22,7 @@ impl Ui {
         self.send_button.set_sensitive(
             !self.composer_text().trim().is_empty() || !self.attachments.borrow().is_empty(),
         );
+        self.voice_refresh();
     }
 
     pub fn sending_mode(&self, chat: &Chat) -> Option<Mode> {

@@ -60,6 +60,11 @@ pub fn editable(name: &str) -> bool {
 fn edits_root() -> PathBuf {
     glib::user_cache_dir().join("monogram-desktop").join("edited")
 }
+/// The private directory for temporary copies (edited pictures and camera photos). Deleting a
+/// copy outside it is refused, and old copies are pruned each time it is opened.
+pub(crate) fn temporary_copies_dir() -> Option<PathBuf> {
+    edits_dir()
+}
 /// A private directory for edited copies; old ones are pruned each time it is opened.
 fn edits_dir() -> Option<PathBuf> {
     use std::os::unix::fs::DirBuilderExt;

@@ -561,8 +561,8 @@ mod tests {
         let settle=||{let until=std::time::Instant::now()+std::time::Duration::from_millis(200);while std::time::Instant::now()<until {context.iteration(false);std::thread::sleep(std::time::Duration::from_millis(1));}};
         settle();
         assert!(wrapped.layout().line_count()>1);
-        let painted=wrapped.layout().pixel_size().0.max(card.allocated_width());
-        assert!(bubble.width()<=painted+2,"Wrapped link left unused trailing bubble space: {}px (text {}, card {})",bubble.width()-painted,wrapped.layout().pixel_size().0,card.allocated_width());
+        let painted=wrapped.layout().pixel_size().0.max(card.width());
+        assert!(bubble.width()<=painted+2,"Wrapped link left unused trailing bubble space: {}px (text {}, card {})",bubble.width()-painted,wrapped.layout().pixel_size().0,card.width());
         assert_eq!(clamp.height(),clamp.measure(gtk::Orientation::Vertical,clamp.width()).1,"wrapped preview height uses its fitted width");
         let stable=(bubble.width(),bubble.height(),wrapped.layout().line_count());settle();assert_eq!(stable,(bubble.width(),bubble.height(),wrapped.layout().line_count()),"fitting converges without width/height oscillation");
         window.set_default_size(280,400);settle();assert!(clamp.width()<=280);assert!(wrapped.layout().pixel_size().0<=wrapped.width());

@@ -160,4 +160,4 @@ geometry is rounded to even values. Trims apply to the source timeline and must 
    follow-up message that attaches to the first, with a fallback body), which needs a message to
    hold a list of attachments. Doing that, and a grid to show it, is the remaining work, with the
    same behaviour needed in mobile.
-6. Camera capture through the desktop camera portal.
+6. ~~Camera capture through the desktop camera portal.~~ Done for photos: see [CAMERA.md](CAMERA.md). Video capture and choosing between cameras remain.

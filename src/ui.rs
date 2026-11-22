@@ -124,6 +124,10 @@ pub struct Ui {
     pub blocking_snapshot: RefCell<crate::blocking::Snapshot>,
     pub blocking_loading: Cell<bool>,
     pub(crate) last_activity: RefCell<crate::last_activity_ui::Cache>,
+    /// The open camera dialog, if any: only one at a time.
+    pub(crate) camera_dialog: RefCell<Option<glib::WeakRef<adw::Dialog>>>,
+    /// The microphone button and recording bar.
+    pub(crate) voice: RefCell<Option<Rc<crate::voice_ui::VoiceUi>>>,
     /// The most reachable device's `show` and idle time for each contact who is online.
     pub(crate) contact_status: RefCell<HashMap<String, crate::contact_status::Detail>>,
     /// The status circle on the open conversation's avatar.
@@ -452,6 +456,8 @@ impl Ui {
             blocking_snapshot: RefCell::new(Default::default()),
             blocking_loading: Cell::new(false),
             last_activity: RefCell::new(Default::default()),
+            camera_dialog: RefCell::new(None),
+            voice: RefCell::new(None),
             contact_status: RefCell::new(HashMap::new()),
             header_presence: RefCell::new(None),
             blocking_error: RefCell::new(None),
@@ -935,6 +941,7 @@ impl Ui {
         self.action("call", |s| s.call_preview());
         self.action("attach-file", |s| s.choose_files(false));
         self.action("attach-media", |s| s.choose_files(true));
+        self.action("attach-camera", |s| s.open_camera());
         self.action("poll", |s| s.new_poll());
         self.action("article", |s| s.article());
         self.action("location", |s| {
@@ -1506,6 +1513,7 @@ impl Ui {
         let menu = gio::Menu::new();
         for (t, a) in [
             ("Photo or Video…", "attach-media"),
+            ("Take Photo…", "attach-camera"),
             ("File…", "attach-file"),
             ("Poll…", "poll"),
             ("Payment…", "payment"),
@@ -1528,6 +1536,17 @@ impl Ui {
         let emoji = icon_button("face-smile-symbolic", "Emoji, stickers and GIFs · F9");
         self.weak_button(&emoji, |s| s.toggle_media());
         composer_row.append(&emoji);
+        // The microphone button sits right after the emoji button, in the same style; while
+        // recording, the rest of the box makes way for the recording bar.
+        let voice = crate::voice_ui::install(
+            self,
+            &composer_row,
+            crate::voice_ui::Parts {
+                hide: vec![attach.clone().upcast(), input.clone().upcast(), emoji.clone().upcast(), attachments.clone().upcast(), self.send_button.clone().upcast()],
+                after: input.clone().upcast(),
+            },
+        );
+        self.voice.replace(Some(voice));
         composer.append(&composer_row);
         line.append(&composer);
         self.send_button.remove_css_class("flat");
@@ -1659,6 +1678,10 @@ impl Ui {
             .flatten();
         self.save_draft();
         let switched = self.state.borrow().active != id;
+        if switched {
+            // A recording belongs to the conversation it was made in.
+            self.voice_cancel();
+        }
         let newest = self.history_window.newest();
         self.timeline_scope_changed();
         if switched { self.switch_cached_timeline(id, newest); }
@@ -3470,7 +3493,7 @@ mod composer_tests {
         let ids=std::process::Command::new("xdotool").args(["search","--name","^Monogram$"]).output().unwrap();let id=String::from_utf8(ids.stdout).unwrap().lines().last().unwrap().to_owned();assert!(std::process::Command::new("xdotool").args(["windowfocus","--sync",&id]).status().unwrap().success());settle();
         let mut previous_line=0;
         for font in [13,20] {
-            fonts.load_from_data(&format!(".composer textview {{font-size:{font}px;}}"));
+            fonts.load_from_string(&format!(".composer textview {{font-size:{font}px;}}"));
             ui.composer.buffer().set_text("asd");ui.composer.buffer().place_cursor(&ui.composer.buffer().end_iter());settle();settle();
             let line=ui.composer.iter_location(&ui.composer.buffer().start_iter()).height();
             assert!(line>previous_line);previous_line=line;

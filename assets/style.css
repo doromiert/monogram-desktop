@@ -297,6 +297,12 @@
 
 /* Participants panel: availability dot on a participant's avatar. */
 .hat-chip { min-height: 18px; }
+
+/* Voice messages: the recording bar replaces the message box while the microphone button is held. */
+.voice-bar { min-height: 36px; }
+.voice-wave { color: @accent_color; }
+.voice-timer { font-weight: 600; }
+.voice-hint.error { color: @error_color; }
 .presence-dot { min-width: 12px; min-height: 12px; border-radius: 999px; border: 2px solid @window_bg_color; background: @success_color; }
 .presence-dot.presence-away { background: @warning_color; }
 .presence-dot.presence-busy { background: @error_color; }

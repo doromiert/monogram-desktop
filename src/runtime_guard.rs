@@ -36,6 +36,17 @@ pub fn presentation_files(src: &Path) -> Vec<String> {
                     .contains(&name.as_str())
         })
         .collect();
+    // The camera module runs on the GTK main loop too (the portal and the stream).
+    for folder in ["camera", "voice"] {
+        if let Ok(entries) = std::fs::read_dir(src.join(folder)) {
+            files.extend(
+                entries
+                    .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+                    .filter(|name| name.ends_with(".rs"))
+                    .map(|name| format!("{folder}/{name}")),
+            );
+        }
+    }
     files.sort();
     files
 }
@@ -94,7 +105,11 @@ mod tests {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let files = presentation_files(&src);
         assert!(files.len() >= 30, "a broken file filter would make the guard check nothing: {}", files.len());
-        for must in ["last_activity_ui.rs", "ui.rs", "dialogs.rs", "room_ui.rs", "adhoc_ui.rs", "messages.rs", "components.rs"] {
+        for must in [
+            "last_activity_ui.rs", "ui.rs", "dialogs.rs", "room_ui.rs", "adhoc_ui.rs", "messages.rs", "components.rs",
+            "camera_ui.rs", "camera/portal.rs", "camera/stream.rs", "camera/frame.rs",
+            "voice_ui.rs", "voice/recorder.rs", "voice/meter.rs", "voice/wave.rs",
+        ] {
             assert!(files.iter().any(|f| f == must), "{must} is covered");
         }
         for never in ["protocol.rs", "iq.rs", "keepassxc.rs", "link_preview_logic.rs", "runtime_guard.rs"] {

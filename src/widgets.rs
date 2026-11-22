@@ -147,7 +147,10 @@ mod message_bubble_limit_imp {
                 None
             }
             let media=tile(widget)?;
-            let style=widget.style_context();let padding=style.padding();let border=style.border();
+            // GTK 4 has no other way to read a widget's CSS padding and border (the deprecation
+            // says "use CSS"), and this is measured before the widget has any size to compare.
+            #[allow(deprecated)]
+            let (padding,border)={let style=widget.style_context();(style.padding(),style.border())};
             return Some(media.measure(gtk::Orientation::Horizontal,-1).1
                 + i32::from(padding.left()+padding.right()+border.left()+border.right()));
         }
