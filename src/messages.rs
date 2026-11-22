@@ -1,4 +1,4 @@
-use crate::{model::*, ui::Ui, widgets::*};
+use crate::{components::{overlay_meta, BubbleKind, FileCard, ForwardedBanner, MessageBubble, ReplyQuote}, model::*, ui::Ui, widgets::*};
 #[path = "reactions_ui.rs"]
 pub(crate) mod reactions_ui;
 use adw::prelude::*;
@@ -41,7 +41,7 @@ struct PreparedMessages {
 struct RenderedRow {
     message: Message,
     row: gtk::ListBoxRow,
-    bubble: gtk::Box,
+    bubble: MessageBubble,
     status: gtk::Box,
     heading: gtk::Box,
     avatar: Option<adw::Avatar>,
@@ -717,37 +717,25 @@ impl Ui {
                 .attachment
                 .as_ref()
                 .is_some_and(|file| file.media_candidate()) || crate::upload_ui::pending_media(&m).is_some();
-            let bubble = bx(true, 0);
-            bubble.set_vexpand(false);
-            bubble.set_valign(gtk::Align::Start);
-            if action.is_some() {
-                bubble.add_css_class("date-pill");
-                bubble.add_css_class("action-pill");
-                bubble.set_halign(gtk::Align::Center);
-            } else {
-                bubble.add_css_class("message-bubble");
-            }
-            if self
-                .history_window
-                .highlighted
-                .borrow()
-                .as_ref()
-                .is_some_and(|(id, _)| id == &m.id)
-            {
-                bubble.add_css_class("reply-target");
-            }
-            if planned.emoji_only[index] {
-                bubble.add_css_class("emoji-only");
-            }
-            if m.own && action.is_none() {
-                bubble.add_css_class("own")
-            }
-            if sticker {
-                bubble.add_css_class("sticker-bubble");
+            let bubble = MessageBubble::new(if action.is_some() {
+                BubbleKind::Action
+            } else if sticker {
+                BubbleKind::Sticker
             } else if media {
-                bubble.add_css_class("media-bubble");
-            }
-            if m.attachment.is_some() && !media { bubble.add_css_class("document-bubble"); }
+                BubbleKind::Media
+            } else {
+                BubbleKind::Text
+            });
+            bubble.set_own(m.own);
+            bubble.set_emoji_only(planned.emoji_only[index]);
+            bubble.set_document(m.attachment.is_some() && !media);
+            bubble.set_highlighted(
+                self.history_window
+                    .highlighted
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|(id, _)| id == &m.id),
+            );
             let heading = bx(false, 6);
             heading.set_margin_bottom(6);
             let author = text(&m.author, "message-author");
@@ -765,29 +753,15 @@ impl Ui {
             message_status(&meta, m);
             bubble.append(&heading);
             if let Some(attribution) = m.forwarded.clone() {
-                let header = gtk::Button::new();
-                header.add_css_class("flat");
-                header.set_halign(gtk::Align::Start);
-                header.set_margin_bottom(4);
-                let title = text(&format!("Forwarded from {}", attribution.name), "caption");
-                title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                title.set_max_width_chars(36);
-                title.set_single_line_mode(true);
-                header.set_child(Some(&title));
-                header.set_tooltip_text(Some(&attribution.name));
                 let weak = Rc::downgrade(self);
-                header.connect_clicked(move |_| {
+                let name = attribution.name.clone();
+                bubble.append(&ForwardedBanner::new(&name, move || {
                     if let Some(ui) = weak.upgrade() {
                         ui.forwarded_details(&attribution);
                     }
-                });
-                bubble.append(&header);
+                }));
             }
             if !m.reply.is_empty() || !m.reply_id.is_empty() {
-                let reply = gtk::Button::new();
-                reply.add_css_class("message-reply");
-                let contents = bx(true, 2);
-                contents.set_hexpand(true);
                 let (reply_author, quote) = m.reply.split_once(" · ").unwrap_or((
                     if m.reply_to == self.state.borrow().account {
                         "You"
@@ -796,29 +770,9 @@ impl Ui {
                     },
                     &m.reply,
                 ));
-                let title = text(reply_author, "reply-author");
-                title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                let preview = quote
-                    .lines()
-                    .map(|line| line.strip_prefix("> ").unwrap_or(line))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let snippet: gtk::Widget = if preview.starts_with("📎 ") {
-                    let name = text(&preview.chars().take(4096).collect::<String>(), "reply-preview");
-                    name.set_single_line_mode(true);
-                    name.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                    name.set_max_width_chars(52);
-                    name.upcast()
-                } else {
-                    crate::reply_preview_ui::Snippet::new(if preview.is_empty(){"Original message"}else{&preview}).upcast()
-                };
-                contents.append(&title);
-                contents.append(&snippet);
+                let reply = ReplyQuote::new(reply_author, quote);
                 // Measure the quote at the width left by its thumbnail.
-                let preview_row = gtk::Grid::builder().column_spacing(7).build();
-                crate::reply_preview_ui::attach(self, m, &preview_row);
-                preview_row.attach(&contents, 1, 0, 1, 1);
-                reply.set_child(Some(&preview_row));
+                crate::reply_preview_ui::attach(self, m, reply.grid());
                 let weak = Rc::downgrade(self);
                 let target = m.reply_id.clone();
                 let author = m.reply_to.clone();
@@ -935,8 +889,7 @@ impl Ui {
                 "file" if m.upload.is_some() && media => {
                     let content=self.media_upload_content(&m);
                     if sticker || m.text.is_empty() {
-                        let overlay=gtk::Overlay::new();overlay.set_child(Some(&content));
-                        meta.add_css_class("sticker-meta");meta.set_halign(gtk::Align::End);meta.set_valign(gtk::Align::End);meta.set_can_target(false);overlay.add_overlay(&meta);bubble.append(&overlay);
+                        bubble.append(&overlay_meta(&content, &meta));
                     } else {
                         bubble.append(&content);
                         bubble.append(&MessageText::new(&wrap(&m.text,"message-text"),&meta));
@@ -951,14 +904,7 @@ impl Ui {
                 "file" if m.attachment.is_some() => {
                     let (attachment,spoiler_button) = crate::formatting_ui::hidden_media(&self.attachment_content(&m),crate::formatting_ui::model(&m).spoiler);
                     if sticker || media && m.text.is_empty() {
-                        let overlay = gtk::Overlay::new();
-                        overlay.set_child(Some(&attachment));
-                        meta.add_css_class("sticker-meta");
-                        meta.set_halign(gtk::Align::End);
-                        meta.set_valign(gtk::Align::End);
-                        meta.set_can_target(false);
-                        overlay.add_overlay(&meta);
-                        bubble.append(&overlay);
+                        bubble.append(&overlay_meta(&attachment, &meta));
                     } else {
                         bubble.append(&attachment);
                     }
@@ -985,17 +931,11 @@ impl Ui {
                     }
                 }
                 "file" => {
-                    let file = bx(false, 10);
-                    let image = gtk::Image::from_icon_name("application-pdf-symbolic");
-                    image.set_pixel_size(32);
-                    file.append(&image);
-                    let words = bx(true, 2);
-                    words.append(&wrap(
+                    let file = FileCard::new(
+                        "application-pdf-symbolic",
                         if m.own { &m.text } else { "Desktop notes.pdf" },
-                        "heading",
-                    ));
-                    words.append(&text("Local file preview", "caption dim-label"));
-                    file.append(&words);
+                        "Local file preview",
+                    );
                     bubble.append(&file);
                     if !m.own {
                         bubble.append(&wrap(&m.text, ""))
@@ -1076,7 +1016,7 @@ impl Ui {
                 meta.set_margin_top(3);
                 bubble.append(&meta);
             }
-            let reactions = reactions_ui::MessageReactions::new(self, &m, &bubble, media, &meta);
+            let reactions = reactions_ui::MessageReactions::new(self, &m, bubble.as_box(), media, &meta);
             let presentation=self.send_animation.wrap(&m.id,&bubble);
             if action.is_some() {
                 outer.set_halign(gtk::Align::Center);
@@ -1131,7 +1071,7 @@ impl Ui {
             right.set_propagation_phase(gtk::PropagationPhase::Capture);
             let id = m.id.clone();
             let weak = Rc::downgrade(self);
-            let parent = bubble.downgrade();
+            let parent = bubble.as_box().downgrade();
             right.connect_pressed(move |g, _, x, y| {
                 g.set_state(gtk::EventSequenceState::Claimed);
                 if let (Some(ui), Some(parent)) = (weak.upgrade(), parent.upgrade()) {

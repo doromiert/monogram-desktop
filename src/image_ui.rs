@@ -486,26 +486,21 @@ impl Ui {
         let owner = self.state.borrow().account.clone();
         let peer = self.state.borrow().current().jid.clone();
         let generation = self.generation.get();
-        let pane = adw::ToolbarView::new();
-        pane.add_css_class("utility-sidebar");
-        pane.add_css_class("shared-media-sidebar");
-        pane.set_top_bar_style(adw::ToolbarStyle::Flat);
-        let header = adw::HeaderBar::builder()
-            .show_start_title_buttons(false)
-            .title_widget(&label("Shared Media", "heading"))
-            .build();
-        let back = icon_button("go-previous-symbolic", "Conversation info");
-        self.weak_button(&back, |ui| ui.show_info());
-        header.pack_start(&back);
-        let close = icon_button("sidebar-show-symbolic", "Close shared media");
+        let pane = crate::components::UtilityPane::new(Some("Shared Media"))
+            .with_class("shared-media-sidebar");
+        let weak = Rc::downgrade(self);
+        pane.back("Conversation info", move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.show_info();
+            }
+        });
         let utility = self.utility.downgrade();
-        close.connect_clicked(move |_| {
+        pane.close("Close shared media", true, move || {
             if let Some(u) = utility.upgrade() {
                 u.set_show_sidebar(false);
             }
         });
-        header.pack_end(&close);
-        pane.add_top_bar(&header);
+        let pane = pane.view;
         let model = gio::ListStore::new::<glib::BoxedAnyObject>();
         let factory = gtk::SignalListItemFactory::new();
         let weak = Rc::downgrade(self);

@@ -2,7 +2,7 @@
 //! and the occupants grouped into Owners, Administrators and Participants.
 use crate::{rooms::members::Participant, ui::Ui, widgets::*};
 use adw::prelude::*;
-use gtk::{gio, glib, subclass::prelude::*};
+use gtk::{gio, glib};
 use std::{
     cell::{Cell, RefCell},
     rc::{Rc, Weak},
@@ -174,15 +174,7 @@ fn factory(ui: Weak<Ui>, room:String) -> gtk::SignalListItemFactory {
         person.set_margin_bottom(6);
         person.set_margin_start(12);
         person.set_margin_end(12);
-        let overlay = gtk::Overlay::new();
-        overlay.set_child(Some(&adw::Avatar::new(40, None, true)));
-        let dot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        dot.add_css_class("presence-dot");
-        dot.set_halign(gtk::Align::End);
-        dot.set_valign(gtk::Align::End);
-        dot.set_can_target(false);
-        overlay.add_overlay(&dot);
-        person.append(&overlay);
+        person.append(&crate::components::PresenceAvatar::new(&adw::Avatar::new(40, None, true)));
         let name = label("", "");
         name.set_xalign(0.);
         name.set_hexpand(true);
@@ -224,20 +216,12 @@ fn factory(ui: Weak<Ui>, room:String) -> gtk::SignalListItemFactory {
                 heading.set_visible(false);
                 profile.set_visible(true);
                 person.set_visible(true);
-                let overlay = person.first_child().and_downcast::<gtk::Overlay>().unwrap();
+                let overlay = person.first_child().and_downcast::<crate::components::PresenceAvatar>().unwrap();
                 let Some(owner)=ui.upgrade() else{return};
                 let chat=owner.participant_chat(&bind_room,&participant);
-                overlay.set_child(Some(&owner.chat_avatar(&chat,40)));
-                let dot = overlay.last_child().unwrap();
-                for class in ["presence-online", "presence-away", "presence-busy"] {
-                    dot.remove_css_class(class);
-                }
+                overlay.set_avatar(&owner.chat_avatar(&chat,40));
                 let status = presence_label(&participant.show);
-                dot.add_css_class(match status {
-                    "Away" => "presence-away",
-                    "Busy" => "presence-busy",
-                    _ => "presence-online",
-                });
+                overlay.set_presence(crate::components::Presence::from_label(status));
                 let name = person.last_child().and_downcast::<gtk::Label>().unwrap();
                 // The "(You)" mark is added here, for the user's own entry only; other people's
                 // names are cleaned so they cannot imitate it or hide characters.
@@ -403,16 +387,9 @@ impl Ui {
         body.append(&search);
         body.append(&stack);
 
-        let pane = adw::ToolbarView::new();
-        pane.add_css_class("utility-sidebar");
-        pane.set_top_bar_style(adw::ToolbarStyle::Flat);
-        let header = adw::HeaderBar::builder()
-            .show_start_title_buttons(false)
-            .title_widget(&label("Participants", "heading"))
-            .build();
-        let close = icon_button("sidebar-show-symbolic", "Close participants");
+        let chrome = crate::components::UtilityPane::new(Some("Participants"));
         let weak = Rc::downgrade(self);
-        close.connect_clicked(move |_| {
+        chrome.close("Close participants", false, move || {
             if let Some(ui) = weak.upgrade() {
                 // Closing is a choice: do not reopen by itself until asked from the menu.
                 ui.set_participants_auto(false);
@@ -420,8 +397,7 @@ impl Ui {
                 ui.utility.set_show_sidebar(false);
             }
         });
-        header.pack_start(&close);
-        pane.add_top_bar(&header);
+        let pane = chrome.view;
         pane.set_content(Some(&body));
 
         let view = Rc::new(ParticipantsView {

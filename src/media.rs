@@ -23,18 +23,14 @@ impl Ui {
         });
     }
     pub fn make_media(self: &Rc<Self>) {
-        self.media_pane.add_css_class("utility-sidebar");
-        let header = adw::HeaderBar::builder()
-            .show_start_title_buttons(false)
-            .build();
-        let close = icon_button("sidebar-show-symbolic", "Close media pane");
+        let chrome = crate::components::UtilityPane::adopt(&self.media_pane);
+        let header = chrome.header.clone();
         let utility = self.utility.downgrade();
-        close.connect_clicked(move |_| {
+        chrome.close("Close media pane", false, move || {
             if let Some(u) = utility.upgrade() {
                 u.set_show_sidebar(false)
             }
         });
-        header.pack_start(&close);
         let toggle = self.media_tabs.clone();
         toggle.add_css_class("media-mode-tabs");
         toggle.add_css_class("round");
@@ -68,7 +64,6 @@ impl Ui {
             }
         });
         header.set_title_widget(Some(&toggle));
-        self.media_pane.add_top_bar(&header);
         let body = bx(true, 0);
         body.set_margin_top(12);
         let search = self.media_search.clone();
@@ -150,21 +145,14 @@ impl Ui {
     pub fn show_info(self: &Rc<Self>) {
         let chat = self.state.borrow().current().clone();
         let demo = self.state.borrow().account.is_empty();
-        let pane = adw::ToolbarView::new();
-        pane.add_css_class("utility-sidebar");
-        let h = adw::HeaderBar::builder()
-            .show_start_title_buttons(false)
-            .title_widget(&label("Conversation Info", "heading"))
-            .build();
-        let close = icon_button("sidebar-show-symbolic", "Close conversation info");
+        let chrome = crate::components::UtilityPane::new(Some("Conversation Info"));
         let u = self.utility.downgrade();
-        close.connect_clicked(move |_| {
+        chrome.close("Close conversation info", false, move || {
             if let Some(u) = u.upgrade() {
                 u.set_show_sidebar(false)
             }
         });
-        h.pack_start(&close);
-        pane.add_top_bar(&h);
+        let pane = chrome.view;
         let body = bx(true, 16);
         margins(&body, 12);
         body.set_width_request(0);
@@ -208,12 +196,7 @@ impl Ui {
             if (key == "access" && !demo || matches!(key,"local-contact"|"suggest-avatar")) && !live_access {
                 continue;
             }
-            let row = adw::ActionRow::builder()
-                .title(title)
-                .activatable(true)
-                .build();
-            row.add_prefix(&gtk::Image::from_icon_name(icon));
-            row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+            let row = crate::components::NavRow::new(icon, title, None);
             let weak = Rc::downgrade(self);
             let peer = chat.jid.clone();
             row.connect_activated(move |_| {
@@ -273,26 +256,21 @@ impl Ui {
             self.live_shared_media();
             return;
         }
-        let pane = adw::ToolbarView::new();
-        pane.add_css_class("utility-sidebar");
-        pane.add_css_class("shared-media-sidebar");
-        pane.set_top_bar_style(adw::ToolbarStyle::Flat);
-        let header = adw::HeaderBar::builder()
-            .show_start_title_buttons(false)
-            .title_widget(&label("Shared Media", "heading"))
-            .build();
-        let back = icon_button("go-previous-symbolic", "Conversation info");
-        self.weak_button(&back, |ui| ui.show_info());
-        header.pack_start(&back);
-        let close = icon_button("sidebar-show-symbolic", "Close shared media");
+        let pane = crate::components::UtilityPane::new(Some("Shared Media"))
+            .with_class("shared-media-sidebar");
+        let weak = Rc::downgrade(self);
+        pane.back("Conversation info", move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.show_info();
+            }
+        });
         let utility = self.utility.downgrade();
-        close.connect_clicked(move |_| {
+        pane.close("Close shared media", true, move || {
             if let Some(u) = utility.upgrade() {
                 u.set_show_sidebar(false);
             }
         });
-        header.pack_end(&close);
-        pane.add_top_bar(&header);
+        let pane = pane.view;
         let items = self.shared_media_items();
         if items.is_empty() {
             let empty = adw::StatusPage::builder()
@@ -433,19 +411,10 @@ impl Ui {
                 .into(),
                 ..Default::default()
             };
-            let a = self.chat_avatar(&who, 44);
-            a.add_css_class(if stories.iter().any(|s| !s.seen) {
-                "story-unread"
-            } else {
-                "story-seen"
-            });
-            let icon = gtk::Overlay::builder().child(&a).build();
+            let icon = crate::components::StoryAvatar::new(&self.chat_avatar(&who, 44));
+            icon.set_unseen(stories.iter().any(|s| !s.seen));
             if owner == "You" {
-                let add = gtk::Image::from_icon_name("list-add-symbolic");
-                add.set_halign(gtk::Align::End);
-                add.set_valign(gtk::Align::End);
-                add.add_css_class("story-add");
-                icon.add_overlay(&add);
+                icon.set_add_badge(true);
                 self.context_actions(&b, vec![("Add Story…".into(), "story-new".into()),("Story History".into(),"story-history".into())]);
             }
             b.set_child(Some(&icon));

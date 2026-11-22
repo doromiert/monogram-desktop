@@ -215,8 +215,7 @@ impl Ui {
         shell.set_vhomogeneous(false);
         shell.add_named(&overlay, Some("main"));
         toast.set_child(Some(&shell));
-        let welcome_view = adw::ToolbarView::new();
-        welcome_view.add_top_bar(&adw::HeaderBar::new());
+        let welcome_view = crate::components::titled_page();
         let welcome_sign_in = gtk::Button::with_label("Sign In");
         welcome_sign_in.add_css_class("suggested-action");
         let welcome_sync=gtk::Button::with_label("Sync from Another Device");
@@ -1190,57 +1189,27 @@ impl Ui {
         let state = self.state.borrow();
         for chat in state.filtered(self.search.text().as_str()) {
             let latest = chat.latest_preview();
-            let row = gtk::ListBoxRow::new();
-            row.set_widget_name(&chat.id);
-            let line = bx(false, 11);
-            let avatar=self.chat_avatar(&chat,44);
-            if chat.group{line.append(&avatar);}else{line.append(&self.profile_button(&avatar,&chat.jid,chat.display_name()));}
-            let words = bx(true, 5);
-            words.set_hexpand(true);
-            let top = bx(false, 8);
-            let name = text(chat.display_name(), "chat-name");
-            name.set_hexpand(true);
-            name.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            top.append(&name);
-            top.append(&label(
-                latest.as_ref().map(|m| m.time.as_str()).unwrap_or("Now"),
-                "chat-time",
-            ));
-            words.append(&top);
-            let bottom = bx(false, 6);
+            let avatar = self.chat_avatar(&chat, 44);
+            let leading: gtk::Widget = if chat.group {
+                avatar.upcast()
+            } else {
+                self.profile_button(&avatar, &chat.jid, chat.display_name()).upcast()
+            };
+            let row = crate::components::ChatRow::new(&chat.id, &leading);
+            row.set_title(chat.display_name());
+            row.set_time(latest.as_ref().map(|m| m.time.as_str()).unwrap_or("Now"));
             let preview = if !chat.draft.is_empty() {
                 format!("Draft: {}", chat.draft.replace('\n', " "))
             } else {
                 latest
                     .as_ref()
-                    .map(|m| {
-                        format!(
-                            "{}{}",
-                            if m.own { "You: " } else { "" },
-                            m.text.replace('\n', " ")
-                        )
-                    })
+                    .map(|m| format!("{}{}", if m.own { "You: " } else { "" }, m.text.replace('\n', " ")))
                     .unwrap_or_else(|| "No messages yet".into())
             };
-            let l = text(&preview, "chat-preview");
-            l.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            l.set_hexpand(true);
-            bottom.append(&l);
-            if chat.unread > 0 || chat.unread_mark {
-                bottom.append(&label(
-                    &if chat.unread > 0 {
-                        chat.unread.to_string()
-                    } else {
-                        "•".into()
-                    },
-                    "unread-badge",
-                ))
-            } else if chat.pinned {
-                bottom.append(&gtk::Image::from_icon_name("view-pin-symbolic"))
-            }
-            words.append(&bottom);
-            line.append(&words);
-            row.set_child(Some(&line));
+            row.set_preview(preview.as_str());
+            row.set_unread(chat.unread);
+            row.set_unread_mark(chat.unread_mark);
+            row.set_pinned(chat.pinned);
             let actions = vec![
                 ("Open".into(), format!("chat-open:{}", chat.id)),
                 (

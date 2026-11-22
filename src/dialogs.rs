@@ -7,6 +7,7 @@ use crate::{
     widgets::*,
 };
 use adw::prelude::*;
+use crate::components::{ContactRow, NavRow};
 use gtk::{gio, glib};
 use std::{
     cell::{Cell, RefCell},
@@ -308,13 +309,11 @@ impl Ui {
             });
             choices.add(&trust);
             if contact_access {
-                let access = adw::ActionRow::builder()
-                    .title("Control Access")
-                    .subtitle("Presence subscriptions and contact-only profile data")
-                    .activatable(true)
-                    .build();
-                access.add_prefix(&gtk::Image::from_icon_name("changes-prevent-symbolic"));
-                access.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+                let access = NavRow::new(
+                    "changes-prevent-symbolic",
+                    "Control Access",
+                    Some("Presence subscriptions and contact-only profile data"),
+                );
                 let weak = Rc::downgrade(self);
                 let target = peer.clone();
                 access.connect_activated(move |_| {
@@ -723,17 +722,8 @@ impl Ui {
         ] {
             let e = adw::ExpanderRow::builder().title(title).build();
             for chat in &self.state.borrow().chats {
-                let check = gtk::CheckButton::builder()
-                    .active(selected.contains(&chat.id))
-                    .valign(gtk::Align::Center)
-                    .build();
-                let row = adw::ActionRow::builder()
-                    .title(&chat.name)
-                    .use_markup(false)
-                    .activatable_widget(&check)
-                    .build();
-                row.add_prefix(&avatar(chat, 32));
-                row.add_suffix(&check);
+                let row = ContactRow::new(&chat.name, None, &avatar(chat, 32));
+                let check = row.with_check(selected.contains(&chat.id));
                 e.add_row(&row);
                 choices
                     .entry(key.into())
@@ -886,12 +876,12 @@ impl Ui {
                 .title("Server")
                 .description("For the account you are signed in to.")
                 .build();
-            let invite = adw::ActionRow::builder()
-                .title("Create Invite Link")
-                .subtitle("Let someone create an account on this server and add you")
-                .activatable(true)
-                .build();
-            invite.add_prefix(&gtk::Image::from_icon_name("emblem-shared-symbolic"));
+            let invite = NavRow::new(
+                "emblem-shared-symbolic",
+                "Create Invite Link",
+                Some("Let someone create an account on this server and add you"),
+            )
+            .without_chevron();
             let weak = Rc::downgrade(self);
             invite.connect_activated(move |_| {
                 if let Some(ui) = weak.upgrade() {
@@ -899,13 +889,11 @@ impl Ui {
                 }
             });
             server.add(&invite);
-            let commands = adw::ActionRow::builder()
-                .title("Server Commands…")
-                .subtitle("Run the commands your server offers")
-                .activatable(true)
-                .build();
-            commands.add_prefix(&gtk::Image::from_icon_name("utilities-terminal-symbolic"));
-            commands.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+            let commands = NavRow::new(
+                "utilities-terminal-symbolic",
+                "Server Commands…",
+                Some("Run the commands your server offers"),
+            );
             let weak = Rc::downgrade(self);
             commands.connect_activated(move |_| {
                 if let Some(ui) = weak.upgrade() {
@@ -1193,17 +1181,12 @@ impl Ui {
             if c.group || c.id == "saved" {
                 continue;
             }
-            let row = adw::ActionRow::builder()
-                .title(&c.name)
-                .subtitle(if live {
-                    c.jid.as_str()
-                } else {
-                    c.subtitle.as_str()
-                })
-                .use_markup(false)
-                .activatable(true)
-                .build();
-            row.add_prefix(&avatar(&c, 36));
+            let row = ContactRow::new(
+                &c.name,
+                Some(if live { c.jid.as_str() } else { c.subtitle.as_str() }),
+                &avatar(&c, 36),
+            )
+            .pickable();
             let weak = Rc::downgrade(self);
             let d = d.clone();
             row.connect_activated(move |_| {
@@ -1293,12 +1276,9 @@ impl Ui {
             .iter()
             .filter(|c| !c.group && c.id != "saved")
         {
+            let row = ContactRow::new(&c.name, None, &avatar(c, 32));
             let check = gtk::CheckButton::new();
-            let row = adw::ActionRow::builder()
-                .title(&c.name)
-                .activatable_widget(&check)
-                .build();
-            row.add_prefix(&avatar(c, 32));
+            row.set_activatable_widget(Some(&check));
             row.add_suffix(&check);
             people.add(&row)
         }
@@ -1339,17 +1319,12 @@ impl Ui {
             if c.group || c.id == "saved" {
                 continue;
             }
-            let row = adw::ActionRow::builder()
-                .title(&c.name)
-                .subtitle(if c.jid.is_empty() {
-                    &c.subtitle
-                } else {
-                    &c.jid
-                })
-                .use_markup(false)
-                .activatable(true)
-                .build();
-            row.add_prefix(&avatar(&c, 36));
+            let row = ContactRow::new(
+                &c.name,
+                Some(if c.jid.is_empty() { &c.subtitle } else { &c.jid }),
+                &avatar(&c, 36),
+            )
+            .pickable();
             let weak = Rc::downgrade(self);
             row.connect_activated(move |_| {
                 if let Some(ui) = weak.upgrade() {
@@ -1372,12 +1347,7 @@ impl Ui {
                 continue;
             }
             count += 1;
-            let row = adw::ActionRow::builder()
-                .title(&c.name)
-                .use_markup(false)
-                .activatable(true)
-                .build();
-            row.add_prefix(&avatar(&c, 36));
+            let row = ContactRow::new(&c.name, None, &avatar(&c, 36)).pickable();
             let id = c.id.clone();
             let weak = Rc::downgrade(self);
             row.connect_activated(move |_| {
@@ -1547,13 +1517,11 @@ impl Ui {
             .title("Privacy and Notifications")
             .build();
         if !owner.is_empty() {
-            let blocked = adw::ActionRow::builder()
-                .title("Blocked Contacts")
-                .subtitle(self.blocking_summary())
-                .activatable(true)
-                .build();
-            blocked.add_prefix(&gtk::Image::from_icon_name("changes-prevent-symbolic"));
-            blocked.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+            let blocked = NavRow::new(
+                "changes-prevent-symbolic",
+                "Blocked Contacts",
+                Some(self.blocking_summary().as_str()),
+            );
             let weak = Rc::downgrade(self);
             blocked.connect_activated(move |_| {
                 if let Some(ui) = weak.upgrade() {
@@ -1961,12 +1929,7 @@ impl Ui {
         page.add(&g);
         let (d, _) = self.dialog("Forward Messages", &page, 520, 480);
         for c in self.state.borrow().chats.clone() {
-            let row = adw::ActionRow::builder()
-                .title(&c.name)
-                .use_markup(false)
-                .activatable(true)
-                .build();
-            row.add_prefix(&avatar(&c, 32));
+            let row = ContactRow::new(&c.name, None, &avatar(&c, 32)).pickable();
             let messages = messages.clone();
             let owner = owner.clone();
             let weak = Rc::downgrade(self);

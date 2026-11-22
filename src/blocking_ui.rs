@@ -7,6 +7,7 @@ use crate::{
     widgets::{bx, clear, clear_list, icon_button, label},
 };
 use adw::prelude::*;
+use crate::components::{NavRow};
 use gtk::glib;
 use std::rc::Rc;
 
@@ -15,7 +16,7 @@ pub struct ListControls {
     generation: u64,
     body: glib::WeakRef<gtk::Box>,
     search: glib::WeakRef<gtk::SearchEntry>,
-    block: glib::WeakRef<adw::ActionRow>,
+    block: glib::WeakRef<NavRow>,
     dialog: glib::WeakRef<adw::Dialog>,
 }
 
@@ -81,13 +82,11 @@ impl Ui {
         actions.set_margin_top(12);
         actions.set_margin_start(12);
         actions.set_margin_end(12);
-        let block = adw::ActionRow::builder()
-            .title("Block Contact")
-            .subtitle("Choose a contact or enter an XMPP address")
-            .activatable(true)
-            .build();
-        block.add_prefix(&gtk::Image::from_icon_name("contact-new-symbolic"));
-        block.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+        let block = NavRow::new(
+            "contact-new-symbolic",
+            "Block Contact",
+            Some("Choose a contact or enter an XMPP address"),
+        );
         let weak = Rc::downgrade(self);
         block.connect_activated(move |_| {
             let Some(ui) = weak.upgrade() else { return };
@@ -504,43 +503,29 @@ impl Ui {
         let exact = rules.iter().any(|rule| rule == &chat.jid);
         let broader = rules.iter().find(|rule| *rule != &chat.jid).cloned();
         let managed = broader.is_some();
+        let icon = "changes-prevent-symbolic";
         let row = if let Some(ref rule) = broader {
-            adw::ActionRow::builder()
-                .title("Managed by a Broader Block Rule")
-                .subtitle(rule)
-                .activatable(true)
-                .build()
+            NavRow::new(icon, "Managed by a Broader Block Rule", Some(rule))
         } else if exact {
-            adw::ActionRow::builder()
-                .title("Unblock Contact")
-                .subtitle("Remove this exact address from the server block list")
-                .activatable(true)
-                .build()
+            NavRow::new(icon, "Unblock Contact", Some("Remove this exact address from the server block list"))
         } else if snapshot.supported == Some(false) {
-            adw::ActionRow::builder()
-                .title("Contact Blocking")
-                .subtitle("Unavailable on this server")
-                .build()
+            let row = NavRow::new(icon, "Contact Blocking", Some("Unavailable on this server")).without_chevron();
+            row.set_activatable(false);
+            row
         } else if snapshot.fresh {
-            adw::ActionRow::builder()
-                .title("Block Contact")
-                .subtitle("Keep this chat and history, but stop contact from this address")
-                .activatable(true)
-                .build()
+            NavRow::new(icon, "Block Contact", Some("Keep this chat and history, but stop contact from this address"))
         } else {
-            adw::ActionRow::builder()
-                .title("Manage Blocked Contacts")
-                .subtitle(if snapshot.jids.is_some() {
+            NavRow::new(
+                icon,
+                "Manage Blocked Contacts",
+                Some(if snapshot.jids.is_some() {
                     "Saved status — refresh to confirm with the server"
                 } else {
                     "Blocking status unknown"
-                })
-                .activatable(true)
-                .build()
+                }),
+            )
         };
-        row.add_prefix(&gtk::Image::from_icon_name("changes-prevent-symbolic"));
         if row.is_activatable() {
-            row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
             let weak = Rc::downgrade(self);
             let peer = chat.jid.clone();
             let name = chat.name.clone();

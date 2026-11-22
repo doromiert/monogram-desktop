@@ -123,6 +123,7 @@ mod upload_ui;
 mod uploads;
 mod video_ui;
 mod wallet;
+mod components;
 mod widgets;
 thread_local! {static SMOKE_TICK: std::cell::Cell<std::time::Instant> = std::cell::Cell::new(std::time::Instant::now()); static SMOKE_MAX_GAP: std::cell::Cell<u128> = const{std::cell::Cell::new(0)};}
 fn main() -> gtk::glib::ExitCode {
@@ -342,8 +343,7 @@ fn main() -> gtk::glib::ExitCode {
 }
 
 fn startup_page() -> adw::ToolbarView {
-    let view = adw::ToolbarView::new();
-    view.add_top_bar(&adw::HeaderBar::new());
+    let view = components::titled_page();
     let spinner = gtk::Spinner::builder().spinning(true).build();
     let page = adw::StatusPage::builder()
         .icon_name("mail-unread-symbolic")
