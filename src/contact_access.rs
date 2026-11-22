@@ -12,7 +12,6 @@ use std::{
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc as channel, oneshot};
 use tokio_xmpp::{jid::Jid, minidom::Element};
-const CLIENT: &str = "jabber:client";
 pub const ROSTER: &str = "jabber:iq:roster";
 type Result<T> = std::result::Result<T, String>;
 
@@ -219,6 +218,8 @@ struct Data {
     allowed: BTreeSet<String>,
     pending: BTreeSet<String>,
     resources: BTreeMap<String, HashSet<String>>,
+    /// What each connected device last said (`show`, XEP-0319 idle time), by contact and device.
+    details: BTreeMap<String, BTreeMap<String, crate::contact_status::Detail>>,
     jobs: BTreeMap<String, Weak<AsyncMutex<()>>>,
     store_error: Option<String>,
     full_serial: u64,
@@ -281,6 +282,7 @@ impl Manager {
         data.loaded = false;
         data.full_request = None;
         data.resources.clear();
+        data.details.clear();
         let epoch = data.epoch;
         let error = data.store_error.clone();
         drop(data);
@@ -298,9 +300,11 @@ impl Manager {
             data.full_request = None;
             data.epoch = data.epoch.wrapping_add(1);
             data.resources.clear();
+            data.details.clear();
             data.items.keys().cloned().collect::<Vec<_>>()
         };
         for peer in peers {
+            self.emit(BackendEvent::ContactStatus { peer: peer.clone(), detail: None });
             self.emit(BackendEvent::Presence {
                 peer,
                 online: false,
@@ -448,6 +452,7 @@ impl Manager {
                 .collect();
             if data.loaded {
                 data.resources.retain(|peer, _| allowed.contains(peer));
+                data.details.retain(|peer, _| allowed.contains(peer));
             }
             changed
                 .into_iter()
@@ -501,7 +506,8 @@ impl Manager {
         if !matches!(kind, "" | "unavailable") {
             return;
         }
-        let (visible, online) = {
+        let now = chrono::Utc::now();
+        let (visible, online, detail) = {
             let mut data = self.data.lock().unwrap();
             if !data.online {
                 return;
@@ -515,9 +521,20 @@ impl Manager {
                 } else {
                     resources.remove(from);
                 }
+                let devices = data.details.entry(peer.clone()).or_default();
+                if kind.is_empty() {
+                    devices.insert(from.into(), crate::contact_status::parse(root, now));
+                } else {
+                    devices.remove(from);
+                }
             } else {
                 data.resources.remove(&peer);
+                data.details.remove(&peer);
             }
+            let detail = data
+                .details
+                .get(&peer)
+                .and_then(|devices| crate::contact_status::best(devices.values().copied()));
             (
                 visible,
                 visible
@@ -525,8 +542,13 @@ impl Manager {
                         .resources
                         .get(&peer)
                         .is_some_and(|resources| !resources.is_empty()),
+                detail,
             )
         };
+        self.emit(BackendEvent::ContactStatus {
+            peer: peer.clone(),
+            detail: if visible { detail } else { None },
+        });
         self.emit(BackendEvent::Presence {
             peer,
             visible,
@@ -832,6 +854,14 @@ mod tests {
                 .unwrap()
         );
         let (events, receive) = mpsc::channel();
+        // Presence now also reports each contact's `show` and idle time; these tests are about
+        // the rest, so skip those events.
+        let next = |receive: &mpsc::Receiver<Envelope>| loop {
+            let event = receive.recv().unwrap();
+            if !matches!(event.2, BackendEvent::ContactStatus { .. }) {
+                return event;
+            }
+        };
         let manager = Manager {
             owner: "owner@example.org".into(),
             generation: 1,
@@ -847,7 +877,7 @@ mod tests {
         };
         manager.presence(&presence("one", ""));
         assert!(matches!(
-            receive.recv().unwrap().2,
+            next(&receive).2,
             BackendEvent::Presence {
                 visible: false,
                 online: false,
@@ -856,9 +886,9 @@ mod tests {
         ));
         manager.apply_roster(epoch, update).unwrap();
         assert!(manager.state("peer@example.org").unwrap().listed);
-        assert!(matches!(receive.recv().unwrap().2, BackendEvent::Roster(_)));
+        assert!(matches!(next(&receive).2, BackendEvent::Roster(_)));
         assert!(matches!(
-            receive.recv().unwrap().2,
+            next(&receive).2,
             BackendEvent::Presence {
                 visible: true,
                 online: true,
@@ -866,10 +896,10 @@ mod tests {
             }
         ));
         manager.presence(&presence("two", ""));
-        let _ = receive.recv().unwrap();
+        let _ = next(&receive);
         manager.presence(&presence("one", " type='unavailable'"));
         assert!(matches!(
-            receive.recv().unwrap().2,
+            next(&receive).2,
             BackendEvent::Presence {
                 visible: true,
                 online: true,
@@ -878,7 +908,7 @@ mod tests {
         ));
         manager.presence(&presence("two", " type='unavailable'"));
         assert!(matches!(
-            receive.recv().unwrap().2,
+            next(&receive).2,
             BackendEvent::Presence {
                 visible: true,
                 online: false,
@@ -886,9 +916,9 @@ mod tests {
             }
         ));
         manager.revoked_by_contact("peer@example.org");
-        let _ = receive.recv().unwrap();
+        let _ = next(&receive);
         assert!(matches!(
-            receive.recv().unwrap().2,
+            next(&receive).2,
             BackendEvent::Presence {
                 visible: false,
                 online: false,
@@ -934,5 +964,158 @@ mod tests {
         manager.disconnect();
         assert!(!manager.valid(epoch));
         assert!(!manager.state("peer@example.org").unwrap().loaded);
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    use crate::contact_status::{Detail, Show};
+
+    const OWNER: &str = "owner@example.org";
+    const PEER: &str = "peer@example.org";
+
+    fn xml(source: &str) -> Element {
+        source.parse().unwrap()
+    }
+    fn manager() -> (Manager, mpsc::Receiver<Envelope>, u64) {
+        let (events, receive) = mpsc::channel();
+        let manager = Manager {
+            owner: OWNER.into(),
+            generation: 1,
+            events,
+            data: Arc::new(Mutex::new(Data::default())),
+            refresh_gate: Arc::new(AsyncMutex::new(())),
+        };
+        let epoch = manager.online();
+        (manager, receive, epoch)
+    }
+    fn roster(subscription: &str) -> RosterUpdate {
+        parse_roster(
+            &xml(&format!("<query xmlns='jabber:iq:roster'><item jid='{PEER}' subscription='{subscription}'/></query>")),
+            true,
+        )
+        .unwrap()
+    }
+    fn presence(manager: &Manager, device: &str, kind: &str, inner: &str) {
+        manager.presence(&xml(&format!(
+            "<presence xmlns='jabber:client' from='{PEER}/{device}' to='{OWNER}/desktop'{kind}>{inner}</presence>"
+        )));
+    }
+    /// The last status event since the previous call.
+    fn status(receive: &mpsc::Receiver<Envelope>) -> Option<Option<Detail>> {
+        receive
+            .try_iter()
+            .filter_map(|event| match event.2 {
+                BackendEvent::ContactStatus { detail, .. } => Some(detail),
+                _ => None,
+            })
+            .last()
+    }
+    /// An idle element for a time shortly before now: the backend reads the real clock.
+    fn idle() -> String {
+        let since = chrono::Utc::now() - chrono::Duration::try_minutes(30).unwrap();
+        format!("<idle xmlns='urn:xmpp:idle:1' since='{}'/>", since.format("%Y-%m-%dT%H:%M:%SZ"))
+    }
+
+    #[test]
+    fn a_visible_contacts_show_and_idle_time_are_reported() {
+        let (manager, receive, epoch) = manager();
+        manager.apply_roster(epoch, roster("both")).unwrap();
+        receive.try_iter().for_each(drop);
+        presence(&manager, "phone", "", &format!("<show>away</show>{}", idle()));
+        let detail = status(&receive).unwrap().unwrap();
+        assert_eq!(detail.show, Show::Away);
+        assert!(detail.idle_since.is_some(), "XEP-0319 time carried through");
+        presence(&manager, "phone", "", "<show>dnd</show>");
+        let detail = status(&receive).unwrap().unwrap();
+        assert_eq!((detail.show, detail.idle_since), (Show::DoNotDisturb, None), "coming back clears the idle time");
+        presence(&manager, "phone", "", "");
+        assert_eq!(status(&receive).unwrap().unwrap().show, Show::Available);
+    }
+
+    #[test]
+    fn with_several_devices_the_most_reachable_one_is_shown_and_removal_falls_back() {
+        let (manager, receive, epoch) = manager();
+        manager.apply_roster(epoch, roster("both")).unwrap();
+        presence(&manager, "phone", "", "<show>dnd</show>");
+        presence(&manager, "laptop", "", "<show>away</show>");
+        assert_eq!(status(&receive).unwrap().unwrap().show, Show::Away, "away is more reachable than dnd");
+        presence(&manager, "desktop", "", "");
+        assert_eq!(status(&receive).unwrap().unwrap().show, Show::Available);
+        presence(&manager, "desktop", " type='unavailable'", "");
+        assert_eq!(status(&receive).unwrap().unwrap().show, Show::Away, "falls back to the next device");
+        presence(&manager, "laptop", " type='unavailable'", "");
+        assert_eq!(status(&receive).unwrap().unwrap().show, Show::DoNotDisturb);
+        presence(&manager, "phone", " type='unavailable'", "");
+        assert_eq!(status(&receive), Some(None), "nobody connected: nothing to show");
+    }
+
+    #[test]
+    fn presence_we_are_not_allowed_to_see_reports_nothing_whatever_it_says() {
+        let (manager, receive, epoch) = manager();
+        // The roster is loaded and the contact is not subscribed to us in the direction we need.
+        manager.apply_roster(epoch, roster("from")).unwrap();
+        receive.try_iter().for_each(drop);
+        presence(&manager, "phone", "", &format!("<show>dnd</show>{}", idle()));
+        assert_eq!(status(&receive), Some(None), "a refused or one-way contact's status is not shown");
+        let events: Vec<_> = {
+            presence(&manager, "phone", "", "");
+            receive.try_iter().map(|event| event.2).collect()
+        };
+        assert!(events.iter().any(|e| matches!(e, BackendEvent::Presence { visible: false, online: false, .. })));
+    }
+
+    #[test]
+    fn losing_the_subscription_forgets_what_was_known() {
+        let (manager, receive, epoch) = manager();
+        manager.apply_roster(epoch, roster("both")).unwrap();
+        presence(&manager, "phone", "", "<show>away</show>");
+        assert!(status(&receive).unwrap().is_some());
+        manager.apply_roster(epoch, roster("none")).unwrap();
+        receive.try_iter().for_each(drop);
+        presence(&manager, "phone", "", "<show>away</show>");
+        assert_eq!(status(&receive), Some(None));
+        // Subscribed again: the old device state did not survive.
+        manager.apply_roster(epoch, roster("both")).unwrap();
+        receive.try_iter().for_each(drop);
+        presence(&manager, "tablet", "", "");
+        assert_eq!(status(&receive).unwrap().unwrap().show, Show::Available);
+    }
+
+    #[test]
+    fn a_hostile_presence_is_ignored_or_reduced_not_trusted() {
+        let (manager, receive, epoch) = manager();
+        manager.apply_roster(epoch, roster("both")).unwrap();
+        receive.try_iter().for_each(drop);
+        // Delayed, forwarded or carbon-copied presence is history, not the contact's state now.
+        presence(&manager, "phone", "", "<delay xmlns='urn:xmpp:delay' stamp='2025-06-15T11:00:00Z'/><show>dnd</show>");
+        assert!(status(&receive).is_none(), "ignored altogether");
+        // A bad idle time costs only the idle time.
+        presence(&manager, "phone", "", "<show>away</show><idle xmlns='urn:xmpp:idle:1' since='not a time'/>");
+        let detail = status(&receive).unwrap().unwrap();
+        assert_eq!((detail.show, detail.idle_since), (Show::Away, None));
+        // Someone else's address, and presence addressed to another account, change nothing.
+        manager.presence(&xml("<presence xmlns='jabber:client' from='stranger@example.org/x' to='owner@example.org/d'><show>dnd</show></presence>"));
+        manager.presence(&xml(&format!("<presence xmlns='jabber:client' from='{PEER}/y' to='someone@else.org/d'><show>dnd</show></presence>")));
+        // A stranger is reported as nobody (as their presence already was), and nothing is kept.
+        assert!(matches!(status(&receive), None | Some(None)));
+        assert!(!manager.data.lock().unwrap().details.contains_key("stranger@example.org"));
+        assert!(!manager.data.lock().unwrap().details.contains_key("someone@else.org"));
+        // An error or probe is not a status.
+        presence(&manager, "phone", " type='error'", "");
+        presence(&manager, "phone", " type='subscribe'", "");
+        assert!(status(&receive).is_none());
+    }
+
+    #[test]
+    fn going_offline_clears_every_contact() {
+        let (manager, receive, epoch) = manager();
+        manager.apply_roster(epoch, roster("both")).unwrap();
+        presence(&manager, "phone", "", "<show>away</show>");
+        receive.try_iter().for_each(drop);
+        manager.disconnect();
+        assert_eq!(status(&receive), Some(None));
+        assert!(manager.data.lock().unwrap().details.is_empty());
     }
 }

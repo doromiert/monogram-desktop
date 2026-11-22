@@ -57,6 +57,7 @@ pub enum Request {
     ProbeRoom {
         recipients: RoomRecipients,
         reply: oneshot::Sender<Result<bool>>,
+        skip_unreachable: bool,
     },
     Send {
         peer: String,
@@ -92,10 +93,6 @@ pub struct Handle {
     events: mpsc::Sender<Envelope>,
 }
 impl Handle {
-    /// Control requests only; incoming ciphertext must use the bounded `send` path.
-    pub fn sender(&self) -> channel::UnboundedSender<Request> {
-        self.tx.clone()
-    }
     pub fn start(
         owner: String,
         generation: u64,
@@ -287,25 +284,39 @@ fn describe(error: &Error) -> String {
         _ => error.to_string(),
     }
 }
+const NOT_READABLE: &str = "OMEMO 2 public keys are not readable";
+const FETCH_FAILED: &str = "OMEMO 2 public keys could not be fetched or published";
+const NO_DEVICES: &str = "This contact has no OMEMO 2 devices";
+const NOBODY_REACHABLE: &str = "No other room member's OMEMO 2 keys could be used";
 fn unusable_published_keys(result: &Result<Option<Vec<Target>>>) -> bool {
-    matches!(result, Err(Error::InvalidBundle | Error::Invalid("PQ bundle")))
+    matches!(result, Err(Error::InvalidBundle(_) | Error::Invalid("PQ bundle")))
 }
 fn probe_available(result: Result<Option<Vec<Target>>>) -> Result<bool> {
     match result {
         Ok(targets) => Ok(targets.is_some()),
         // This mode is definitively unavailable. Automatic may try another encrypted mode.
-        Err(Error::InvalidBundle | Error::Invalid("PQ bundle")) => Ok(false),
+        Err(Error::InvalidBundle(_) | Error::Invalid("PQ bundle")) => Ok(false),
         Err(error) => Err(error),
     }
 }
 fn pep_error(error: pep::Error) -> Error {
     match error {
         pep::Error::Crypto(error) => error,
-        pep::Error::PublicAccess => Error::Unavailable("OMEMO 2 public keys are not readable"),
-        pep::Error::Request(_) => {
-            Error::Unavailable("OMEMO 2 public keys could not be fetched or published")
-        }
+        pep::Error::PublicAccess => Error::Unavailable(NOT_READABLE),
+        pep::Error::Request(_) => Error::Unavailable(FETCH_FAILED),
     }
+}
+/// Whether failing to get one room member's keys is a reason the sender may choose to leave that
+/// member out. Unreviewed keys, a changed identity and anything about our own devices never are.
+pub(crate) fn skippable(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::InvalidBundle(_) | Error::Unavailable(NOT_READABLE | FETCH_FAILED | NO_DEVICES)
+    )
+}
+/// [`skippable`] for a failure that is only available as the text shown to the user.
+pub(crate) fn skippable_reason(reason: &str) -> bool {
+    matches!(reason, NOT_READABLE | FETCH_FAILED | NO_DEVICES)
 }
 impl Worker {
     fn emit(&self, event: BackendEvent) {
@@ -437,7 +448,9 @@ impl Worker {
             return Ok(None);
         };
         let bundle = Bundle::parse(&xml).map_err(|error| match error {
-            Error::Invalid(_) | Error::Native(_) => Error::InvalidBundle,
+            Error::Invalid(_) | Error::Native(_) => {
+                Error::invalid_bundle(crate::encryption_policy::Mode::Pq.name(), peer, None)
+            }
             other => other,
         })?;
         let blind = self.blind(peer, conversation)?;
@@ -481,7 +494,7 @@ impl Worker {
             }
             let bundle = match self.observe(peer, id, force, conversation).await {
                 Ok(bundle) => bundle,
-                Err(Error::InvalidBundle | Error::Invalid("PQ bundle"))
+                Err(Error::InvalidBundle(_) | Error::Invalid("PQ bundle"))
                     if self.blind(peer, conversation)? => None,
                 Err(error) => return Err(error),
             };
@@ -523,7 +536,7 @@ impl Worker {
         }
         if result.is_empty() && !optional {
             return Err(if missing {
-                Error::InvalidBundle
+                Error::invalid_bundle(crate::encryption_policy::Mode::Pq.name(), peer, None)
             } else {
                 Error::TrustRequired
             });
@@ -575,7 +588,14 @@ impl Worker {
         }
         Ok(Some(targets))
     }
-    async fn room_targets(&mut self, recipients: &RoomRecipients) -> Result<Option<Vec<Target>>> {
+    /// Every room member's devices. With `skip_unreachable`, members whose keys cannot be used are
+    /// left out and returned with the reason; the user chose that with Send Anyway. Never our own
+    /// account, never unreviewed keys, and nothing is sent when nobody else is left.
+    async fn room_targets(
+        &mut self,
+        recipients: &RoomRecipients,
+        skip_unreachable: bool,
+    ) -> Result<(Option<Vec<Target>>, Vec<(String, String)>)> {
         self.initialize().await?;
         if recipients.members.is_empty() || !recipients.members.contains_key(&self.owner) {
             return Err(Error::Unavailable(
@@ -583,19 +603,34 @@ impl Worker {
             ));
         }
         let mut targets = Vec::new();
+        let mut skipped = Vec::new();
         for peer in recipients.members.keys() {
-            let Some(found) = self
-                .targets(peer, peer == &self.owner, false, Some(&recipients.room))
-                .await?
-            else {
-                return Ok(None);
+            let own = peer == &self.owner;
+            let found = match self
+                .targets(peer, own, false, Some(&recipients.room))
+                .await
+            {
+                Ok(Some(found)) => found,
+                Ok(None) if skip_unreachable && !own => {
+                    skipped.push((peer.clone(), NO_DEVICES.to_owned()));
+                    continue;
+                }
+                Ok(None) => return Ok((None, skipped)),
+                Err(error) if skip_unreachable && !own && skippable(&error) => {
+                    skipped.push((peer.clone(), error.to_string()));
+                    continue;
+                }
+                Err(error) => return Err(error),
             };
             targets.extend(found);
             if targets.len() > 500 {
                 return Err(Error::Invalid("PQ recipient limit"));
             }
         }
-        Ok(Some(targets))
+        if !skipped.is_empty() && skipped.len() + 1 >= recipients.members.len() {
+            return Err(Error::Unavailable(NOBODY_REACHABLE));
+        }
+        Ok((Some(targets), skipped))
     }
     fn clear_message(
         &self,
@@ -632,16 +667,16 @@ impl Worker {
         message: &Message,
         quote: &str,
         room: Option<&RoomRecipients>,
-    ) -> Result<Element> {
+    ) -> Result<(Element, Vec<(String, String)>)> {
         if !self.online {
             return Err(Error::Unavailable("OMEMO 2 is disconnected"));
         }
-        let targets = if let Some(room) = room {
-            self.room_targets(room).await?
+        let (targets, skipped) = if let Some(room) = room {
+            self.room_targets(room, message.skip_unreachable).await?
         } else {
-            self.recipients(peer).await?
-        }
-        .ok_or(Error::Unavailable("This contact has no OMEMO 2 devices"))?;
+            (self.recipients(peer).await?, Vec::new())
+        };
+        let targets = targets.ok_or(Error::Unavailable(NO_DEVICES))?;
         if !message.fingerprint.is_empty()
             && self.local.as_mut().unwrap().fingerprint()? != message.fingerprint
         {
@@ -669,7 +704,7 @@ impl Worker {
         {
             outer.append_child(Element::builder("store", "urn:xmpp:hints").build());
         }
-        Ok(outer)
+        Ok((outer, skipped))
     }
     async fn send_wire(&self, xml: Element, room: Option<(&RoomRecipients, u64)>) -> Result<()> {
         let (reply, result) = oneshot::channel();
@@ -914,12 +949,18 @@ impl Worker {
                 }
                 let _ = reply.send(result);
             }
-            Request::ProbeRoom { recipients, reply } => {
-                let mut result = self.room_targets(&recipients).await;
+            Request::ProbeRoom { recipients, reply, skip_unreachable } => {
+                let mut result = self
+                    .room_targets(&recipients, skip_unreachable)
+                    .await
+                    .map(|(targets, _)| targets);
                 if unusable_published_keys(&result) {
                     self.lists.clear();
                     self.bundles.clear();
-                    result = self.room_targets(&recipients).await;
+                    result = self
+                        .room_targets(&recipients, skip_unreachable)
+                        .await
+                        .map(|(targets, _)| targets);
                 }
                 let result = probe_available(result);
                 if let Err(error) = &result {
@@ -991,7 +1032,7 @@ impl Worker {
                 quote,
             } => {
                 let result = match self.encrypted(&peer, &message, &quote, None).await {
-                    Ok(xml) => self.send_wire(xml, None).await,
+                    Ok((xml, _)) => self.send_wire(xml, None).await,
                     Err(error) => Err(error),
                 };
                 self.sent(peer, message.wire_id, result);
@@ -1003,14 +1044,26 @@ impl Worker {
                 epoch,
             } => {
                 let peer = recipients.room.clone();
+                let mut skipped = Vec::new();
                 let result = match self
                     .encrypted(&peer, &message, &quote, Some(&recipients))
                     .await
                 {
-                    Ok(xml) => self.send_wire(xml, Some((&recipients, epoch))).await,
+                    Ok((xml, left_out)) => {
+                        skipped = left_out;
+                        self.send_wire(xml, Some((&recipients, epoch))).await
+                    }
                     Err(error) => Err(error),
                 };
-                self.sent(peer, message.wire_id, result);
+                let sent = result.is_ok();
+                self.sent(peer.clone(), message.wire_id.clone(), result);
+                if sent && !skipped.is_empty() {
+                    self.emit(BackendEvent::SentPartially {
+                        peer,
+                        id: message.wire_id,
+                        skipped,
+                    });
+                }
             }
             Request::Incoming(frame) => {
                 self.receive(frame, None).await;
@@ -1113,7 +1166,7 @@ mod actor_tests {
     #[test]
     fn unusable_public_keys_allow_an_encrypted_fallback_without_hiding_local_failures() {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-            for error in [Error::InvalidBundle, Error::Invalid("PQ bundle")] {
+            for error in [Error::InvalidBundle(None), Error::Invalid("PQ bundle")] {
                 let mode = crate::encryption_policy::select(
                     async { probe_available(Err(error)) },
                     async { Ok::<_, Error>(true) },
@@ -1176,7 +1229,7 @@ mod actor_tests {
             let contact=worker.targets(PEER,false,true,Some(PEER)).await.unwrap().unwrap();
             assert_eq!(contact.iter().map(|target|target.device).collect::<Vec<_>>(),vec![83],"mobile skips stale contact entries while retaining valid recipient devices");
             missing_contact.store(2,std::sync::atomic::Ordering::Release);
-            assert!(matches!(worker.targets(PEER,false,true,Some(PEER)).await,Err(Error::InvalidBundle)),"a required contact with no bundle/session must still fail closed");
+            assert!(matches!(worker.targets(PEER,false,true,Some(PEER)).await,Err(Error::InvalidBundle(_))),"a required contact with no bundle/session must still fail closed");
             let before=missing_queries.load(std::sync::atomic::Ordering::Relaxed);
             let (reply,result)=oneshot::channel();worker.process(Request::Probe{peer:PEER.into(),reply}).await;
             assert!(!result.await.unwrap().unwrap(),"Automatic can try another encrypted mode when these published keys cannot be used");
@@ -1629,5 +1682,191 @@ mod actor_tests {
         );
         drop(alice);
         drop(bob);
+    }
+
+    mod room_skip {
+        use super::*;
+        use crate::rooms::members::Affiliation;
+        const OWNER: &str = "owner@example.invalid";
+        const BOB: &str = "bob@example.invalid";
+        const CAROL: &str = "carol@example.invalid";
+        const DAVE: &str = "dave@example.invalid";
+        const ERIN: &str = "erin@example.invalid";
+        const ROOM: &str = "room@conference.example.invalid";
+
+        /// A worker for OWNER in ROOM against a fake server. BOB is healthy; CAROL's server refuses
+        /// her device list; DAVE has no devices; ERIN lists a device whose bundle is missing.
+        /// `blind` is the room's blind-trust setting (without it BOB's key is unreviewed) and
+        /// `owner_broken` makes the owner's own list unreadable.
+        async fn new_worker(blind: bool, owner_broken: bool) -> (Worker, tokio::task::JoinHandle<()>, std::path::PathBuf) {
+            let root = std::env::temp_dir().join(format!("monogram-pq-room-skip-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            let history = crate::storage::Store { db: rusqlite::Connection::open(root.join("history.sqlite3")).unwrap() };
+            history.db.execute_batch("CREATE TABLE preferences(key TEXT PRIMARY KEY,value TEXT)").unwrap();
+            history.set_blind_trust(OWNER, ROOM, blind).unwrap();
+            history.set_blind_trust(OWNER, BOB, blind).unwrap();
+            let mut local = Device::memory(OWNER, 81).unwrap();
+            local.prepare().unwrap();
+            let mut bob = Device::memory(BOB, 83).unwrap();
+            let bob_bundle = Bundle::from_parts(bob.prepare().unwrap()).unwrap();
+            let (network, mut requests) = channel::unbounded_channel();
+            let (events, _) = mpsc::channel();
+            let server = tokio::spawn(async move {
+                const PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+                while let Some(Command::Iq { to, payload, reply, .. }) = requests.recv().await {
+                    let requested = payload.get_child("items", PUBSUB).unwrap();
+                    let node = requested.attr("node").unwrap().to_owned();
+                    let id = requested.children().next().and_then(|c| c.attr("id")).unwrap_or("").to_owned();
+                    let refused = node == pep::DEVICES && (to == CAROL || (to == OWNER && owner_broken));
+                    if refused {
+                        let _ = reply.send(Err(iq::Error::Rejected { condition: "forbidden".into(), pubsub: None }));
+                        continue;
+                    }
+                    let content = if node == pep::DEVICES {
+                        let ids: Vec<u32> = match to.as_str() {
+                            OWNER => vec![81],
+                            BOB => vec![83],
+                            ERIN => vec![84],
+                            _ => vec![],
+                        };
+                        let mut devices = Element::builder("devices", super::super::NS);
+                        for id in ids {
+                            devices = devices.append(Element::builder("device", super::super::NS).attr("id".try_into().unwrap(), id.to_string()).build());
+                        }
+                        Some(devices.build())
+                    } else if to == BOB && id == "83" {
+                        Some(bob_bundle.xml())
+                    } else {
+                        None
+                    };
+                    let mut items = Element::builder("items", PUBSUB).attr("node".try_into().unwrap(), node.as_str());
+                    if let Some(content) = content {
+                        items = items.append(Element::builder("item", PUBSUB).attr("id".try_into().unwrap(), id.as_str()).append(content).build());
+                    }
+                    let _ = reply.send(Ok(Some(Element::builder("pubsub", PUBSUB).append(items.build()).build())));
+                }
+            });
+            let worker = Worker {
+                owner: OWNER.into(),
+                generation: 1,
+                network,
+                events,
+                root: root.clone(),
+                local: Some(local),
+                online: true,
+                ready: true,
+                publication_pending: false,
+                bundles: BTreeMap::new(),
+                lists: BTreeMap::new(),
+            };
+            (worker, server, root)
+        }
+        fn room(members: &[&str]) -> RoomRecipients {
+            RoomRecipients {
+                room: ROOM.into(),
+                revision: 1,
+                members: members.iter().map(|m| (m.to_string(), Affiliation::Member)).collect(),
+            }
+        }
+        fn runtime() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+        }
+        fn clean(root: std::path::PathBuf) {
+            let _ = std::fs::remove_dir_all(root);
+        }
+
+        #[test]
+        fn without_the_choice_an_unreachable_member_blocks_the_room() {
+            runtime().block_on(async {
+                let (mut worker, server, root) = new_worker(true, false).await;
+                let error = worker.room_targets(&room(&[OWNER, BOB, CAROL]), false).await.err().expect("an error");
+                assert!(matches!(error, Error::Unavailable(FETCH_FAILED)), "{error:?}");
+                server.abort();
+                clean(root);
+            });
+        }
+
+        #[test]
+        fn with_the_choice_every_unusable_member_is_left_out_with_the_reason() {
+            runtime().block_on(async {
+                let (mut worker, server, root) = new_worker(true, false).await;
+                let (targets, skipped) = worker.room_targets(&room(&[OWNER, BOB, CAROL, DAVE, ERIN]), true).await.unwrap();
+                let targets = targets.expect("BOB's device is a target");
+                assert_eq!(targets.iter().map(|t| (t.peer.as_str(), t.device)).collect::<Vec<_>>(), vec![(BOB, 83)]);
+                assert_eq!(
+                    skipped,
+                    vec![
+                        (CAROL.to_owned(), FETCH_FAILED.to_owned()),
+                        (DAVE.to_owned(), NO_DEVICES.to_owned()),
+                        (ERIN.to_owned(), "No usable OMEMO2 keys from erin@example.invalid; refresh device review".to_owned()),
+                    ],
+                    "who was left out and why, as the message details show it"
+                );
+                server.abort();
+                clean(root);
+            });
+        }
+
+        /// The room probe is what automatic selection runs: with the choice it still finds the room
+        /// encryptable, without it the room is reported as blocked.
+        #[test]
+        fn the_probe_honours_the_choice() {
+            runtime().block_on(async {
+                let (mut worker, server, root) = new_worker(true, false).await;
+                let blocked = worker.room_targets(&room(&[OWNER, BOB, DAVE]), false).await.unwrap();
+                assert!(blocked.0.is_none(), "a member with no devices makes the room not encryptable");
+                let (probe, skipped) = worker.room_targets(&room(&[OWNER, BOB, DAVE]), true).await.unwrap();
+                assert!(probe.is_some(), "with the choice the room can be encrypted");
+                assert_eq!(skipped.len(), 1);
+                server.abort();
+                clean(root);
+            });
+        }
+
+        #[test]
+        fn unreviewed_keys_and_our_own_devices_are_never_skipped() {
+            runtime().block_on(async {
+                // BOB's key is unreviewed (no blind trust in the room): reviewing is required.
+                let (mut worker, server, root) = new_worker(false, false).await;
+                let error = worker.room_targets(&room(&[OWNER, BOB, CAROL]), true).await.err().expect("an error");
+                assert!(matches!(error, Error::TrustRequired), "{error:?}");
+                server.abort();
+                clean(root);
+
+                // Our own list unreadable: not a reason to leave anyone out.
+                let (mut worker, server, root) = new_worker(true, true).await;
+                assert!(worker.room_targets(&room(&[OWNER, BOB, CAROL]), true).await.is_err());
+                server.abort();
+                clean(root);
+            });
+        }
+
+        #[test]
+        fn nothing_is_sent_when_nobody_but_the_sender_is_reachable() {
+            runtime().block_on(async {
+                let (mut worker, server, root) = new_worker(true, false).await;
+                let error = worker.room_targets(&room(&[OWNER, CAROL, DAVE]), true).await.err().expect("an error");
+                assert!(matches!(error, Error::Unavailable(NOBODY_REACHABLE)), "{error:?}");
+                server.abort();
+                clean(root);
+            });
+        }
+
+        #[test]
+        fn the_text_shown_to_the_user_is_recognised_for_exactly_the_skippable_errors() {
+            for error in [
+                Error::Unavailable(NOT_READABLE),
+                Error::Unavailable(FETCH_FAILED),
+                Error::Unavailable(NO_DEVICES),
+                Error::invalid_bundle("OMEMO2", ERIN, None),
+            ] {
+                assert!(skippable(&error), "{error:?}");
+                assert!(crate::crypto::skippable_reason(&error.to_string()), "{error}");
+            }
+            for error in [Error::TrustRequired, Error::OwnDeviceTrustRequired, Error::Changed, Error::Unavailable(NOBODY_REACHABLE), Error::Unavailable("OMEMO 2 is disconnected")] {
+                assert!(!skippable(&error), "{error:?}");
+                assert!(!crate::crypto::skippable_reason(&error.to_string()), "{error}");
+            }
+        }
     }
 }

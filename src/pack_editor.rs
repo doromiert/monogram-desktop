@@ -949,7 +949,7 @@ pub(crate) fn manage(ui: &Rc<Ui>, page: &Rc<PackLibraryPage>, library: Library, 
     let weak_dialog = dialog.downgrade();
     glib::spawn_future_local(async move {
         let snapshot = library.snapshot().await;
-        let Some(ui) = weak_ui
+        let Some(_ui) = weak_ui
             .upgrade()
             .filter(|ui| ui.generation.get() == generation && ui.state.borrow().account == owner)
         else {

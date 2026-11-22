@@ -1,4 +1,4 @@
-use crate::{model::*, ui::Ui, widgets::*};
+use crate::{components::{overlay_meta, BubbleKind, FileCard, ForwardedBanner, MessageBubble, ReplyQuote}, model::*, ui::Ui, widgets::*};
 #[path = "reactions_ui.rs"]
 pub(crate) mod reactions_ui;
 use adw::prelude::*;
@@ -41,11 +41,54 @@ struct PreparedMessages {
 struct RenderedRow {
     message: Message,
     row: gtk::ListBoxRow,
-    bubble: gtk::Box,
+    bubble: MessageBubble,
     status: gtk::Box,
     heading: gtk::Box,
+    hats: crate::components::HatStrip,
+    author: gtk::Label,
     avatar: Option<adw::Avatar>,
     reactions: reactions_ui::MessageReactions,
+}
+/// Show an author's hats next to their name. The name stops taking the spare width while hats
+/// are there, so the hats sit beside it instead of at the far edge.
+fn show_hats(strip: &crate::components::HatStrip, author: &gtk::Label, hats: &[crate::rooms::hats::Hat]) {
+    strip.set_hats(hats);
+    author.set_hexpand(hats.is_empty());
+    strip.set_hexpand(!hats.is_empty());
+}
+impl Ui {
+    /// The hats the room gives this message's author, if the room supports them and they are
+    /// in it right now.
+    pub(crate) fn hats_of(&self, m: &Message) -> Vec<crate::rooms::hats::Hat> {
+        if !self.shows_hats() {
+            return Vec::new();
+        }
+        let room = self.state.borrow().current().jid.clone();
+        let rosters = self.room_rosters.borrow();
+        let Some(people) = rosters.get(&room) else {
+            return Vec::new();
+        };
+        people
+            .iter()
+            .find(|person| match (m.sender.is_empty(), person.jid.as_deref()) {
+                // Both addresses are known: they have to be the same person. A nickname alone
+                // proves nothing here, an old message may be from someone who used it before.
+                (false, Some(jid)) => jid == m.sender,
+                _ => crate::text_safety::display_nick(&person.nick, person.own) == m.author,
+            })
+            .map(|person| person.hats.clone())
+            .unwrap_or_default()
+    }
+    /// The room's people changed: update the hats on the messages already on screen.
+    pub(crate) fn refresh_message_hats(&self, room: &str) {
+        if self.state.borrow().current().jid != room {
+            return;
+        }
+        let rendered = self.rendered_rows.borrow();
+        for row in rendered.rows.values() {
+            show_hats(&row.hats, &row.author, &self.hats_of(&row.message));
+        }
+    }
 }
 fn message_focus(root: &gtk::Widget, emoji: Option<&str>) -> Option<gtk::Widget> {
     if let Some(emoji) = emoji {
@@ -185,9 +228,23 @@ fn action_actor(message: &Message, chat: &Chat, owner: &str) -> String {
     };
     actor.replace(['\n', '\r'], " ")
 }
+/// The ordinary lock of an encrypted message that was sent without some room members, in the
+/// theme's accent colour (blue by default) so it stands out.
+fn partial_lock(m: &Message) -> gtk::Image {
+    let lock = gtk::Image::from_icon_name("channel-secure-symbolic");
+    lock.set_pixel_size(11);
+    lock.add_css_class("message-partial-lock");
+    lock.add_css_class("accent");
+    let tooltip = format!("{} with problems. See Message Details", m.mode().name());
+    lock.set_tooltip_text(Some(&tooltip));
+    lock.update_property(&[gtk::accessible::Property::Label(&tooltip)]);
+    lock
+}
 fn message_status(meta: &gtk::Box, m: &Message) {
     clear(meta);
-    if m.encrypted
+    if m.own && m.encrypted && !m.skipped_members.is_empty() {
+        meta.append(&partial_lock(m));
+    } else if m.encrypted
         && (!m.own
             || !matches!(
                 m.delivery.as_str(),
@@ -226,10 +283,12 @@ fn message_status(meta: &gtk::Box, m: &Message) {
             "failed" | "uncertain" => {
                 let image = gtk::Image::from_icon_name("dialog-warning-symbolic");
                 image.set_pixel_size(12);
-                image.set_tooltip_text(Some(if m.delivery == "failed" {
-                    "Send failed"
-                } else {
-                    "Delivery uncertain"
+                let see_details = !m.failure_reason.is_empty();
+                image.set_tooltip_text(Some(match (m.delivery == "failed", see_details) {
+                    (true, true) => "Send failed. See Message Details",
+                    (true, false) => "Send failed",
+                    (false, true) => "Delivery uncertain. See Message Details",
+                    (false, false) => "Delivery uncertain",
                 }));
                 meta.append(&image);
             }
@@ -312,6 +371,8 @@ impl Ui {
             || row.message.edited != message.edited
             || row.message.encrypted != message.encrypted
             || row.message.encryption_mode != message.encryption_mode
+            || row.message.skipped_members != message.skipped_members
+            || row.message.failure_reason != message.failure_reason
         {
             message_status(&row.status, message);
         }
@@ -699,37 +760,25 @@ impl Ui {
                 .attachment
                 .as_ref()
                 .is_some_and(|file| file.media_candidate()) || crate::upload_ui::pending_media(&m).is_some();
-            let bubble = bx(true, 0);
-            bubble.set_vexpand(false);
-            bubble.set_valign(gtk::Align::Start);
-            if action.is_some() {
-                bubble.add_css_class("date-pill");
-                bubble.add_css_class("action-pill");
-                bubble.set_halign(gtk::Align::Center);
-            } else {
-                bubble.add_css_class("message-bubble");
-            }
-            if self
-                .history_window
-                .highlighted
-                .borrow()
-                .as_ref()
-                .is_some_and(|(id, _)| id == &m.id)
-            {
-                bubble.add_css_class("reply-target");
-            }
-            if planned.emoji_only[index] {
-                bubble.add_css_class("emoji-only");
-            }
-            if m.own && action.is_none() {
-                bubble.add_css_class("own")
-            }
-            if sticker {
-                bubble.add_css_class("sticker-bubble");
+            let bubble = MessageBubble::new(if action.is_some() {
+                BubbleKind::Action
+            } else if sticker {
+                BubbleKind::Sticker
             } else if media {
-                bubble.add_css_class("media-bubble");
-            }
-            if m.attachment.is_some() && !media { bubble.add_css_class("document-bubble"); }
+                BubbleKind::Media
+            } else {
+                BubbleKind::Text
+            });
+            bubble.set_own(m.own);
+            bubble.set_emoji_only(planned.emoji_only[index]);
+            bubble.set_document(m.attachment.is_some() && !media);
+            bubble.set_highlighted(
+                self.history_window
+                    .highlighted
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|(id, _)| id == &m.id),
+            );
             let heading = bx(false, 6);
             heading.set_margin_bottom(6);
             let author = text(&m.author, "message-author");
@@ -741,35 +790,26 @@ impl Ui {
                 heading.append(&gtk::Image::from_icon_name("view-pin-symbolic"))
             }
             if !m.sender.is_empty(){heading.append(&self.profile_button(&author,&m.sender,&m.author));}else{heading.append(&author);}
+            let hats = crate::components::HatStrip::new();
+            hats.set_halign(gtk::Align::Start);
+            hats.set_valign(gtk::Align::Center);
+            heading.append(&hats);
+            show_hats(&hats, &author, &self.hats_of(m));
             let meta = bx(false, 4);
             meta.add_css_class("message-meta");
             meta.set_valign(gtk::Align::Center);
             message_status(&meta, m);
             bubble.append(&heading);
             if let Some(attribution) = m.forwarded.clone() {
-                let header = gtk::Button::new();
-                header.add_css_class("flat");
-                header.set_halign(gtk::Align::Start);
-                header.set_margin_bottom(4);
-                let title = text(&format!("Forwarded from {}", attribution.name), "caption");
-                title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                title.set_max_width_chars(36);
-                title.set_single_line_mode(true);
-                header.set_child(Some(&title));
-                header.set_tooltip_text(Some(&attribution.name));
                 let weak = Rc::downgrade(self);
-                header.connect_clicked(move |_| {
+                let name = attribution.name.clone();
+                bubble.append(&ForwardedBanner::new(&name, move || {
                     if let Some(ui) = weak.upgrade() {
                         ui.forwarded_details(&attribution);
                     }
-                });
-                bubble.append(&header);
+                }));
             }
             if !m.reply.is_empty() || !m.reply_id.is_empty() {
-                let reply = gtk::Button::new();
-                reply.add_css_class("message-reply");
-                let contents = bx(true, 2);
-                contents.set_hexpand(true);
                 let (reply_author, quote) = m.reply.split_once(" · ").unwrap_or((
                     if m.reply_to == self.state.borrow().account {
                         "You"
@@ -778,29 +818,9 @@ impl Ui {
                     },
                     &m.reply,
                 ));
-                let title = text(reply_author, "reply-author");
-                title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                let preview = quote
-                    .lines()
-                    .map(|line| line.strip_prefix("> ").unwrap_or(line))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let snippet: gtk::Widget = if preview.starts_with("📎 ") {
-                    let name = text(&preview.chars().take(4096).collect::<String>(), "reply-preview");
-                    name.set_single_line_mode(true);
-                    name.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                    name.set_max_width_chars(52);
-                    name.upcast()
-                } else {
-                    crate::reply_preview_ui::Snippet::new(if preview.is_empty(){"Original message"}else{&preview}).upcast()
-                };
-                contents.append(&title);
-                contents.append(&snippet);
+                let reply = ReplyQuote::new(reply_author, quote);
                 // Measure the quote at the width left by its thumbnail.
-                let preview_row = gtk::Grid::builder().column_spacing(7).build();
-                crate::reply_preview_ui::attach(self, m, &preview_row);
-                preview_row.attach(&contents, 1, 0, 1, 1);
-                reply.set_child(Some(&preview_row));
+                crate::reply_preview_ui::attach(self, m, reply.grid());
                 let weak = Rc::downgrade(self);
                 let target = m.reply_id.clone();
                 let author = m.reply_to.clone();
@@ -917,8 +937,7 @@ impl Ui {
                 "file" if m.upload.is_some() && media => {
                     let content=self.media_upload_content(&m);
                     if sticker || m.text.is_empty() {
-                        let overlay=gtk::Overlay::new();overlay.set_child(Some(&content));
-                        meta.add_css_class("sticker-meta");meta.set_halign(gtk::Align::End);meta.set_valign(gtk::Align::End);meta.set_can_target(false);overlay.add_overlay(&meta);bubble.append(&overlay);
+                        bubble.append(&overlay_meta(&content, &meta));
                     } else {
                         bubble.append(&content);
                         bubble.append(&MessageText::new(&wrap(&m.text,"message-text"),&meta));
@@ -933,14 +952,7 @@ impl Ui {
                 "file" if m.attachment.is_some() => {
                     let (attachment,spoiler_button) = crate::formatting_ui::hidden_media(&self.attachment_content(&m),crate::formatting_ui::model(&m).spoiler);
                     if sticker || media && m.text.is_empty() {
-                        let overlay = gtk::Overlay::new();
-                        overlay.set_child(Some(&attachment));
-                        meta.add_css_class("sticker-meta");
-                        meta.set_halign(gtk::Align::End);
-                        meta.set_valign(gtk::Align::End);
-                        meta.set_can_target(false);
-                        overlay.add_overlay(&meta);
-                        bubble.append(&overlay);
+                        bubble.append(&overlay_meta(&attachment, &meta));
                     } else {
                         bubble.append(&attachment);
                     }
@@ -967,17 +979,11 @@ impl Ui {
                     }
                 }
                 "file" => {
-                    let file = bx(false, 10);
-                    let image = gtk::Image::from_icon_name("application-pdf-symbolic");
-                    image.set_pixel_size(32);
-                    file.append(&image);
-                    let words = bx(true, 2);
-                    words.append(&wrap(
+                    let file = FileCard::new(
+                        "application-pdf-symbolic",
                         if m.own { &m.text } else { "Desktop notes.pdf" },
-                        "heading",
-                    ));
-                    words.append(&text("Local file preview", "caption dim-label"));
-                    file.append(&words);
+                        "Local file preview",
+                    );
                     bubble.append(&file);
                     if !m.own {
                         bubble.append(&wrap(&m.text, ""))
@@ -1058,7 +1064,7 @@ impl Ui {
                 meta.set_margin_top(3);
                 bubble.append(&meta);
             }
-            let reactions = reactions_ui::MessageReactions::new(self, &m, &bubble, media, &meta);
+            let reactions = reactions_ui::MessageReactions::new(self, &m, bubble.as_box(), media, &meta);
             let presentation=self.send_animation.wrap(&m.id,&bubble);
             if action.is_some() {
                 outer.set_halign(gtk::Align::Center);
@@ -1113,7 +1119,7 @@ impl Ui {
             right.set_propagation_phase(gtk::PropagationPhase::Capture);
             let id = m.id.clone();
             let weak = Rc::downgrade(self);
-            let parent = bubble.downgrade();
+            let parent = bubble.as_box().downgrade();
             right.connect_pressed(move |g, _, x, y| {
                 g.set_state(gtk::EventSequenceState::Claimed);
                 if let (Some(ui), Some(parent)) = (weak.upgrade(), parent.upgrade()) {
@@ -1127,6 +1133,8 @@ impl Ui {
                 bubble,
                 status: meta,
                 heading,
+                hats,
+                author,
                 avatar,
                 reactions,
             };
@@ -1401,7 +1409,6 @@ impl Ui {
     pub fn delete_confirmation(self: &Rc<Self>, ids: Vec<String>) {
         let owner = self.state.borrow().account.clone();
         let chat = self.state.borrow().active.clone();
-        self.notice("Preparing message deletion…");
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let Some(ui) = weak.upgrade() else {
@@ -1501,6 +1508,10 @@ impl Ui {
                     return;
                 }
                 self.uploads.borrow_mut().cancel(id);
+                // Deleting a picture that was still waiting to upload also deletes its edited copy.
+                if let Some(draft) = message.as_ref().and_then(|m| m.upload.as_ref()) {
+                    crate::picture_editor_ui::discard_edited_uri(&draft.uri);
+                }
                 if message.as_ref().is_some_and(|m| m.upload.is_some()) {
                     let (account, id) = (s.account.clone(), id.clone());
                     gtk::gio::spawn_blocking(move || {
@@ -2059,5 +2070,104 @@ mod chat_switch_tests {
         wait(&ui);
         assert!(!ui.bubbles.borrow().contains_key("1-35"));
         ui.window.close();
+    }
+}
+
+#[cfg(test)]
+mod hats_tests {
+    use super::*;
+    use crate::rooms::{hats::Hat, members::Participant};
+    use gtk::{gio, prelude::*};
+
+    const ROOM: &str = "room@conference.example.org";
+
+    fn ui() -> Rc<Ui> {
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id("com.negzero.MessageHatsFixture")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gio::Cancellable>).unwrap();
+        Ui::new(&app, true)
+    }
+    fn person(nick: &str, jid: Option<&str>, own: bool, hats: Vec<Hat>) -> Participant {
+        Participant {
+            nick: nick.into(),
+            jid: jid.map(Into::into),
+            affiliation: "member".into(),
+            role: "participant".into(),
+            show: String::new(),
+            own,
+            hats,
+        }
+    }
+    fn host() -> Vec<Hat> {
+        vec![Hat::new("Host", "urn:h", Some(120.0)).unwrap()]
+    }
+    fn message(author: &str, sender: &str) -> Message {
+        Message { id: format!("m-{author}"), author: author.into(), sender: sender.into(), text: "hi".into(), ..Default::default() }
+    }
+    fn open_room(ui: &Rc<Ui>) {
+        let mut state = ui.state.borrow_mut();
+        let chat = state.chat_for(ROOM);
+        chat.group = true;
+        let id = chat.id.clone();
+        state.active = id;
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn an_authors_hats_are_found_by_address_then_by_cleaned_nickname() {
+        let ui = ui();
+        open_room(&ui);
+        ui.room_rosters.borrow_mut().insert(
+            ROOM.into(),
+            vec![
+                person("amy", Some("amy@example.org"), false, host()),
+                person("bob", None, false, vec![]),
+                person("me", None, true, host()),
+                person("evil\u{202e}", None, false, host()),
+            ],
+        );
+        let titles = |m: Message| ui.hats_of(&m).into_iter().map(|h| h.title).collect::<Vec<_>>();
+        assert_eq!(titles(message("amy", "amy@example.org")), ["Host"], "by real address");
+        assert_eq!(titles(message("Someone Else", "amy@example.org")), ["Host"], "even under another display name");
+        assert_eq!(titles(message("amy", "")), ["Host"], "by nickname when no address is known");
+        assert!(titles(message("bob", "")).is_empty(), "no hats, none shown");
+        assert_eq!(titles(message("me", "")), ["Host"], "your own hats too");
+        assert_eq!(titles(message("evil", "")), ["Host"], "compared after the same cleaning the list uses");
+        assert!(titles(message("nobody", "")).is_empty(), "someone who left shows none");
+        assert!(
+            titles(message("amy", "amy@elsewhere.org")).is_empty(),
+            "the same nickname from a different address is a different person"
+        );
+        assert_eq!(titles(message("bob", "bob@example.org")), Vec::<String>::new(), "known address, roster has none");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn without_a_roster_or_in_another_chat_no_hats_are_shown() {
+        let ui = ui();
+        open_room(&ui);
+        assert!(ui.hats_of(&message("amy", "")).is_empty(), "no roster yet");
+        ui.room_rosters.borrow_mut().insert("other@conference.example.org".into(), vec![person("amy", None, false, host())]);
+        assert!(ui.hats_of(&message("amy", "")).is_empty(), "another room's hats do not leak in");
+        ui.room_rosters.borrow_mut().insert(ROOM.into(), vec![]);
+        assert!(ui.hats_of(&message("amy", "")).is_empty(), "an empty roster");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn the_author_name_gives_up_spare_width_only_while_hats_are_shown() {
+        adw::init().unwrap();
+        let strip = crate::components::HatStrip::new();
+        let author = gtk::Label::new(Some("amy"));
+        show_hats(&strip, &author, &[]);
+        assert!(author.hexpands() && !strip.hexpands() && !strip.is_visible(), "unchanged without hats");
+        show_hats(&strip, &author, &host());
+        assert!(!author.hexpands() && strip.hexpands() && strip.is_visible());
+        assert_eq!(strip.chips().len(), 1);
+        show_hats(&strip, &author, &[]);
+        assert!(author.hexpands() && !strip.hexpands() && !strip.is_visible(), "and back again");
     }
 }

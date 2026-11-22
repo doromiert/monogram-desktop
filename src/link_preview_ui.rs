@@ -543,7 +543,7 @@ mod tests {
         linkify_message_label(&body,source,&crate::link_previews::clickable_urls(source,None));
         let preview=Preview{url:source.into(),display_url:source.into(),site_name:"GitHub".into(),title:"Pure-Rust sticker renderer, no Java in the Arch package, opt-in Discord emoji completion by raluvy95 · Pull Request #1 · doromiert/monogram-desktop".into(),description:"What changed Sticker renderer Replaces the rlottie C helper with src/bin/monogram-sticker-renderer.rs, which uses the pure-Rust rasterlottie crate. Protocol, size/frame limits, ...".into(),kind:Kind::Article,thumbnail:None,media:None};
         let card=link_preview_card(&preview);
-        let bubble=bx(true,0);bubble.add_css_class("message-bubble");bubble.append(&body);bubble.append(&card);
+        let bubble=crate::components::MessageBubble::new(crate::components::BubbleKind::Text);bubble.append(&body);bubble.append(&card);
         let meta=label("14:25","message-meta");meta.set_halign(gtk::Align::End);bubble.append(&meta);
         let clamp=MessageBubbleLimit::new(&bubble,false);clamp.set_valign(gtk::Align::Start);
         let window=gtk::Window::builder().default_width(1400).default_height(300).child(&clamp).build();window.present();
@@ -561,8 +561,8 @@ mod tests {
         let settle=||{let until=std::time::Instant::now()+std::time::Duration::from_millis(200);while std::time::Instant::now()<until {context.iteration(false);std::thread::sleep(std::time::Duration::from_millis(1));}};
         settle();
         assert!(wrapped.layout().line_count()>1);
-        let painted=wrapped.layout().pixel_size().0.max(card.allocated_width());
-        assert!(bubble.width()<=painted+2,"Wrapped link left unused trailing bubble space: {}px (text {}, card {})",bubble.width()-painted,wrapped.layout().pixel_size().0,card.allocated_width());
+        let painted=wrapped.layout().pixel_size().0.max(card.width());
+        assert!(bubble.width()<=painted+2,"Wrapped link left unused trailing bubble space: {}px (text {}, card {})",bubble.width()-painted,wrapped.layout().pixel_size().0,card.width());
         assert_eq!(clamp.height(),clamp.measure(gtk::Orientation::Vertical,clamp.width()).1,"wrapped preview height uses its fitted width");
         let stable=(bubble.width(),bubble.height(),wrapped.layout().line_count());settle();assert_eq!(stable,(bubble.width(),bubble.height(),wrapped.layout().line_count()),"fitting converges without width/height oscillation");
         window.set_default_size(280,400);settle();assert!(clamp.width()<=280);assert!(wrapped.layout().pixel_size().0<=wrapped.width());
@@ -585,7 +585,7 @@ mod tests {
         linkify_message_label(&body,source,&crate::link_previews::clickable_urls(source,None));
         let preview=Preview{url:source.into(),display_url:"x.com/stonetoss/status/2121649346471219227".into(),site_name:"X (formerly Twitter)".into(),title:"Stoneto-ss Comics (@stonetoss)".into(),description:"Stoneto-ss Comics (@stonetoss) on X".into(),kind:Kind::Article,thumbnail:Some(Thumbnail{path:path.clone(),width:600,height:400}),media:None};
         let card=link_preview_card(&preview);
-        let bubble=bx(true,0);bubble.add_css_class("message-bubble");bubble.append(&body);bubble.append(&card);
+        let bubble=crate::components::MessageBubble::new(crate::components::BubbleKind::Text);bubble.append(&body);bubble.append(&card);
         let meta=label("14:25","message-meta");meta.set_halign(gtk::Align::End);bubble.append(&meta);
         let clamp=MessageBubbleLimit::new(&bubble,false);
         let window=gtk::Window::builder().default_width(600).default_height(320).child(&clamp).build();window.present();
@@ -618,7 +618,7 @@ mod tests {
         let body=wrap(source,"message-text");
         linkify_message_label(&body,source,&crate::link_previews::clickable_urls(source,None));
         assert!(body.measure(gtk::Orientation::Horizontal,-1).0>400,"the link is expected to be unbreakable");
-        let bubble=bx(true,0);bubble.add_css_class("message-bubble");bubble.append(&body);
+        let bubble=crate::components::MessageBubble::new(crate::components::BubbleKind::Text);bubble.append(&body);
         let column=bx(true,0);column.append(&MessageBubbleLimit::new(&bubble,false));
         let scroller=scroll(&column);
         let minimum=scroller.measure(gtk::Orientation::Horizontal,-1).0;

@@ -2,7 +2,7 @@
 //! and the occupants grouped into Owners, Administrators and Participants.
 use crate::{rooms::members::Participant, ui::Ui, widgets::*};
 use adw::prelude::*;
-use gtk::{gio, glib, subclass::prelude::*};
+use gtk::{gio, glib};
 use std::{
     cell::{Cell, RefCell},
     rc::{Rc, Weak},
@@ -174,20 +174,17 @@ fn factory(ui: Weak<Ui>, room:String) -> gtk::SignalListItemFactory {
         person.set_margin_bottom(6);
         person.set_margin_start(12);
         person.set_margin_end(12);
-        let overlay = gtk::Overlay::new();
-        overlay.set_child(Some(&adw::Avatar::new(40, None, true)));
-        let dot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        dot.add_css_class("presence-dot");
-        dot.set_halign(gtk::Align::End);
-        dot.set_valign(gtk::Align::End);
-        dot.set_can_target(false);
-        overlay.add_overlay(&dot);
-        person.append(&overlay);
+        person.append(&crate::components::PresenceAvatar::new(&adw::Avatar::new(40, None, true)));
         let name = label("", "");
         name.set_xalign(0.);
-        name.set_hexpand(true);
         name.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        person.append(&name);
+        // The name, and under it the hats the room gave this person (hidden while there are none).
+        let words = bx(true, 4);
+        words.set_hexpand(true);
+        words.set_valign(gtk::Align::Center);
+        words.append(&name);
+        words.append(&crate::components::HatStrip::new());
+        person.append(&words);
         root.append(&heading);
         let button=gtk::Button::builder().child(&person).css_classes(["flat","profile-target"]).build();
         let weak_item=item.downgrade();let weak_ui=profile_ui.clone();let room=room.clone();
@@ -224,21 +221,15 @@ fn factory(ui: Weak<Ui>, room:String) -> gtk::SignalListItemFactory {
                 heading.set_visible(false);
                 profile.set_visible(true);
                 person.set_visible(true);
-                let overlay = person.first_child().and_downcast::<gtk::Overlay>().unwrap();
+                let overlay = person.first_child().and_downcast::<crate::components::PresenceAvatar>().unwrap();
                 let Some(owner)=ui.upgrade() else{return};
                 let chat=owner.participant_chat(&bind_room,&participant);
-                overlay.set_child(Some(&owner.chat_avatar(&chat,40)));
-                let dot = overlay.last_child().unwrap();
-                for class in ["presence-online", "presence-away", "presence-busy"] {
-                    dot.remove_css_class(class);
-                }
+                overlay.set_avatar(&owner.chat_avatar(&chat,40));
                 let status = presence_label(&participant.show);
-                dot.add_css_class(match status {
-                    "Away" => "presence-away",
-                    "Busy" => "presence-busy",
-                    _ => "presence-online",
-                });
-                let name = person.last_child().and_downcast::<gtk::Label>().unwrap();
+                overlay.set_presence(crate::components::Presence::from_label(status));
+                let words = person.last_child().and_downcast::<gtk::Box>().unwrap();
+                let name = words.first_child().and_downcast::<gtk::Label>().unwrap();
+                words.last_child().and_downcast::<crate::components::HatStrip>().unwrap().set_hats(if owner.shows_hats() { &participant.hats } else { &[] });
                 // The "(You)" mark is added here, for the user's own entry only; other people's
                 // names are cleaned so they cannot imitate it or hide characters.
                 let nick = crate::text_safety::display_nick(chat.display_name(), participant.own);
@@ -403,16 +394,9 @@ impl Ui {
         body.append(&search);
         body.append(&stack);
 
-        let pane = adw::ToolbarView::new();
-        pane.add_css_class("utility-sidebar");
-        pane.set_top_bar_style(adw::ToolbarStyle::Flat);
-        let header = adw::HeaderBar::builder()
-            .show_start_title_buttons(false)
-            .title_widget(&label("Participants", "heading"))
-            .build();
-        let close = icon_button("sidebar-show-symbolic", "Close participants");
+        let chrome = crate::components::UtilityPane::new(Some("Participants"));
         let weak = Rc::downgrade(self);
-        close.connect_clicked(move |_| {
+        chrome.close("Close participants", false, move || {
             if let Some(ui) = weak.upgrade() {
                 // Closing is a choice: do not reopen by itself until asked from the menu.
                 ui.set_participants_auto(false);
@@ -420,8 +404,7 @@ impl Ui {
                 ui.utility.set_show_sidebar(false);
             }
         });
-        header.pack_start(&close);
-        pane.add_top_bar(&header);
+        let pane = chrome.view;
         pane.set_content(Some(&body));
 
         let view = Rc::new(ParticipantsView {
@@ -468,6 +451,7 @@ impl Ui {
                 .insert(room.into(), people.clone());
         }
         self.refresh_profile_card();
+        self.refresh_message_hats(room);
         let view = self.participants.borrow().clone();
         if let Some(view) = view.filter(|view| view.room == room) {
             view.update(people);
@@ -524,6 +508,7 @@ mod tests {
             role: "participant".into(),
             show: String::new(),
             own,
+            hats: Vec::new(),
         }
     }
 
@@ -758,7 +743,7 @@ mod alias_tests {
     use super::*;
     #[test]
     fn local_display_names_are_searchable_without_changing_room_identity() {
-        let person=Participant{nick:"Room Nick".into(),jid:Some("person@example.invalid".into()),affiliation:"member".into(),role:"participant".into(),show:String::new(),own:false};
+        let person=Participant{nick:"Room Nick".into(),jid:Some("person@example.invalid".into()),affiliation:"member".into(),role:"participant".into(),show:String::new(),own:false,hats:vec![]};
         let found=rows_named(&[person.clone()],"local",|_|"Local Nick".into());
         assert!(matches!(found.last(),Some(Row::Person(actual)) if actual==&person));
     }

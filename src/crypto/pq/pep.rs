@@ -20,15 +20,6 @@ pub enum Error {
     PublicAccess,
 }
 impl Error {
-    pub fn access_denied(&self) -> bool {
-        matches!(self, Self::Request(iq::Error::Rejected { condition, pubsub })
-            if matches!(condition.as_str(), "forbidden" | "not-authorized" | "subscription-required")
-                || pubsub.as_deref() == Some("presence-subscription-required"))
-    }
-    pub fn unsupported(&self) -> bool {
-        matches!(self, Self::Request(iq::Error::Rejected { condition, .. })
-            if condition == "feature-not-implemented")
-    }
 }
 impl From<super::Error> for Error {
     fn from(e: super::Error) -> Self {
@@ -161,25 +152,6 @@ impl Pep {
         let root = self.item(peer, DEVICES, None).await?;
         ids(root.as_ref())?;
         Ok(root)
-    }
-    pub async fn bundle(&self, peer: &str, device: u32) -> Result<Bundle> {
-        address(peer, device)?;
-        let root = self
-            .item(peer, BUNDLES, Some(&device.to_string()))
-            .await?
-            .ok_or_else(invalid)?;
-        Ok(Bundle::parse(&root)?)
-    }
-    pub async fn discover(&self, peer: &str) -> Result<BTreeMap<u32, Bundle>> {
-        let root = self.devices(peer).await?;
-        let mut bundles = BTreeMap::new();
-        for id in ids(root.as_ref())? {
-            if peer == self.owner && id == self.device {
-                continue;
-            }
-            bundles.insert(id, self.bundle(peer, id).await?);
-        }
-        Ok(bundles)
     }
     async fn publish(&self, node: &str, id: &str, value: Element) -> Result<()> {
         if !(node == DEVICES && id == "current" || node == BUNDLES && id == self.device.to_string())

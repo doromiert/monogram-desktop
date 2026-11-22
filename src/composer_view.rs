@@ -32,7 +32,11 @@ mod imp {
                 if iter.is_end() { break; }
             }
             let padding = view.top_margin() + view.bottom_margin();
-            let natural = padding + lines * first.height().max(1);
+            // One fixed line height, taken from ordinary text. The first line's own height
+            // changes with what is on it (a line of emoji, a tall glyph from a fallback font),
+            // which made the whole box jump or grow for good.
+            let line = view.create_pango_layout(Some("Åg")).pixel_size().1.max(1);
+            let natural = padding + lines * line;
             (measured.0.min(natural),natural,-1,-1)
         }
         fn size_allocate(&self, width:i32, height:i32, baseline:i32) {

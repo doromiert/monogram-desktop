@@ -454,6 +454,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[gtk::test]
+    #[ignore = "requires a native display: a headless frame clock does not tick the animation"]
     fn native_reaction_transition_frames_and_reduced_motion() {
         gtk::init().expect("native reaction test requires a display");
         let settings = gtk::Settings::default().expect("GTK settings");
@@ -515,13 +516,13 @@ mod status_tests {
         let css=gtk::CssProvider::new();css.load_from_path(asset("style.css"));gtk::style_context_add_provider_for_display(&gtk::gdk::Display::default().unwrap(),&css,gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
         let root=bx(true,16);crate::widgets::margins(&root,20);let mut cases=vec![];
         for kind in 0..4 {
-            let bubble=bx(true,0);bubble.add_css_class("message-bubble");if kind!=0{bubble.set_width_request(420);}bubble.set_halign(gtk::Align::Start);if kind%2==1{bubble.add_css_class("own");}
+            let bubble=crate::components::MessageBubble::new(if kind==2{crate::components::BubbleKind::Media}else{crate::components::BubbleKind::Text});if kind!=0{bubble.set_width_request(420);}bubble.set_halign(gtk::Align::Start);bubble.set_own(kind%2==1);let bubble=bubble.upcast::<gtk::Box>();
             let status=bx(false,4);status.add_css_class("message-meta");status.append(&text("20:49 ✓",""));
             if kind<2 {
                 if kind==1{bubble.append(&wrap("A reply preview that makes this short message wider.","message-reply"));}
                 let source=if kind==0{"A short message"}else{"Yes"};bubble.append(&MessageText::with_rich(&wrap(source,"message-text"),&status,crate::markdown::RichText::plain(source)));
             }else if kind==2 {
-                bubble.add_css_class("media-bubble");let overlay=gtk::Overlay::new();let media=gtk::DrawingArea::builder().content_width(320).content_height(110).build();overlay.set_child(Some(&media));status.add_css_class("sticker-meta");status.set_halign(gtk::Align::End);status.set_valign(gtk::Align::End);overlay.add_overlay(&status);bubble.append(&overlay);
+                let media=gtk::DrawingArea::builder().content_width(320).content_height(110).build();bubble.append(&crate::components::overlay_meta(&media,&status));
             }else{
                 let article=bx(true,4);article.append(&text("An article heading","heading"));article.append(&wrap("Formatted content without a MessageText wrapper.","message-text"));article.append(&status);bubble.append(&article);
             }

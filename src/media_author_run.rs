@@ -9,7 +9,7 @@ use crate::media_authoring::{self, Format, Job, Kind, Limits, Plan, SourceInfo};
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command},
     time::{Duration, Instant},
 };
 
@@ -40,6 +40,9 @@ pub enum Error {
     Refused(media_authoring::Error),
     /// The helper rejected or could not process the file.
     Failed,
+    /// The helper refused a request this build wrote: it is an older build that does not know a
+    /// field. `cargo run` rebuilds only the app, so the helper next to it can lag behind.
+    OutOfDate,
     TimedOut,
     Cancelled,
     /// The helper claimed success but its output did not match the plan.
@@ -51,6 +54,7 @@ impl std::fmt::Display for Error {
             Self::Unavailable => f.write_str("Picture editing is unavailable"),
             Self::Refused(error) => error.fmt(f),
             Self::Failed => f.write_str("This picture could not be edited"),
+            Self::OutOfDate => f.write_str("The picture editing helper is out of date. Rebuild with cargo build, then restart"),
             Self::TimedOut => f.write_str("Editing this picture took too long"),
             Self::Cancelled => f.write_str("Editing was cancelled"),
             Self::BadOutput => f.write_str("The edited picture could not be verified"),
@@ -92,12 +96,23 @@ fn sandbox_command(
     crate::confined::sandbox_command(bwrap, helper, crate::confined::Input::Path(source), Some(out_dir), plugins, &[mode])
 }
 
+/// The JSON the helper reads on stdin. It refuses more than `max_job_json` bytes, so a request that
+/// is bigger (marks with large text bitmaps that do not pack) is refused here, with the real reason,
+/// rather than sent to be cut off and reported as a broken helper.
+fn build_request(plan: &Plan, info: &SourceInfo, limits: &Limits) -> Result<Vec<u8>, Error> {
+    let request = serde_json::to_vec(&serde_json::json!({ "plan": plan, "source": info })).map_err(|_| Error::Failed)?;
+    if request.len() > limits.max_job_json {
+        return Err(Error::Refused(media_authoring::Error::JobTooLarge));
+    }
+    Ok(request)
+}
+
 /// Wait for the helper, killing it on cancellation or after the deadline.
-fn wait(child: &mut Child, cancel: &dyn Fn() -> bool) -> Result<bool, Error> {
+fn wait(child: &mut Child, cancel: &dyn Fn() -> bool) -> Result<Option<i32>, Error> {
     let started = Instant::now();
     loop {
         if let Some(status) = child.try_wait().map_err(|_| Error::Failed)? {
-            return Ok(status.success());
+            return Ok(status.code());
         }
         let stop = if cancel() {
             Some(Error::Cancelled)
@@ -133,9 +148,13 @@ fn execute(
     let mut child = sandbox_command(&bwrap, &helper, &source, out_dir, &plugins, mode)
         .spawn()
         .map_err(|_| Error::Unavailable)?;
-    // The request is a few hundred bytes, far below the pipe buffer, so this cannot block.
+    // A request with text bitmaps can be larger than the pipe buffer, so it is written from its own
+    // thread; the helper reads it all before it starts, and closing the pipe ends it.
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(input);
+        let input = input.to_vec();
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
     }
     let mut stdout = child.stdout.take().ok_or(Error::Failed)?;
     let reader = std::thread::spawn(move || {
@@ -144,9 +163,14 @@ fn execute(
         let _ = (&mut stdout).take(4096).read_to_end(&mut reply);
         reply
     });
-    if !wait(&mut child, cancel)? {
-        let _ = reader.join();
-        return Err(Error::Failed);
+    match wait(&mut child, cancel)? {
+        Some(0) => {}
+        code => {
+            let _ = reader.join();
+            // Exit code 3 is "bad request": this build checked the plan itself, so the helper
+            // must be older than the app.
+            return Err(if code == Some(3) { Error::OutOfDate } else { Error::Failed });
+        }
     }
     reader.join().map_err(|_| Error::Failed)
 }
@@ -174,8 +198,7 @@ pub fn author(
     let info = probe(source, cancel)?;
     let plan = media_authoring::plan(job, &info, &limits).map_err(Error::Refused)?;
     let scratch = tempdir_in(work_dir)?;
-    let request = serde_json::to_vec(&serde_json::json!({ "plan": plan, "source": info }))
-        .map_err(|_| Error::Failed)?;
+    let request = build_request(&plan, &info, &limits)?;
     let reply = execute(source, &scratch.0, "run", &request, cancel)?;
     let name = serde_json::from_slice::<serde_json::Value>(&reply)
         .ok()
@@ -236,7 +259,7 @@ fn tempdir_in(parent: &Path) -> Result<Scratch, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media_authoring::{Rect, Rotation};
+    use crate::media_authoring::{Mark, Rect, Rotation};
 
     fn args(command: &Command) -> Vec<String> {
         command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect()
@@ -293,6 +316,7 @@ mod tests {
             output_width: 10,
             output_height: 10,
             max_output_bytes: 1024,
+            marks: vec![],
         };
         let png = |width: u32, height: u32| {
             let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
@@ -375,6 +399,197 @@ mod tests {
         let leftovers: Vec<_> = std::fs::read_dir(&work.0).unwrap().collect();
         assert_eq!(leftovers.len(), 1, "scratch directory removed, only the result remains");
         assert!(std::fs::read(&source).unwrap() == gradient_png(), "the original is untouched");
+    }
+
+    fn pixel_at(decoded: &(usize, usize, usize, Vec<u8>), x: usize, y: usize) -> [u8; 3] {
+        let (width, _, channels, pixels) = decoded;
+        let at = (y * width + x) * channels;
+        [pixels[at], pixels[at + 1], pixels[at + 2]]
+    }
+
+    #[test]
+    #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
+    fn a_square_is_drawn_by_the_helper_and_nothing_else_changes() {
+        let (_dir, source) = fixture("photo.png", &gradient_png());
+        let original = decode_png(&gradient_png());
+        let work = tempdir().unwrap();
+        let job = Job {
+            marks: vec![Mark::Square { rect: Rect { x: 8, y: 4, width: 20, height: 12 }, color: [255, 0, 0], stroke: 2 }],
+            ..Default::default()
+        };
+        let made = author(&source, &job, &work.0, NEVER).unwrap();
+        assert_eq!((made.width, made.height), (64, 32));
+        let marked = decode_png(&std::fs::read(&made.path).unwrap());
+        for (x, y) in [(8, 4), (27, 4), (8, 15), (27, 15), (9, 5), (17, 4), (17, 5), (8, 9), (27, 9)] {
+            assert_eq!(pixel_at(&marked, x, y), [255, 0, 0], "({x},{y}) is on the outline");
+        }
+        for (x, y) in [(17, 9), (12, 8), (7, 4), (28, 4), (8, 3), (8, 16), (0, 0), (63, 31), (40, 20)] {
+            assert_eq!(pixel_at(&marked, x, y), pixel_at(&original, x, y), "({x},{y}) is untouched");
+        }
+        assert!(std::fs::read(&source).unwrap() == gradient_png(), "the original is untouched");
+    }
+
+    #[test]
+    #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
+    fn marks_follow_the_crop_and_the_rotation() {
+        let (_dir, source) = fixture("photo.png", &gradient_png());
+        let work = tempdir().unwrap();
+        let job = Job {
+            crop: Some(Rect { x: 4, y: 2, width: 40, height: 20 }),
+            rotation: Rotation::Clockwise90,
+            // In source pixels: its top-left corner is (4, 2) inside the crop.
+            marks: vec![Mark::Square { rect: Rect { x: 8, y: 4, width: 20, height: 12 }, color: [0, 0, 255], stroke: 2 }],
+            ..Default::default()
+        };
+        let made = author(&source, &job, &work.0, NEVER).unwrap();
+        assert_eq!((made.width, made.height), (20, 40), "40x20 turned a quarter");
+        let marked = decode_png(&std::fs::read(&made.path).unwrap());
+        // Crop-local (x, y) goes to (20 - 1 - y, x) after a clockwise quarter turn.
+        let turned = |x: usize, y: usize| (19 - y, x);
+        for (x, y) in [(4, 2), (23, 2), (4, 13), (23, 13), (10, 2), (4, 8)] {
+            let (tx, ty) = turned(x, y);
+            assert_eq!(pixel_at(&marked, tx, ty), [0, 0, 255], "crop-local ({x},{y}) on the outline");
+        }
+        let (cx, cy) = turned(14, 8);
+        assert_ne!(pixel_at(&marked, cx, cy), [0, 0, 255], "the inside of the square is not painted");
+    }
+
+    #[test]
+    #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
+    fn circles_arrows_and_freehand_lines_are_drawn_by_the_helper() {
+        let (_dir, source) = fixture("photo.png", &gradient_png());
+        let original = decode_png(&gradient_png());
+        let work = tempdir().unwrap();
+        let job = Job {
+            marks: vec![
+                Mark::Circle { rect: Rect { x: 4, y: 2, width: 20, height: 20 }, color: [0, 255, 0], stroke: 2 },
+                Mark::Arrow { from: (30, 6), to: (60, 6), color: [0, 0, 255], stroke: 2 },
+                Mark::Freehand { points: vec![(30, 20), (60, 20), (60, 30)], color: [255, 255, 0], stroke: 2, pressure: vec![] },
+            ],
+            ..Default::default()
+        };
+        let made = author(&source, &job, &work.0, NEVER).unwrap();
+        let marked = decode_png(&std::fs::read(&made.path).unwrap());
+        let painted = |points: &[(usize, usize)], colour: [u8; 3], what: &str| {
+            for (x, y) in points {
+                assert_eq!(pixel_at(&marked, *x, *y), colour, "{what} at ({x},{y})");
+            }
+        };
+        painted(&[(13, 2), (14, 2), (4, 11), (23, 11), (13, 21)], [0, 255, 0], "the ring");
+        painted(&[(31, 6), (45, 6), (59, 6), (60, 6), (54, 9), (54, 3)], [0, 0, 255], "the arrow");
+        painted(&[(30, 20), (45, 20), (60, 20), (60, 25), (60, 30)], [255, 255, 0], "the line");
+        for (x, y) in [(14, 12), (45, 12), (0, 0), (20, 28), (63, 0), (45, 26), (40, 31)] {
+            assert_eq!(pixel_at(&marked, x, y), pixel_at(&original, x, y), "({x},{y}) is untouched");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
+    fn arrows_and_lines_follow_the_crop_and_the_rotation() {
+        let (_dir, source) = fixture("photo.png", &gradient_png());
+        let work = tempdir().unwrap();
+        let job = Job {
+            crop: Some(Rect { x: 4, y: 2, width: 40, height: 20 }),
+            rotation: Rotation::Clockwise90,
+            marks: vec![
+                // Crop-local: a horizontal arrow along y = 8 from x = 6 to x = 30.
+                Mark::Arrow { from: (10, 10), to: (34, 10), color: [0, 0, 255], stroke: 2 },
+                Mark::Freehand { points: vec![(10, 18), (34, 18)], color: [255, 255, 0], stroke: 2, pressure: vec![] },
+            ],
+            ..Default::default()
+        };
+        let made = author(&source, &job, &work.0, NEVER).unwrap();
+        assert_eq!((made.width, made.height), (20, 40));
+        let marked = decode_png(&std::fs::read(&made.path).unwrap());
+        // Crop-local (x, y) goes to (19 - y, x) after a clockwise quarter turn, so the horizontal
+        // arrow (y = 8) became a vertical one at x = 11 and the line (y = 16) one at x = 3.
+        for y in [8, 14, 20, 28] {
+            assert_eq!(pixel_at(&marked, 11, y), [0, 0, 255], "arrow shaft at row {y}");
+        }
+        for y in [6, 14, 24, 30] {
+            assert_eq!(pixel_at(&marked, 3, y), [255, 255, 0], "line at row {y}");
+        }
+        // Between the two lines, four pixels from each, nothing is drawn.
+        let between = pixel_at(&marked, 7, 10);
+        assert!(between != [0, 0, 255] && between != [255, 255, 0], "{between:?}");
+    }
+
+    #[test]
+    #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
+    fn a_stroke_outside_the_picture_is_refused_before_the_sandbox_runs() {
+        let (_dir, source) = fixture("photo.png", &gradient_png());
+        let work = tempdir().unwrap();
+        for mark in [
+            Mark::Arrow { from: (0, 0), to: (65, 10), color: [0, 0, 0], stroke: 2 },
+            Mark::Freehand { points: vec![(1, 1), (10, 33)], color: [0, 0, 0], stroke: 2, pressure: vec![] },
+            Mark::Freehand { points: vec![], color: [0, 0, 0], stroke: 2, pressure: vec![] },
+            Mark::Circle { rect: Rect { x: 50, y: 0, width: 20, height: 20 }, color: [0, 0, 0], stroke: 2 },
+        ] {
+            let job = Job { marks: vec![mark], ..Default::default() };
+            assert!(author(&source, &job, &work.0, NEVER).is_err());
+        }
+        assert_eq!(std::fs::read_dir(&work.0).unwrap().count(), 0, "nothing was written");
+    }
+
+    #[test]
+    #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
+    fn text_is_composited_by_the_helper_at_exact_pixels() {
+        let (_dir, source) = fixture("photo.png", &gradient_png());
+        let original = decode_png(&gradient_png());
+        let work = tempdir().unwrap();
+        // A bitmap that is fully covered in the left half and empty in the right, for exact pixels.
+        let (tw, th) = (20usize, 10usize);
+        let coverage: Vec<u8> = (0..tw * th).map(|i| if i % tw < tw / 2 { 255 } else { 0 }).collect();
+        let job = Job {
+            marks: vec![
+                Mark::Text { rect: Rect { x: 8, y: 6, width: tw as u32, height: th as u32 }, color: [255, 255, 0], mask: media_authoring::encode_mask(&coverage) },
+            ],
+            ..Default::default()
+        };
+        let made = author(&source, &job, &work.0, NEVER).unwrap();
+        let marked = decode_png(&std::fs::read(&made.path).unwrap());
+        for (x, y) in [(8, 6), (17, 6), (8, 15), (17, 15), (12, 10)] {
+            assert_eq!(pixel_at(&marked, x, y), [255, 255, 0], "({x},{y}) is covered");
+        }
+        for (x, y) in [(18, 6), (27, 15), (7, 6), (8, 5), (8, 16), (0, 0), (40, 20)] {
+            assert_eq!(pixel_at(&marked, x, y), pixel_at(&original, x, y), "({x},{y}) is untouched");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
+    fn a_request_larger_than_the_pipe_buffer_still_reaches_the_helper() {
+        let (_dir, source) = fixture("photo.png", &gradient_png());
+        let work = tempdir().unwrap();
+        // A 64x32 picture can hold at most a 64x32 bitmap, so make the request big with many
+        // marks that all carry a poorly packing mask of the full size.
+        let mut seed = 99u32;
+        let noise: Vec<u8> = (0..64 * 32)
+            .map(|_| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                (seed >> 24) as u8
+            })
+            .collect();
+        let mask = media_authoring::encode_mask(&noise);
+        let marks: Vec<Mark> = (0..4).map(|_| Mark::Text { rect: Rect { x: 0, y: 0, width: 64, height: 32 }, color: [255, 0, 0], mask: mask.clone() }).collect();
+        let job = Job { marks, ..Default::default() };
+        let json = serde_json::to_vec(&job).unwrap();
+        assert!(json.len() > 8_000, "a sizeable request: {} bytes", json.len());
+        let made = author(&source, &job, &work.0, NEVER).unwrap();
+        assert_eq!((made.width, made.height), (64, 32));
+    }
+
+    #[test]
+    #[ignore = "requires the built helper, GStreamer plugins and real bubblewrap namespaces"]
+    fn a_mark_outside_the_picture_is_refused_before_the_sandbox_runs() {
+        let (_dir, source) = fixture("photo.png", &gradient_png());
+        let work = tempdir().unwrap();
+        let job = Job {
+            marks: vec![Mark::Square { rect: Rect { x: 60, y: 0, width: 20, height: 12 }, color: [255, 0, 0], stroke: 2 }],
+            ..Default::default()
+        };
+        assert!(author(&source, &job, &work.0, NEVER).is_err());
+        assert_eq!(std::fs::read_dir(&work.0).unwrap().count(), 0, "nothing was written");
     }
 
     /// Minimal PNG reader for 8-bit RGB/RGBA, non-interlaced files (what the helper writes), so
@@ -515,5 +730,35 @@ mod tests {
             probe(Path::new("/nonexistent/photo.png"), NEVER).unwrap_err(),
             Error::Unavailable
         );
+    }
+
+    #[test]
+    fn a_request_the_helper_would_cut_off_is_refused_here_with_its_real_reason() {
+        use crate::media_authoring::{encode_mask, Mark};
+        let limits = Limits::default();
+        let info = SourceInfo { kind: Kind::Image, width: 3000, height: 3000, duration_ms: None, bytes: 1000 };
+        // Noise does not pack, so a few large text bitmaps make a request over a mebibyte.
+        let mut seed = 7u32;
+        let noise: Vec<u8> = (0..700_000)
+            .map(|_| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                (seed >> 24) as u8
+            })
+            .collect();
+        let mark = Mark::Text { rect: Rect { x: 0, y: 0, width: 1000, height: 700 }, color: [0, 0, 0], mask: encode_mask(&noise) };
+        let plan = |marks: Vec<Mark>| Plan {
+            kind: Kind::Image,
+            crop: Rect { x: 0, y: 0, width: 3000, height: 3000 },
+            rotation: Rotation::None,
+            trim: None,
+            output_width: 3000,
+            output_height: 3000,
+            max_output_bytes: 1 << 20,
+            marks,
+        };
+        assert!(build_request(&plan(vec![mark.clone()]), &info, &limits).is_ok(), "one bitmap fits");
+        let refused = build_request(&plan(vec![mark.clone(), mark.clone()]), &info, &limits);
+        assert!(matches!(refused, Err(Error::Refused(media_authoring::Error::JobTooLarge))), "{refused:?}");
+        assert_eq!(Error::Refused(media_authoring::Error::JobTooLarge).to_string(), "There is too much drawn or typed on this picture to save");
     }
 }

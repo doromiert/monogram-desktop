@@ -19,7 +19,7 @@ depends=('gtk4>=1:4.20' 'libadwaita>=1:1.9' 'glycin-gtk4>=2.1' 'glycin'
          'gst-plugins-ugly' 'gst-libav' 'libepoxy' 'openssl' 'sqlite' 'protobuf-c'
          'bubblewrap' 'fontconfig' 'ttf-dejavu' 'noto-fonts-emoji' 'pangomm-2.48' 'cairomm-1.16' 'tinyxml2')
 makedepends=('git' 'rust' 'cargo' 'pkgconf' 'protobuf' 'cmake' 'ninja' 'glib2-devel')
-optdepends=('keepassxc: fill and save XMPP passwords' 'gnome-keyring: Secret Service provider (or another compatible keyring)')
+optdepends=('keepassxc: fill and save XMPP passwords' 'xdg-desktop-portal: ask for permission to use the camera' 'gst-plugin-pipewire: take photos with the camera' 'gnome-keyring: Secret Service provider (or another compatible keyring)')
 provides=('monogram-desktop')
 conflicts=('monogram-desktop')
 options=('!lto')

@@ -1,4 +1,7 @@
 use adw::prelude::*;
+mod account_deletion;
+mod adhoc;
+mod adhoc_ui;
 mod action_store;
 mod attachment_ui;
 mod audio_ui;
@@ -7,6 +10,7 @@ mod avatar_ui;
 mod blocking;
 mod blocking_ui;
 mod clipboard_upload;
+mod drop_files;
 mod chat_states;
 mod composer_view;
 mod chat_navigation;
@@ -120,6 +124,19 @@ mod upload_ui;
 mod uploads;
 mod video_ui;
 mod wallet;
+mod camera;
+mod camera_ui;
+mod components;
+mod contact_status;
+mod hat_color;
+mod last_activity;
+mod last_activity_ui;
+mod presence_privacy;
+mod slow_notice;
+mod voice;
+mod voice_ui;
+#[cfg(test)]
+mod runtime_guard;
 mod widgets;
 thread_local! {static SMOKE_TICK: std::cell::Cell<std::time::Instant> = std::cell::Cell::new(std::time::Instant::now()); static SMOKE_MAX_GAP: std::cell::Cell<u128> = const{std::cell::Cell::new(0)};}
 fn main() -> gtk::glib::ExitCode {
@@ -219,7 +236,7 @@ fn main() -> gtk::glib::ExitCode {
                     let Some(ui) = weak.upgrade() else { return };
                     let peer = ui.state.borrow().current().jid.clone();
                     let (reply, receive) = tokio::sync::oneshot::channel();
-                    if ui.command(protocol::Command::ChooseEncryption { peer, reply }) {
+                    if ui.command(protocol::Command::ChooseEncryption { peer, reply, skip_unreachable: false }) {
                         gtk::glib::MainContext::default().spawn_local(async move {
                             match receive.await {
                                 Ok(Ok(mode)) => eprintln!("Monogram diagnostic encryption choice: {mode:?}"),
@@ -339,8 +356,7 @@ fn main() -> gtk::glib::ExitCode {
 }
 
 fn startup_page() -> adw::ToolbarView {
-    let view = adw::ToolbarView::new();
-    view.add_top_bar(&adw::HeaderBar::new());
+    let view = components::titled_page();
     let spinner = gtk::Spinner::builder().spinning(true).build();
     let page = adw::StatusPage::builder()
         .icon_name("mail-unread-symbolic")

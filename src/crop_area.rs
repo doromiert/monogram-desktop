@@ -2,11 +2,95 @@
 //! `picture_editor::Editor`; this widget only draws it and turns pointer and keyboard input into
 //! editor calls. The picture is drawn rotated with a snapshot transform, so no pixels are copied.
 use crate::{
-    media_authoring::Rotation,
-    picture_editor::{hit, Editor, Handle},
+    media_authoring::{arrow_segments, Point, Rect, Rotation, Shape},
+    picture_editor::{hit, Editor, Handle, Kind, TextBitmap, ViewMark, ViewShape, Weight, INKS},
 };
 use gtk::{gdk, glib, graphene, gsk, prelude::*, subclass::prelude::*};
 use std::cell::{Cell, RefCell};
+
+/// What a drag on the picture does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tool {
+    /// Move and resize the crop.
+    #[default]
+    Crop,
+    /// Draw a square outline.
+    Square,
+    /// Draw an ellipse outline.
+    Circle,
+    /// Draw an arrow.
+    Arrow,
+    /// Draw freehand.
+    Pen,
+    /// Click to place a line of text.
+    Text,
+}
+impl Tool {
+    /// What this tool draws; `None` for the crop.
+    pub fn kind(self) -> Option<Kind> {
+        match self {
+            Self::Crop => None,
+            Self::Square => Some(Kind::Square),
+            Self::Circle => Some(Kind::Circle),
+            Self::Arrow => Some(Kind::Arrow),
+            Self::Pen => Some(Kind::Freehand),
+            Self::Text => Some(Kind::Text),
+        }
+    }
+}
+
+/// How a pen's pressure becomes line width, tuned to feel like ink: a feather touch is a hairline
+/// and a firm press is the boldest, with a big swing in between. `GAIN` makes an ordinary firm
+/// press (about two thirds of what a tablet can report) already count as full, `CURVE` keeps the
+/// light end thin for longer before the line swells, and `FLOOR` is the thinnest width as a share
+/// of the chosen size (the helper never draws under one pixel).
+pub const PRESSURE_GAIN: f64 = 1.5;
+pub const PRESSURE_CURVE: f64 = 2.2;
+pub const PRESSURE_FLOOR: f64 = 0.03;
+
+/// A pen's pressure (0 to 1) as the 1 to 255 level a freehand line stores: that share of the
+/// chosen size is how wide the line is there. An unreadable value counts as full pressure.
+pub fn pressure_level(pressure: f64) -> u8 {
+    let pressure = if pressure.is_finite() { pressure.clamp(0., 1.) } else { 1. };
+    let pushed = (pressure * PRESSURE_GAIN).min(1.);
+    let width = PRESSURE_FLOOR + (1. - PRESSURE_FLOOR) * pushed.powf(PRESSURE_CURVE);
+    (width * 255.).round().clamp(1., 255.) as u8
+}
+
+/// The pressure to use for a new reading: the reading eased toward from the last one, so a
+/// jittery sensor does not make the line ripple, while a real change still shows within a couple
+/// of points.
+pub fn smooth_pressure(previous: f64, reading: f64) -> f64 {
+    previous + (reading - previous) * 0.6
+}
+
+/// Most points a stroke in progress keeps, so a long drag cannot grow without bound.
+const MAX_SKETCH_POINTS: usize = 4096;
+
+/// A pressure reading as 0 to 1, or `None` when there is none. A mouse, a finger and a pen that
+/// does not report pressure all give `None`, so their lines are one width; a reading that is not
+/// a number is treated as absent rather than as full pressure.
+pub fn usable_pressure(raw: Option<f64>) -> Option<f64> {
+    raw.filter(|value| value.is_finite()).map(|value| value.clamp(0., 1.))
+}
+
+/// How hard the pen presses in the event the gesture is handling. The drag gesture that already
+/// owns the press reads it from its own event: a second gesture beside it would be denied the
+/// pen's touch, which is what made pressure never arrive.
+fn event_pressure(gesture: &impl IsA<gtk::EventController>) -> Option<f64> {
+    let event = gesture.current_event()?;
+    let pressure = usable_pressure(event.axis(gdk::AxisUse::Pressure));
+    if std::env::var_os("MONOGRAM_DEBUG_PEN").is_some() {
+        eprintln!(
+            "pen: device={:?} source={:?} tool={:?} pressure={:?}",
+            event.device().map(|device| device.name()),
+            event.device().map(|device| device.source()),
+            event.device_tool().map(|tool| tool.tool_type()),
+            pressure
+        );
+    }
+    pressure
+}
 
 const MARGIN: f64 = 14.;
 /// Pointer reach of a handle, in widget pixels.
@@ -23,6 +107,28 @@ mod imp {
         pub drag: RefCell<Option<(Handle, crate::media_authoring::Rect)>>,
         pub changed: RefCell<Option<Box<dyn Fn()>>>,
         pub scale: Cell<f64>,
+        pub tool: Cell<Tool>,
+        /// The pointer is over the picture (not while it is away).
+        pub hovered: Cell<bool>,
+        /// Asked to put a text box at a view point, with the widget point it was clicked at.
+        #[allow(clippy::type_complexity)]
+        pub text_request: RefCell<Option<Box<dyn Fn((u32, u32), (f64, f64))>>>,
+        /// Textures of text marks already built, by bitmap and colour, so a redraw reuses them.
+        pub text_textures: RefCell<Vec<(usize, [u8; 3], gdk::Texture)>>,
+        /// Where a text click began, in view pixels, and in the widget.
+        pub text_click: Cell<Option<((u32, u32), (f64, f64))>>,
+        pub ink: Cell<Option<[u8; 3]>>,
+        pub weight: Cell<Option<Weight>>,
+        /// Where a square drag began, in view pixels, and the square so far.
+        pub sketch: Cell<Option<(f64, f64)>>,
+        pub pending: RefCell<Option<ViewShape>>,
+        /// Pen pressure for each point of the line being drawn; empty for a mouse.
+        pub pending_pressure: RefCell<Vec<u8>>,
+        /// Some point of the line so far came with a pressure reading. A line where none did (a
+        /// mouse) keeps no pressure at all, so it stays one width.
+        pub any_pressure: Cell<bool>,
+        /// The smoothed pressure of the line being drawn.
+        pub eased_pressure: Cell<f64>,
     }
 
     #[glib::object_subclass]
@@ -52,21 +158,23 @@ mod imp {
             let drag = gtk::GestureDrag::new();
             drag.set_button(gdk::BUTTON_PRIMARY);
             let weak = area.downgrade();
-            drag.connect_drag_begin(move |_, x, y| {
+            drag.connect_drag_begin(move |gesture, x, y| {
                 if let Some(area) = weak.upgrade() {
-                    area.begin_drag(x, y);
+                    area.begin_sketch(x, y, event_pressure(gesture));
                 }
             });
             let weak = area.downgrade();
-            drag.connect_drag_update(move |_, dx, dy| {
+            drag.connect_drag_update(move |gesture, dx, dy| {
                 if let Some(area) = weak.upgrade() {
-                    area.update_drag(dx, dy);
+                    area.update_drag_pressed(dx, dy, event_pressure(gesture));
                 }
             });
             let weak = area.downgrade();
             drag.connect_drag_end(move |_, _, _| {
                 if let Some(area) = weak.upgrade() {
                     area.imp().drag.replace(None);
+                    area.finish_sketch();
+                    area.queue_draw();
                 }
             });
             area.add_controller(drag);
@@ -75,7 +183,20 @@ mod imp {
             let weak = area.downgrade();
             motion.connect_motion(move |_, x, y| {
                 if let Some(area) = weak.upgrade() {
+                    area.set_hovered(true);
                     area.update_cursor(x, y);
+                }
+            });
+            let weak = area.downgrade();
+            motion.connect_enter(move |_, _, _| {
+                if let Some(area) = weak.upgrade() {
+                    area.set_hovered(true);
+                }
+            });
+            let weak = area.downgrade();
+            motion.connect_leave(move |_| {
+                if let Some(area) = weak.upgrade() {
+                    area.set_hovered(false);
                 }
             });
             area.add_controller(motion);
@@ -97,8 +218,8 @@ mod imp {
         fn measure(&self, orientation: gtk::Orientation, _for_size: i32) -> (i32, i32, i32, i32) {
             // Small enough for a narrow window, comfortable by default.
             match orientation {
-                gtk::Orientation::Horizontal => (240, 480, -1, -1),
-                _ => (200, 360, -1, -1),
+                gtk::Orientation::Horizontal => (200, 480, -1, -1),
+                _ => (160, 360, -1, -1),
             }
         }
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
@@ -131,6 +252,45 @@ impl CropArea {
         self.imp().editor.replace(Some(editor));
         self.queue_draw();
     }
+    /// The pointer came over the picture or left it.
+    pub fn set_hovered(&self, hovered: bool) {
+        if self.imp().hovered.replace(hovered) != hovered {
+            self.queue_draw();
+        }
+    }
+    /// Whether the 3x3 grid shows: while cropping, when the pointer is over the picture or a
+    /// handle is being dragged (a drag can leave the widget and must keep the grid).
+    pub fn grid_visible(&self) -> bool {
+        self.imp().tool.get() == Tool::Crop && (self.imp().hovered.get() || self.imp().drag.borrow().is_some())
+    }
+    pub fn tool(&self) -> Tool {
+        self.imp().tool.get()
+    }
+    pub fn set_tool(&self, tool: Tool) {
+        let imp = self.imp();
+        imp.tool.set(tool);
+        imp.sketch.set(None);
+        imp.text_click.set(None);
+        imp.pending.replace(None);
+        imp.pending_pressure.replace(Vec::new());
+        imp.any_pressure.set(false);
+        imp.drag.replace(None);
+        self.set_cursor_from_name(Some(if tool == Tool::Crop { "default" } else { "crosshair" }));
+        self.queue_draw();
+    }
+    /// The colour and line thickness new squares get.
+    pub fn set_pen(&self, color: [u8; 3], weight: Weight) {
+        self.imp().ink.set(Some(color));
+        self.imp().weight.set(Some(weight));
+        self.queue_draw();
+    }
+    /// The colour and thickness new marks get now.
+    pub fn pen_choice(&self) -> ([u8; 3], Weight) {
+        self.pen()
+    }
+    fn pen(&self) -> ([u8; 3], Weight) {
+        (self.imp().ink.get().unwrap_or(INKS[0].1), self.imp().weight.get().unwrap_or(Weight::Medium))
+    }
     pub fn editor(&self) -> Option<Editor> {
         self.imp().editor.borrow().clone()
     }
@@ -142,6 +302,56 @@ impl CropArea {
         self.queue_draw();
         self.notify_changed();
     }
+    /// Call `request(view point, widget point)` when the text tool is clicked on the picture.
+    pub fn connect_text_request(&self, request: impl Fn((u32, u32), (f64, f64)) + 'static) {
+        self.imp().text_request.replace(Some(Box::new(request)));
+    }
+
+    /// Ask for text at `view` (view pixels), as a click there would. False when nothing listens or
+    /// the picture is not laid out.
+    pub fn request_text(&self, view: (u32, u32)) -> bool {
+        let Some((left, top, scale)) = self.layout() else { return false };
+        match self.imp().text_request.borrow().as_ref() {
+            Some(request) => {
+                request(view, (left + f64::from(view.0) * scale, top + f64::from(view.1) * scale));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Draw `text` at `px` pixels tall (a line's height) into a coverage bitmap, as the editor
+    /// shows it and the helper will composite it. Needs the display's renderer, so `None` when the
+    /// widget is not on screen, and `None` for text that is empty or would be too large.
+    pub fn render_text(&self, text: &str, px: u32) -> Option<TextBitmap> {
+        let words: String = text.chars().filter(|c| !c.is_control()).collect();
+        if words.trim().is_empty() || words.chars().count() > crate::picture_editor::MAX_TEXT_CHARS {
+            return None;
+        }
+        let px = px.clamp(4, 1024);
+        let layout = self.create_pango_layout(Some(&words));
+        let mut font = gtk::pango::FontDescription::from_string("Sans Bold");
+        font.set_absolute_size(f64::from(px) * f64::from(gtk::pango::SCALE));
+        layout.set_font_description(Some(&font));
+        let (width, height) = layout.pixel_size();
+        // A little room so antialiasing at the edges is not cut off.
+        let (pad, width, height) = (2, width.max(1) as u32 + 4, height.max(1) as u32 + 4);
+        if u64::from(width) * u64::from(height) > crate::picture_editor::MAX_TEXT_PIXELS {
+            return None;
+        }
+        let snapshot = gtk::Snapshot::new();
+        snapshot.translate(&graphene::Point::new(pad as f32, pad as f32));
+        snapshot.append_layout(&layout, &gdk::RGBA::new(1., 1., 1., 1.));
+        let node = snapshot.to_node()?;
+        let renderer = self.native()?.renderer()?;
+        let texture = renderer.render_texture(&node, Some(&graphene::Rect::new(0., 0., width as f32, height as f32)));
+        let mut pixels = vec![0u8; width as usize * height as usize * 4];
+        texture.download(&mut pixels, width as usize * 4);
+        // The texture is BGRA with premultiplied alpha; the coverage is its alpha channel.
+        let alpha: Vec<u8> = pixels.chunks_exact(4).map(|px| px[3]).collect();
+        alpha.iter().any(|a| *a > 0).then(|| TextBitmap { width, height, alpha: alpha.into() })
+    }
+
     pub fn connect_changed(&self, callback: impl Fn() + 'static) {
         self.imp().changed.replace(Some(Box::new(callback)));
     }
@@ -181,21 +391,130 @@ impl CropArea {
         ))
     }
 
-    fn begin_drag(&self, x: f64, y: f64) {
+    /// A point in widget pixels as a point in the picture, in view pixels, kept inside it.
+    fn view_point(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+        let (left, top, scale) = self.layout()?;
+        let (view_w, view_h) = self.imp().editor.borrow().as_ref()?.view_size();
+        Some((((x - left) / scale).clamp(0., f64::from(view_w)), ((y - top) / scale).clamp(0., f64::from(view_h))))
+    }
+    /// A press at `(x, y)` in widget pixels, from a pen if `pressure` is known: it starts a mark
+    /// with a drawing tool and grabs a crop handle with the crop tool.
+    fn begin_sketch(&self, x: f64, y: f64, pressure: Option<f64>) {
         self.grab_focus();
+        if self.imp().tool.get() == Tool::Text {
+            let click = self.view_point(x, y).map(|(vx, vy)| ((vx.round() as u32, vy.round() as u32), (x, y)));
+            self.imp().text_click.set(click);
+            return;
+        }
+        if self.imp().tool.get() != Tool::Crop {
+            let start = self.view_point(x, y);
+            self.imp().sketch.set(start);
+            self.imp().pending.replace(None);
+            self.imp().eased_pressure.set(pressure.unwrap_or(1.));
+            self.imp().pending_pressure.replace(vec![pressure.map_or(255, pressure_level)]);
+            self.imp().any_pressure.set(pressure.is_some());
+            return;
+        }
         let (Some(crop), Some(start)) = (self.crop_px(), self.imp().editor.borrow().as_ref().map(Editor::rect)) else {
             return;
         };
         if let Some(handle) = hit((x, y), crop, GRAB) {
             self.imp().drag.replace(Some((handle, start)));
+            self.queue_draw();
         }
     }
     fn update_drag(&self, dx: f64, dy: f64) {
+        self.update_drag_pressed(dx, dy, None);
+    }
+    /// The pointer is now `(dx, dy)` widget pixels from where the press began, pressing with
+    /// `pressure` if it is a pen.
+    fn update_drag_pressed(&self, dx: f64, dy: f64, pressure: Option<f64>) {
+        if let Some((sx, sy)) = self.imp().sketch.get() {
+            let scale = self.imp().scale.get().max(f64::EPSILON);
+            let Some((view_w, view_h)) = self.imp().editor.borrow().as_ref().map(Editor::view_size) else { return };
+            let (ex, ey) = ((sx + dx / scale).clamp(0., f64::from(view_w)), (sy + dy / scale).clamp(0., f64::from(view_h)));
+            let whole = |value: f64| value.round() as u32;
+            let shape = match self.imp().tool.get() {
+                Tool::Crop | Tool::Text => return,
+                Tool::Square | Tool::Circle => {
+                    let (x0, y0, x1, y1) = (sx.min(ex).round(), sy.min(ey).round(), sx.max(ex).round(), sy.max(ey).round());
+                    let rect = Rect { x: x0 as u32, y: y0 as u32, width: (x1 - x0) as u32, height: (y1 - y0) as u32 };
+                    ViewShape::Rect(if self.imp().tool.get() == Tool::Circle { Shape::Circle } else { Shape::Square }, rect)
+                }
+                Tool::Arrow => ViewShape::Arrow((whole(sx), whole(sy)), (whole(ex), whole(ey))),
+                Tool::Pen => {
+                    let mut path = match self.imp().pending.take() {
+                        Some(ViewShape::Freehand(path)) => path,
+                        _ => vec![(whole(sx), whole(sy))],
+                    };
+                    let here = (whole(ex), whole(ey));
+                    if path.last() != Some(&here) && path.len() < MAX_SKETCH_POINTS {
+                        path.push(here);
+                        // One level per point: the reading if there is one, else the last one.
+                        let mut levels = self.imp().pending_pressure.borrow_mut();
+                        let level = match pressure {
+                            Some(reading) => {
+                                let eased = smooth_pressure(self.imp().eased_pressure.get(), reading);
+                                self.imp().eased_pressure.set(eased);
+                                pressure_level(eased)
+                            }
+                            None => *levels.last().unwrap_or(&255),
+                        };
+                        levels.push(level);
+                        if pressure.is_some() {
+                            self.imp().any_pressure.set(true);
+                        }
+                    }
+                    ViewShape::Freehand(path)
+                }
+            };
+            self.imp().pending.replace(Some(shape));
+            self.queue_draw();
+            return;
+        }
         let Some((handle, start)) = *self.imp().drag.borrow() else { return };
         let scale = self.imp().scale.get().max(f64::EPSILON);
         self.edit(|editor| editor.drag(handle, start, (dx / scale).round() as i64, (dy / scale).round() as i64));
     }
+    /// The pointer was released: keep the square if it is big enough to be one.
+    fn finish_sketch(&self) {
+        let imp = self.imp();
+        imp.sketch.set(None);
+        // A click with the text tool asks the dialog where to type.
+        if let Some((view, widget)) = imp.text_click.take() {
+            if imp.tool.get() == Tool::Text {
+                if let Some(request) = imp.text_request.borrow().as_ref() {
+                    request(view, widget);
+                }
+            }
+            return;
+        }
+        let mut levels = imp.pending_pressure.take();
+        // A line drawn without any pressure reading carries none.
+        if !imp.any_pressure.replace(false) {
+            levels.clear();
+        }
+        // Like a pen lifting off the paper: the ends of a long line come to a finer point.
+        let levels = crate::picture_editor::pen_taper(&levels);
+        if let Some(shape) = imp.pending.take() {
+            let (color, weight) = self.pen();
+            self.edit(|editor| {
+                match shape {
+                    ViewShape::Rect(shape, rect) => editor.add_mark(shape, rect, color, weight),
+                    ViewShape::Arrow(from, to) => editor.add_arrow(from, to, color, weight),
+                    ViewShape::Freehand(points) => editor.add_pressured_path(&points, &levels, color, weight),
+                    // Text is placed from the dialog once it has been typed.
+                    ViewShape::Text { .. } => false,
+                };
+            });
+        }
+        self.queue_draw();
+    }
     fn update_cursor(&self, x: f64, y: f64) {
+        if self.imp().tool.get() != Tool::Crop {
+            self.set_cursor_from_name(Some("crosshair"));
+            return;
+        }
         let name = self.crop_px().and_then(|crop| hit((x, y), crop, GRAB)).map(|handle| match handle {
             Handle::Move => "move",
             Handle::TopLeft | Handle::BottomRight => "nwse-resize",
@@ -206,6 +525,15 @@ impl CropArea {
         self.set_cursor_from_name(name.or(Some("default")));
     }
     fn key(&self, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
+        // With the text tool, Enter asks for text at the corner of the crop: the way to place text
+        // without a pointer.
+        if matches!(key, gdk::Key::Return | gdk::Key::KP_Enter) && self.imp().tool.get() == Tool::Text {
+            if let Some(rect) = self.imp().editor.borrow().as_ref().map(Editor::rect) {
+                if self.request_text((rect.x, rect.y)) {
+                    return glib::Propagation::Stop;
+                }
+            }
+        }
         let (dx, dy) = match key {
             gdk::Key::Left | gdk::Key::KP_Left => (-1, 0),
             gdk::Key::Right | gdk::Key::KP_Right => (1, 0),
@@ -224,6 +552,118 @@ impl CropArea {
             }
         });
         glib::Propagation::Stop
+    }
+
+    /// One mark, drawn the way the helper will paint it: outlines for squares and circles, round
+    /// strokes for the arrow and the freehand line.
+    fn draw_mark(&self, snapshot: &gtk::Snapshot, mark: &ViewMark, (left, top, scale): (f64, f64, f64)) {
+        let colour = gdk::RGBA::new(f32::from(mark.color[0]) / 255., f32::from(mark.color[1]) / 255., f32::from(mark.color[2]) / 255., 1.);
+        let line = f64::from(mark.stroke) * scale;
+        let at = |p: &Point| (left + f64::from(p.0) * scale, top + f64::from(p.1) * scale);
+        let stroke_path = |segments: &[((f64, f64), (f64, f64))]| {
+            let path = gsk::PathBuilder::new();
+            for (a, b) in segments {
+                path.move_to(a.0 as f32, a.1 as f32);
+                path.line_to(b.0 as f32, b.1 as f32);
+            }
+            let pen = gsk::Stroke::new(line.max(1.5) as f32);
+            pen.set_line_cap(gsk::LineCap::Round);
+            pen.set_line_join(gsk::LineJoin::Round);
+            snapshot.append_stroke(&path.to_path(), &pen, &colour);
+        };
+        match &mark.shape {
+            ViewShape::Rect(shape, rect) => {
+                let (mx, my) = (left + f64::from(rect.x) * scale, top + f64::from(rect.y) * scale);
+                let (mw, mh) = (f64::from(rect.width) * scale, f64::from(rect.height) * scale);
+                let width = line.clamp(1.5, (mw.min(mh) / 2.).max(1.5)) as f32;
+                let bounds = graphene::Rect::new(mx as f32, my as f32, mw as f32, mh as f32);
+                let outline = if *shape == Shape::Circle {
+                    let corner = graphene::Size::new((mw / 2.) as f32, (mh / 2.) as f32);
+                    gsk::RoundedRect::new(bounds, corner, corner, corner, corner)
+                } else {
+                    gsk::RoundedRect::from_rect(bounds, 0.)
+                };
+                snapshot.append_border(&outline, &[width; 4], &[colour, colour, colour, colour]);
+            }
+            ViewShape::Arrow(from, to) => {
+                let segments: Vec<_> = arrow_segments(*from, *to, mark.stroke)
+                    .iter()
+                    .map(|(a, b)| ((left + a.0 * scale, top + a.1 * scale), (left + b.0 * scale, top + b.1 * scale)))
+                    .collect();
+                stroke_path(&segments);
+            }
+            ViewShape::Text { rect, bitmap, source_turns, .. } => {
+                let rotation = self.imp().editor.borrow().as_ref().map_or(Rotation::None, Editor::rotation);
+                let view_turns = match rotation {
+                    Rotation::None => 0,
+                    Rotation::Clockwise90 => 1,
+                    Rotation::Half => 2,
+                    Rotation::Counterclockwise90 => 3,
+                };
+                let key = std::rc::Rc::as_ptr(&bitmap.alpha) as *const u8 as usize;
+                let texture = {
+                    let mut cache = self.imp().text_textures.borrow_mut();
+                    match cache.iter().find(|(k, c, _)| *k == key && *c == mark.color) {
+                        Some((_, _, texture)) => texture.clone(),
+                        None => {
+                            // Premultiplied RGBA: the colour scaled by each pixel's coverage.
+                            let mut data = Vec::with_capacity(bitmap.alpha.len() * 4);
+                            for a in bitmap.alpha.iter() {
+                                let level = u16::from(*a);
+                                data.extend(mark.color.iter().map(|c| ((u16::from(*c) * level + 127) / 255) as u8));
+                                data.push(*a);
+                            }
+                            let texture = gdk::MemoryTexture::new(
+                                bitmap.width as i32,
+                                bitmap.height as i32,
+                                gdk::MemoryFormat::R8g8b8a8Premultiplied,
+                                &glib::Bytes::from_owned(data),
+                                bitmap.width as usize * 4,
+                            )
+                            .upcast::<gdk::Texture>();
+                            if cache.len() > 64 {
+                                cache.clear();
+                            }
+                            cache.push((key, mark.color, texture.clone()));
+                            texture
+                        }
+                    }
+                };
+                // Centre of the box in the widget; the bitmap is turned about it like the picture is.
+                let (cx, cy) = (
+                    left + (f64::from(rect.x) + f64::from(rect.width) / 2.) * scale,
+                    top + (f64::from(rect.y) + f64::from(rect.height) / 2.) * scale,
+                );
+                let (w, h) = (f64::from(bitmap.width) * scale, f64::from(bitmap.height) * scale);
+                snapshot.save();
+                snapshot.translate(&graphene::Point::new(cx as f32, cy as f32));
+                snapshot.rotate(f32::from((view_turns + source_turns) % 4) * 90.);
+                snapshot.append_scaled_texture(
+                    &texture,
+                    gsk::ScalingFilter::Linear,
+                    &graphene::Rect::new((-w / 2.) as f32, (-h / 2.) as f32, w as f32, h as f32),
+                );
+                snapshot.restore();
+            }
+            ViewShape::Freehand(points) if mark.pressure.len() == points.len() && !points.is_empty() => {
+                // A pen line: each piece as wide as the pressure over it, as the helper paints it.
+                for (i, pair) in points.windows(2).enumerate() {
+                    let level = (f64::from(mark.pressure[i]) + f64::from(mark.pressure[i + 1])) / 2. / 255.;
+                    let path = gsk::PathBuilder::new();
+                    let (a, b) = (at(&pair[0]), at(&pair[1]));
+                    path.move_to(a.0 as f32, a.1 as f32);
+                    path.line_to(b.0 as f32, b.1 as f32);
+                    let pen = gsk::Stroke::new((line * level).max(1.) as f32);
+                    pen.set_line_cap(gsk::LineCap::Round);
+                    pen.set_line_join(gsk::LineJoin::Round);
+                    snapshot.append_stroke(&path.to_path(), &pen, &colour);
+                }
+            }
+            ViewShape::Freehand(points) => {
+                let segments: Vec<_> = points.windows(2).map(|pair| (at(&pair[0]), at(&pair[1]))).collect();
+                stroke_path(&segments);
+            }
+        }
     }
 
     fn draw(&self, snapshot: &gtk::Snapshot) {
@@ -252,6 +692,16 @@ impl CropArea {
             snapshot.restore();
         }
 
+        // Marks sit on the picture, under the dimming, so what a crop would cut away stays dim.
+        let mut marks: Vec<ViewMark> = editor.marks().to_vec();
+        if let Some(shape) = self.imp().pending.borrow().clone() {
+            let (color, weight) = self.pen();
+            marks.push(ViewMark { shape, color, stroke: editor.stroke_for(weight), pressure: self.imp().pending_pressure.borrow().clone() });
+        }
+        for mark in &marks {
+            self.draw_mark(snapshot, mark, (left, top, scale));
+        }
+
         let Some((x, y, w, h)) = self.crop_px() else { return };
         // Dim everything outside the crop.
         let dim = gdk::RGBA::new(0., 0., 0., 0.55);
@@ -261,21 +711,593 @@ impl CropArea {
         snapshot.append_color(&dim, &rect(x + w, y, left + shown_w - (x + w), h));
 
         let white = gdk::RGBA::new(1., 1., 1., 1.);
-        let thirds = gdk::RGBA::new(1., 1., 1., 0.35);
-        for i in 1..3 {
-            let step = f64::from(i) / 3.;
-            snapshot.append_color(&thirds, &rect(x + w * step - 0.5, y, 1., h));
-            snapshot.append_color(&thirds, &rect(x, y + h * step - 0.5, w, 1.));
+        let shade = gdk::RGBA::new(0., 0., 0., 0.45);
+        // The 3x3 grid, a guide for composing the crop, only while the crop is in play.
+        if self.grid_visible() {
+            let line = gdk::RGBA::new(1., 1., 1., 0.7);
+            let halo = gdk::RGBA::new(0., 0., 0., 0.3);
+            for i in 1..3 {
+                let at = f64::from(i) / 3.;
+                let (vx, hy) = (x + w * at, y + h * at);
+                snapshot.append_color(&halo, &rect(vx - 1.5, y, 3., h));
+                snapshot.append_color(&line, &rect(vx - 0.5, y, 1., h));
+                snapshot.append_color(&halo, &rect(x, hy - 1.5, w, 3.));
+                snapshot.append_color(&line, &rect(x, hy - 0.5, w, 1.));
+            }
         }
-        // A thicker frame while focused shows where keyboard input goes.
-        let border = if self.has_focus() { 3. } else { 2. };
+        // A thin frame, thicker while focused so keyboard users can see where input goes.
+        let border = if self.has_focus() { 2. } else { 1. };
         let outline = gsk::RoundedRect::from_rect(rect(x, y, w, h), 0.);
         snapshot.append_border(&outline, &[border as f32; 4], &[white, white, white, white]);
-        // Handles at the corners and edge midpoints.
-        let shade = gdk::RGBA::new(0., 0., 0., 0.6);
-        for (hx, hy) in [(x, y), (x + w / 2., y), (x + w, y), (x, y + h / 2.), (x + w, y + h / 2.), (x, y + h), (x + w / 2., y + h), (x + w, y + h)] {
-            snapshot.append_color(&shade, &rect(hx - 6., hy - 6., 12., 12.));
-            snapshot.append_color(&white, &rect(hx - 5., hy - 5., 10., 10.));
+        // Only while cropping: corner brackets and edge grips to drag, each with a dark halo so
+        // they stay visible on a light picture.
+        if self.imp().tool.get() == Tool::Crop {
+            let (arm, thick) = (18.0_f64.min(w / 2.).min(h / 2.), 4.);
+            let bracket = |cx: f64, cy: f64, right: bool, down: bool| {
+                let ox = if right { cx - arm } else { cx };
+                let oy = if down { cy - thick } else { cy };
+                let ix = if right { cx - thick } else { cx };
+                let iy = if down { cy - arm } else { cy };
+                for (px, py, pw, ph) in [(ox, oy, arm, thick), (ix, iy, thick, arm)] {
+                    snapshot.append_color(&shade, &rect(px - 1., py - 1., pw + 2., ph + 2.));
+                    snapshot.append_color(&white, &rect(px, py, pw, ph));
+                }
+            };
+            bracket(x, y, false, false);
+            bracket(x + w, y, true, false);
+            bracket(x, y + h, false, true);
+            bracket(x + w, y + h, true, true);
+            let grip = 14.0_f64.min(w / 3.).min(h / 3.);
+            for (gx, gy, gw, gh) in [
+                (x + w / 2. - grip / 2., y - thick / 2., grip, thick),
+                (x + w / 2. - grip / 2., y + h - thick / 2., grip, thick),
+                (x - thick / 2., y + h / 2. - grip / 2., thick, grip),
+                (x + w - thick / 2., y + h / 2. - grip / 2., thick, grip),
+            ] {
+                snapshot.append_color(&shade, &rect(gx - 1., gy - 1., gw + 2., gh + 2.));
+                snapshot.append_color(&white, &rect(gx, gy, gw, gh));
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::picture_editor::{Editor, Weight, MIN_MARK};
+    use crate::picture_editor::ViewShape;
+    use std::{cell::{Cell, RefCell}, rc::Rc};
+
+    fn settle() {
+        let context = glib::MainContext::default();
+        for _ in 0..20 {
+            while context.iteration(false) {}
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+    /// An area showing a 200x100 picture, in a window big enough to lay it out.
+    fn shown() -> (CropArea, gtk::Window) {
+        gtk::init().expect("display");
+        let area = CropArea::new();
+        area.set_editor(Editor::new(200, 100));
+        let window = gtk::Window::builder().default_width(500).default_height(400).child(&area).build();
+        window.present();
+        settle();
+        (area, window)
+    }
+    /// Press at picture point `(x, y)`, move by `(dx, dy)` picture pixels, release.
+    fn drag(area: &CropArea, from: (f64, f64), by: (f64, f64)) {
+        let (left, top, scale) = area.layout().expect("laid out");
+        area.begin_sketch(left + from.0 * scale, top + from.1 * scale, None);
+        area.update_drag(by.0 * scale, by.1 * scale);
+        area.finish_sketch();
+    }
+    fn marks(area: &CropArea) -> Vec<(Rect, [u8; 3], u32)> {
+        area.editor().unwrap().marks().iter().map(|m| (m.bounds(), m.color, m.stroke)).collect()
+    }
+    fn near(rect: Rect, x: u32, y: u32, width: u32, height: u32) -> bool {
+        let close = |a: u32, b: u32| a.abs_diff(b) <= 1;
+        close(rect.x, x) && close(rect.y, y) && close(rect.width, width) && close(rect.height, height)
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn dragging_with_the_square_tool_draws_a_square_where_the_pointer_went() {
+        let (area, _window) = shown();
+        area.set_tool(Tool::Square);
+        drag(&area, (20., 10.), (60., 40.));
+        let made = marks(&area);
+        assert_eq!(made.len(), 1);
+        assert!(near(made[0].0, 20, 10, 60, 40), "{:?}", made[0].0);
+        assert_eq!(area.editor().unwrap().rect(), Rect { x: 0, y: 0, width: 200, height: 100 }, "the crop did not move");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn a_drag_up_and_to_the_left_makes_the_same_kind_of_square() {
+        let (area, _window) = shown();
+        area.set_tool(Tool::Square);
+        drag(&area, (100., 60.), (-50., -30.));
+        assert!(near(marks(&area)[0].0, 50, 30, 50, 30), "{:?}", marks(&area)[0].0);
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn a_square_dragged_past_the_picture_stops_at_its_edge() {
+        let (area, _window) = shown();
+        area.set_tool(Tool::Square);
+        drag(&area, (150., 70.), (500., 500.));
+        assert!(near(marks(&area)[0].0, 150, 70, 50, 30), "{:?}", marks(&area)[0].0);
+        drag(&area, (30., 20.), (-500., -500.));
+        assert!(near(marks(&area)[1].0, 0, 0, 30, 20), "{:?}", marks(&area)[1].0);
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn a_click_or_a_tiny_drag_does_not_make_a_mark() {
+        let (area, _window) = shown();
+        area.set_tool(Tool::Square);
+        drag(&area, (50., 50.), (0., 0.));
+        drag(&area, (50., 50.), (f64::from(MIN_MARK) - 2., 40.));
+        assert!(marks(&area).is_empty());
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn the_crop_tool_moves_the_crop_and_never_draws() {
+        let (area, _window) = shown();
+        area.edit(|editor| editor.set_rect(40, 20, 100, 50));
+        assert_eq!(area.tool(), Tool::Crop);
+        drag(&area, (90., 45.), (20., 10.));
+        assert!(marks(&area).is_empty());
+        assert_eq!(area.editor().unwrap().rect(), Rect { x: 60, y: 30, width: 100, height: 50 }, "the crop moved");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn switching_tools_drops_a_square_that_was_still_being_dragged() {
+        let (area, _window) = shown();
+        area.set_tool(Tool::Square);
+        let (left, top, scale) = area.layout().unwrap();
+        area.begin_sketch(left + 10. * scale, top + 10. * scale, None);
+        area.update_drag(50. * scale, 30. * scale);
+        assert!(area.imp().pending.borrow().is_some());
+        area.set_tool(Tool::Crop);
+        area.finish_sketch();
+        assert!(marks(&area).is_empty());
+        assert!(area.imp().pending.borrow().is_none());
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn new_squares_take_the_chosen_colour_and_thickness() {
+        let (area, _window) = shown();
+        // A larger picture, so thin, medium and thick are different pixel counts.
+        area.set_editor(Editor::new(2000, 1000));
+        area.set_tool(Tool::Square);
+        drag(&area, (100., 100.), (400., 300.));
+        area.set_pen([1, 2, 3], Weight::Thick);
+        drag(&area, (600., 100.), (400., 300.));
+        let made = marks(&area);
+        assert_eq!(made[0].1, crate::picture_editor::INKS[0].1, "red unless told otherwise");
+        assert_eq!(made[1].1, [1, 2, 3]);
+        assert!(made[1].2 > made[0].2, "thick is thicker than the default");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn squares_turn_with_the_picture_and_the_area_keeps_drawing_after_it_turns() {
+        let (area, _window) = shown();
+        area.set_tool(Tool::Square);
+        drag(&area, (10., 10.), (40., 20.));
+        area.edit(|editor| editor.rotate(true));
+        assert_eq!(area.editor().unwrap().view_size(), (100, 200));
+        assert_eq!(marks(&area)[0].0, Rect { x: 100 - 10 - 20, y: 10, width: 20, height: 40 }, "turned a quarter with the picture");
+        drag(&area, (10., 100.), (30., 30.));
+        assert_eq!(marks(&area).len(), 2);
+    }
+
+    fn shapes(area: &CropArea) -> Vec<ViewShape> {
+        area.editor().unwrap().marks().iter().map(|m| m.shape.clone()).collect()
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn the_circle_tool_makes_a_circle_in_the_dragged_box() {
+        let (area, _window) = shown();
+        area.set_tool(Tool::Circle);
+        drag(&area, (20., 10.), (60., 40.));
+        let ViewShape::Rect(shape, rect) = shapes(&area)[0].clone() else { panic!("a rectangle shape") };
+        assert_eq!(shape, Shape::Circle);
+        assert!(near(rect, 20, 10, 60, 40), "{rect:?}");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn the_arrow_tool_points_from_where_the_drag_began_to_where_it_ended() {
+        let (area, _window) = shown();
+        area.set_tool(Tool::Arrow);
+        drag(&area, (30., 70.), (100., -50.));
+        let ViewShape::Arrow(from, to) = shapes(&area)[0].clone() else { panic!("an arrow") };
+        let close = |a: (u32, u32), b: (u32, u32)| a.0.abs_diff(b.0) <= 1 && a.1.abs_diff(b.1) <= 1;
+        assert!(close(from, (30, 70)) && close(to, (130, 20)), "{from:?} -> {to:?}");
+        // The arrow is not normalised: the tip is where the pointer let go, even up and to the left.
+        drag(&area, (100., 80.), (-60., -40.));
+        let ViewShape::Arrow(from, to) = shapes(&area)[1].clone() else { panic!("an arrow") };
+        assert!(close(from, (100, 80)) && close(to, (40, 40)), "{from:?} -> {to:?}");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn the_pen_follows_every_update_of_the_drag() {
+        let (area, _window) = shown();
+        area.set_tool(Tool::Pen);
+        let (left, top, scale) = area.layout().unwrap();
+        area.begin_sketch(left + 10. * scale, top + 10. * scale, None);
+        for (dx, dy) in [(20., 0.), (40., 10.), (40., 30.), (10., 30.)] {
+            area.update_drag(dx * scale, dy * scale);
+        }
+        area.finish_sketch();
+        let ViewShape::Freehand(points) = shapes(&area)[0].clone() else { panic!("a stroke") };
+        let close = |a: (u32, u32), b: (u32, u32)| a.0.abs_diff(b.0) <= 1 && a.1.abs_diff(b.1) <= 1;
+        assert_eq!(points.len(), 5, "the start and four moves: {points:?}");
+        for (got, want) in points.iter().zip([(10, 10), (30, 10), (50, 20), (50, 40), (20, 40)]) {
+            assert!(close(*got, want), "{points:?}");
+        }
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn a_pen_click_and_a_jittering_pen_leave_no_stroke_and_a_new_drag_starts_fresh() {
+        let (area, _window) = shown();
+        area.set_tool(Tool::Pen);
+        drag(&area, (50., 50.), (0., 0.));
+        drag(&area, (50., 50.), (2., 1.));
+        assert!(marks(&area).is_empty());
+        drag(&area, (20., 20.), (50., 0.));
+        drag(&area, (20., 60.), (50., 0.));
+        let strokes = shapes(&area);
+        assert_eq!(strokes.len(), 2);
+        let ViewShape::Freehand(second) = &strokes[1] else { panic!("a stroke") };
+        assert!(second.iter().all(|p| p.1.abs_diff(60) <= 1), "the second stroke did not inherit the first's points: {second:?}");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn a_very_long_drag_stays_bounded_and_still_draws() {
+        let (area, _window) = shown();
+        area.set_editor(Editor::new(5000, 100));
+        area.set_tool(Tool::Pen);
+        let (left, top, scale) = area.layout().unwrap();
+        area.begin_sketch(left, top, None);
+        for step in 1..=6000 {
+            area.update_drag(f64::from(step) * 0.7 * scale, f64::from(step % 90) * scale);
+        }
+        assert!(area.imp().pending.borrow().as_ref().is_some_and(|shape| matches!(shape, ViewShape::Freehand(p) if p.len() <= MAX_SKETCH_POINTS)));
+        area.finish_sketch();
+        let ViewShape::Freehand(points) = shapes(&area)[0].clone() else { panic!("a stroke") };
+        assert!(points.len() <= crate::picture_editor::MAX_PATH_POINTS);
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn each_tool_sets_the_matching_cursor_and_the_crop_tool_restores_it() {
+        let (area, _window) = shown();
+        for tool in [Tool::Square, Tool::Circle, Tool::Arrow, Tool::Pen] {
+            area.set_tool(tool);
+            assert_eq!(area.cursor().and_then(|c| c.name()).as_deref(), Some("crosshair"), "{tool:?}");
+            assert!(tool.kind().is_some());
+        }
+        area.set_tool(Tool::Crop);
+        assert_eq!(area.cursor().and_then(|c| c.name()).as_deref(), Some("default"));
+        assert!(Tool::Crop.kind().is_none());
+    }
+
+    #[test]
+    fn a_pens_pressure_becomes_a_level_that_is_never_zero_and_never_exceeds_a_byte() {
+        assert_eq!(pressure_level(1.), 255);
+        assert_eq!(pressure_level(0.), 8, "a feather touch is a hairline, 3 percent of the size");
+        assert!(pressure_level(0.5) > pressure_level(0.25) && pressure_level(0.25) > pressure_level(0.));
+        assert_eq!(pressure_level(7.), 255, "out of range is clamped");
+        assert_eq!(pressure_level(-3.), 8);
+        assert_eq!(pressure_level(f64::NAN), 255, "an unreadable value counts as full");
+        assert_eq!(pressure_level(f64::INFINITY), 255);
+        let mut last = 0;
+        for step in 0..=100 {
+            let level = pressure_level(f64::from(step) / 100.);
+            assert!(level >= last && level >= 1, "monotonic: {level} after {last}");
+            last = level;
+        }
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn a_pen_stroke_keeps_the_pressure_at_every_point() {
+        let (area, _window) = shown();
+        area.set_editor(Editor::new(2000, 1000));
+        area.set_tool(Tool::Pen);
+        let (left, top, scale) = area.layout().unwrap();
+        area.begin_sketch(left + 100. * scale, top + 100. * scale, Some(0.1));
+        for (step, pressure) in [(1., 0.3), (2., 0.6), (3., 1.0), (4., 0.5)] {
+            area.update_drag_pressed(step * 100. * scale, step * 40. * scale, Some(pressure));
+        }
+        area.finish_sketch();
+        let mark = area.editor().unwrap().marks()[0].clone();
+        let ViewShape::Freehand(points) = &mark.shape else { panic!("a stroke") };
+        assert_eq!(mark.pressure.len(), points.len(), "one level per point");
+        // The first point is the reading as it came; each later one is eased from the last.
+        let mut eased = 0.1;
+        let mut expected = vec![pressure_level(0.1)];
+        for reading in [0.3, 0.6, 1.0, 0.5] {
+            eased = smooth_pressure(eased, reading);
+            expected.push(pressure_level(eased));
+        }
+        assert_eq!(mark.pressure, expected);
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn a_mouse_stroke_has_no_pressure_and_a_pen_stroke_does_not_leak_into_the_next() {
+        let (area, _window) = shown();
+        area.set_tool(Tool::Pen);
+        drag(&area, (20., 20.), (60., 30.));
+        assert!(area.editor().unwrap().marks()[0].pressure.is_empty(), "a mouse has no pressure");
+        let (left, top, scale) = area.layout().unwrap();
+        area.begin_sketch(left + 20. * scale, top + 60. * scale, Some(0.8));
+        area.update_drag_pressed(60. * scale, 0., Some(0.8));
+        area.finish_sketch();
+        assert!(!area.editor().unwrap().marks()[1].pressure.is_empty());
+        drag(&area, (20., 80.), (60., 5.));
+        assert!(area.editor().unwrap().marks()[2].pressure.is_empty(), "the next mouse stroke starts clean");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn a_missed_pressure_reading_repeats_the_last_one_and_shapes_ignore_pressure() {
+        let (area, _window) = shown();
+        area.set_tool(Tool::Pen);
+        let (left, top, scale) = area.layout().unwrap();
+        area.begin_sketch(left + 20. * scale, top + 20. * scale, Some(0.4));
+        area.update_drag_pressed(30. * scale, 0., Some(0.9));
+        area.update_drag_pressed(60. * scale, 10. * scale, None);
+        area.finish_sketch();
+        let pressure = area.editor().unwrap().marks()[0].pressure.clone();
+        let eased = smooth_pressure(0.4, 0.9);
+        assert_eq!(pressure, [pressure_level(0.4), pressure_level(eased), pressure_level(eased)], "a missing reading repeats the last");
+        area.set_tool(Tool::Arrow);
+        area.begin_sketch(left + 10. * scale, top + 10. * scale, Some(0.5));
+        area.update_drag_pressed(80. * scale, 40. * scale, Some(0.5));
+        area.finish_sketch();
+        assert!(area.editor().unwrap().marks()[1].pressure.is_empty(), "an arrow is one width");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn changing_tool_mid_stroke_drops_its_pressure_too() {
+        let (area, _window) = shown();
+        area.set_tool(Tool::Pen);
+        let (left, top, scale) = area.layout().unwrap();
+        area.begin_sketch(left + 20. * scale, top + 20. * scale, Some(0.7));
+        area.update_drag_pressed(40. * scale, 10. * scale, Some(0.7));
+        area.set_tool(Tool::Crop);
+        area.finish_sketch();
+        assert!(area.editor().unwrap().marks().is_empty());
+        assert!(area.imp().pending_pressure.borrow().is_empty());
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn the_grid_shows_on_hover_while_cropping_and_goes_when_the_pointer_leaves() {
+        let (area, _window) = shown();
+        assert!(!area.grid_visible(), "not before the pointer arrives");
+        area.set_hovered(true);
+        assert!(area.grid_visible(), "shown while the pointer is over the picture");
+        area.set_hovered(false);
+        assert!(!area.grid_visible(), "hidden when it leaves");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn the_grid_stays_during_a_crop_drag_even_if_the_pointer_leaves_and_ends_with_it() {
+        let (area, _window) = shown();
+        area.edit(|editor| editor.set_rect(40, 20, 100, 50));
+        let (left, top, scale) = area.layout().unwrap();
+        // Press on the crop's right edge to start resizing.
+        area.begin_sketch(left + 140. * scale, top + 45. * scale, None);
+        assert!(area.imp().drag.borrow().is_some(), "a handle is held");
+        assert!(area.grid_visible(), "the grid shows while resizing, with no hover at all");
+        area.set_hovered(false);
+        assert!(area.grid_visible(), "leaving the widget mid-drag keeps it");
+        area.imp().drag.replace(None);
+        assert!(!area.grid_visible(), "and it goes when the drag ends");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn the_grid_is_for_cropping_only_and_never_shows_with_a_drawing_tool() {
+        let (area, _window) = shown();
+        area.set_hovered(true);
+        for tool in [Tool::Square, Tool::Circle, Tool::Arrow, Tool::Pen] {
+            area.set_tool(tool);
+            assert!(!area.grid_visible(), "{tool:?} is drawing, not cropping");
+        }
+        area.set_tool(Tool::Crop);
+        assert!(area.grid_visible(), "and it is back with the crop");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn text_is_drawn_into_a_coverage_bitmap_sized_by_the_words_and_the_size() {
+        let (area, _window) = shown();
+        let small = area.render_text("Hello", 20).expect("a bitmap");
+        let large = area.render_text("Hello", 40).expect("a bitmap");
+        assert_eq!(small.alpha.len() as u32, small.width * small.height);
+        assert!(small.alpha.iter().any(|a| *a == 255), "solid where the letters are");
+        assert!(small.alpha.iter().any(|a| *a == 0), "empty around them");
+        assert!(small.alpha.iter().filter(|a| **a > 0 && **a < 255).count() > 10, "antialiased edges");
+        assert!(large.width > small.width * 3 / 2 && large.height > small.height * 3 / 2, "twice the size is about twice the bitmap");
+        let longer = area.render_text("Hello, world", 20).unwrap();
+        assert!(longer.width > small.width * 2, "more words are wider");
+        // Padding keeps the first and last columns empty so antialiasing is not cut off.
+        let column_empty = |x: u32| (0..small.height).all(|y| small.alpha[(y * small.width + x) as usize] == 0);
+        assert!(column_empty(0) && column_empty(small.width - 1));
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn text_that_is_empty_control_only_too_long_or_too_big_makes_no_bitmap() {
+        let (area, _window) = shown();
+        assert!(area.render_text("", 20).is_none());
+        assert!(area.render_text("   ", 20).is_none());
+        assert!(area.render_text("\u{7}\n\t", 20).is_none(), "controls are not text");
+        assert!(area.render_text(&"x".repeat(crate::picture_editor::MAX_TEXT_CHARS + 1), 20).is_none());
+        assert!(area.render_text(&"x".repeat(crate::picture_editor::MAX_TEXT_CHARS), 1024).is_none(), "a bitmap over the pixel cap");
+        let tiny = area.render_text("a", 1).expect("sizes are clamped up to something readable");
+        assert!(tiny.height >= 8);
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn a_click_with_the_text_tool_asks_for_text_there_and_draws_nothing() {
+        let (area, _window) = shown();
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let sink = asked.clone();
+        area.connect_text_request(move |view, widget| sink.borrow_mut().push((view, widget)));
+        area.set_tool(Tool::Text);
+        let (left, top, scale) = area.layout().unwrap();
+        area.begin_sketch(left + 50. * scale, top + 30. * scale, None);
+        area.update_drag(5., 5.);
+        area.finish_sketch();
+        let asked = asked.borrow();
+        assert_eq!(asked.len(), 1, "one click, one request");
+        let ((vx, vy), (wx, wy)) = asked[0];
+        assert!(vx.abs_diff(50) <= 1 && vy.abs_diff(30) <= 1, "{vx},{vy}");
+        assert!((wx - (left + 50. * scale)).abs() < 1.5 && (wy - (top + 30. * scale)).abs() < 1.5);
+        assert!(area.editor().unwrap().marks().is_empty());
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn other_tools_never_ask_for_text_and_enter_asks_at_the_crop_corner() {
+        let (area, _window) = shown();
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let sink = asked.clone();
+        area.connect_text_request(move |view, _| sink.borrow_mut().push(view));
+        area.set_tool(Tool::Square);
+        drag(&area, (20., 20.), (60., 30.));
+        assert!(asked.borrow().is_empty());
+        area.edit(|e| e.set_rect(30, 12, 100, 60));
+        area.set_tool(Tool::Text);
+        assert!(area.key(gdk::Key::Return, gdk::ModifierType::empty()) == glib::Propagation::Stop);
+        assert_eq!(*asked.borrow(), [(30, 12)], "Enter is a click on the corner of the crop");
+        area.set_tool(Tool::Crop);
+        assert!(area.key(gdk::Key::Return, gdk::ModifierType::empty()) == glib::Propagation::Proceed, "only the text tool takes Enter");
+        assert!(!{ let blank = CropArea::new(); blank.request_text((1, 1)) }, "nothing listens, nothing happens");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn switching_away_from_the_text_tool_forgets_a_click_that_was_not_finished() {
+        let (area, _window) = shown();
+        let asked = Rc::new(Cell::new(0));
+        let sink = asked.clone();
+        area.connect_text_request(move |_, _| sink.set(sink.get() + 1));
+        area.set_tool(Tool::Text);
+        let (left, top, scale) = area.layout().unwrap();
+        area.begin_sketch(left + 10. * scale, top + 10. * scale, None);
+        area.set_tool(Tool::Pen);
+        area.finish_sketch();
+        assert_eq!(asked.get(), 0);
+    }
+
+    #[test]
+    fn a_pressure_reading_is_kept_in_range_and_a_missing_or_broken_one_is_none() {
+        assert_eq!(usable_pressure(Some(0.5)), Some(0.5));
+        assert_eq!(usable_pressure(Some(0.)), Some(0.), "a touch at zero is still a reading");
+        assert_eq!(usable_pressure(Some(1.7)), Some(1.), "clamped, never above one");
+        assert_eq!(usable_pressure(Some(-0.2)), Some(0.));
+        assert_eq!(usable_pressure(None), None, "a mouse reports nothing");
+        assert_eq!(usable_pressure(Some(f64::NAN)), None, "garbage is not full pressure");
+        assert_eq!(usable_pressure(Some(f64::INFINITY)), None);
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn pressure_is_read_by_the_one_drag_gesture_and_no_second_gesture_competes_for_the_pen() {
+        let (area, _window) = shown();
+        let controllers = area.observe_controllers();
+        let (mut drags, mut stylus) = (0, 0);
+        for index in 0..controllers.n_items() {
+            let item = controllers.item(index).unwrap();
+            drags += usize::from(item.is::<gtk::GestureDrag>());
+            stylus += usize::from(item.is::<gtk::GestureStylus>());
+        }
+        assert_eq!((drags, stylus), (1, 0), "a stylus gesture beside the drag gesture is denied the pen's touch");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn a_stroke_whose_first_event_has_no_pressure_still_keeps_the_pressure_that_follows() {
+        let (area, _window) = shown();
+        area.set_editor(Editor::new(2000, 1000));
+        area.set_tool(Tool::Pen);
+        let (left, top, scale) = area.layout().unwrap();
+        // Some stacks send the press without axes and report pressure from the first move.
+        area.begin_sketch(left + 100. * scale, top + 100. * scale, None);
+        area.update_drag_pressed(200. * scale, 50. * scale, Some(0.4));
+        area.update_drag_pressed(400. * scale, 80. * scale, Some(0.9));
+        area.finish_sketch();
+        let mark = area.editor().unwrap().marks()[0].clone();
+        let first = smooth_pressure(1., 0.4);
+        let second = smooth_pressure(first, 0.9);
+        assert_eq!(mark.pressure, [255, pressure_level(first), pressure_level(second)], "the unreadable first point counts as full");
+        // And a stroke that never had any reading carries none, as before.
+        area.begin_sketch(left + 100. * scale, top + 500. * scale, None);
+        area.update_drag_pressed(300. * scale, 0., None);
+        area.finish_sketch();
+        assert!(area.editor().unwrap().marks()[1].pressure.is_empty());
+    }
+
+    #[test]
+    fn the_pressure_response_swings_from_a_hairline_to_the_boldest() {
+        let light = f64::from(pressure_level(0.1));
+        let medium = f64::from(pressure_level(0.4));
+        let firm = f64::from(pressure_level(0.67));
+        assert!(light <= 20., "a light touch is thin: {light}");
+        assert!(firm >= 250., "an ordinary firm press is already the boldest: {firm}");
+        assert!(firm / light >= 12., "thin to boldest is a big swing: {light} to {firm}");
+        assert!(medium > 3. * light && medium < 0.6 * firm, "with a real middle: {light} {medium} {firm}");
+        assert_eq!(pressure_level(1.), 255, "and never wider than asked for");
+        let mut last = 0;
+        let mut steps = Vec::new();
+        for step in 0..=100 {
+            let level = pressure_level(f64::from(step) / 100.);
+            assert!(level >= last, "never narrower as you press harder");
+            last = level;
+            steps.push(level);
+        }
+        let distinct: std::collections::BTreeSet<_> = steps.iter().collect();
+        assert!(distinct.len() > 40, "plenty of steps between the extremes: {}", distinct.len());
+    }
+
+    #[test]
+    fn the_light_end_stays_thin_for_longer_than_a_straight_line_would() {
+        // A straight 3-to-100 percent ramp would give half the size at half pressure.
+        assert!(f64::from(pressure_level(0.25)) < 0.3 * 255., "{}", pressure_level(0.25));
+        assert!(f64::from(pressure_level(0.5)) < 0.7 * 255., "{}", pressure_level(0.5));
+    }
+
+    #[test]
+    fn a_new_reading_is_eased_from_the_last_but_a_real_change_shows_quickly() {
+        assert_eq!(smooth_pressure(0.5, 0.5), 0.5, "steady stays steady");
+        let jitter = smooth_pressure(0.5, 0.55);
+        assert!(jitter > 0.5 && jitter < 0.55, "a small wobble is softened: {jitter}");
+        let mut level = 0.1;
+        for _ in 0..3 {
+            level = smooth_pressure(level, 0.9);
+        }
+        assert!(level > 0.84, "three points into a hard press it is nearly there: {level}");
+        assert_eq!(smooth_pressure(0.2, 0.2), 0.2);
+        assert!(smooth_pressure(1., 0.) > 0. && smooth_pressure(0., 1.) < 1., "never overshoots");
     }
 }

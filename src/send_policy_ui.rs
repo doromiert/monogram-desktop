@@ -1,5 +1,5 @@
 use crate::{
-    encryption_policy::{Mode, Preference, Selection},
+    encryption_policy::{Mode, Preference},
     model::Chat,
     protocol::Command,
     ui::Ui,
@@ -8,14 +8,21 @@ use adw::prelude::*;
 use gtk::glib;
 use std::rc::Rc;
 
-/// Shown instead of sending when a room that used encryption stops offering it.
-pub const DOWNGRADE_NOTICE: &str = "This room no longer offers end-to-end encryption, so nothing was sent. To send unencrypted anyway, choose Unencrypted in Conversation Security.";
+/// Shown instead of sending when automatic selection could only offer plaintext for a room that has
+/// used encryption. The cause is often one member who has no usable keys, not the room itself.
+pub const DOWNGRADE_NOTICE: &str = "This room could not be fully encrypted, so nothing was sent. To send unencrypted anyway, choose Unencrypted in Conversation Security.";
+/// The toast for a room whose encryption was blocked; the reason is in Message Details.
+pub const DOWNGRADE_TOAST: &str = crate::text_safety::NOT_SENT_TOAST;
+/// Shown in Message Details when automatic selection ended at plaintext for a room that has used
+/// encryption and nothing was sent.
+pub const DOWNGRADE_REASON: &str = "This room could not be fully encrypted, so nothing was sent. Someone in it may have no usable keys, or it may no longer offer encryption. Send Anyway encrypts for everyone who has keys; choosing Unencrypted in Conversation Security sends in plain text.";
 
 impl Ui {
     pub(crate) fn update_send_button(&self) {
         self.send_button.set_sensitive(
             !self.composer_text().trim().is_empty() || !self.attachments.borrow().is_empty(),
         );
+        self.voice_refresh();
     }
 
     pub fn sending_mode(&self, chat: &Chat) -> Option<Mode> {
@@ -53,7 +60,7 @@ impl Ui {
     /// The encryption check failed. A Legacy OMEMO contact-authorization denial offers Resolve.
     pub(crate) fn report_encryption_check_failure(
         self: &Rc<Self>,
-        peer: &str,
+        _peer: &str,
         error: &crate::crypto::Error,
     ) {
         let reason = error.to_string();
@@ -95,6 +102,7 @@ impl Ui {
         if !self.command(Command::ChooseEncryption {
             peer: peer.clone(),
             reply,
+            skip_unreachable: self.send_anyway_active(&peer),
         }) {
             self.notice("Encryption check could not start. Your draft is kept.");
             return;

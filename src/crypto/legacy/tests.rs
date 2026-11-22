@@ -36,7 +36,7 @@ fn established_legacy_session_sends_without_a_published_bundle() {
     approve(&mut bob, A, 101, &alice_bundle);
     assert!(matches!(
         encrypt_for(&mut alice, B, "not ready", "missing", &[(device(B, 202, &bob_bundle), None)]),
-        Err(Error::InvalidBundle)
+        Err(Error::InvalidBundle(_))
     ));
     for (id, body, bundle) in [
         ("first", "first", Some(bob_bundle.clone())),
@@ -419,6 +419,7 @@ fn live_legacy_service_and_independent_send_preference() {
     sender.send(Command::ChooseEncryption {
         peer: RECEIVER.into(),
         reply: tx,
+        skip_unreachable: false,
     });
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {

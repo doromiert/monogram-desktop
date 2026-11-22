@@ -1,5 +1,6 @@
 use crate::{lan_sync, ui::Ui};
 use adw::prelude::*;
+use crate::components::{NavRow};
 use gtk::{gio, glib};
 use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
 
@@ -106,11 +107,8 @@ pub fn show(ui: &Rc<Ui>) {
     ui.dialogs.borrow_mut().push(dialog.clone().upcast());
     dialog.present(Some(&ui.window));
 }
-fn pairing_row(title: &str, icon: &str) -> adw::ActionRow {
-    let row = adw::ActionRow::builder().title(title).activatable(true).build();
-    row.add_prefix(&gtk::Image::from_icon_name(icon));
-    row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-    row
+fn pairing_row(title: &str, icon: &str) -> NavRow {
+    NavRow::new(icon, title, None)
 }
 fn build_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) {
     let page = adw::PreferencesPage::builder().title("Devices").icon_name("network-workgroup-symbolic").build();

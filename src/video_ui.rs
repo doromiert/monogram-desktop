@@ -158,7 +158,12 @@ pub(crate) struct Playback {
     pub(crate) expanded: Cell<bool>,
     inline_interactive: Cell<bool>,
     inline_users: Cell<usize>,
+    /// When a preview was first seen ready, for [`Playback::keep_preview_silent`].
+    prepared_at: Cell<Option<Instant>>,
 }
+
+/// How long a ready preview is kept muted against Clapper's late initial state.
+const SETTLE: Duration = Duration::from_millis(1500);
 /// True when `head` starts like a binary media container. Text such as an HLS or DASH manifest,
 /// a playlist or an SDP file is refused even if the sender labelled it `video/*`.
 fn media_container(head: &[u8]) -> bool {
@@ -182,6 +187,32 @@ fn audio_container(head:&[u8])->bool {
         || head.len()>=4 && head[0]==0xff && head[1]&0xe0==0xe0 && head[1]&0x18!=0x08
 }
 impl Playback {
+    /// Keep an inline preview silent while it settles. Called for every preview on each poll.
+    ///
+    /// Previews play muted. Clapper can publish its own "not muted" state shortly after the
+    /// stream is ready, so for [`SETTLE`] after that the mute is put back. After that it is left
+    /// alone for good: whoever unmutes the player later, the viewer opened on it or the person in
+    /// the system mixer, means it, and muting it again every 150 ms is what made the sound
+    /// impossible to turn on.
+    pub(crate) fn keep_preview_silent(&self) {
+        self.keep_preview_silent_at(Instant::now());
+    }
+    fn keep_preview_silent_at(&self, now: Instant) {
+        // Someone is listening: the viewer is showing this player, or a round video was tapped.
+        if self.inline_interactive.get() || self.expanded.get() {
+            return;
+        }
+        let ready = match self.prepared_at.get() {
+            Some(ready) => ready,
+            None => {
+                self.prepared_at.set(Some(now));
+                now
+            }
+        };
+        if now.saturating_duration_since(ready) <= SETTLE && !self.media.is_muted() {
+            self.media.set_muted(true);
+        }
+    }
     pub(crate) fn new(input: VerifiedFile) -> Option<Rc<Self>> {Self::new_kind(input,false)}
     pub(crate) fn new_audio(input:VerifiedFile)->Option<Rc<Self>> {Self::new_kind(input,true)}
     fn new_kind(input:VerifiedFile,audio:bool)->Option<Rc<Self>> {
@@ -212,6 +243,7 @@ impl Playback {
             _input: input,
             expanded: Cell::new(false),
             inline_interactive: Cell::new(false),
+            prepared_at: Cell::new(None),
             inline_users: Cell::new(0),
         }))
     }
@@ -639,10 +671,7 @@ impl Ui {
             if let Some(binding) = attached.as_mut() {
                 let player = &binding.player;
                 if player.media.is_prepared() {
-                    // Clapper may publish its initial audio state after GtkMediaStream setup.
-                    if !player.inline_interactive.get() && !player.media.is_muted() {
-                        player.media.set_muted(true);
-                    }
+                    player.keep_preview_silent();
                     if !player.media.has_video() {
                         controls.add_css_class("media-preview-error");
                         controls.set_tooltip_text(Some("This attachment has no video track"));
@@ -834,6 +863,188 @@ mod cold_playback_tests {
             let player=Playback::new(input()).expect("First sticker/video player must construct after worker initialization");
             player.media.play();glib::timeout_future(Duration::from_millis(300)).await;player.media.pause();
             assert!(player.media.error().is_none(),"Native media pipeline failed: {:?}",player.media.error());
+        });
+    }
+}
+
+#[cfg(test)]
+mod video_audio_tests {
+    use super::*;
+
+    /// The videos with a sound track: what is common in chats (H.264 and AAC in MP4) and WebM.
+    const FIXTURES: [&str; 2] = ["video-with-aac.mp4", "video-with-audio.webm"];
+
+    /// A fresh player for a video-with-sound fixture.
+    fn player_for(name: &str) -> Rc<Playback> {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
+        Playback::new(VerifiedFile(std::fs::File::open(path).unwrap())).expect("the player is built once playback is initialized")
+    }
+    fn player() -> Rc<Playback> {
+        player_for(FIXTURES[1])
+    }
+    async fn wait(limit: Duration, done: impl Fn() -> bool) -> bool {
+        let end = Instant::now() + limit;
+        while Instant::now() < end {
+            if done() {
+                return true;
+            }
+            glib::timeout_future(Duration::from_millis(10)).await;
+        }
+        done()
+    }
+
+    /// A video with a sound track must say it has sound once it is ready. GTK silences a stream
+    /// that was marked prepared without audio and never asks again, so a wrong answer here means
+    /// a video that stays silent however often it is unmuted.
+    #[test]
+    #[ignore = "requires isolated native display and media plugins"]
+    fn a_video_with_a_sound_track_reports_audio_whenever_it_is_prepared() {
+        gtk::init().unwrap();
+        glib::MainContext::default().block_on(async {
+            assert!(gio::spawn_blocking(initialize).await.unwrap(), "playback initializes");
+            for name in FIXTURES {
+                let (mut silent, mut ready) = (0, 0);
+                for round in 0..4 {
+                    let player = player_for(name);
+                    player.media.play();
+                    if !wait(Duration::from_secs(25), || player.media.is_prepared()).await {
+                        // The pipeline of a player occasionally never starts in the test setup;
+                        // that is not what is being checked here, so it is not counted.
+                        eprintln!("{name} round {round}: never became ready, not counted");
+                        continue;
+                    }
+                    ready += 1;
+                    if !player.media.has_audio() {
+                        silent += 1;
+                    }
+                    assert!(player.media.has_video(), "{name} round {round}");
+                    assert!(player.media.error().is_none(), "{name}: {:?}", player.media.error());
+                    player.media.pause();
+                    drop(player);
+                    // Let the finished player's pipeline be taken down before the next one starts.
+                    glib::timeout_future(Duration::from_millis(400)).await;
+                }
+                assert!(ready >= 2, "{name}: only {ready} of 4 players became ready");
+                assert_eq!(silent, 0, "{name}: {silent} of {ready} players were prepared without audio and would stay silent");
+            }
+        });
+    }
+
+    /// Unmuting and changing the volume of a video with sound must reach the player and stay.
+    #[test]
+    #[ignore = "requires isolated native display and media plugins"]
+    fn unmuting_and_the_volume_reach_the_player_of_a_video_with_sound() {
+        gtk::init().unwrap();
+        glib::MainContext::default().block_on(async {
+            assert!(gio::spawn_blocking(initialize).await.unwrap());
+            let player = player();
+            assert!(player.media.is_muted(), "inline videos start silent");
+            player.media.play();
+            assert!(wait(Duration::from_secs(10), || player.media.is_prepared()).await);
+            assert!(player.media.has_audio());
+            // Unmute, as opening the viewer does.
+            player.media.set_muted(false);
+            glib::timeout_future(Duration::from_millis(400)).await;
+            assert!(!player.media.is_muted(), "unmuting stuck");
+            assert!((player.media.volume() - 1.0).abs() < 0.01, "full volume: {}", player.media.volume());
+            // The volume follows what is asked, and the sound stays on.
+            player.media.set_volume(0.4);
+            glib::timeout_future(Duration::from_millis(400)).await;
+            assert!((player.media.volume() - 0.4).abs() < 0.02, "{}", player.media.volume());
+            assert!(!player.media.is_muted(), "changing the volume must not mute");
+            // Muting and unmuting again, repeatedly, keeps working.
+            for _ in 0..3 {
+                player.media.set_muted(true);
+                glib::timeout_future(Duration::from_millis(150)).await;
+                assert!(player.media.is_muted());
+                player.media.set_muted(false);
+                glib::timeout_future(Duration::from_millis(150)).await;
+                assert!(!player.media.is_muted());
+            }
+            assert!(player.media.error().is_none(), "the pipeline did not fail: {:?}", player.media.error());
+            player.media.pause();
+        });
+    }
+
+    /// The report: "the app has muted itself, and if I unmute it, it keeps muting". The chat tile
+    /// polls every 150 ms; something (the viewer, or the system mixer) unmutes the player; the tile
+    /// must leave it alone.
+    #[test]
+    #[ignore = "requires isolated native display and media plugins"]
+    fn a_player_someone_unmuted_is_not_muted_again_by_the_chat_tile_behind_it() {
+        gtk::init().unwrap();
+        glib::MainContext::default().block_on(async {
+            assert!(gio::spawn_blocking(initialize).await.unwrap());
+            let player = player();
+            assert!(player.media.is_muted(), "a preview starts silent");
+            player.media.play();
+            assert!(wait(Duration::from_secs(10), || player.media.is_prepared()).await);
+            // The tile's own timer.
+            let tile = player.clone();
+            let poll = glib::timeout_add_local(Duration::from_millis(150), move || {
+                tile.keep_preview_silent();
+                glib::ControlFlow::Continue
+            });
+            glib::timeout_future(Duration::from_millis(2500)).await;
+            assert!(player.media.is_muted(), "still silent while only previewing");
+            // Someone listens: the viewer unmutes it, or the person does in the system mixer.
+            player.media.set_muted(false);
+            glib::timeout_future(Duration::from_millis(1200)).await;
+            poll.remove();
+            assert!(!player.media.is_muted(), "the tile behind muted it again");
+            player.media.pause();
+        });
+    }
+
+    /// The settling window and the exemptions, with chosen clock readings.
+    #[test]
+    #[ignore = "requires isolated native display and media plugins"]
+    fn previews_are_kept_silent_only_while_settling_and_never_while_someone_listens() {
+        gtk::init().unwrap();
+        glib::MainContext::default().block_on(async {
+            assert!(gio::spawn_blocking(initialize).await.unwrap());
+            let start = Instant::now();
+            let at = |ms: u64| start + Duration::from_millis(ms);
+            // Inside the window an unmuted preview is muted again (Clapper's late initial state).
+            let preview = player();
+            preview.keep_preview_silent_at(at(0));
+            preview.media.set_muted(false);
+            preview.keep_preview_silent_at(at(1000));
+            assert!(preview.media.is_muted(), "inside the window it is put back");
+            preview.media.set_muted(false);
+            preview.keep_preview_silent_at(at(1500));
+            assert!(preview.media.is_muted(), "the window includes its last instant");
+            // After it, never again, however often it is polled.
+            preview.media.set_muted(false);
+            for ms in [1501, 1700, 5000, 60_000, 3_600_000] {
+                preview.keep_preview_silent_at(at(ms));
+                assert!(!preview.media.is_muted(), "left alone at {ms} ms");
+            }
+            // The window runs from the first look, and a clock that goes backwards is harmless.
+            let late = player();
+            late.keep_preview_silent_at(at(10_000));
+            late.media.set_muted(false);
+            late.keep_preview_silent_at(at(11_000));
+            assert!(late.media.is_muted());
+            late.media.set_muted(false);
+            late.keep_preview_silent_at(at(9_000));
+            assert!(late.media.is_muted(), "an earlier reading counts as no time having passed");
+            // Someone listening: never muted, even inside the window.
+            for shown in [true, false] {
+                let heard = player();
+                heard.keep_preview_silent_at(at(0));
+                heard.media.set_muted(false);
+                if shown {
+                    heard.expanded.set(true); // the viewer is showing it
+                } else {
+                    heard.inline_interactive.set(true); // a round video was tapped
+                }
+                heard.keep_preview_silent_at(at(100));
+                assert!(!heard.media.is_muted(), "listened to (viewer: {shown})");
+                // When the viewer is closed the app mutes it itself, as it always did.
+                heard.expanded.set(false);
+                heard.inline_interactive.set(false);
+            }
         });
     }
 }

@@ -50,9 +50,6 @@ const CHANGED: &str = "This request changed. Close it and review the current req
 const DATABASE: &str = "Pending requests could not be saved. Please try again.";
 
 impl Ui {
-    pub fn pending_requests(&self) -> Result<PendingRequests, String> {
-        self.pending_requests_before(None)
-    }
     pub fn pending_requests_before(&self, before: Option<u64>) -> Result<PendingRequests, String> {
         let state = self.state.borrow();
         if state.account.is_empty() {

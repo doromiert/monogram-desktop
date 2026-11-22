@@ -105,6 +105,9 @@ pub struct Ui {
     pub pq_reviews: RefCell<HashMap<String, Vec<crate::crypto::pq::service::Review>>>,
     pub encryption_checks: RefCell<HashMap<String, String>>,
     pub encryption_revision: Cell<u64>,
+    /// Rooms where the user chose Send Anyway, and until when: messages to them skip members whose
+    /// keys cannot be used without asking again. In memory only, so it ends with the session.
+    pub(crate) send_anyway_until: RefCell<HashMap<String, std::time::Instant>>,
     pub room_syncing: RefCell<Option<(u64, String, u64)>>,
     pub room_sync_retry: RefCell<HashMap<String, (Instant, u8)>>,
     pub(crate) active_audio: RefCell<Option<std::rc::Weak<crate::video_ui::Playback>>>,
@@ -120,6 +123,15 @@ pub struct Ui {
     pub contact_access_widgets: RefCell<Option<crate::contact_access_ui::ContactAccessControls>>,
     pub blocking_snapshot: RefCell<crate::blocking::Snapshot>,
     pub blocking_loading: Cell<bool>,
+    pub(crate) last_activity: RefCell<crate::last_activity_ui::Cache>,
+    /// The open camera dialog, if any: only one at a time.
+    pub(crate) camera_dialog: RefCell<Option<glib::WeakRef<adw::Dialog>>>,
+    /// The microphone button and recording bar.
+    pub(crate) voice: RefCell<Option<Rc<crate::voice_ui::VoiceUi>>>,
+    /// The most reachable device's `show` and idle time for each contact who is online.
+    pub(crate) contact_status: RefCell<HashMap<String, crate::contact_status::Detail>>,
+    /// The status circle on the open conversation's avatar.
+    pub(crate) header_presence: RefCell<Option<crate::components::PresenceAvatar>>,
     pub blocking_error: RefCell<Option<String>>,
     pub blocking_list: RefCell<Option<crate::blocking_ui::ListControls>>,
     pub review_request: RefCell<Option<(String, crate::encryption_policy::Mode)>>,
@@ -212,8 +224,7 @@ impl Ui {
         shell.set_vhomogeneous(false);
         shell.add_named(&overlay, Some("main"));
         toast.set_child(Some(&shell));
-        let welcome_view = adw::ToolbarView::new();
-        welcome_view.add_top_bar(&adw::HeaderBar::new());
+        let welcome_view = crate::components::titled_page();
         let welcome_sign_in = gtk::Button::with_label("Sign In");
         welcome_sign_in.add_css_class("suggested-action");
         let welcome_sync=gtk::Button::with_label("Sync from Another Device");
@@ -431,6 +442,7 @@ impl Ui {
             pq_reviews: RefCell::new(HashMap::new()),
             encryption_checks: RefCell::new(HashMap::new()),
             encryption_revision: Cell::new(0),
+            send_anyway_until: RefCell::new(HashMap::new()),
             room_syncing: RefCell::new(None),
             room_sync_retry: RefCell::new(HashMap::new()),
             active_audio: RefCell::new(None),
@@ -443,6 +455,11 @@ impl Ui {
             contact_access_widgets: RefCell::new(None),
             blocking_snapshot: RefCell::new(Default::default()),
             blocking_loading: Cell::new(false),
+            last_activity: RefCell::new(Default::default()),
+            camera_dialog: RefCell::new(None),
+            voice: RefCell::new(None),
+            contact_status: RefCell::new(HashMap::new()),
+            header_presence: RefCell::new(None),
             blocking_error: RefCell::new(None),
             blocking_list: RefCell::new(None),
             link_preview_jobs: RefCell::new(Default::default()),
@@ -705,6 +722,117 @@ impl Ui {
             }
         });
     }
+    /// Earlier versions pinned a room to Legacy OMEMO for a day when the user chose Send Anyway, and
+    /// Legacy OMEMO refuses reactions. Forget those cached choices once; the next send simply asks
+    /// again, and automatic selection picks the protocol as usual.
+    fn clear_legacy_room_pins(&self, state: &mut State) {
+        let key = format!("legacy_room_pins_cleared:{}", state.account);
+        if state.account.is_empty() || self.store.pref(&key, "false") == "true" {
+            return;
+        }
+        for chat in state.chats.iter_mut().filter(|chat| chat.group) {
+            if chat
+                .automatic_encryption
+                .is_some_and(|selection| selection.mode == crate::encryption_policy::Mode::Legacy)
+            {
+                chat.automatic_encryption = None;
+            }
+        }
+        let _ = self.store.set_pref(&key, "true");
+    }
+    /// The toast for a message that did not go out. In a group chat, when the cause is one member's
+    /// keys that cannot be used, it offers Send Anyway: the same message, still encrypted, for
+    /// everyone who can be reached. Otherwise it is [`Self::notice_resolving_authorization`].
+    pub(crate) fn notice_send_failure(
+        self: &Rc<Self>,
+        peer: &str,
+        ids: Vec<String>,
+        reason: &str,
+        title: String,
+    ) {
+        let in_group = self
+            .state
+            .borrow()
+            .chats
+            .iter()
+            .any(|chat| chat.jid == peer && chat.group);
+        if in_group {
+            if let Some(fix) = crate::rooms::fix_for(reason) {
+                let toast = adw::Toast::builder().title(title).button_label("Resolve").build();
+                let weak = Rc::downgrade(self);
+                let peer = peer.to_owned();
+                toast.connect_button_clicked(move |_| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.resolve_room_failure(&peer, fix);
+                    }
+                });
+                return self.show_toast(toast);
+            }
+        }
+        if !in_group
+            || ids.is_empty()
+            || !self.offers_send_anyway()
+            || !crate::crypto::skippable_reason(reason)
+        {
+            return self.notice_resolving_authorization(reason, title);
+        }
+        let toast = adw::Toast::builder()
+            .title(title)
+            .button_label("Send Anyway")
+            .build();
+        let weak = Rc::downgrade(self);
+        let peer = peer.to_owned();
+        toast.connect_button_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.send_anyway(&peer, &ids);
+            }
+        });
+        self.show_toast(toast);
+    }
+    /// The toast for a room whose automatic encryption ended at plaintext. In a group with messages
+    /// to resend it offers Send Anyway; otherwise it explains how to send unencrypted.
+    pub(crate) fn notice_downgrade_blocked(self: &Rc<Self>, peer: &str, ids: Vec<String>) {
+        let in_group = self
+            .state
+            .borrow()
+            .chats
+            .iter()
+            .any(|chat| chat.jid == peer && chat.group);
+        if !in_group || ids.is_empty() || !self.offers_send_anyway() {
+            return self.notice(crate::send_policy_ui::DOWNGRADE_NOTICE);
+        }
+        let toast = adw::Toast::builder()
+            .title(crate::send_policy_ui::DOWNGRADE_TOAST)
+            .button_label("Send Anyway")
+            .build();
+        let weak = Rc::downgrade(self);
+        let peer = peer.to_owned();
+        toast.connect_button_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.send_anyway(&peer, &ids);
+            }
+        });
+        self.show_toast(toast);
+    }
+    /// Open what deals with a room that cannot be encrypted: Conversation Security to choose how it
+    /// is sent, or the participants to see who is in it. The room is shown first if it is not open.
+    pub(crate) fn resolve_room_failure(self: &Rc<Self>, room: &str, fix: crate::rooms::Fix) {
+        let id = self
+            .state
+            .borrow()
+            .chats
+            .iter()
+            .find(|chat| chat.jid == room && chat.group)
+            .map(|chat| chat.id.clone());
+        let Some(id) = id else { return };
+        if self.state.borrow().current().jid != room {
+            self.select_chat(&id);
+        }
+        match fix {
+            crate::rooms::Fix::Security => self.security(),
+            crate::rooms::Fix::Participants => self.show_participants(),
+        }
+    }
     /// A toast for `title`. When `reason` is a Legacy OMEMO contact-authorization refusal, it names
     /// the contact who refused and carries a Resolve button that opens Control Access for them
     /// (in a room too, where the contact is a member and `peer` is the room).
@@ -735,7 +863,7 @@ impl Ui {
     pub fn show_toast(&self, toast: adw::Toast) {
         crate::toast_routing::show(&self.window, &self.toast, toast);
     }
-    fn queue_chat_refresh(self: &Rc<Self>) {
+    pub(crate) fn queue_chat_refresh(self: &Rc<Self>) {
         if self.chat_refresh_pending.replace(true) {
             return;
         }
@@ -813,6 +941,7 @@ impl Ui {
         self.action("call", |s| s.call_preview());
         self.action("attach-file", |s| s.choose_files(false));
         self.action("attach-media", |s| s.choose_files(true));
+        self.action("attach-camera", |s| s.open_camera());
         self.action("poll", |s| s.new_poll());
         self.action("article", |s| s.article());
         self.action("location", |s| {
@@ -1075,57 +1204,30 @@ impl Ui {
         let state = self.state.borrow();
         for chat in state.filtered(self.search.text().as_str()) {
             let latest = chat.latest_preview();
-            let row = gtk::ListBoxRow::new();
-            row.set_widget_name(&chat.id);
-            let line = bx(false, 11);
-            let avatar=self.chat_avatar(&chat,44);
-            if chat.group{line.append(&avatar);}else{line.append(&self.profile_button(&avatar,&chat.jid,chat.display_name()));}
-            let words = bx(true, 5);
-            words.set_hexpand(true);
-            let top = bx(false, 8);
-            let name = text(chat.display_name(), "chat-name");
-            name.set_hexpand(true);
-            name.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            top.append(&name);
-            top.append(&label(
-                latest.as_ref().map(|m| m.time.as_str()).unwrap_or("Now"),
-                "chat-time",
-            ));
-            words.append(&top);
-            let bottom = bx(false, 6);
+            let avatar = self.chat_avatar(&chat, 44);
+            let leading: gtk::Widget = if chat.group {
+                avatar.upcast()
+            } else {
+                let dot = crate::components::PresenceAvatar::new(&avatar);
+                dot.set_presence(self.contact_presence(&chat));
+                dot.set_dot_visible(self.shows_contact_status());
+                self.profile_button(&dot, &chat.jid, chat.display_name()).upcast()
+            };
+            let row = crate::components::ChatRow::new(&chat.id, &leading);
+            row.set_title(chat.display_name());
+            row.set_time(latest.as_ref().map(|m| m.time.as_str()).unwrap_or("Now"));
             let preview = if !chat.draft.is_empty() {
                 format!("Draft: {}", chat.draft.replace('\n', " "))
             } else {
                 latest
                     .as_ref()
-                    .map(|m| {
-                        format!(
-                            "{}{}",
-                            if m.own { "You: " } else { "" },
-                            m.text.replace('\n', " ")
-                        )
-                    })
+                    .map(|m| format!("{}{}", if m.own { "You: " } else { "" }, m.text.replace('\n', " ")))
                     .unwrap_or_else(|| "No messages yet".into())
             };
-            let l = text(&preview, "chat-preview");
-            l.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            l.set_hexpand(true);
-            bottom.append(&l);
-            if chat.unread > 0 || chat.unread_mark {
-                bottom.append(&label(
-                    &if chat.unread > 0 {
-                        chat.unread.to_string()
-                    } else {
-                        "•".into()
-                    },
-                    "unread-badge",
-                ))
-            } else if chat.pinned {
-                bottom.append(&gtk::Image::from_icon_name("view-pin-symbolic"))
-            }
-            words.append(&bottom);
-            line.append(&words);
-            row.set_child(Some(&line));
+            row.set_preview(preview.as_str());
+            row.set_unread(chat.unread);
+            row.set_unread_mark(chat.unread_mark);
+            row.set_pinned(chat.pinned);
             let actions = vec![
                 ("Open".into(), format!("chat-open:{}", chat.id)),
                 (
@@ -1411,6 +1513,7 @@ impl Ui {
         let menu = gio::Menu::new();
         for (t, a) in [
             ("Photo or Video…", "attach-media"),
+            ("Take Photo…", "attach-camera"),
             ("File…", "attach-file"),
             ("Poll…", "poll"),
             ("Payment…", "payment"),
@@ -1433,6 +1536,17 @@ impl Ui {
         let emoji = icon_button("face-smile-symbolic", "Emoji, stickers and GIFs · F9");
         self.weak_button(&emoji, |s| s.toggle_media());
         composer_row.append(&emoji);
+        // The microphone button sits right after the emoji button, in the same style; while
+        // recording, the rest of the box makes way for the recording bar.
+        let voice = crate::voice_ui::install(
+            self,
+            &composer_row,
+            crate::voice_ui::Parts {
+                hide: vec![attach.clone().upcast(), input.clone().upcast(), emoji.clone().upcast(), attachments.clone().upcast(), self.send_button.clone().upcast()],
+                after: input.clone().upcast(),
+            },
+        );
+        self.voice.replace(Some(voice));
         composer.append(&composer_row);
         line.append(&composer);
         self.send_button.remove_css_class("flat");
@@ -1450,6 +1564,7 @@ impl Ui {
         chat.set_vexpand(true);
         conversation.append(&chat);
         conversation.append(&shell);
+        crate::drop_files::install(self, &conversation);
         self.pages.add_named(&conversation, Some("chat"));
         self.pages
             .add_named(&scroll(&self.search_page), Some("search"));
@@ -1564,6 +1679,10 @@ impl Ui {
             .flatten();
         self.save_draft();
         let switched = self.state.borrow().active != id;
+        if switched {
+            // A recording belongs to the conversation it was made in.
+            self.voice_cancel();
+        }
         let newest = self.history_window.newest();
         self.timeline_scope_changed();
         if switched { self.switch_cached_timeline(id, newest); }
@@ -1605,6 +1724,7 @@ impl Ui {
         if !self.state.borrow().account.is_empty() {
             self.load_timeline(None);
         }
+        self.refresh_last_activity_current();
         self.refresh_chats(None);
         self.persist();
         if self.split.is_collapsed() {
@@ -1662,7 +1782,15 @@ impl Ui {
         self.composer_placeholder
             .set_visible(self.composer_text().is_empty());
         let title = bx(false, 8);
-        title.append(&self.chat_avatar(chat, 28));
+        if chat.group {
+            self.header_presence.replace(None);
+            title.append(&self.chat_avatar(chat, 28));
+        } else {
+            let dot = crate::components::PresenceAvatar::new(&self.chat_avatar(chat, 28));
+            dot.set_dot_visible(self.shows_contact_status());
+            title.append(&dot);
+            self.header_presence.replace(Some(dot));
+        }
         let words = bx(true, 0);
         words.append(&text(chat.display_name(), "chat-title"));
         let subtitle = text("", "chat-subtitle dim-label");
@@ -1684,8 +1812,17 @@ impl Ui {
         let chat = state.current();
         let composing = self.typing.borrow().iter().any(|((peer, _), at)|
             peer == &chat.jid && at.elapsed() < crate::chat_states::TIMEOUT);
+        if let Some(dot) = self.header_presence.borrow().as_ref() {
+            dot.set_presence(self.contact_presence(chat));
+            dot.set_dot_visible(self.shows_contact_status());
+        }
         if let Some(label) = self.header_subtitle.borrow().as_ref() {
-            label.set_text(if composing { "typing..." } else { &chat.subtitle });
+            let shown = if composing || chat.group {
+                None
+            } else {
+                Some(self.status_text(&chat.jid, &chat.subtitle))
+            };
+            label.set_text(if composing { "typing..." } else { shown.as_deref().unwrap_or(&chat.subtitle) });
         }
     }
 
@@ -1836,8 +1973,33 @@ impl Ui {
             );
         }
     }
-    pub fn command(&self, c: Command) -> bool {
+    pub fn command(&self, mut c: Command) -> bool {
+        if let Command::Send { peer, message, .. } = &mut c {
+            self.apply_send_anyway_cooldown(peer, message);
+        }
         self.session.borrow().as_ref().is_some_and(|s| s.send(c))
+    }
+    /// How long Send Anyway keeps applying to a room after the user chose it.
+    pub(crate) const SEND_ANYWAY_COOLDOWN: Duration = Duration::from_secs(30 * 60);
+    /// Whether the Send Anyway button is offered at all (Preferences > Offer Send Anyway).
+    pub(crate) fn offers_send_anyway(&self) -> bool {
+        self.preference("offer_send_anyway", true)
+    }
+    /// Within the cooldown after Send Anyway, a message to that room is sent without the members
+    /// whose keys cannot be used, as the user already chose, instead of failing again.
+    pub(crate) fn apply_send_anyway_cooldown(&self, peer: &str, message: &mut Message) {
+        if self.send_anyway_active(peer) {
+            message.skip_unreachable = true;
+        }
+    }
+    /// Whether Send Anyway is on for `peer` right now: offered, chosen, and not yet expired.
+    pub(crate) fn send_anyway_active(&self, peer: &str) -> bool {
+        self.offers_send_anyway()
+            && self
+                .send_anyway_until
+                .borrow()
+                .get(peer)
+                .is_some_and(|until| *until > std::time::Instant::now())
     }
     pub fn send_content(self: &Rc<Self>, value: &str, kind: &str) -> Option<String> {
         if kind=="article" {return self.queue_formatted_text(value,Some(crate::formatting::Markup{body:value.into(),markdown:true,unstyled:true,..Default::default()}));}
@@ -2167,6 +2329,7 @@ impl Ui {
     pub fn activate_state(self: &Rc<Self>, mut state: State) {
         // Rosters belong to the previous account's rooms.
         self.room_rosters.borrow_mut().clear();
+        self.contact_status.borrow_mut().clear();
         if self.participants.take().is_some()
             && self.media_mode.borrow().as_str() == "participants"
         {
@@ -2191,6 +2354,7 @@ impl Ui {
         self.timeline.set_opacity(0.);
         self.images.borrow_mut().clear();
         self.avatars.borrow_mut().clear();
+        self.clear_legacy_room_pins(&mut state);
         for chat in &mut state.chats {
             for m in &mut chat.messages {
                 if let Some(draft) = &mut m.upload {
@@ -2781,6 +2945,13 @@ impl Ui {
                 self.queue_chat_refresh();
                 return;
             }
+            BackendEvent::ContactStatus { peer, detail } => {
+                match detail {
+                    Some(detail) => self.contact_status.borrow_mut().insert(peer, detail),
+                    None => self.contact_status.borrow_mut().remove(&peer),
+                };
+                return;
+            }
             BackendEvent::Presence {
                 peer,
                 online,
@@ -2803,6 +2974,7 @@ impl Ui {
                 drop(s);
                 self.update_chat_subtitle();
                 self.refresh_profile_card();
+                self.queue_chat_refresh();
                 return;
             }
             BackendEvent::Typing { peer, sender, composing } => {
@@ -2813,6 +2985,9 @@ impl Ui {
                 }
                 self.update_chat_subtitle();
                 return;
+            }
+            BackendEvent::SentPartially { peer, id, skipped } => {
+                self.record_partial_send(owner, &peer, &id, &skipped);
             }
             BackendEvent::Uncertain { peer, id } => {
                 self.delivery(&peer, &id, "uncertain");
@@ -2829,24 +3004,20 @@ impl Ui {
             BackendEvent::Failed { peer, id, reason } => {
                 // Bounced typing, receipt and marker stanzas also arrive here; only one of our own
                 // messages is worth a toast (edits, reactions and removals toast in `delivery`).
-                let ours = self
-                    .store
-                    .own_wire_id(owner, &peer, &id)
-                    .ok()
-                    .flatten()
-                    .is_some();
-                if ours {
+                let own_id = self.store.own_wire_id(owner, &peer, &id).ok().flatten();
+                if own_id.is_some() {
                     let stage = if reason.starts_with("the server said") { "XMPP server response" } else { "Message submission" };
                     if self.store.record_message_failure(owner, &peer, &id, stage, &reason).is_err() {
                         self.notice("The send error could not be saved in Message Details");
                     }
                 }
                 self.delivery(&peer, &id, "failed");
-                if !ours {
+                let Some(own_id) = own_id else {
                     return;
-                }
+                };
+                self.record_failure_reason(owner, &peer, &id, &reason);
                 let title = crate::text_safety::failed_send_toast(&crate::message_failures::safe_detail(&reason));
-                self.notice_resolving_authorization(&reason, title);
+                self.notice_send_failure(&peer, vec![own_id], &reason, title);
             }
             BackendEvent::History {
                 peer,
@@ -3199,6 +3370,54 @@ impl Ui {
             Err(_) => self.notice("Message delivery status could not be saved"),
         }
     }
+    /// Keep why the own message `id` failed on it, so Message Details can say what went wrong and the
+    /// toast can stay short.
+    pub(crate) fn record_failure_reason(self: &Rc<Self>, owner: &str, peer: &str, id: &str, reason: &str) {
+        let reason = crate::text_safety::failure_reason(reason);
+        match self.store.record_failure(owner, peer, id, &reason) {
+            Ok(Some(message)) => {
+                let mut state = self.state.borrow_mut();
+                let active = state.current().jid == peer;
+                let chat = state.chat_for(peer);
+                if let Some(row) = chat.messages.iter_mut().find(|m| m.id == message.id) {
+                    *row = message;
+                }
+                drop(state);
+                if active {
+                    self.render_messages(false);
+                }
+            }
+            Ok(None) => {}
+            Err(_) => self.notice("Could not record why this message failed"),
+        }
+    }
+    /// Remember on the message that it went out without `skipped` room members, so its bubble and
+    /// its details can say so. The list is bounded; it is shown, never acted on.
+    pub(crate) fn record_partial_send(
+        self: &Rc<Self>,
+        owner: &str,
+        peer: &str,
+        id: &str,
+        skipped: &[(String, String)],
+    ) {
+        let skipped: Vec<(String, String)> = skipped.iter().take(200).cloned().collect();
+        match self.store.record_skipped(owner, peer, id, &skipped) {
+            Ok(Some(message)) => {
+                let mut state = self.state.borrow_mut();
+                let active = state.current().jid == peer;
+                let chat = state.chat_for(peer);
+                if let Some(row) = chat.messages.iter_mut().find(|m| m.id == message.id) {
+                    *row = message;
+                }
+                drop(state);
+                if active {
+                    self.render_messages(false);
+                }
+            }
+            Ok(None) => {}
+            Err(_) => self.notice("Could not record who this message was not sent to"),
+        }
+    }
     pub(crate) fn update_history_spinner(&self) {
         let state = self.state.borrow();
         let busy = !state.account.is_empty()
@@ -3275,7 +3494,7 @@ mod composer_tests {
         let ids=std::process::Command::new("xdotool").args(["search","--name","^Monogram$"]).output().unwrap();let id=String::from_utf8(ids.stdout).unwrap().lines().last().unwrap().to_owned();assert!(std::process::Command::new("xdotool").args(["windowfocus","--sync",&id]).status().unwrap().success());settle();
         let mut previous_line=0;
         for font in [13,20] {
-            fonts.load_from_data(&format!(".composer textview {{font-size:{font}px;}}"));
+            fonts.load_from_string(&format!(".composer textview {{font-size:{font}px;}}"));
             ui.composer.buffer().set_text("asd");ui.composer.buffer().place_cursor(&ui.composer.buffer().end_iter());settle();settle();
             let line=ui.composer.iter_location(&ui.composer.buffer().start_iter()).height();
             assert!(line>previous_line);previous_line=line;
@@ -3303,6 +3522,49 @@ mod composer_tests {
         assert_eq!(ui.input_scroll.height(),ui.composer.top_margin()+ui.composer.bottom_margin()+5*line);
         assert!(started.elapsed()<Duration::from_millis(400),"large paste blocked visible feedback");
         ui.window.close();
+    }
+
+    /// Inserting an emoji (a glyph from another, taller font) must not make the message box taller.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn inserting_an_emoji_does_not_resize_the_message_box() {
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id("com.negzero.ComposerEmojiHeightFixture")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let ui = Ui::new(&app, true);
+        let css = gtk::CssProvider::new();
+        css.load_from_path(crate::widgets::asset("style.css"));
+        gtk::style_context_add_provider_for_display(&gtk::gdk::Display::default().unwrap(), &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        ui.window.set_default_size(900, 700);
+        ui.window.present();
+        let context = glib::MainContext::default();
+        let settle = |ms: u64| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            while std::time::Instant::now() < deadline {
+                context.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        };
+        settle(400);
+        let height = |ui: &Rc<Ui>| ui.input_scroll.measure(gtk::Orientation::Vertical, ui.composer.width()).1;
+        let row = |ui: &Rc<Ui>| ui.composer.parent().map(|p| p.height()).unwrap_or(0);
+        for text in ["", "hello", "hello wörld ÅgyQ"] {
+            ui.composer.buffer().set_text(text);
+            ui.composer.buffer().place_cursor(&ui.composer.buffer().end_iter());
+            settle(150);
+            let (before, row_before) = (height(&ui), row(&ui));
+            for emoji in ["😀", "👍🏽", "❤️", "🇷🇴", "👨‍👩‍👧‍👦", "😀😀😀"] {
+                ui.composer.buffer().insert_at_cursor(emoji);
+                settle(150);
+                assert_eq!(height(&ui), before, "{text:?} + {emoji}: the text area changed height");
+                assert_eq!(row(&ui), row_before, "{text:?} + {emoji}: the message box changed height");
+            }
+            ui.composer.buffer().set_text("");
+            settle(100);
+        }
     }
 
     /// The composer is sized by its scroll window from its content in the same layout pass

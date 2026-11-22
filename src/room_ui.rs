@@ -6,6 +6,7 @@ use crate::{
     widgets::*,
 };
 use adw::prelude::*;
+use crate::components::{ContactRow, NavRow};
 use gtk::glib;
 use std::{
     cell::{Cell, RefCell},
@@ -187,14 +188,9 @@ impl Ui {
                     && crate::protocol::bare(&chat.jid).ok().as_deref() == Some(chat.jid.as_str())
             })
             .map(|chat| {
+                let row = ContactRow::new(&chat.name, Some(&chat.jid), &self.chat_avatar(chat, 32));
                 let check = gtk::CheckButton::new();
-                let row = adw::ActionRow::builder()
-                    .title(&chat.name)
-                    .subtitle(&chat.jid)
-                    .use_markup(false)
-                    .activatable_widget(&check)
-                    .build();
-                row.add_prefix(&self.chat_avatar(chat, 32));
+                row.set_activatable_widget(Some(&check));
                 row.add_suffix(&check);
                 people.add(&row);
                 (chat.jid.clone(), check)
@@ -380,13 +376,11 @@ impl Ui {
             .active(true)
             .build();
         fields.add(&address);
-        let browse = adw::ActionRow::builder()
-            .title("Browse Public Rooms")
-            .subtitle("Choose from rooms listed by this account’s group services")
-            .activatable(true)
-            .build();
-        browse.add_prefix(&gtk::Image::from_icon_name("system-search-symbolic"));
-        browse.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+        let browse = NavRow::new(
+            "system-search-symbolic",
+            "Browse Public Rooms",
+            Some("Choose from rooms listed by this account’s group services"),
+        );
         let weak = Rc::downgrade(self);
         let target = address.downgrade();
         browse.connect_activated(move |_| {

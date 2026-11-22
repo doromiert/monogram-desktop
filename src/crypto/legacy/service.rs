@@ -246,6 +246,7 @@ pub enum Request {
     ProbeRoom {
         recipients: RoomRecipients,
         reply: oneshot::Sender<Result<bool>>,
+        skip_unreachable: bool,
     },
     SendRoom {
         recipients: RoomRecipients,
@@ -473,6 +474,16 @@ fn outer_metadata(
         frame.historical || frame.archive.is_some(),
     ))
 }
+/// What automatic selection learns from trying to encrypt a room: `true` when it can be encrypted,
+/// `false` when Legacy OMEMO is simply not available there (a member has no devices), and an error
+/// for anything that should stop the send instead.
+pub(crate) fn probe_outcome<T>(result: Result<T>) -> Result<bool> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(Error::Unavailable(super::NO_DEVICES | super::UNSUPPORTED)) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
 fn describe(error: &Error) -> String {
     match error {
         Error::Invalid(_) => "Invalid Legacy OMEMO message or key data".into(),
@@ -645,27 +656,24 @@ impl Worker {
             Err(Error::Uncertain)
         }
     }
-    async fn probe_room(&mut self, recipients: &RoomRecipients) -> Result<bool> {
+    async fn probe_room(&mut self, recipients: &RoomRecipients, skip_unreachable: bool) -> Result<bool> {
         if !self.ready {
             self.initialize().await?;
         }
         let members = recipients.members.keys().cloned().collect();
-        match self
-            .local
-            .as_mut()
-            .ok_or(Error::Incomplete)?
-            .encrypt_room(
-                &recipients.room,
-                &members,
-                "Monogram encryption check",
-                &crate::model::new_id(),
-            )
-            .await
-        {
-            Ok(_) => Ok(true),
-            Err(Error::Unavailable(super::NO_DEVICES | super::UNSUPPORTED)) => Ok(false),
-            Err(error) => Err(error),
-        }
+        probe_outcome(
+            self.local
+                .as_mut()
+                .ok_or(Error::Incomplete)?
+                .encrypt_room(
+                    &recipients.room,
+                    &members,
+                    "Monogram encryption check",
+                    &crate::model::new_id(),
+                    skip_unreachable,
+                )
+                .await,
+        )
     }
     async fn send_room(
         &mut self,
@@ -673,7 +681,7 @@ impl Worker {
         message: &Message,
         quote: &str,
         epoch: u64,
-    ) -> Result<()> {
+    ) -> Result<Vec<(String, String)>> {
         let clear = outgoing_content(&recipients.room, message, quote)?;
         if !self.ready || !self.online {
             return Err(Error::Unavailable("Legacy OMEMO is not ready"));
@@ -691,8 +699,14 @@ impl Worker {
             .ok_or(Error::Invalid("legacy room body"))?
             .text();
         let members = recipients.members.keys().cloned().collect();
-        let mut xml = local
-            .encrypt_room(&recipients.room, &members, &body, &message.wire_id)
+        let (mut xml, skipped) = local
+            .encrypt_room(
+                &recipients.room,
+                &members,
+                &body,
+                &message.wire_id,
+                message.skip_unreachable,
+            )
             .await?;
         decorate_outgoing(&mut xml, &clear, message);
         let current =
@@ -726,7 +740,7 @@ impl Worker {
             .await
             .is_ok_and(|value| value.unwrap_or(false))
         {
-            Ok(())
+            Ok(skipped)
         } else {
             Err(Error::Uncertain)
         }
@@ -1237,7 +1251,13 @@ impl Worker {
                     .item(&peer, &super::bundle_node(repair.device), None)
                     .await
                     .map_err(|error| super::lookup_peer(error, &peer, own))?
-                    .ok_or(Error::InvalidBundle)?;
+                    .ok_or_else(|| {
+                        Error::invalid_bundle(
+                            crate::encryption_policy::Mode::Legacy.name(),
+                            &peer,
+                            Some(repair.device),
+                        )
+                    })?;
                 super::wire::parse_bundle(&data)
             }
             .await;
@@ -1325,11 +1345,24 @@ impl Worker {
             } => {
                 let id = message.wire_id.clone();
                 let result = self.send_room(&recipients, &message, &quote, epoch).await;
-                self.sent(recipients.room, id, result);
+                match result {
+                    Ok(skipped) => {
+                        let room = recipients.room.clone();
+                        self.sent(room.clone(), id, Ok(()));
+                        if !skipped.is_empty() {
+                            self.emit(BackendEvent::SentPartially {
+                                peer: room,
+                                id: message.wire_id.clone(),
+                                skipped,
+                            });
+                        }
+                    }
+                    Err(error) => self.sent(recipients.room, id, Err(error)),
+                }
             }
-            Request::ProbeRoom { recipients, reply } => {
+            Request::ProbeRoom { recipients, reply, skip_unreachable } => {
                 if !reply.is_closed() {
-                    let result = self.probe_room(&recipients).await;
+                    let result = self.probe_room(&recipients, skip_unreachable).await;
                     if let Err(error) = &result {
                         eprintln!("Monogram encryption probe Legacy room: {}", error.diagnostic());
                     }

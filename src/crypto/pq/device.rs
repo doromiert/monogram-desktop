@@ -30,14 +30,6 @@ pub struct Device {
     _lock: Option<File>,
 }
 
-pub fn exists(root: &Path, owner: &str) -> bool {
-    root.join("crypto")
-        .join(crate::crypto::lifecycle::hex(&openssl::sha::sha256(
-            owner.as_bytes(),
-        )))
-        .join("pq/device.json")
-        .exists()
-}
 fn identity_pin(classic: &[u8; 33], pq: &[u8]) -> Result<Vec<u8>> {
     if pq.len() != signal::PQ_IDENTITY_PUBLIC_KEY_LEN {
         return Err(Error::Invalid("PQ hybrid identity"));

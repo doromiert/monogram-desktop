@@ -739,9 +739,12 @@ impl Ui {
                 ));
             }
         }
-        self.notice("Deleting selected messages…");
+        // The write is local and normally instant: say something only if it is not.
+        let slow = self.notice_if_slow("Deleting selected messages…", crate::slow_notice::SLOW_AFTER);
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
+            // Dropped on every way out of this block, which cancels or dismisses the notice.
+            let _slow = slow;
             let Some(ui)=weak.upgrade() else{return};
             let (a,p,ids)=(prep.owner.clone(),prep.peer.clone(),prep.ids.clone());
             let result=ui.store.write_snapshot(move |store|store.apply_selected_deletion(&a,&p,&ids,&requests)).await;

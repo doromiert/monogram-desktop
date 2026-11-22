@@ -56,7 +56,15 @@ fn overlay_in(dialog: &adw::Dialog) -> Option<adw::ToastOverlay> {
     Some(overlay)
 }
 
+/// Make a toast show its title as plain text. `AdwToast` parses Pango markup by default, and a
+/// toast title often carries text that is not ours (a server's error or a form label), which could
+/// then include a clickable `<a href>` link. Every toast goes through `show`, which calls this.
+pub fn plain_text(toast: &adw::Toast) {
+    toast.set_use_markup(false);
+}
+
 pub fn show(window: &adw::ApplicationWindow, fallback: &adw::ToastOverlay, toast: adw::Toast) {
+    plain_text(&toast);
     let dialog = window.visible_dialog();
     match route(dialog.as_ref()) {
         Route::Window => fallback.add_toast(toast),
@@ -287,7 +295,7 @@ mod tests {
             reason: "the server connection dropped".into(),
         });
         settle(300);
-        assert!(shows_text(ui.toast.upcast_ref(), "Message not sent: the server connection dropped"));
+        assert!(shows_text(ui.toast.upcast_ref(), "Message not sent. See Message Details."));
         assert!(find_button(ui.toast.upcast_ref(), "Resolve").is_none());
         ui.toast.dismiss_all();
         settle(500);
@@ -298,7 +306,7 @@ mod tests {
             reason: denial("bob@example.org"),
         });
         settle(300);
-        assert!(shows_text(ui.toast.upcast_ref(), &format!("Message not sent: {}", denial("bob@example.org"))));
+        assert!(shows_text(ui.toast.upcast_ref(), "Message not sent. See Message Details."));
         let button = find_button(ui.toast.upcast_ref(), "Resolve").expect("Resolve button on the failed-send toast");
         button.emit_clicked();
         settle(300);
@@ -380,10 +388,12 @@ mod tests {
         let queued = |n: &str| ui.store.message(&owner, PEER, &format!("local-{n}")).unwrap();
 
         ui.fail_queued_selection(&owner, PEER, vec![queued("b")], "The connection is unavailable");
-        assert_toast(&ui, "The connection is unavailable", false);
+        assert_toast(&ui, "Message not sent. See Message Details.", false);
+        assert_eq!(ui.store.message(&owner, PEER, "local-b").unwrap().failure_reason, "The connection is unavailable", "the reason is on the message");
 
         ui.fail_queued_selection(&owner, PEER, vec![queued("a")], &denial(PEER));
-        assert_toast(&ui, &denial(PEER), true);
+        assert_toast(&ui, "Message not sent. See Message Details.", true);
+        assert_eq!(ui.store.message(&owner, PEER, "local-a").unwrap().failure_reason, denial(PEER), "the full reason is on the message");
         ui.window.close();
     }
 
@@ -429,10 +439,12 @@ mod tests {
         let event = |id: &str, reason: &str| BackendEvent::Failed { peer: PEER.into(), id: id.into(), reason: reason.into() };
 
         ui.backend_event(generation, &owner, event("wire-b", "the server connection dropped"));
-        assert_toast(&ui, "Message not sent: the server connection dropped", false);
+        assert_toast(&ui, "Message not sent. See Message Details.", false);
+        assert_eq!(ui.store.message(&owner, PEER, "local-b").unwrap().failure_reason, "the server connection dropped");
 
         ui.backend_event(generation, &owner, event("wire-a", &denial(PEER)));
-        assert_toast(&ui, &format!("Message not sent: {}", denial(PEER)), true);
+        assert_toast(&ui, "Message not sent. See Message Details.", true);
+        assert_eq!(ui.store.message(&owner, PEER, "local-a").unwrap().failure_reason, denial(PEER), "the full reason is on the message");
         ui.window.close();
     }
 

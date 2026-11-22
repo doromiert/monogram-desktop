@@ -62,15 +62,20 @@ pub fn display_nick(nick: &str, own: bool) -> String {
     out
 }
 
-/// The toast for a message that could not be sent. A reason that came from a server says so, so
-/// a server cannot pass its own words off as the app's.
+/// The toast for a message that could not be sent. It is short on purpose: a toast cuts long text
+/// off, so the reason lives in Message Details, which sanitizes it (a reason that came from a server
+/// says so, so a server cannot pass its own words off as the app's).
+pub const NOT_SENT_TOAST: &str = "Message not sent. See Message Details.";
 pub fn failed_send_toast(reason: &str) -> String {
-    let reason = visible(reason, 100);
-    if reason.is_empty() {
+    if visible(reason, 100).is_empty() {
         "Message could not be sent. Retry from its menu.".into()
     } else {
-        format!("Message not sent: {reason}")
+        NOT_SENT_TOAST.into()
     }
+}
+/// The reason stored on a failed message and shown in its details.
+pub fn failure_reason(reason: &str) -> String {
+    visible(reason, 400)
 }
 
 #[cfg(test)]
@@ -107,12 +112,21 @@ mod tests {
     }
 
     #[test]
-    fn failed_send_toasts_are_plain_bounded_and_fall_back_when_empty() {
+    fn failed_send_toasts_are_short_and_fall_back_when_empty() {
         assert_eq!(failed_send_toast(""), "Message could not be sent. Retry from its menu.");
         assert_eq!(failed_send_toast("\u{202e}  "), "Message could not be sent. Retry from its menu.");
-        assert_eq!(failed_send_toast("the server said forbidden"), "Message not sent: the server said forbidden");
-        let long = failed_send_toast(&"a".repeat(5000));
-        assert_eq!(long.chars().count(), "Message not sent: ".chars().count() + 100);
-        assert!(!failed_send_toast("x\u{202e}y\nz").contains(['\u{202e}', '\n']));
+        // The reason never goes in the toast: a toast cuts long text off, so it lives in the details.
+        for reason in ["the server said forbidden".to_owned(), "a".repeat(5000), "x\u{202e}y\nz".to_owned()] {
+            assert_eq!(failed_send_toast(&reason), "Message not sent. See Message Details.");
+        }
+    }
+
+    #[test]
+    fn a_stored_failure_reason_is_plain_and_bounded() {
+        assert_eq!(failure_reason("the server said forbidden"), "the server said forbidden");
+        assert!(failure_reason(&"a".repeat(5000)).chars().count() <= 400);
+        let cleaned = failure_reason("x\u{202e}y\nz\u{0}");
+        assert!(!cleaned.contains(['\u{202e}', '\n', '\u{0}']), "{cleaned:?}");
+        assert_eq!(failure_reason(" \n "), "");
     }
 }
