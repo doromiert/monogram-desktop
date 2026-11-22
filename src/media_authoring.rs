@@ -1464,4 +1464,17 @@ mod tests {
         let broken = Mark::Text { rect: Rect { x: 0, y: 0, width: 4, height: 2 }, color: [255, 0, 0], mask: "AAAA".into() };
         assert!(!paint(&mut rgba, 8, 8, &[broken]));
     }
+
+    #[test]
+    fn a_hairline_pen_stroke_is_one_pixel_and_the_boldest_is_the_full_size() {
+        let (w, h) = (90, 50);
+        let mut rgba = blank(w, h);
+        // The levels the editor gives for a feather touch and for a firm press (3 and 100 percent).
+        assert!(paint(&mut rgba, w, h, &[pen(&[(5, 25), (85, 25)], &[8, 255], 40)]));
+        let thin = height_of_line_at(&rgba, w, h, 8);
+        let bold = height_of_line_at(&rgba, w, h, 82);
+        assert!(thin >= 1 && thin <= 3, "the hairline end: {thin}");
+        assert!(bold >= 36 && bold <= 41, "the boldest end is the full 40: {bold}");
+        assert!(bold >= 12 * thin, "a big swing: {thin} to {bold}");
+    }
 }

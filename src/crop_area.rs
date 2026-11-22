@@ -39,11 +39,29 @@ impl Tool {
     }
 }
 
-/// A pen's pressure (0 to 1) as the 1 to 255 level a freehand line stores. A feather-light touch
-/// still leaves a visible line (15 percent), and an unreadable value counts as full pressure.
+/// How a pen's pressure becomes line width, tuned to feel like ink: a feather touch is a hairline
+/// and a firm press is the boldest, with a big swing in between. `GAIN` makes an ordinary firm
+/// press (about two thirds of what a tablet can report) already count as full, `CURVE` keeps the
+/// light end thin for longer before the line swells, and `FLOOR` is the thinnest width as a share
+/// of the chosen size (the helper never draws under one pixel).
+pub const PRESSURE_GAIN: f64 = 1.5;
+pub const PRESSURE_CURVE: f64 = 2.2;
+pub const PRESSURE_FLOOR: f64 = 0.03;
+
+/// A pen's pressure (0 to 1) as the 1 to 255 level a freehand line stores: that share of the
+/// chosen size is how wide the line is there. An unreadable value counts as full pressure.
 pub fn pressure_level(pressure: f64) -> u8 {
     let pressure = if pressure.is_finite() { pressure.clamp(0., 1.) } else { 1. };
-    ((0.15 + 0.85 * pressure) * 255.).round().clamp(1., 255.) as u8
+    let pushed = (pressure * PRESSURE_GAIN).min(1.);
+    let width = PRESSURE_FLOOR + (1. - PRESSURE_FLOOR) * pushed.powf(PRESSURE_CURVE);
+    (width * 255.).round().clamp(1., 255.) as u8
+}
+
+/// The pressure to use for a new reading: the reading eased toward from the last one, so a
+/// jittery sensor does not make the line ripple, while a real change still shows within a couple
+/// of points.
+pub fn smooth_pressure(previous: f64, reading: f64) -> f64 {
+    previous + (reading - previous) * 0.6
 }
 
 /// Most points a stroke in progress keeps, so a long drag cannot grow without bound.
@@ -109,6 +127,8 @@ mod imp {
         /// Some point of the line so far came with a pressure reading. A line where none did (a
         /// mouse) keeps no pressure at all, so it stays one width.
         pub any_pressure: Cell<bool>,
+        /// The smoothed pressure of the line being drawn.
+        pub eased_pressure: Cell<f64>,
     }
 
     #[glib::object_subclass]
@@ -390,6 +410,7 @@ impl CropArea {
             let start = self.view_point(x, y);
             self.imp().sketch.set(start);
             self.imp().pending.replace(None);
+            self.imp().eased_pressure.set(pressure.unwrap_or(1.));
             self.imp().pending_pressure.replace(vec![pressure.map_or(255, pressure_level)]);
             self.imp().any_pressure.set(pressure.is_some());
             return;
@@ -431,7 +452,14 @@ impl CropArea {
                         path.push(here);
                         // One level per point: the reading if there is one, else the last one.
                         let mut levels = self.imp().pending_pressure.borrow_mut();
-                        let level = pressure.map_or_else(|| *levels.last().unwrap_or(&255), pressure_level);
+                        let level = match pressure {
+                            Some(reading) => {
+                                let eased = smooth_pressure(self.imp().eased_pressure.get(), reading);
+                                self.imp().eased_pressure.set(eased);
+                                pressure_level(eased)
+                            }
+                            None => *levels.last().unwrap_or(&255),
+                        };
                         levels.push(level);
                         if pressure.is_some() {
                             self.imp().any_pressure.set(true);
@@ -466,6 +494,8 @@ impl CropArea {
         if !imp.any_pressure.replace(false) {
             levels.clear();
         }
+        // Like a pen lifting off the paper: the ends of a long line come to a finer point.
+        let levels = crate::picture_editor::pen_taper(&levels);
         if let Some(shape) = imp.pending.take() {
             let (color, weight) = self.pen();
             self.edit(|editor| {
@@ -966,10 +996,10 @@ mod tests {
     #[test]
     fn a_pens_pressure_becomes_a_level_that_is_never_zero_and_never_exceeds_a_byte() {
         assert_eq!(pressure_level(1.), 255);
-        assert_eq!(pressure_level(0.), 38, "a feather touch still leaves a line");
+        assert_eq!(pressure_level(0.), 8, "a feather touch is a hairline, 3 percent of the size");
         assert!(pressure_level(0.5) > pressure_level(0.25) && pressure_level(0.25) > pressure_level(0.));
         assert_eq!(pressure_level(7.), 255, "out of range is clamped");
-        assert_eq!(pressure_level(-3.), 38);
+        assert_eq!(pressure_level(-3.), 8);
         assert_eq!(pressure_level(f64::NAN), 255, "an unreadable value counts as full");
         assert_eq!(pressure_level(f64::INFINITY), 255);
         let mut last = 0;
@@ -995,7 +1025,14 @@ mod tests {
         let mark = area.editor().unwrap().marks()[0].clone();
         let ViewShape::Freehand(points) = &mark.shape else { panic!("a stroke") };
         assert_eq!(mark.pressure.len(), points.len(), "one level per point");
-        assert_eq!(mark.pressure, [pressure_level(0.1), pressure_level(0.3), pressure_level(0.6), pressure_level(1.0), pressure_level(0.5)]);
+        // The first point is the reading as it came; each later one is eased from the last.
+        let mut eased = 0.1;
+        let mut expected = vec![pressure_level(0.1)];
+        for reading in [0.3, 0.6, 1.0, 0.5] {
+            eased = smooth_pressure(eased, reading);
+            expected.push(pressure_level(eased));
+        }
+        assert_eq!(mark.pressure, expected);
     }
 
     #[gtk::test]
@@ -1025,7 +1062,8 @@ mod tests {
         area.update_drag_pressed(60. * scale, 10. * scale, None);
         area.finish_sketch();
         let pressure = area.editor().unwrap().marks()[0].pressure.clone();
-        assert_eq!(pressure, [pressure_level(0.4), pressure_level(0.9), pressure_level(0.9)]);
+        let eased = smooth_pressure(0.4, 0.9);
+        assert_eq!(pressure, [pressure_level(0.4), pressure_level(eased), pressure_level(eased)], "a missing reading repeats the last");
         area.set_tool(Tool::Arrow);
         area.begin_sketch(left + 10. * scale, top + 10. * scale, Some(0.5));
         area.update_drag_pressed(80. * scale, 40. * scale, Some(0.5));
@@ -1210,11 +1248,56 @@ mod tests {
         area.update_drag_pressed(400. * scale, 80. * scale, Some(0.9));
         area.finish_sketch();
         let mark = area.editor().unwrap().marks()[0].clone();
-        assert_eq!(mark.pressure, [255, pressure_level(0.4), pressure_level(0.9)], "the unreadable first point counts as full");
+        let first = smooth_pressure(1., 0.4);
+        let second = smooth_pressure(first, 0.9);
+        assert_eq!(mark.pressure, [255, pressure_level(first), pressure_level(second)], "the unreadable first point counts as full");
         // And a stroke that never had any reading carries none, as before.
         area.begin_sketch(left + 100. * scale, top + 500. * scale, None);
         area.update_drag_pressed(300. * scale, 0., None);
         area.finish_sketch();
         assert!(area.editor().unwrap().marks()[1].pressure.is_empty());
+    }
+
+    #[test]
+    fn the_pressure_response_swings_from_a_hairline_to_the_boldest() {
+        let light = f64::from(pressure_level(0.1));
+        let medium = f64::from(pressure_level(0.4));
+        let firm = f64::from(pressure_level(0.67));
+        assert!(light <= 20., "a light touch is thin: {light}");
+        assert!(firm >= 250., "an ordinary firm press is already the boldest: {firm}");
+        assert!(firm / light >= 12., "thin to boldest is a big swing: {light} to {firm}");
+        assert!(medium > 3. * light && medium < 0.6 * firm, "with a real middle: {light} {medium} {firm}");
+        assert_eq!(pressure_level(1.), 255, "and never wider than asked for");
+        let mut last = 0;
+        let mut steps = Vec::new();
+        for step in 0..=100 {
+            let level = pressure_level(f64::from(step) / 100.);
+            assert!(level >= last, "never narrower as you press harder");
+            last = level;
+            steps.push(level);
+        }
+        let distinct: std::collections::BTreeSet<_> = steps.iter().collect();
+        assert!(distinct.len() > 40, "plenty of steps between the extremes: {}", distinct.len());
+    }
+
+    #[test]
+    fn the_light_end_stays_thin_for_longer_than_a_straight_line_would() {
+        // A straight 3-to-100 percent ramp would give half the size at half pressure.
+        assert!(f64::from(pressure_level(0.25)) < 0.3 * 255., "{}", pressure_level(0.25));
+        assert!(f64::from(pressure_level(0.5)) < 0.7 * 255., "{}", pressure_level(0.5));
+    }
+
+    #[test]
+    fn a_new_reading_is_eased_from_the_last_but_a_real_change_shows_quickly() {
+        assert_eq!(smooth_pressure(0.5, 0.5), 0.5, "steady stays steady");
+        let jitter = smooth_pressure(0.5, 0.55);
+        assert!(jitter > 0.5 && jitter < 0.55, "a small wobble is softened: {jitter}");
+        let mut level = 0.1;
+        for _ in 0..3 {
+            level = smooth_pressure(level, 0.9);
+        }
+        assert!(level > 0.84, "three points into a hard press it is nearly there: {level}");
+        assert_eq!(smooth_pressure(0.2, 0.2), 0.2);
+        assert!(smooth_pressure(1., 0.) > 0. && smooth_pressure(0., 1.) < 1., "never overshoots");
     }
 }

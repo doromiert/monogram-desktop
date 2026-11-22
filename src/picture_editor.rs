@@ -92,6 +92,27 @@ pub const MAX_TEXT_CHARS: usize = 200;
 pub const MAX_TEXT_PIXELS: u64 = 4_000_000;
 pub const MAX_TEXT_TOTAL: u64 = 8_000_000;
 
+/// How much the first and last points of a long pen line are thinned, nearest the end first, so it
+/// starts and finishes on a finer point like ink. Only for lines of at least `TAPER_MIN_POINTS`; a
+/// short squiggle keeps what the pen gave.
+pub const TAPER: [f64; 4] = [0.35, 0.6, 0.8, 0.92];
+pub const TAPER_MIN_POINTS: usize = 8;
+
+/// `levels` with both ends tapered (see `TAPER`). The same length, every level at least 1.
+pub fn pen_taper(levels: &[u8]) -> Vec<u8> {
+    let mut out = levels.to_vec();
+    if out.len() < TAPER_MIN_POINTS {
+        return out;
+    }
+    let last = out.len() - 1;
+    for (distance, factor) in TAPER.iter().enumerate() {
+        for index in [distance, last - distance] {
+            out[index] = ((f64::from(levels[index]) * factor).round() as u8).max(1);
+        }
+    }
+    out
+}
+
 /// `alpha` (`width` x `height`) turned clockwise by `turns` quarter turns, with its new size.
 pub fn rotate_alpha(alpha: &[u8], width: u32, height: u32, turns: u8) -> (u32, u32, Vec<u8>) {
     let (w, h) = (width as usize, height as usize);
@@ -1487,5 +1508,22 @@ mod tests {
         assert_eq!(marks.len(), 2);
         assert!(matches!(&marks[0], Mark::Text { rect: Rect { x: 1, y: 1, width: 4, height: 3 }, .. }));
         assert!(matches!(&marks[1], Mark::Arrow { from: (5, 5), to: (30, 20), .. }));
+    }
+
+    #[test]
+    fn a_long_pen_line_ends_on_a_finer_point_and_a_short_one_is_left_alone() {
+        let steady = vec![200u8; 12];
+        let tapered = pen_taper(&steady);
+        assert_eq!(tapered.len(), 12);
+        assert_eq!(&tapered[4..8], &[200, 200, 200, 200], "the middle is untouched");
+        assert!(tapered[0] < tapered[1] && tapered[1] < tapered[2] && tapered[2] < tapered[3] && tapered[3] < 200, "{tapered:?}");
+        assert_eq!(tapered[0], 70, "35 percent at the very tip");
+        assert_eq!(tapered[11], tapered[0], "the same at the other end");
+        assert_eq!(tapered[10], tapered[1]);
+        let short = vec![200u8; TAPER_MIN_POINTS - 1];
+        assert_eq!(pen_taper(&short), short, "too short to taper");
+        assert_eq!(pen_taper(&[]), Vec::<u8>::new());
+        assert!(pen_taper(&vec![1u8; 20]).iter().all(|level| *level >= 1), "never to nothing");
+        assert_eq!(pen_taper(&vec![255u8; 8]).len(), 8, "exactly the minimum length");
     }
 }

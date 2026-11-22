@@ -128,9 +128,13 @@ geometry is rounded to even values. Trims apply to the source timeline and must 
 
    **Marks (done: square, circle, arrow and freehand).** Choosing a tool from the strip and dragging
    on the picture draws that shape in the chosen colour and size: a square or circle in the dragged
-   box, an arrow from where the drag began to where it ended, a freehand line along the pointer. A pen's pressure sets the width along a freehand line (15 to
-   100 percent of the chosen size, stored per point in `Mark::Freehand::pressure`); a mouse draws one
-   width.
+   box, an arrow from where the drag began to where it ended, a freehand line along the pointer. A pen's pressure sets the width along a freehand line, from a
+   hairline (3 percent of the chosen size, never under one pixel) for a feather touch to the full
+   chosen size, which an ordinary firm press already reaches (`PRESSURE_GAIN` 1.5, `PRESSURE_CURVE`
+   2.2, `PRESSURE_FLOOR` 0.03 in `crop_area.rs`, one place to tune the feel). The reading is eased
+   from point to point so a jittery sensor does not ripple the line, and the first and last four
+   points of a long line are thinned (`pen_taper`) so it starts and ends on a finer point. The
+   width is stored per point in `Mark::Freehand::pressure`; a mouse draws one width.
    "Mark the Crop Area" (in the Crop menu) places the chosen shape without a pointer (a square or
    circle around the crop, an arrow across it from corner to corner, a line along its edge) and
    Undo in the header takes back the newest; Redo appears next to it only after an undo and goes
