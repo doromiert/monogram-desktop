@@ -1527,29 +1527,6 @@ impl Ui {
         self.input_scroll.set_child(Some(&self.composer));
         self.input_scroll
             .set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-        // A line holding only emoji is a pixel shorter than one mixing them with letters (the
-        // emoji font's line metrics differ), so the box used to jump by a pixel when the first
-        // emoji went into an empty message. One line is never shorter than the tallest kind.
-        let pin_line_height = {
-            let (view, scroll) = (self.composer.downgrade(), self.input_scroll.downgrade());
-            move || {
-                if let (Some(view), Some(scroll)) = (view.upgrade(), scroll.upgrade()) {
-                    let line = view.create_pango_layout(Some("Åg😀👍🏽❤️")).pixel_size().1;
-                    scroll.set_min_content_height(line + view.top_margin() + view.bottom_margin());
-                }
-            }
-        };
-        pin_line_height();
-        self.composer.connect_map({
-            let pin = pin_line_height.clone();
-            move |_| pin()
-        });
-        if let Some(settings) = gtk::Settings::default() {
-            settings.connect_gtk_font_name_notify({
-                let pin = pin_line_height.clone();
-                move |_| pin()
-            });
-        }
         let input = gtk::Overlay::builder()
             .child(&self.input_scroll)
             .hexpand(true)
