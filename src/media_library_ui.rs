@@ -96,6 +96,13 @@ fn schedule_lottie_frame(
         let cancel_after = cancel.clone();
         glib::spawn_future_local(async move {
             let permit = lottie_permit().await;
+            // The tile may have scrolled away while this waited for a slot: do not spend one on a
+            // frame nobody will see, and close its decoder off the main thread.
+            if serial_after.get() != expected || cancel_after.is_cancelled() || picture_after.upgrade().is_none() {
+                drop(permit);
+                gio::spawn_blocking(move || drop(decoder));
+                return;
+            }
             let result = gio::spawn_blocking(move || {
                 let mut decoder = decoder;
                 let frame = decoder.frame();
@@ -144,6 +151,26 @@ fn start_lottie(
     let source_frames = source.clone();
     glib::spawn_future_local(async move {
         let permit = lottie_permit().await;
+        // This waited its turn behind every other tile. Jumping to the end of a long pack maps and
+        // unmaps hundreds of tiles on the way, and each of those is still in the queue: without
+        // this check every one of them would decode in turn before the tiles on screen now.
+        // A tile that has gone is skipped here, in microseconds, without opening anything.
+        if serial.get() != expected || cancel.is_cancelled() {
+            drop(permit);
+            return;
+        }
+        let Some(live) = picture_weak.upgrade() else {
+            drop(permit);
+            return;
+        };
+        // Mapped but not in view (a row just beyond the edge): wait until it is, rather than
+        // spending a decoder on it ahead of a tile you can see.
+        if !lottie_visible(&live, &scroll_weak) {
+            drop(permit);
+            wait_lottie_visible(picture_weak, spinner_weak, scroll_weak, source_frames, serial, expected);
+            return;
+        }
+        drop(live);
         let worker_cancel = cancel.clone();
         let result = gio::spawn_blocking(move || {
             let input = source()?;
@@ -3500,5 +3527,143 @@ mod gif_native_tests {
         println!(
             "FAVORITE DRAG PASS GIFs and actual database reload: membership and recents unchanged, no attachment staged"
         );
+    }
+}
+
+#[cfg(test)]
+mod lottie_queue_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn settle(milliseconds: u64) {
+        let context = glib::MainContext::default();
+        let until = std::time::Instant::now() + Duration::from_millis(milliseconds);
+        while std::time::Instant::now() < until {
+            while context.iteration(false) {}
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// A window with `count` 4 px pictures in a grid, all inside the visible area.
+    fn grid(count: usize) -> (gtk::Window, gtk::ScrolledWindow, Vec<gtk::Picture>, gtk::Spinner) {
+        gtk::init().expect("display");
+        let grid = gtk::Grid::new();
+        let mut pictures = Vec::new();
+        for index in 0..count {
+            let picture = gtk::Picture::new();
+            picture.set_size_request(4, 4);
+            grid.attach(&picture, (index % 10) as i32, (index / 10) as i32, 1, 1);
+            pictures.push(picture);
+        }
+        let scroll = gtk::ScrolledWindow::builder().child(&grid).build();
+        let window = gtk::Window::builder().default_width(300).default_height(300).child(&scroll).build();
+        window.present();
+        settle(300);
+        (window, scroll, pictures, gtk::Spinner::new())
+    }
+
+    fn counting_source(calls: &Arc<AtomicUsize>) -> LottieSource {
+        let calls = calls.clone();
+        Arc::new(move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err("a test source that opens nothing")
+        })
+    }
+
+    /// Take every decoder slot so later starts have to queue, as they do while a pack scrolls.
+    fn hold_all_slots() -> Vec<tokio::sync::OwnedSemaphorePermit> {
+        let held = Rc::new(RefCell::new(Vec::new()));
+        for _ in 0..4 {
+            let held = held.clone();
+            glib::spawn_future_local(async move {
+                held.borrow_mut().push(lottie_permit().await);
+            });
+        }
+        settle(100);
+        assert_eq!(held.borrow().len(), 4, "all four slots are taken");
+        Rc::try_unwrap(held).ok().unwrap().into_inner()
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn tiles_that_scrolled_away_while_queued_are_skipped_so_the_ones_in_view_are_not_held_up() {
+        let (_window, scroll, pictures, spinner) = grid(50);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let slots = hold_all_slots();
+        let serials: Vec<Rc<Cell<u64>>> = pictures.iter().map(|_| Rc::new(Cell::new(0))).collect();
+        for (picture, serial) in pictures.iter().zip(&serials) {
+            start_lottie(picture, &spinner, &scroll, counting_source(&calls), serial.clone());
+        }
+        // A quick jump to the end: all but the last tile are unmapped again, which is what bumps
+        // the serial, while their decodes are still waiting for a slot.
+        for serial in &serials[..49] {
+            serial.set(serial.get().wrapping_add(1));
+        }
+        drop(slots);
+        settle(800);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "only the tile still on screen opened its sticker, not all 50");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn a_tile_that_is_still_wanted_is_not_skipped_and_starts_as_soon_as_a_slot_frees() {
+        let (_window, scroll, pictures, spinner) = grid(8);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let slots = hold_all_slots();
+        let serials: Vec<Rc<Cell<u64>>> = pictures.iter().map(|_| Rc::new(Cell::new(0))).collect();
+        for (picture, serial) in pictures.iter().zip(&serials) {
+            start_lottie(picture, &spinner, &scroll, counting_source(&calls), serial.clone());
+        }
+        settle(100);
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "nothing opens while every slot is busy");
+        drop(slots);
+        settle(800);
+        assert_eq!(calls.load(Ordering::SeqCst), 8, "every tile that stayed in view got its turn");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn a_tile_that_was_destroyed_while_waiting_does_not_open_anything() {
+        let (window, scroll, pictures, spinner) = grid(4);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let slots = hold_all_slots();
+        let serial = Rc::new(Cell::new(0));
+        start_lottie(&pictures[0], &spinner, &scroll, counting_source(&calls), serial);
+        // Take the whole tree down: the window lets go of the scroller, and nothing else holds it.
+        window.set_child(gtk::Widget::NONE);
+        drop(pictures);
+        drop(scroll);
+        settle(100);
+        drop(slots);
+        settle(500);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a native display"]
+    fn a_tile_beyond_the_edge_waits_for_view_instead_of_taking_a_slot_ahead_of_visible_ones() {
+        gtk::init().expect("display");
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let mut pictures = Vec::new();
+        for _ in 0..40 {
+            let picture = gtk::Picture::new();
+            picture.set_size_request(60, 60);
+            column.append(&picture);
+            pictures.push(picture);
+        }
+        let scroll = gtk::ScrolledWindow::builder().child(&column).build();
+        let window = gtk::Window::builder().default_width(200).default_height(200).child(&scroll).build();
+        window.present();
+        settle(300);
+        let spinner = gtk::Spinner::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let far = Rc::new(Cell::new(0));
+        start_lottie(&pictures[39], &spinner, &scroll, counting_source(&calls), far);
+        settle(600);
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "the 40th tile is far below the view and opens nothing yet");
+        let near = Rc::new(Cell::new(0));
+        start_lottie(&pictures[0], &spinner, &scroll, counting_source(&calls), near);
+        settle(600);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the tile in view opens at once");
     }
 }
