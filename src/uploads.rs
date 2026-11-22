@@ -790,7 +790,7 @@ pub async fn run(
         height: None,
         hashes: BTreeMap::from([("sha-256".into(), prepared.hash)]),
         manual: false,
-        sticker: draft.sticker,
+        sticker: draft.sticker, voice: draft.voice,
     };
     if !attachment.valid_outgoing(encrypted) {
         return Err("Invalid uploaded attachment");
@@ -1233,6 +1233,7 @@ mod tests {
             name: "file.txt".into(),
             error: None,
             sticker: false,
+            voice: false,
             local_sticker: None,
         };
         let target = directory.0.join("account/uploads/snapshot.input");

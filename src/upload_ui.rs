@@ -27,7 +27,7 @@ pub(crate) fn pending_media(message: &Message) -> Option<crate::file_share::Atta
         height: None,
         hashes: Default::default(),
         manual: true,
-        sticker: draft.sticker,
+        sticker: draft.sticker, voice: false,
     };
     file.media_candidate().then_some(file)
 }
@@ -550,7 +550,8 @@ impl Ui {
                     name: filename,
                     error: None,
                     sticker: false,
-                    local_sticker: None,
+                voice: false,
+                local_sticker: None,
                 }),
                 ..Default::default()
             };
@@ -984,6 +985,7 @@ mod tests {
                 name: "fixture.png".into(),
                 error: None,
                 sticker: false,
+                voice: false,
                 local_sticker: None,
             },
         };
@@ -1021,7 +1023,8 @@ mod tests {
                 name: "input.txt".into(),
                 error: None,
                 sticker: false,
-                    local_sticker: None,
+                voice: false,
+                local_sticker: None,
             }),
             unsupported_attachment: true,
             ..Default::default()

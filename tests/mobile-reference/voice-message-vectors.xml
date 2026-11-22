@@ -1,0 +1,280 @@
+<cases xmlns:ns0="jabber:client" xmlns:ns1="urn:xmpp:sfs:0" xmlns:ns2="urn:xmpp:file:metadata:0" xmlns:ns3="urn:monogram:voice-message:0" xmlns:ns4="http://jabber.org/protocol/url-data" xmlns:ns5="urn:monogram:voice-message:0:other" xmlns:ns6="urn:xmpp:stickers:0" xmlns="urn:monogram:voice-message:test">
+  <case name="voice-plain" voice="true" context="plain" attachment="true">
+    <ns0:message from="alice@example.org/phone" to="bob@example.org" type="chat" id="voice-plain">
+      <ns0:body>https://files.example.org/opaque.ogg</ns0:body>
+      <ns1:file-sharing disposition="inline">
+        <ns2:file>
+          <ns2:media-type>audio/ogg; codecs=opus</ns2:media-type>
+          <ns2:name>voice-anything.ogg</ns2:name>
+          <ns2:size>123</ns2:size>
+          <ns2:length>3500</ns2:length>
+          <ns3:voice-message />
+        </ns2:file>
+        <ns1:sources>
+          <ns4:url-data target="https://files.example.org/opaque.ogg" />
+        </ns1:sources>
+      </ns1:file-sharing>
+    </ns0:message>
+  </case>
+  <case name="voice-protected" voice="true" context="protected" attachment="true">
+    <ns0:message from="alice@example.org/phone" to="bob@example.org" type="chat" id="voice-protected">
+      <ns0:body>aesgcm://files.example.org/opaque.ogg#0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</ns0:body>
+      <ns1:file-sharing disposition="inline">
+        <ns2:file>
+          <ns2:media-type>audio/ogg; codecs=opus</ns2:media-type>
+          <ns2:name>voice-anything.ogg</ns2:name>
+          <ns2:size>123</ns2:size>
+          <ns2:length>3500</ns2:length>
+          <ns3:voice-message />
+        </ns2:file>
+        <ns1:sources>
+          <ns4:url-data target="aesgcm://files.example.org/opaque.ogg#0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" />
+        </ns1:sources>
+      </ns1:file-sharing>
+    </ns0:message>
+  </case>
+  <case name="ordinary-audio" voice="false" context="plain" attachment="true">
+    <ns0:message from="alice@example.org/phone" to="bob@example.org" type="chat" id="ordinary-audio">
+      <ns0:body>https://files.example.org/opaque.ogg</ns0:body>
+      <ns1:file-sharing disposition="inline">
+        <ns2:file>
+          <ns2:media-type>audio/ogg; codecs=opus</ns2:media-type>
+          <ns2:name>voice-anything.ogg</ns2:name>
+          <ns2:size>123</ns2:size>
+          <ns2:length>3500</ns2:length>
+        </ns2:file>
+        <ns1:sources>
+          <ns4:url-data target="https://files.example.org/opaque.ogg" />
+        </ns1:sources>
+      </ns1:file-sharing>
+    </ns0:message>
+  </case>
+  <case name="lookalike" voice="false" context="plain" attachment="true">
+    <ns0:message from="alice@example.org/phone" to="bob@example.org" type="chat" id="lookalike">
+      <ns0:body>https://files.example.org/opaque.ogg</ns0:body>
+      <ns1:file-sharing disposition="inline">
+        <ns2:file>
+          <ns2:media-type>audio/ogg; codecs=opus</ns2:media-type>
+          <ns2:name>voice-anything.ogg</ns2:name>
+          <ns2:size>123</ns2:size>
+          <ns2:length>3500</ns2:length>
+          <ns5:voice-message />
+        </ns2:file>
+        <ns1:sources>
+          <ns4:url-data target="https://files.example.org/opaque.ogg" />
+        </ns1:sources>
+      </ns1:file-sharing>
+    </ns0:message>
+  </case>
+  <case name="duplicate" voice="false" context="plain" attachment="true">
+    <ns0:message from="alice@example.org/phone" to="bob@example.org" type="chat" id="duplicate">
+      <ns0:body>https://files.example.org/opaque.ogg</ns0:body>
+      <ns1:file-sharing disposition="inline">
+        <ns2:file>
+          <ns2:media-type>audio/ogg; codecs=opus</ns2:media-type>
+          <ns2:name>voice-anything.ogg</ns2:name>
+          <ns2:size>123</ns2:size>
+          <ns2:length>3500</ns2:length>
+          <ns3:voice-message />
+          <ns3:voice-message />
+        </ns2:file>
+        <ns1:sources>
+          <ns4:url-data target="https://files.example.org/opaque.ogg" />
+        </ns1:sources>
+      </ns1:file-sharing>
+    </ns0:message>
+  </case>
+  <case name="attribute" voice="false" context="plain" attachment="true">
+    <ns0:message from="alice@example.org/phone" to="bob@example.org" type="chat" id="attribute">
+      <ns0:body>https://files.example.org/opaque.ogg</ns0:body>
+      <ns1:file-sharing disposition="inline">
+        <ns2:file>
+          <ns2:media-type>audio/ogg; codecs=opus</ns2:media-type>
+          <ns2:name>voice-anything.ogg</ns2:name>
+          <ns2:size>123</ns2:size>
+          <ns2:length>3500</ns2:length>
+          <ns3:voice-message value="true" />
+        </ns2:file>
+        <ns1:sources>
+          <ns4:url-data target="https://files.example.org/opaque.ogg" />
+        </ns1:sources>
+      </ns1:file-sharing>
+    </ns0:message>
+  </case>
+  <case name="text" voice="false" context="plain" attachment="true">
+    <ns0:message from="alice@example.org/phone" to="bob@example.org" type="chat" id="text">
+      <ns0:body>https://files.example.org/opaque.ogg</ns0:body>
+      <ns1:file-sharing disposition="inline">
+        <ns2:file>
+          <ns2:media-type>audio/ogg; codecs=opus</ns2:media-type>
+          <ns2:name>voice-anything.ogg</ns2:name>
+          <ns2:size>123</ns2:size>
+          <ns2:length>3500</ns2:length>
+          <ns3:voice-message>text</ns3:voice-message>
+        </ns2:file>
+        <ns1:sources>
+          <ns4:url-data target="https://files.example.org/opaque.ogg" />
+        </ns1:sources>
+      </ns1:file-sharing>
+    </ns0:message>
+  </case>
+  <case name="child" voice="false" context="plain" attachment="true">
+    <ns0:message from="alice@example.org/phone" to="bob@example.org" type="chat" id="child">
+      <ns0:body>https://files.example.org/opaque.ogg</ns0:body>
+      <ns1:file-sharing disposition="inline">
+        <ns2:file>
+          <ns2:media-type>audio/ogg; codecs=opus</ns2:media-type>
+          <ns2:name>voice-anything.ogg</ns2:name>
+          <ns2:size>123</ns2:size>
+          <ns2:length>3500</ns2:length>
+          <ns3:voice-message>
+            <ns3:child />
+          </ns3:voice-message>
+        </ns2:file>
+        <ns1:sources>
+          <ns4:url-data target="https://files.example.org/opaque.ogg" />
+        </ns1:sources>
+      </ns1:file-sharing>
+    </ns0:message>
+  </case>
+  <case name="outer-only" voice="false" context="plain" attachment="true">
+    <ns0:message from="alice@example.org/phone" to="bob@example.org" type="chat" id="outer-only">
+      <ns0:body>https://files.example.org/opaque.ogg</ns0:body>
+      <ns1:file-sharing disposition="inline">
+        <ns2:file>
+          <ns2:media-type>audio/ogg; codecs=opus</ns2:media-type>
+          <ns2:name>voice-anything.ogg</ns2:name>
+          <ns2:size>123</ns2:size>
+          <ns2:length>3500</ns2:length>
+        </ns2:file>
+        <ns1:sources>
+          <ns4:url-data target="https://files.example.org/opaque.ogg" />
+        </ns1:sources>
+      </ns1:file-sharing>
+      <ns3:voice-message />
+    </ns0:message>
+  </case>
+  <case name="manual" voice="false" context="plain" attachment="true">
+    <ns0:message from="alice@example.org/phone" to="bob@example.org" type="chat" id="manual">
+      <ns0:body>https://files.example.org/opaque.ogg</ns0:body>
+      <ns1:file-sharing disposition="attachment">
+        <ns2:file>
+          <ns2:media-type>audio/ogg; codecs=opus</ns2:media-type>
+          <ns2:name>voice-anything.ogg</ns2:name>
+          <ns2:size>123</ns2:size>
+          <ns2:length>3500</ns2:length>
+          <ns3:voice-message />
+        </ns2:file>
+        <ns1:sources>
+          <ns4:url-data target="https://files.example.org/opaque.ogg" />
+        </ns1:sources>
+      </ns1:file-sharing>
+    </ns0:message>
+  </case>
+  <case name="not-audio" voice="false" context="plain" attachment="true">
+    <ns0:message from="alice@example.org/phone" to="bob@example.org" type="chat" id="not-audio">
+      <ns0:body>https://files.example.org/opaque.ogg</ns0:body>
+      <ns1:file-sharing disposition="inline">
+        <ns2:file>
+          <ns2:media-type>video/ogg</ns2:media-type>
+          <ns2:name>voice-anything.ogg</ns2:name>
+          <ns2:size>123</ns2:size>
+          <ns2:length>3500</ns2:length>
+          <ns3:voice-message />
+        </ns2:file>
+        <ns1:sources>
+          <ns4:url-data target="https://files.example.org/opaque.ogg" />
+        </ns1:sources>
+      </ns1:file-sharing>
+    </ns0:message>
+  </case>
+  <case name="sticker" voice="false" context="plain" attachment="true">
+    <ns0:message from="alice@example.org/phone" to="bob@example.org" type="chat" id="sticker">
+      <ns0:body>https://files.example.org/opaque.ogg</ns0:body>
+      <ns1:file-sharing disposition="inline">
+        <ns2:file>
+          <ns2:media-type>audio/ogg; codecs=opus</ns2:media-type>
+          <ns2:name>voice-anything.ogg</ns2:name>
+          <ns2:size>123</ns2:size>
+          <ns2:length>3500</ns2:length>
+          <ns3:voice-message />
+        </ns2:file>
+        <ns1:sources>
+          <ns4:url-data target="https://files.example.org/opaque.ogg" />
+        </ns1:sources>
+      </ns1:file-sharing>
+      <ns6:sticker />
+    </ns0:message>
+  </case>
+  <case name="case-insensitive-audio" voice="true" context="plain" attachment="true">
+    <ns0:message from="alice@example.org/phone" to="bob@example.org" type="chat" id="case-insensitive-audio">
+      <ns0:body>https://files.example.org/opaque.ogg</ns0:body>
+      <ns1:file-sharing disposition="inline">
+        <ns2:file>
+          <ns2:media-type>Audio/OGG</ns2:media-type>
+          <ns2:name>voice-anything.ogg</ns2:name>
+          <ns2:size>123</ns2:size>
+          <ns2:length>3500</ns2:length>
+          <ns3:voice-message />
+        </ns2:file>
+        <ns1:sources>
+          <ns4:url-data target="https://files.example.org/opaque.ogg" />
+        </ns1:sources>
+      </ns1:file-sharing>
+    </ns0:message>
+  </case>
+  <case name="legacy-outer-forgery" voice="false" context="legacy" attachment="true">
+    <ns0:message from="alice@example.org/phone" to="bob@example.org" type="chat" id="legacy-outer-forgery">
+      <ns0:body>aesgcm://files.example.org/opaque.ogg#0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</ns0:body>
+      <ns1:file-sharing disposition="inline">
+        <ns2:file>
+          <ns2:media-type>audio/ogg; codecs=opus</ns2:media-type>
+          <ns2:name>voice-anything.ogg</ns2:name>
+          <ns2:size>123</ns2:size>
+          <ns2:length>3500</ns2:length>
+          <ns3:voice-message />
+        </ns2:file>
+        <ns1:sources>
+          <ns4:url-data target="aesgcm://files.example.org/opaque.ogg#0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" />
+        </ns1:sources>
+      </ns1:file-sharing>
+    </ns0:message>
+  </case>
+  <case name="quoted-marker" voice="false" context="plain" attachment="true">
+    <ns0:message from="alice@example.org/phone" to="bob@example.org" type="chat" id="quoted-marker">
+      <ns0:body>https://files.example.org/opaque.ogg</ns0:body>
+      <ns1:file-sharing disposition="inline">
+        <ns2:file>
+          <ns2:media-type>audio/ogg; codecs=opus</ns2:media-type>
+          <ns2:name>voice-anything.ogg</ns2:name>
+          <ns2:size>123</ns2:size>
+          <ns2:length>3500</ns2:length>
+          <ns2:desc>
+            <ns3:voice-message />
+          </ns2:desc>
+        </ns2:file>
+        <ns1:sources>
+          <ns4:url-data target="https://files.example.org/opaque.ogg" />
+        </ns1:sources>
+      </ns1:file-sharing>
+    </ns0:message>
+  </case>
+  <case name="duplicate-sharing" voice="false" context="plain" attachment="false">
+    <ns0:message from="alice@example.org/phone" to="bob@example.org" type="chat" id="duplicate-sharing">
+      <ns0:body>https://files.example.org/opaque.ogg</ns0:body>
+      <ns1:file-sharing disposition="inline">
+        <ns2:file>
+          <ns2:media-type>audio/ogg; codecs=opus</ns2:media-type>
+          <ns2:name>voice-anything.ogg</ns2:name>
+          <ns2:size>123</ns2:size>
+          <ns2:length>3500</ns2:length>
+          <ns3:voice-message />
+        </ns2:file>
+        <ns1:sources>
+          <ns4:url-data target="https://files.example.org/opaque.ogg" />
+        </ns1:sources>
+      </ns1:file-sharing>
+      <ns1:file-sharing />
+    </ns0:message>
+  </case>
+</cases>

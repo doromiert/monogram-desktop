@@ -476,6 +476,7 @@ fn picker_zoom_collapse_pack_editor_and_sticker_pending_bubble() {
                 name: "not shown.webp".into(),
                 error: None,
                 sticker: true,
+                voice: false,
                 local_sticker: Some(pack.items[0].id),
             }),
             ..Default::default()

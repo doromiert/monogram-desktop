@@ -240,7 +240,7 @@ mod tests {
             height: None,
             hashes: Default::default(),
             manual: false,
-            sticker: false,
+            sticker: false, voice: false,
         });
         let mut caption = message("caption-stable", true);
         caption.encrypted = true;

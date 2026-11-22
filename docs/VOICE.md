@@ -75,3 +75,11 @@ which the app's own player and validator accept and other apps play. The file is
 
 Locking a recording to keep going hands-free, pausing, previewing before sending, and a waveform
 stored with the message (the player draws its own from the file).
+
+## Voice intent on the wire
+
+Both clients use the local, unsubmitted [voice-message ProtoXEP](../../mobile/xeps/xep-voice-messages.xml): an empty `voice-message` in `urn:monogram:voice-message:0` belongs inside the particular SFS file metadata. This is not an XSF-assigned namespace. The recorder sets an explicit durable outbox flag, including recordings kept for review; importing an audio file does not. Neither filenames nor codecs imply a voice note.
+
+Mobile projects this into its native voice controls. Desktop keeps its sandboxed waveform player, voice-message previews and accessible control labels. Modern encrypted content protects the marker with the file description. Legacy URI-only OMEMO media deliberately falls back to ordinary audio remotely, without publishing the hint outside encryption or changing the selected encryption mode. Old messages without a marker remain ordinary audio.
+
+Shared Java/Rust vectors cover valid, invalid and forged metadata. Independent-client interoperability and real-microphone acceptance remain unverified.

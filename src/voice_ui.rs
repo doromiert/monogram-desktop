@@ -595,9 +595,11 @@ impl VoiceUi {
         };
         let action = action_with_minimum(outcome, length, here, min_length());
         let file = gio::File::for_path(&session.path);
+        // Keep explicit recorder intent if the user must review this file before sending.
+        unsafe { file.set_data("monogram-voice-message", true); }
         match action {
             Action::Send => {
-                if !ui.queue_local_files(vec![file.clone()], "", false, false) {
+                if !ui.queue_voice_message(file.clone()) {
                     // It could not be queued (a blocked contact, a full queue): never lose it.
                     if ui.stage_attachment_files(vec![file]) {
                         ui.notice("The voice message could not be sent yet. It is in your message");
@@ -1010,6 +1012,9 @@ mod tests {
         assert!(v.mic.has_css_class("flat") && !v.composer().unwrap().has_css_class("voice-recording"));
         assert!(wait_until(Duration::from_secs(10), || !sent(&ui).is_empty()), "the voice message was sent");
         let message = sent(&ui).remove(0);
+        assert!(message.upload.as_ref().unwrap().voice, "recorded intent survives the durable outbox");
+        let restored: crate::model::UploadDraft = serde_json::from_str(&serde_json::to_string(message.upload.as_ref().unwrap()).unwrap()).unwrap();
+        assert!(restored.voice);
         let name = message.upload.as_ref().unwrap().name.clone();
         assert!(name.starts_with("voice-") && name.ends_with(".ogg"), "{name}");
         assert_eq!(ui.composer_text(), before, "the draft being typed was not touched");
@@ -1286,6 +1291,9 @@ mod tests {
         let_go(&ui, 0.0);
         settle(300);
         assert_eq!(ui.attachments.borrow().len(), 1, "letting go later changes nothing");
+        let files=ui.attachments.borrow().clone();
+        assert!(ui.queue_local_files(files,"",false,false));
+        assert!(sent(&ui).iter().all(|m|m.upload.as_ref().is_some_and(|u|u.voice)));
         ui.window.close();
     }
 

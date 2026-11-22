@@ -62,10 +62,13 @@ impl Ui {
         sticker: bool,
         clear_composer: bool,
     ) -> bool {
-        self.queue_local_files_with_preview(files,caption,sticker,clear_composer,None)
+        self.queue_local_files_with_preview(files,caption,sticker,clear_composer,None,false)
+    }
+    pub(crate) fn queue_voice_message(self:&Rc<Self>,file:gtk::gio::File)->bool {
+        self.queue_local_files_with_preview(vec![file],"",false,false,None,true)
     }
     pub(crate) fn send_pack_sticker(self:&Rc<Self>,asset:&crate::packs::Asset)->bool {
-        self.queue_local_files_with_preview(vec![gtk::gio::File::for_path(&asset.path)],"",true,false,Some(asset.item.id))
+        self.queue_local_files_with_preview(vec![gtk::gio::File::for_path(&asset.path)],"",true,false,Some(asset.item.id),false)
     }
     fn queue_local_files_with_preview(
         self: &Rc<Self>,
@@ -74,6 +77,7 @@ impl Ui {
         sticker: bool,
         clear_composer: bool,
         local_sticker: Option<i64>,
+        voice: bool,
     ) -> bool {
         if files.is_empty()
             || files.len() > 64
@@ -121,6 +125,7 @@ impl Ui {
                         .unwrap_or_else(|| "attachment".into()),
                     error: None,
                     sticker,
+                    voice: voice || unsafe { file.data::<bool>("monogram-voice-message").is_some_and(|value| *value.as_ref()) },
                     local_sticker,
                 }),
                 ..Default::default()

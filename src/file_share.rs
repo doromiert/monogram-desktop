@@ -8,6 +8,8 @@ pub const NS: &str = "urn:xmpp:sfs:0";
 pub const META: &str = "urn:xmpp:file:metadata:0";
 pub const HASH: &str = "urn:xmpp:hashes:2";
 pub const OOB: &str = "jabber:x:oob";
+/// Unsubmitted ProtoXEP, not an XSF-assigned namespace.
+pub const VOICE: &str = "urn:monogram:voice-message:0";
 pub const MAX: u64 = 4000 * 1024 * 1024;
 const CLIENT: &str = "jabber:client";
 const FALLBACK: &str = "urn:xmpp:fallback:0";
@@ -125,6 +127,8 @@ pub struct Attachment {
     pub hashes: BTreeMap<String, Vec<u8>>,
     pub manual: bool,
     pub sticker: bool,
+    #[serde(default)]
+    pub voice: bool,
 }
 // URLs can contain bearer tokens and file keys; never include them in diagnostics.
 impl std::fmt::Debug for Attachment {
@@ -198,6 +202,9 @@ impl Attachment {
                     .append(STANDARD.encode(hash))
                     .build(),
             );
+        }
+        if self.voice {
+            metadata.append_child(Element::builder("voice-message", VOICE).build());
         }
         Element::builder("file-sharing", NS)
             .attr(
@@ -280,7 +287,7 @@ impl Attachment {
         if self.sticker || self.mime.starts_with("video/") || self.mime.starts_with("image/") {
             return false;
         }
-        self.mime.starts_with("audio/") || (self.mime.is_empty() || self.mime == "application/octet-stream") && self.audio_extension()
+        self.voice || self.mime.starts_with("audio/") || (self.mime.is_empty() || self.mime == "application/octet-stream") && self.audio_extension()
     }
     pub fn audio_extension(&self) -> bool {
         self.name.rsplit_once('.').is_some_and(|(_, extension)| {
@@ -345,6 +352,7 @@ impl Attachment {
             hashes: BTreeMap::new(),
             manual: false,
             sticker: false,
+            voice: false,
         })
     }
     fn description(element: &Element, sticker: bool) -> Option<Self> {
@@ -419,6 +427,10 @@ impl Attachment {
         }
         value.manual = disposition == Some("attachment");
         value.sticker = sticker;
+        let markers: Vec<_> = file.children().filter(|child|child.is("voice-message",VOICE)).collect();
+        let mime=value.mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+        value.voice=!value.manual && !sticker && mime.starts_with("audio/") && mime.len()>6
+            && matches!(markers.as_slice(),[marker] if marker.attrs().iter().next().is_none() && marker.children().next().is_none() && marker.text().trim().is_empty());
         Some(value)
     }
     /// Protected content is supplied by the caller; never inspect exposed encrypted XML.
@@ -542,6 +554,40 @@ impl Attachment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn voice_message_shared_vectors_preserve_authenticated_intent_and_storage() {
+        let cases: Element=include_str!("../tests/mobile-reference/voice-message-vectors.xml").parse().unwrap();
+        assert_eq!(cases.children().count(),16);
+        for case in cases.children() {
+            let name=case.attr("name").unwrap();
+            let outer=case.children().next().unwrap().clone();
+            let context=case.attr("context").unwrap();
+            let body=outer.get_child("body",CLIENT).unwrap().text();
+            let content=match context {
+                "protected" => {
+                    let envelope=crate::crypto::payload::envelope(&outer).unwrap();
+                    crate::crypto::payload::content(&outer,&envelope,0).unwrap()
+                },
+                // Body-only decryption exposes the URI, not unprotected outer file metadata.
+                "legacy" => Element::builder("message",CLIENT).append(Element::builder("body",CLIENT).append(body.as_str()).build()).build(),
+                _ => outer,
+            };
+            let attachment=Attachment::incoming(&content,&body,context!="plain");
+            assert_eq!(attachment.is_some(),case.attr("attachment")==Some("true"),"{name}");
+            assert_eq!(attachment.as_ref().is_some_and(|file|file.voice),case.attr("voice")==Some("true"),"{name}");
+            if let Some(file)=attachment {
+                let stored:Attachment=serde_json::from_str(&serde_json::to_string(&file).unwrap()).unwrap();
+                assert_eq!(stored,file,"{name}");
+                assert_eq!(Attachment::description(&file.element(),file.sticker).unwrap().voice,file.voice,"{name}");
+                let mut old=serde_json::to_value(&file).unwrap();old.as_object_mut().unwrap().remove("voice");
+                assert!(!serde_json::from_value::<Attachment>(old).unwrap().voice,"old caches must remain ordinary audio");
+                if file.voice {
+                    let message=crate::model::Message{attachment:Some(file),..Default::default()};
+                    assert_eq!(message.preview(),"Voice message");
+                }
+            }
+        }
+    }
     #[test]
     fn round_marker_requires_verified_square_video_metadata() {
         let mut file = Attachment::bare("https://example.org/opaque").unwrap();

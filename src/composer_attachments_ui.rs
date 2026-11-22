@@ -195,7 +195,7 @@ impl Ui {
                             height: None,
                             hashes: BTreeMap::new(),
                             manual: false,
-                            sticker: false,
+                            sticker: false, voice: false,
                         },
                         180,
                         |picture| picture.is_mapped(),

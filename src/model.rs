@@ -229,14 +229,14 @@ impl Message {
     pub fn preview(&self) -> String {
         if let Some(upload) = &self.upload {
             return if self.text.is_empty() {
-                if upload.sticker { "Sticker".into() } else { format!("📎 {}", upload.name) }
+                if upload.sticker { "Sticker".into() } else if upload.voice { "Voice message".into() } else { format!("📎 {}", upload.name) }
             } else {
                 crate::formatting::preview(self)
             };
         }
         if let Some(file) = &self.attachment {
             return if self.text.is_empty() {
-                if file.sticker { "Sticker".into() } else { format!("📎 {}", file.name) }
+                if file.sticker { "Sticker".into() } else if file.voice { "Voice message".into() } else { format!("📎 {}", file.name) }
             } else {
                 crate::formatting::preview(self)
             };
@@ -817,6 +817,8 @@ pub struct UploadDraft {
     pub error: Option<String>,
     #[serde(default)]
     pub sticker: bool,
+    #[serde(default)]
+    pub voice: bool,
     #[serde(default)]
     pub local_sticker: Option<i64>,
 }

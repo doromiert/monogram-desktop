@@ -100,7 +100,7 @@ impl Ui {
         let wave = gtk::DrawingArea::builder().hexpand(true).content_height(34).content_width(180).build();
         wave.add_css_class("audio-wave");
         wave.set_focusable(true);
-        wave.update_property(&[gtk::accessible::Property::Label("Audio position")]);
+        wave.update_property(&[gtk::accessible::Property::Label(if file.voice { "Voice message position" } else { "Audio position" })]);
         let time = label("", "caption dim-label audio-time");
         time.set_xalign(0.);
         let column = bx(true, 4);
@@ -113,6 +113,7 @@ impl Ui {
         row.append(&column);
         let root = bx(true, 0);
         root.add_css_class("audio-bubble");
+        root.update_property(&[gtk::accessible::Property::Label(if file.voice { "Voice message" } else { "Audio file" })]);
         root.append(&row);
 
         let bubble = Rc::new(Bubble {
@@ -144,9 +145,9 @@ impl Ui {
 impl Bubble {
     fn set_phase(&self, phase: Phase) {
         let (icon, label, tooltip) = match &phase {
-            Phase::Waiting => ("folder-download-symbolic", "Download audio", None),
+            Phase::Waiting => ("folder-download-symbolic", if self.file.voice { "Download voice message" } else { "Download audio" }, None),
             Phase::Downloading(_) => ("process-stop-symbolic", "Cancel download", None),
-            Phase::Downloaded(_) => ("media-playback-start-symbolic", "Play audio", None),
+            Phase::Downloaded(_) => ("media-playback-start-symbolic", if self.file.voice { "Play voice message" } else { "Play audio" }, None),
             Phase::Preparing => ("content-loading-symbolic", "Preparing audio", None),
             Phase::Ready => (self.play_icon(), self.play_label(), None),
             Phase::Failed(reason) => ("view-refresh-symbolic", "Try again", Some(reason.clone())),
@@ -172,8 +173,8 @@ impl Bubble {
     }
     fn play_label(&self) -> &'static str {
         match self.player.borrow().as_ref().map(AudioPlayer::state) {
-            Some(PlayState::Playing) => "Pause audio",
-            _ => "Play audio",
+            Some(PlayState::Playing) => if self.file.voice { "Pause voice message" } else { "Pause audio" },
+            _ => if self.file.voice { "Play voice message" } else { "Play audio" },
         }
     }
     /// The label under the waveform: size before it is ready, the length at rest, the elapsed time
@@ -481,7 +482,7 @@ mod tests {
     use std::{collections::BTreeMap, path::{Path, PathBuf}, time::Instant};
 
     fn attachment(name: &str, mime: &str) -> Attachment {
-        Attachment { wire_url: String::new(), name: name.into(), mime: mime.into(), size: None, width: None, height: None, hashes: BTreeMap::new(), manual: false, sticker: false }
+        Attachment { wire_url: String::new(), name: name.into(), mime: mime.into(), size: None, width: None, height: None, hashes: BTreeMap::new(), manual: false, sticker: false, voice: false }
     }
 
     #[test]
@@ -543,6 +544,32 @@ mod tests {
     }
     fn bubble_of(root: &gtk::Box) -> Rc<Bubble> {
         unsafe { root.data::<Rc<Bubble>>("audio-bubble").expect("the bubble state").as_ref().clone() }
+    }
+    #[gtk::test]
+    #[ignore = "requires a private GTK display, built audio helper and bubblewrap"]
+    fn voice_note_player_keeps_native_controls_and_immediate_feedback() {
+        adw::init().unwrap();
+        let app=adw::Application::builder().application_id("com.negzero.VoiceIntentFixture").flags(gio::ApplicationFlags::NON_UNIQUE).build();
+        app.register(None::<&gio::Cancellable>).unwrap();
+        let ui=Ui::new(&app,true);
+        let mut file=attachment("opaque.ogg","audio/ogg");file.voice=true;
+        let message=Message{own:true,attachment:Some(file),..Default::default()};
+        let started=Instant::now();let root=ui.audio_attachment(&message);
+        let bubble=bubble_of(&root);bubble.sink.set("fakesink");
+        assert!(started.elapsed()<Duration::from_millis(400));
+        assert_eq!(bubble.button.tooltip_text().as_deref(),Some("Download voice message"));
+        let window=gtk::Window::builder().child(&root).default_width(420).default_height(180).build();window.present();
+        let started=Instant::now();bubble.prepare(fixture("tone-opus.ogg"),false);
+        assert!(started.elapsed()<Duration::from_millis(400));assert_eq!(*bubble.phase.borrow(),Phase::Preparing);
+        assert!(wait(Duration::from_secs(20),||*bubble.phase.borrow()==Phase::Ready));
+        assert_eq!(bubble.peaks.borrow().len(),audio_preview_run::BARS);
+        assert_eq!(bubble.button.tooltip_text().as_deref(),Some("Play voice message"));
+        bubble.button.emit_clicked();
+        assert!(wait(Duration::from_secs(10),||bubble.player.borrow().as_ref().is_some_and(|p|p.state()==PlayState::Playing)));
+        assert_eq!(bubble.button.tooltip_text().as_deref(),Some("Pause voice message"));
+        bubble.seek_to(0.5);
+        assert!(wait(Duration::from_secs(10),||bubble.player.borrow().as_ref().is_some_and(|p|p.state()==PlayState::Idle)));
+        window.close();ui.window.close();
     }
 
     /// A real bubble in a real window: prepared through the sandbox, played, seeked by clicking the

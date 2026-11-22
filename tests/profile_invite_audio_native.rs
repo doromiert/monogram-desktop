@@ -291,7 +291,7 @@ fn accepted_invites_profile_cards_audio_and_compact_pack_strip() {
         height: None,
         hashes: Default::default(),
         manual: false,
-        sticker: false,
+        sticker: false, voice: false,
     };
     let root = crate::downloads::account_root(owner).unwrap();
     std::fs::create_dir_all(&root).unwrap();
@@ -411,7 +411,7 @@ fn media_reply_insets_keep_media_edges_thin() {
         height: Some(180),
         hashes: Default::default(),
         manual: true,
-        sticker: false,
+        sticker: false, voice: false,
     };
     let media = crate::model::Message {
         id: "media-reply".into(),

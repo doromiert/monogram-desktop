@@ -2497,6 +2497,7 @@ mod edit_button_tests {
             hashes: Default::default(),
             manual: false,
             sticker,
+            voice: false,
         }
     }
 

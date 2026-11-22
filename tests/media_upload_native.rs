@@ -17,7 +17,7 @@ fn approved_pq_upload_submits_after_snapshot_staging_without_a_cached_choice() {
     ui.state.replace(State::live(owner, vec![]));
     let mut photo = Message { id:"approved-photo".into(), wire_id:"approved-photo".into(),
         own:true, sender:owner.into(), kind:"file".into(), delivery:"sending".into(),
-        upload:Some(Draft { uri:"file:///fixture.png".into(), name:"fixture.png".into(), error:None, sticker:false, local_sticker:None }),
+        upload:Some(Draft { uri:"file:///fixture.png".into(), name:"fixture.png".into(), error:None, sticker:false, voice:false, local_sticker:None }),
         ..Default::default() };
     photo.set_encryption(Mode::Pq, "fixture-fingerprint".into());
     let mut state = ui.state.borrow_mut();
@@ -169,6 +169,7 @@ fn native_media_upload_previews_progress_cancel_and_retry() {
             name: "photo.png".into(),
             error: None,
             sticker: false,
+            voice: false,
             local_sticker: None,
         }),
         ..Default::default()
