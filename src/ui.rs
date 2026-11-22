@@ -1527,6 +1527,29 @@ impl Ui {
         self.input_scroll.set_child(Some(&self.composer));
         self.input_scroll
             .set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        // A line holding only emoji is a pixel shorter than one mixing them with letters (the
+        // emoji font's line metrics differ), so the box used to jump by a pixel when the first
+        // emoji went into an empty message. One line is never shorter than the tallest kind.
+        let pin_line_height = {
+            let (view, scroll) = (self.composer.downgrade(), self.input_scroll.downgrade());
+            move || {
+                if let (Some(view), Some(scroll)) = (view.upgrade(), scroll.upgrade()) {
+                    let line = view.create_pango_layout(Some("Åg😀👍🏽❤️")).pixel_size().1;
+                    scroll.set_min_content_height(line + view.top_margin() + view.bottom_margin());
+                }
+            }
+        };
+        pin_line_height();
+        self.composer.connect_map({
+            let pin = pin_line_height.clone();
+            move |_| pin()
+        });
+        if let Some(settings) = gtk::Settings::default() {
+            settings.connect_gtk_font_name_notify({
+                let pin = pin_line_height.clone();
+                move |_| pin()
+            });
+        }
         let input = gtk::Overlay::builder()
             .child(&self.input_scroll)
             .hexpand(true)
@@ -1564,6 +1587,7 @@ impl Ui {
         chat.set_vexpand(true);
         conversation.append(&chat);
         conversation.append(&shell);
+        crate::drop_files::install(self, &conversation);
         self.pages.add_named(&conversation, Some("chat"));
         self.pages
             .add_named(&scroll(&self.search_page), Some("search"));
@@ -3521,6 +3545,49 @@ mod composer_tests {
         assert_eq!(ui.input_scroll.height(),ui.composer.top_margin()+ui.composer.bottom_margin()+5*line);
         assert!(started.elapsed()<Duration::from_millis(400),"large paste blocked visible feedback");
         ui.window.close();
+    }
+
+    /// Inserting an emoji (a glyph from another, taller font) must not make the message box taller.
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn inserting_an_emoji_does_not_resize_the_message_box() {
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id("com.negzero.ComposerEmojiHeightFixture")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let ui = Ui::new(&app, true);
+        let css = gtk::CssProvider::new();
+        css.load_from_path(crate::widgets::asset("style.css"));
+        gtk::style_context_add_provider_for_display(&gtk::gdk::Display::default().unwrap(), &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        ui.window.set_default_size(900, 700);
+        ui.window.present();
+        let context = glib::MainContext::default();
+        let settle = |ms: u64| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            while std::time::Instant::now() < deadline {
+                context.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        };
+        settle(400);
+        let height = |ui: &Rc<Ui>| ui.input_scroll.measure(gtk::Orientation::Vertical, ui.composer.width()).1;
+        let row = |ui: &Rc<Ui>| ui.composer.parent().map(|p| p.height()).unwrap_or(0);
+        for text in ["", "hello", "hello wörld ÅgyQ"] {
+            ui.composer.buffer().set_text(text);
+            ui.composer.buffer().place_cursor(&ui.composer.buffer().end_iter());
+            settle(150);
+            let (before, row_before) = (height(&ui), row(&ui));
+            for emoji in ["😀", "👍🏽", "❤️", "🇷🇴", "👨‍👩‍👧‍👦", "😀😀😀"] {
+                ui.composer.buffer().insert_at_cursor(emoji);
+                settle(150);
+                assert_eq!(height(&ui), before, "{text:?} + {emoji}: the text area changed height");
+                assert_eq!(row(&ui), row_before, "{text:?} + {emoji}: the message box changed height");
+            }
+            ui.composer.buffer().set_text("");
+            settle(100);
+        }
     }
 
     /// The composer is sized by its scroll window from its content in the same layout pass

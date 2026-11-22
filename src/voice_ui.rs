@@ -198,6 +198,11 @@ pub struct VoiceUi {
     timer: gtk::Label,
     hint: gtk::Label,
     cancel: gtk::Button,
+    /// The microphone glyph inside the button. Sliding to cancel carries it to the left and
+    /// turns it into a trash can on red.
+    chip: gtk::Box,
+    chip_host: gtk::Fixed,
+    chip_icons: gtk::Stack,
     parts: Parts,
     saved: RefCell<Vec<(gtk::Widget, bool)>>,
     current: RefCell<Option<Rc<Session>>>,
@@ -211,11 +216,34 @@ pub fn install(ui: &Rc<Ui>, row: &gtk::Box, parts: Parts) -> Rc<VoiceUi> {
     let mic = icon_button("audio-input-microphone-symbolic", "Hold to record a voice message");
     mic.update_property(&[gtk::accessible::Property::Label("Record voice message")]);
     mic.add_css_class("voice-button");
+    let (chip_host, chip, chip_icons) = (gtk::Fixed::new(), bx(false, 0), gtk::Stack::new());
+    chip.add_css_class("voice-chip");
+    chip_icons.set_transition_type(gtk::StackTransitionType::Crossfade);
+    chip_icons.set_transition_duration(180);
+    for (icon, name) in [("audio-input-microphone-symbolic", "mic"), ("user-trash-symbolic", "trash")] {
+        let image = gtk::Image::from_icon_name(icon);
+        image.set_pixel_size(16);
+        chip_icons.add_named(&image, Some(name));
+    }
+    chip.append(&chip_icons);
+    // Exactly the size of the emoji button's icon, whatever the chip is doing.
+    chip.set_size_request(16, 16);
+    chip.set_halign(gtk::Align::Start);
+    chip.set_valign(gtk::Align::Start);
+    chip_host.set_size_request(16, 16);
+    chip_host.set_halign(gtk::Align::Center);
+    chip_host.set_valign(gtk::Align::Center);
+    chip_host.put(&chip, 0.0, 0.0);
+    // The microphone leaves its button when carried to the left, so nothing may clip it.
+    for widget in [mic.upcast_ref::<gtk::Widget>(), chip_host.upcast_ref()] {
+        widget.set_overflow(gtk::Overflow::Visible);
+    }
+    mic.set_child(Some(&chip_host));
     let wave = VoiceWave::new();
-    let timer = label("00:00", "numeric accent voice-timer");
+    let timer = label("00:00", "numeric voice-timer");
     timer.set_valign(gtk::Align::Center);
     let dot = gtk::Image::from_icon_name("media-record-symbolic");
-    dot.add_css_class("accent");
+    dot.add_css_class("voice-dot");
     dot.set_valign(gtk::Align::Center);
     dot.set_accessible_role(gtk::AccessibleRole::Presentation);
     let cancel = icon_button("user-trash-symbolic", "Cancel recording · Esc");
@@ -242,6 +270,9 @@ pub fn install(ui: &Rc<Ui>, row: &gtk::Box, parts: Parts) -> Rc<VoiceUi> {
         timer,
         hint,
         cancel: cancel.clone(),
+        chip,
+        chip_host,
+        chip_icons,
         parts,
         saved: RefCell::new(Vec::new()),
         current: RefCell::new(None),
@@ -267,6 +298,7 @@ pub fn install(ui: &Rc<Ui>, row: &gtk::Box, parts: Parts) -> Rc<VoiceUi> {
         move |gesture, dx, _| {
             if let Some(voice) = weak_voice.upgrade() {
                 let rtl = gesture.widget().is_some_and(|widget| widget.direction() == gtk::TextDirection::Rtl);
+                voice.carry(dx, rtl);
                 voice.slide(slid_to_cancel(dx, rtl));
             }
         }
@@ -400,10 +432,29 @@ impl VoiceUi {
         self.timer.announce("Recording voice message", gtk::AccessibleAnnouncementPriority::Medium);
     }
 
+    /// The microphone follows the pointer towards the start of the line, up to the distance that
+    /// arms "cancel".
+    pub(crate) fn carry(&self, dx: f64, rtl: bool) {
+        if !self.recording() {
+            return;
+        }
+        let towards_start = if rtl { dx } else { -dx };
+        let travel = towards_start.clamp(0.0, SLIDE_TO_CANCEL);
+        self.shift_chip(if rtl { travel } else { -travel });
+        // The hint makes way for the microphone as it passes over it.
+        self.hint.set_opacity(1.0 - travel / SLIDE_TO_CANCEL);
+    }
+
     /// The pointer moved far enough from the press to arm, or disarm, "cancel".
     pub(crate) fn slide(&self, armed: bool) {
         if !self.recording() || self.sliding.replace(armed) == armed {
             return;
+        }
+        self.chip_icons.set_visible_child_name(if armed { "trash" } else { "mic" });
+        if armed {
+            self.chip.add_css_class("armed");
+        } else {
+            self.chip.remove_css_class("armed");
         }
         self.hint.set_label(if armed { "Release to cancel" } else { "Release to send · slide left to cancel" });
         if armed {
@@ -581,6 +632,15 @@ impl VoiceUi {
         self.hint.add_css_class("dim-label");
         self.hint.remove_css_class("error");
         self.cancel.remove_css_class("destructive-action");
+        self.reset_chip();
+        // While the button is held, the microphone itself becomes the way to cancel, so the trash
+        // button only shows without a held button (tap to record). It keeps its place either way,
+        // so the waveform never moves.
+        let shown = mode == Mode::Toggled;
+        self.cancel.set_opacity(if shown { 1.0 } else { 0.0 });
+        self.cancel.set_can_target(shown);
+        self.cancel.set_focusable(shown);
+        self.cancel.update_state(&[gtk::accessible::State::Hidden(!shown)]);
         {
             let mut saved = self.saved.borrow_mut();
             saved.clear();
@@ -590,13 +650,36 @@ impl VoiceUi {
             }
         }
         self.bar.set_visible(true);
-        self.mic.remove_css_class("flat");
-        self.mic.add_css_class("suggested-action");
-        self.mic.add_css_class("circular");
+        // The whole message box turns accent coloured; the microphone stays a flat button in it.
+        if let Some(composer) = self.composer() {
+            composer.add_css_class("voice-recording");
+        }
         self.mic.set_tooltip_text(Some(match mode {
             Mode::Held => "Release to send",
             Mode::Toggled => "Send voice message",
         }));
+    }
+
+    /// The message box the microphone button sits in.
+    fn composer(&self) -> Option<gtk::Widget> {
+        self.mic.parent()?.parent()
+    }
+
+    fn reset_chip(&self) {
+        self.chip.remove_css_class("armed");
+        self.chip_icons.set_visible_child_name("mic");
+        self.shift_chip(0.0);
+        self.hint.set_opacity(1.0);
+    }
+
+    fn shift_chip(&self, x: f64) {
+        let to = gtk::graphene::Point::new(x as f32, 0.0);
+        self.chip_host.set_child_transform(&self.chip, Some(&gtk::gsk::Transform::new().translate(&to)));
+    }
+
+    #[cfg(test)]
+    fn chip_shift(&self) -> f64 {
+        self.chip_host.child_transform(&self.chip).map_or(0.0, |t| f64::from(t.to_translate().0))
     }
 
     fn show_idle(&self) {
@@ -604,9 +687,10 @@ impl VoiceUi {
         for (widget, was_visible) in self.saved.borrow_mut().drain(..) {
             widget.set_visible(was_visible);
         }
-        self.mic.remove_css_class("suggested-action");
-        self.mic.remove_css_class("circular");
-        self.mic.add_css_class("flat");
+        self.reset_chip();
+        if let Some(composer) = self.composer() {
+            composer.remove_css_class("voice-recording");
+        }
         self.mic.set_tooltip_text(Some("Hold to record a voice message"));
         self.sliding.set(false);
     }
@@ -870,7 +954,9 @@ mod tests {
         let mic = voice(&ui).mic.clone();
         let emoji = mic.prev_sibling().and_downcast::<gtk::Button>().expect("the emoji button is just before it");
         assert_eq!(emoji.icon_name().as_deref(), Some("face-smile-symbolic"));
-        assert_eq!(mic.icon_name().as_deref(), Some("audio-input-microphone-symbolic"), "a GNOME icon");
+        let glyph = voice(&ui).chip_icons.child_by_name("mic").and_downcast::<gtk::Image>().unwrap();
+        assert_eq!(glyph.icon_name().as_deref(), Some("audio-input-microphone-symbolic"), "a GNOME icon");
+        assert_eq!(voice(&ui).chip_icons.visible_child_name().as_deref(), Some("mic"));
         for class in ["flat"] {
             assert!(mic.has_css_class(class) && emoji.has_css_class(class), "{class}");
         }
@@ -909,15 +995,19 @@ mod tests {
         let v = voice(&ui);
         // The message box makes way for it; the microphone button stays, now in the accent style.
         assert!(v.parts.hide.iter().all(|w| !w.is_visible()), "the rest of the box is out of the way");
-        assert!(v.mic.is_visible() && v.mic.has_css_class("suggested-action") && !v.mic.has_css_class("flat"));
+        assert!(v.mic.is_visible() && v.mic.has_css_class("flat") && !v.mic.has_css_class("suggested-action"), "no blue circle");
+        assert!(v.composer().unwrap().has_css_class("voice-recording"), "the box itself turns accent coloured");
+        assert!(v.cancel.opacity() == 0.0 && !v.cancel.can_target(), "no trash button beside a held microphone");
+        assert!(v.cancel.is_visible(), "but its place is kept, so the waveform does not move");
+        assert_eq!(v.chip_shift(), 0.0, "the microphone sits exactly where it did before recording");
         assert_eq!(timer(&ui), "00:00");
         assert!(wait_until(Duration::from_secs(10), || timer(&ui) == "00:01"), "the timer counts: {}", timer(&ui));
         assert!(v.wave.len() > 10, "the waveform has been filling");
-        assert!(v.timer.has_css_class("accent") && v.wave.has_css_class("voice-wave"), "accent coloured");
+        assert!(v.timer.has_css_class("voice-timer") && v.wave.has_css_class("voice-wave"), "styled by the bar");
         let_go(&ui, 0.0);
         assert!(!recording_ui(&ui), "the box comes back as soon as the button is let go");
         assert!(v.parts.hide.iter().all(|w| w.is_visible() || w == &v.parts.hide[3]), "everything that was there is back");
-        assert!(v.mic.has_css_class("flat") && !v.mic.has_css_class("suggested-action"));
+        assert!(v.mic.has_css_class("flat") && !v.composer().unwrap().has_css_class("voice-recording"));
         assert!(wait_until(Duration::from_secs(10), || !sent(&ui).is_empty()), "the voice message was sent");
         let message = sent(&ui).remove(0);
         let name = message.upload.as_ref().unwrap().name.clone();
@@ -977,17 +1067,28 @@ mod tests {
         assert!(wait_until(Duration::from_secs(10), || timer(&ui) == "00:01"));
         let v = voice(&ui);
         assert!(v.hint.label().contains("slide left"));
+        assert_eq!(v.chip_icons.visible_child_name().as_deref(), Some("mic"));
+        drag(&ui, -40.0);
+        assert_eq!(v.chip_shift(), -40.0, "the microphone follows the pointer");
+        assert!(!v.chip.has_css_class("armed"));
         drag(&ui, -SLIDE_TO_CANCEL - 10.0);
+        assert_eq!(v.chip_shift(), -SLIDE_TO_CANCEL, "and stops at the cancel distance");
+        assert_eq!(v.chip_icons.visible_child_name().as_deref(), Some("trash"), "it became a trash can");
+        assert!(v.chip.has_css_class("armed"), "on red");
         assert_eq!(v.hint.label(), "Release to cancel");
         assert!(v.hint.has_css_class("error") && v.cancel.has_css_class("destructive-action"));
         // Back again: sending is possible again.
         drag(&ui, -10.0);
+        assert_eq!(v.chip_icons.visible_child_name().as_deref(), Some("mic"), "the microphone returns");
+        assert!(!v.chip.has_css_class("armed"));
         assert!(v.hint.label().contains("Release to send") && !v.cancel.has_css_class("destructive-action"));
         drag(&ui, -SLIDE_TO_CANCEL - 10.0);
         let_go(&ui, -SLIDE_TO_CANCEL - 10.0);
         settle(600);
         assert!(sent(&ui).is_empty() && files(&ui).is_empty(), "cancelled: nothing sent, file deleted");
         assert!(!recording_ui(&ui));
+        assert_eq!(v.chip_shift(), 0.0, "the microphone is back in its button");
+        assert_eq!(v.chip_icons.visible_child_name().as_deref(), Some("mic"));
         // And the other way: slid out, slid back, then let go.
         press(&ui);
         assert!(wait_until(Duration::from_secs(10), || timer(&ui) == "00:01"));

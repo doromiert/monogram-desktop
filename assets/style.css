@@ -299,10 +299,20 @@
 .hat-chip { min-height: 18px; }
 
 /* Voice messages: the recording bar replaces the message box while the microphone button is held. */
-.voice-bar { min-height: 36px; }
-.voice-wave { color: @accent_color; }
-.voice-timer { font-weight: 600; }
-.voice-hint.error { color: @error_color; }
+.voice-button, .voice-button > fixed { overflow: visible; }
+.voice-bar { min-height: 36px; padding: 0 4px; }
+/* While recording the whole message box is the accent-coloured bar, with no focus ring. */
+.composer.voice-recording, .composer.voice-recording:focus-within { background-color: @accent_bg_color; color: white; outline-color: transparent; }
+.composer.voice-recording button { color: white; }
+.composer.voice-recording button:hover { background-color: alpha(white, 0.15); }
+.voice-wave { color: white; }
+.voice-timer { font-weight: 600; color: white; }
+.voice-dot { color: white; }
+.voice-hint, .voice-hint.dim-label { color: white; opacity: 0.85; }
+.voice-hint.error { color: white; opacity: 1; font-weight: 600; }
+/* The microphone, carried left while sliding to cancel, becomes white on red. */
+.voice-chip { border-radius: 999px; background-color: transparent; transition: background-color 180ms, box-shadow 180ms, color 180ms; }
+.voice-chip.armed { background-color: @destructive_bg_color; color: white; box-shadow: 0 0 0 7px @destructive_bg_color; }
 .presence-dot { min-width: 12px; min-height: 12px; border-radius: 999px; border: 2px solid @window_bg_color; background: @success_color; }
 .presence-dot.presence-away { background: @warning_color; }
 .presence-dot.presence-busy { background: @error_color; }
@@ -329,3 +339,10 @@
 .profile-card-panel { padding: 8px; border-radius: 14px; background: @popover_bg_color; box-shadow: 0 2px 8px alpha(black,.2); }
 
 .media-upload-status { color: white; background: alpha(black,.65); border-radius: 8px; padding: 2px 6px; font-size: 10px; }
+
+/* A file is being dragged over the conversation. */
+.drop-target {
+  outline: 2px dashed @accent_bg_color;
+  outline-offset: -6px;
+  background-color: alpha(@accent_bg_color, 0.08);
+}

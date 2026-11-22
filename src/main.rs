@@ -10,6 +10,7 @@ mod avatar_ui;
 mod blocking;
 mod blocking_ui;
 mod clipboard_upload;
+mod drop_files;
 mod chat_states;
 mod composer_view;
 mod chat_navigation;
