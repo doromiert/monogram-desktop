@@ -146,6 +146,8 @@ impl Ui {
             return;
         }
         let generation = self.generation.get();
+        // This runs on the GTK main loop, which has no Tokio runtime: `Client::request` would panic
+        // there ("there is no reactor running"), so it must be `request_on_main_loop`. A test pins this.
         let (peer, domain) = (peer.to_owned(), owner.split_once('@').map_or(owner.clone(), |(_, d)| d.to_owned()));
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
@@ -156,7 +158,7 @@ impl Ui {
                 }
                 let disco = tokio_xmpp::minidom::Element::builder("query", "http://jabber.org/protocol/disco#info").build();
                 let yes = matches!(
-                    iq.request(&domain, crate::iq::Kind::Get, disco).await,
+                    iq.request_on_main_loop(&domain, crate::iq::Kind::Get, disco).await,
                     Ok(Some(info)) if last_activity::advertised(&info)
                 );
                 let Some(ui) = weak.upgrade().filter(|ui| current(ui)) else { return };
@@ -172,7 +174,7 @@ impl Ui {
                     return;
                 }
             }
-            let outcome = match iq.request(&peer, crate::iq::Kind::Get, last_activity::request()).await {
+            let outcome = match iq.request_on_main_loop(&peer, crate::iq::Kind::Get, last_activity::request()).await {
                 Ok(Some(query)) => match last_activity::parse(&query) {
                     Some(activity) => Outcome::Known(last_activity::when(activity, Utc::now())),
                     None => Outcome::Unavailable,
@@ -699,6 +701,165 @@ mod tests {
             [false, true, false]
         );
         dialog.force_close();
+        ui.window.close();
+    }
+
+    // ---- the lookup on the GTK main loop (no Tokio runtime) ------------------------------
+
+    use crate::protocol::Command;
+    use tokio::sync::mpsc;
+
+    /// A session whose server is this test: commands the app sends arrive on the receiver.
+    fn connect(ui: &Rc<Ui>) -> mpsc::UnboundedReceiver<Command> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        ui.session.replace(Some(crate::protocol::Session::fixture_channel(tx)));
+        rx
+    }
+    /// Run the main loop until the app sends an IQ, and take it.
+    fn next_iq(rx: &mut mpsc::UnboundedReceiver<Command>) -> (String, tokio_xmpp::minidom::Element, tokio::sync::oneshot::Sender<crate::iq::Reply>) {
+        let context = glib::MainContext::default();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            context.iteration(false);
+            if let Ok(Command::Iq { to, payload, reply, .. }) = rx.try_recv() {
+                return (to, payload, reply);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!("the app sent no IQ");
+    }
+    fn no_more_iq(rx: &mut mpsc::UnboundedReceiver<Command>) {
+        pump();
+        assert!(rx.try_recv().is_err(), "nothing else was sent");
+    }
+    fn disco(feature: Option<&str>) -> tokio_xmpp::minidom::Element {
+        let inner = feature.map(|f| format!("<feature var='{f}'/>")).unwrap_or_default();
+        format!("<query xmlns='http://jabber.org/protocol/disco#info'>{inner}</query>").parse().unwrap()
+    }
+    fn last(seconds: &str) -> tokio_xmpp::minidom::Element {
+        format!("<query xmlns='jabber:iq:last' seconds='{seconds}'/>").parse().unwrap()
+    }
+    fn signed_in(ui: &Rc<Ui>) {
+        open_contact(ui);
+        presence(ui, true, false);
+    }
+
+    /// Regression: `thread 'main' panicked at src/iq.rs:63:9: there is no reactor running, must be
+    /// called from the context of a Tokio 1.x runtime`. The lookup used `Client::request`, which
+    /// needs a Tokio timer; the GTK main loop has none.
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn the_last_seen_lookup_runs_on_the_gtk_main_loop_without_a_tokio_runtime() {
+        assert!(tokio::runtime::Handle::try_current().is_err(), "this thread has no Tokio runtime, like the real main loop");
+        let ui = ui();
+        signed_in(&ui);
+        let mut server = connect(&ui);
+        ui.refresh_last_activity(PEER);
+        // First the server is asked what it supports, then the contact is asked.
+        let (to, payload, reply) = next_iq(&mut server);
+        assert_eq!(to, "example.invalid");
+        assert!(payload.is("query", "http://jabber.org/protocol/disco#info"));
+        reply.send(Ok(Some(disco(Some("jabber:iq:last"))))).unwrap();
+        let (to, payload, reply) = next_iq(&mut server);
+        assert_eq!(to, PEER);
+        assert!(payload.is("query", "jabber:iq:last"), "asked in the XEP-0012 namespace");
+        reply.send(Ok(Some(last("903")))).unwrap();
+        pump();
+        let line = ui.last_seen_line(PEER).expect("the answer is shown");
+        assert!(line.starts_with("Last seen 15 minutes ago · "), "{line}");
+        assert!(header_text(&ui).starts_with("Last seen 15 minutes ago · "), "{}", header_text(&ui));
+        no_more_iq(&mut server);
+        ui.window.close();
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_server_without_last_activity_is_asked_once_and_the_contact_never() {
+        let ui = ui();
+        signed_in(&ui);
+        let mut server = connect(&ui);
+        ui.refresh_last_activity(PEER);
+        let (_, _, reply) = next_iq(&mut server);
+        reply.send(Ok(Some(disco(Some("urn:other"))))).unwrap();
+        pump();
+        assert_eq!(ui.last_seen_line(PEER), None);
+        assert_eq!(header_text(&ui), "Offline");
+        // Other contacts are not asked either, and the server is not asked again for a while.
+        ui.refresh_last_activity("carol@example.invalid");
+        ui.refresh_last_activity(PEER);
+        no_more_iq(&mut server);
+        assert_eq!(ui.last_activity.borrow().supported(Instant::now()), Some(false));
+        ui.window.close();
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn refused_failed_and_garbled_answers_show_nothing_and_do_not_crash() {
+        use crate::iq::Error;
+        let answers: [(&str, crate::iq::Reply); 7] = [
+            ("forbidden", Err(Error::Rejected { condition: "forbidden".into(), pubsub: None })),
+            ("service-unavailable", Err(Error::Rejected { condition: "service-unavailable".into(), pubsub: None })),
+            ("timeout", Err(Error::Timeout)),
+            ("session closed", Err(Error::Closed)),
+            ("empty result", Ok(None)),
+            ("not a number", Ok(Some(last("soon")))),
+            ("wrong namespace", Ok(Some("<query xmlns='urn:other' seconds='5'/>".parse().unwrap()))),
+        ];
+        for (name, answer) in answers {
+            let ui = ui_for(name);
+            signed_in(&ui);
+            let mut server = connect(&ui);
+            // The server's support is already known, so only the contact is asked.
+            ui.last_activity.borrow_mut().support = Some((true, Instant::now()));
+            ui.refresh_last_activity(PEER);
+            let (to, _, reply) = next_iq(&mut server);
+            assert_eq!(to, PEER, "{name}");
+            reply.send(answer).unwrap();
+            pump();
+            assert_eq!(ui.last_seen_line(PEER), None, "{name}");
+            assert_eq!(header_text(&ui), "Offline", "{name}");
+            // And it is not asked again straight away.
+            ui.refresh_last_activity(PEER);
+            no_more_iq(&mut server);
+            ui.window.close();
+        }
+    }
+
+    /// A fresh fixture per case, but GTK may only be initialised once per process.
+    fn ui_for(_case: &str) -> Rc<Ui> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id(format!("com.negzero.LastSeenLoop{}", NEXT.fetch_add(1, Ordering::Relaxed)))
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        Ui::new(&app, true)
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_lookup_is_dropped_quietly_when_the_session_ends_or_the_account_changes_mid_flight() {
+        let ui = ui();
+        signed_in(&ui);
+        let mut server = connect(&ui);
+        ui.last_activity.borrow_mut().support = Some((true, Instant::now()));
+        ui.refresh_last_activity(PEER);
+        let (_, _, reply) = next_iq(&mut server);
+        // The account changes before the answer arrives: it must not be shown for the new one.
+        ui.state.borrow_mut().account = "other@example.invalid".into();
+        reply.send(Ok(Some(last("60")))).unwrap();
+        pump();
+        assert_eq!(ui.last_seen_line(PEER), None);
+        // A session that goes away while a question is open answers "closed": no panic, no text.
+        ui.state.borrow_mut().account = OWNER.into();
+        ui.last_activity.borrow_mut().entries.clear();
+        ui.refresh_last_activity(PEER);
+        let (_, _, reply) = next_iq(&mut server);
+        drop(reply);
+        pump();
+        assert_eq!(ui.last_seen_line(PEER), None);
         ui.window.close();
     }
 }

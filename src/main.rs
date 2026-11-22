@@ -129,6 +129,8 @@ mod hat_color;
 mod last_activity;
 mod last_activity_ui;
 mod presence_privacy;
+#[cfg(test)]
+mod runtime_guard;
 mod widgets;
 thread_local! {static SMOKE_TICK: std::cell::Cell<std::time::Instant> = std::cell::Cell::new(std::time::Instant::now()); static SMOKE_MAX_GAP: std::cell::Cell<u128> = const{std::cell::Cell::new(0)};}
 fn main() -> gtk::glib::ExitCode {

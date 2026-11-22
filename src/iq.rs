@@ -422,6 +422,66 @@ mod tests {
         reply.send(Ok(None)).unwrap();
         assert_eq!(pending.now_or_never(), Some(Ok(None)));
     }
+    /// The panic this guards against: `thread 'main' panicked at src/iq.rs:63:9: there is no
+    /// reactor running, must be called from the context of a Tokio 1.x runtime`.
+    #[test]
+    fn the_tokio_request_panics_without_a_runtime_which_is_why_the_gtk_loop_must_not_use_it() {
+        use futures_util::FutureExt;
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let client = Client::new(tx);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = client.request("example.com", Kind::Get, cancel()).now_or_never();
+        }));
+        let message = match caught {
+            Ok(()) => panic!("`request` must need a Tokio runtime; if it no longer does, the main-loop variant can go"),
+            Err(payload) => payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+                .unwrap_or_default(),
+        };
+        assert!(message.contains("no reactor running"), "{message}");
+    }
+
+    #[test]
+    fn the_tokio_request_works_on_a_tokio_task_and_the_main_loop_one_works_there_too() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        runtime.block_on(async {
+            for main_loop in [false, true] {
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                let client = Client::new(tx);
+                let asked = async {
+                    if main_loop {
+                        client.request_on_main_loop("example.com", Kind::Get, cancel()).await
+                    } else {
+                        client.request("example.com", Kind::Get, cancel()).await
+                    }
+                };
+                let answer = async {
+                    let Some(Command::Iq { reply, .. }) = rx.recv().await else { panic!("sent to the session") };
+                    reply.send(Ok(None)).unwrap();
+                };
+                let (got, ()) = tokio::join!(asked, answer);
+                assert_eq!(got, Ok(None), "main_loop: {main_loop}");
+            }
+        });
+    }
+
+    #[test]
+    fn both_requests_report_a_closed_session_and_a_bad_address_the_same_way() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        runtime.block_on(async {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let client = Client::new(tx);
+            assert_eq!(client.request("not a jid", Kind::Get, cancel()).await, Err(Error::Invalid));
+            assert_eq!(client.request_on_main_loop("not a jid", Kind::Get, cancel()).await, Err(Error::Invalid));
+            drop(rx);
+            assert_eq!(client.request("example.com", Kind::Get, cancel()).await, Err(Error::Closed));
+            assert_eq!(client.request_on_main_loop("example.com", Kind::Get, cancel()).await, Err(Error::Closed));
+        });
+    }
+
     #[test]
     fn the_main_loop_request_reports_a_dropped_session_and_a_bad_address() {
         use futures_util::FutureExt;
