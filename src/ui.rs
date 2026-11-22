@@ -123,6 +123,11 @@ pub struct Ui {
     pub contact_access_widgets: RefCell<Option<crate::contact_access_ui::ContactAccessControls>>,
     pub blocking_snapshot: RefCell<crate::blocking::Snapshot>,
     pub blocking_loading: Cell<bool>,
+    pub(crate) last_activity: RefCell<crate::last_activity_ui::Cache>,
+    /// The most reachable device's `show` and idle time for each contact who is online.
+    pub(crate) contact_status: RefCell<HashMap<String, crate::contact_status::Detail>>,
+    /// The status circle on the open conversation's avatar.
+    pub(crate) header_presence: RefCell<Option<crate::components::PresenceAvatar>>,
     pub blocking_error: RefCell<Option<String>>,
     pub blocking_list: RefCell<Option<crate::blocking_ui::ListControls>>,
     pub review_request: RefCell<Option<(String, crate::encryption_policy::Mode)>>,
@@ -446,6 +451,9 @@ impl Ui {
             contact_access_widgets: RefCell::new(None),
             blocking_snapshot: RefCell::new(Default::default()),
             blocking_loading: Cell::new(false),
+            last_activity: RefCell::new(Default::default()),
+            contact_status: RefCell::new(HashMap::new()),
+            header_presence: RefCell::new(None),
             blocking_error: RefCell::new(None),
             blocking_list: RefCell::new(None),
             link_preview_jobs: RefCell::new(Default::default()),
@@ -849,7 +857,7 @@ impl Ui {
     pub fn show_toast(&self, toast: adw::Toast) {
         crate::toast_routing::show(&self.window, &self.toast, toast);
     }
-    fn queue_chat_refresh(self: &Rc<Self>) {
+    pub(crate) fn queue_chat_refresh(self: &Rc<Self>) {
         if self.chat_refresh_pending.replace(true) {
             return;
         }
@@ -1193,7 +1201,10 @@ impl Ui {
             let leading: gtk::Widget = if chat.group {
                 avatar.upcast()
             } else {
-                self.profile_button(&avatar, &chat.jid, chat.display_name()).upcast()
+                let dot = crate::components::PresenceAvatar::new(&avatar);
+                dot.set_presence(self.contact_presence(&chat));
+                dot.set_dot_visible(self.shows_contact_status());
+                self.profile_button(&dot, &chat.jid, chat.display_name()).upcast()
             };
             let row = crate::components::ChatRow::new(&chat.id, &leading);
             row.set_title(chat.display_name());
@@ -1689,6 +1700,7 @@ impl Ui {
         if !self.state.borrow().account.is_empty() {
             self.load_timeline(None);
         }
+        self.refresh_last_activity_current();
         self.refresh_chats(None);
         self.persist();
         if self.split.is_collapsed() {
@@ -1746,7 +1758,15 @@ impl Ui {
         self.composer_placeholder
             .set_visible(self.composer_text().is_empty());
         let title = bx(false, 8);
-        title.append(&self.chat_avatar(chat, 28));
+        if chat.group {
+            self.header_presence.replace(None);
+            title.append(&self.chat_avatar(chat, 28));
+        } else {
+            let dot = crate::components::PresenceAvatar::new(&self.chat_avatar(chat, 28));
+            dot.set_dot_visible(self.shows_contact_status());
+            title.append(&dot);
+            self.header_presence.replace(Some(dot));
+        }
         let words = bx(true, 0);
         words.append(&text(chat.display_name(), "chat-title"));
         let subtitle = text("", "chat-subtitle dim-label");
@@ -1768,8 +1788,17 @@ impl Ui {
         let chat = state.current();
         let composing = self.typing.borrow().iter().any(|((peer, _), at)|
             peer == &chat.jid && at.elapsed() < crate::chat_states::TIMEOUT);
+        if let Some(dot) = self.header_presence.borrow().as_ref() {
+            dot.set_presence(self.contact_presence(chat));
+            dot.set_dot_visible(self.shows_contact_status());
+        }
         if let Some(label) = self.header_subtitle.borrow().as_ref() {
-            label.set_text(if composing { "typing..." } else { &chat.subtitle });
+            let shown = if composing || chat.group {
+                None
+            } else {
+                Some(self.status_text(&chat.jid, &chat.subtitle))
+            };
+            label.set_text(if composing { "typing..." } else { shown.as_deref().unwrap_or(&chat.subtitle) });
         }
     }
 
@@ -2276,6 +2305,7 @@ impl Ui {
     pub fn activate_state(self: &Rc<Self>, mut state: State) {
         // Rosters belong to the previous account's rooms.
         self.room_rosters.borrow_mut().clear();
+        self.contact_status.borrow_mut().clear();
         if self.participants.take().is_some()
             && self.media_mode.borrow().as_str() == "participants"
         {
@@ -2891,6 +2921,13 @@ impl Ui {
                 self.queue_chat_refresh();
                 return;
             }
+            BackendEvent::ContactStatus { peer, detail } => {
+                match detail {
+                    Some(detail) => self.contact_status.borrow_mut().insert(peer, detail),
+                    None => self.contact_status.borrow_mut().remove(&peer),
+                };
+                return;
+            }
             BackendEvent::Presence {
                 peer,
                 online,
@@ -2913,6 +2950,7 @@ impl Ui {
                 drop(s);
                 self.update_chat_subtitle();
                 self.refresh_profile_card();
+                self.queue_chat_refresh();
                 return;
             }
             BackendEvent::Typing { peer, sender, composing } => {

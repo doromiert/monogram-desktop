@@ -41,6 +41,7 @@ pub struct RoomInfo {
     pub title: String,
     pub mam: bool,
     pub stable_ids: bool,
+    pub hats: bool,
     pub private: bool,
 }
 #[derive(Clone, Debug)]
@@ -210,6 +211,7 @@ fn info(xml: &Element) -> Result<RoomInfo> {
         title: title.into(),
         mam: has("urn:xmpp:mam:2"),
         stable_ids: has("urn:xmpp:sid:0"),
+        hats: super::hats::advertised(xml),
         private: has("muc_membersonly")
             && has("muc_nonanonymous")
             && !has("muc_open")
@@ -483,6 +485,12 @@ pub async fn create(
                 peer: room.clone(),
             });
         }
+        if info.hats {
+            let _ = network.send(Command::RoomHats {
+                epoch,
+                peer: room.clone(),
+            });
+        }
         let (reply, answer) = oneshot::channel();
         network
             .send(Command::ManagedUnlock {
@@ -552,6 +560,12 @@ pub async fn join(
     }
     if info.stable_ids {
         let _ = network.send(Command::RoomStableIds {
+            epoch,
+            peer: room.clone(),
+        });
+    }
+    if info.hats {
+        let _ = network.send(Command::RoomHats {
             epoch,
             peer: room.clone(),
         });

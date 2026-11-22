@@ -177,9 +177,14 @@ fn factory(ui: Weak<Ui>, room:String) -> gtk::SignalListItemFactory {
         person.append(&crate::components::PresenceAvatar::new(&adw::Avatar::new(40, None, true)));
         let name = label("", "");
         name.set_xalign(0.);
-        name.set_hexpand(true);
         name.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        person.append(&name);
+        // The name, and under it the hats the room gave this person (hidden while there are none).
+        let words = bx(true, 4);
+        words.set_hexpand(true);
+        words.set_valign(gtk::Align::Center);
+        words.append(&name);
+        words.append(&crate::components::HatStrip::new());
+        person.append(&words);
         root.append(&heading);
         let button=gtk::Button::builder().child(&person).css_classes(["flat","profile-target"]).build();
         let weak_item=item.downgrade();let weak_ui=profile_ui.clone();let room=room.clone();
@@ -222,7 +227,9 @@ fn factory(ui: Weak<Ui>, room:String) -> gtk::SignalListItemFactory {
                 overlay.set_avatar(&owner.chat_avatar(&chat,40));
                 let status = presence_label(&participant.show);
                 overlay.set_presence(crate::components::Presence::from_label(status));
-                let name = person.last_child().and_downcast::<gtk::Label>().unwrap();
+                let words = person.last_child().and_downcast::<gtk::Box>().unwrap();
+                let name = words.first_child().and_downcast::<gtk::Label>().unwrap();
+                words.last_child().and_downcast::<crate::components::HatStrip>().unwrap().set_hats(if owner.shows_hats() { &participant.hats } else { &[] });
                 // The "(You)" mark is added here, for the user's own entry only; other people's
                 // names are cleaned so they cannot imitate it or hide characters.
                 let nick = crate::text_safety::display_nick(chat.display_name(), participant.own);
@@ -444,6 +451,7 @@ impl Ui {
                 .insert(room.into(), people.clone());
         }
         self.refresh_profile_card();
+        self.refresh_message_hats(room);
         let view = self.participants.borrow().clone();
         if let Some(view) = view.filter(|view| view.room == room) {
             view.update(people);
@@ -500,6 +508,7 @@ mod tests {
             role: "participant".into(),
             show: String::new(),
             own,
+            hats: Vec::new(),
         }
     }
 
@@ -734,7 +743,7 @@ mod alias_tests {
     use super::*;
     #[test]
     fn local_display_names_are_searchable_without_changing_room_identity() {
-        let person=Participant{nick:"Room Nick".into(),jid:Some("person@example.invalid".into()),affiliation:"member".into(),role:"participant".into(),show:String::new(),own:false};
+        let person=Participant{nick:"Room Nick".into(),jid:Some("person@example.invalid".into()),affiliation:"member".into(),role:"participant".into(),show:String::new(),own:false,hats:vec![]};
         let found=rows_named(&[person.clone()],"local",|_|"Local Nick".into());
         assert!(matches!(found.last(),Some(Row::Person(actual)) if actual==&person));
     }

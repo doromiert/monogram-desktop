@@ -44,8 +44,51 @@ struct RenderedRow {
     bubble: MessageBubble,
     status: gtk::Box,
     heading: gtk::Box,
+    hats: crate::components::HatStrip,
+    author: gtk::Label,
     avatar: Option<adw::Avatar>,
     reactions: reactions_ui::MessageReactions,
+}
+/// Show an author's hats next to their name. The name stops taking the spare width while hats
+/// are there, so the hats sit beside it instead of at the far edge.
+fn show_hats(strip: &crate::components::HatStrip, author: &gtk::Label, hats: &[crate::rooms::hats::Hat]) {
+    strip.set_hats(hats);
+    author.set_hexpand(hats.is_empty());
+    strip.set_hexpand(!hats.is_empty());
+}
+impl Ui {
+    /// The hats the room gives this message's author, if the room supports them and they are
+    /// in it right now.
+    pub(crate) fn hats_of(&self, m: &Message) -> Vec<crate::rooms::hats::Hat> {
+        if !self.shows_hats() {
+            return Vec::new();
+        }
+        let room = self.state.borrow().current().jid.clone();
+        let rosters = self.room_rosters.borrow();
+        let Some(people) = rosters.get(&room) else {
+            return Vec::new();
+        };
+        people
+            .iter()
+            .find(|person| match (m.sender.is_empty(), person.jid.as_deref()) {
+                // Both addresses are known: they have to be the same person. A nickname alone
+                // proves nothing here, an old message may be from someone who used it before.
+                (false, Some(jid)) => jid == m.sender,
+                _ => crate::text_safety::display_nick(&person.nick, person.own) == m.author,
+            })
+            .map(|person| person.hats.clone())
+            .unwrap_or_default()
+    }
+    /// The room's people changed: update the hats on the messages already on screen.
+    pub(crate) fn refresh_message_hats(&self, room: &str) {
+        if self.state.borrow().current().jid != room {
+            return;
+        }
+        let rendered = self.rendered_rows.borrow();
+        for row in rendered.rows.values() {
+            show_hats(&row.hats, &row.author, &self.hats_of(&row.message));
+        }
+    }
 }
 fn message_focus(root: &gtk::Widget, emoji: Option<&str>) -> Option<gtk::Widget> {
     if let Some(emoji) = emoji {
@@ -747,6 +790,11 @@ impl Ui {
                 heading.append(&gtk::Image::from_icon_name("view-pin-symbolic"))
             }
             if !m.sender.is_empty(){heading.append(&self.profile_button(&author,&m.sender,&m.author));}else{heading.append(&author);}
+            let hats = crate::components::HatStrip::new();
+            hats.set_halign(gtk::Align::Start);
+            hats.set_valign(gtk::Align::Center);
+            heading.append(&hats);
+            show_hats(&hats, &author, &self.hats_of(m));
             let meta = bx(false, 4);
             meta.add_css_class("message-meta");
             meta.set_valign(gtk::Align::Center);
@@ -1085,6 +1133,8 @@ impl Ui {
                 bubble,
                 status: meta,
                 heading,
+                hats,
+                author,
                 avatar,
                 reactions,
             };
@@ -2021,5 +2071,104 @@ mod chat_switch_tests {
         wait(&ui);
         assert!(!ui.bubbles.borrow().contains_key("1-35"));
         ui.window.close();
+    }
+}
+
+#[cfg(test)]
+mod hats_tests {
+    use super::*;
+    use crate::rooms::{hats::Hat, members::Participant};
+    use gtk::{gio, prelude::*};
+
+    const ROOM: &str = "room@conference.example.org";
+
+    fn ui() -> Rc<Ui> {
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id("com.negzero.MessageHatsFixture")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gio::Cancellable>).unwrap();
+        Ui::new(&app, true)
+    }
+    fn person(nick: &str, jid: Option<&str>, own: bool, hats: Vec<Hat>) -> Participant {
+        Participant {
+            nick: nick.into(),
+            jid: jid.map(Into::into),
+            affiliation: "member".into(),
+            role: "participant".into(),
+            show: String::new(),
+            own,
+            hats,
+        }
+    }
+    fn host() -> Vec<Hat> {
+        vec![Hat::new("Host", "urn:h", Some(120.0)).unwrap()]
+    }
+    fn message(author: &str, sender: &str) -> Message {
+        Message { id: format!("m-{author}"), author: author.into(), sender: sender.into(), text: "hi".into(), ..Default::default() }
+    }
+    fn open_room(ui: &Rc<Ui>) {
+        let mut state = ui.state.borrow_mut();
+        let chat = state.chat_for(ROOM);
+        chat.group = true;
+        let id = chat.id.clone();
+        state.active = id;
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn an_authors_hats_are_found_by_address_then_by_cleaned_nickname() {
+        let ui = ui();
+        open_room(&ui);
+        ui.room_rosters.borrow_mut().insert(
+            ROOM.into(),
+            vec![
+                person("amy", Some("amy@example.org"), false, host()),
+                person("bob", None, false, vec![]),
+                person("me", None, true, host()),
+                person("evil\u{202e}", None, false, host()),
+            ],
+        );
+        let titles = |m: Message| ui.hats_of(&m).into_iter().map(|h| h.title).collect::<Vec<_>>();
+        assert_eq!(titles(message("amy", "amy@example.org")), ["Host"], "by real address");
+        assert_eq!(titles(message("Someone Else", "amy@example.org")), ["Host"], "even under another display name");
+        assert_eq!(titles(message("amy", "")), ["Host"], "by nickname when no address is known");
+        assert!(titles(message("bob", "")).is_empty(), "no hats, none shown");
+        assert_eq!(titles(message("me", "")), ["Host"], "your own hats too");
+        assert_eq!(titles(message("evil", "")), ["Host"], "compared after the same cleaning the list uses");
+        assert!(titles(message("nobody", "")).is_empty(), "someone who left shows none");
+        assert!(
+            titles(message("amy", "amy@elsewhere.org")).is_empty(),
+            "the same nickname from a different address is a different person"
+        );
+        assert_eq!(titles(message("bob", "bob@example.org")), Vec::<String>::new(), "known address, roster has none");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn without_a_roster_or_in_another_chat_no_hats_are_shown() {
+        let ui = ui();
+        open_room(&ui);
+        assert!(ui.hats_of(&message("amy", "")).is_empty(), "no roster yet");
+        ui.room_rosters.borrow_mut().insert("other@conference.example.org".into(), vec![person("amy", None, false, host())]);
+        assert!(ui.hats_of(&message("amy", "")).is_empty(), "another room's hats do not leak in");
+        ui.room_rosters.borrow_mut().insert(ROOM.into(), vec![]);
+        assert!(ui.hats_of(&message("amy", "")).is_empty(), "an empty roster");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn the_author_name_gives_up_spare_width_only_while_hats_are_shown() {
+        adw::init().unwrap();
+        let strip = crate::components::HatStrip::new();
+        let author = gtk::Label::new(Some("amy"));
+        show_hats(&strip, &author, &[]);
+        assert!(author.hexpands() && !strip.hexpands() && !strip.is_visible(), "unchanged without hats");
+        show_hats(&strip, &author, &host());
+        assert!(!author.hexpands() && strip.hexpands() && strip.is_visible());
+        assert_eq!(strip.chips().len(), 1);
+        show_hats(&strip, &author, &[]);
+        assert!(author.hexpands() && !strip.hexpands() && !strip.is_visible(), "and back again");
     }
 }

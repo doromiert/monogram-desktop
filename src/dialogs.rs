@@ -1561,6 +1561,24 @@ impl Ui {
                 "In group chats, offer to send an encrypted message to the members who have keys, then keep doing so for 30 minutes",
                 true,
             ),
+            (
+                crate::presence_privacy::LAST_SEEN,
+                crate::presence_privacy::OPTIONS[0].1,
+                crate::presence_privacy::OPTIONS[0].2,
+                true,
+            ),
+            (
+                crate::presence_privacy::CONTACT_STATUS,
+                crate::presence_privacy::OPTIONS[1].1,
+                crate::presence_privacy::OPTIONS[1].2,
+                true,
+            ),
+            (
+                crate::presence_privacy::HATS,
+                crate::presence_privacy::OPTIONS[2].1,
+                crate::presence_privacy::OPTIONS[2].2,
+                true,
+            ),
         ] {
             let row = adw::SwitchRow::builder()
                 .title(title)
@@ -1575,6 +1593,7 @@ impl Ui {
                         &format!("{key}:{owner}"),
                         if r.is_active() { "true" } else { "false" },
                     );
+                    ui.presence_privacy_changed();
                 }
             });
             privacy.add(&row)

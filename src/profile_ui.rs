@@ -41,9 +41,9 @@ impl Ui {
         if self.active_profile.borrow().as_ref().is_none_or(|popup|!popup.is_visible()) {return;}
         let chat=self.profile_chat(&card.peer,&card.fallback,card.room.as_ref());
         card.title.set_label(&crate::text_safety::visible(chat.display_name(),128));
-        card.status.set_label(profile_status(&chat,card.room.is_some()));
-        if let Some(old)=card.banner.last_child().and_downcast::<adw::Avatar>() {card.banner.remove_overlay(&old);}
-        add_avatar(self,&card.banner,&chat);
+        card.status.set_label(&self.profile_status_text(&chat,card.room.is_some()));
+        if let Some(old)=card.banner.last_child().filter(|old|old.is::<adw::Avatar>()||old.is::<crate::components::PresenceAvatar>()) {card.banner.remove_overlay(&old);}
+        add_avatar(self,&card.banner,&chat,card.room.is_some());
     }
 
     pub(crate) fn profile_button(
@@ -120,7 +120,7 @@ impl Ui {
         color.add_css_class("profile-card-banner");
         color.set_margin_bottom(32);
         banner.set_child(Some(&color));
-        add_avatar(self,&banner,&chat);
+        add_avatar(self,&banner,&chat,room.is_some());
         body.append(&banner);
         let content = bx(true, 10);
         content.set_margin_start(12);
@@ -138,7 +138,8 @@ impl Ui {
         address.set_xalign(0.);
         address.set_max_width_chars(35);
         content.append(&address);
-        let status = wrap(profile_status(&chat,room.is_some()), "caption");
+        let status = wrap(&self.profile_status_text(&chat,room.is_some()), "caption");
+        if room.is_none() && !chat.group { self.refresh_last_activity(peer); }
         status.set_xalign(0.);
         content.append(&status);
         let fields = bx(true, 10);
@@ -289,16 +290,31 @@ fn render(body: &gtk::Box, card: &crate::profiles::Profile) {
     }
 }
 
+impl Ui {
+    fn profile_status_text(&self,chat:&Chat,room:bool)->String {
+        let base=profile_status(chat,room);
+        if room||chat.group { base.into() } else { self.status_text(&chat.jid,base) }
+    }
+}
 fn profile_status(chat:&Chat, room:bool)->&str {
     if room && !chat.subtitle.is_empty() { &chat.subtitle }
     else if chat.group { "Room participant" }
     else if !chat.subtitle.is_empty() { &chat.subtitle }
     else { "Presence unavailable" }
 }
-fn add_avatar(ui:&Ui,banner:&gtk::Overlay,chat:&Chat) {
+fn add_avatar(ui:&Ui,banner:&gtk::Overlay,chat:&Chat,room:bool) {
     let avatar=ui.chat_avatar(chat,72);
-    avatar.set_halign(gtk::Align::Start);avatar.set_valign(gtk::Align::End);avatar.set_margin_start(12);
-    banner.add_overlay(&avatar);
+    // A person (not a room occupant or a group) gets the status circle.
+    let shown:gtk::Widget=if chat.group {avatar.upcast()} else {
+        let dot=crate::components::PresenceAvatar::new(&avatar);
+        // In a room the status is the occupant's presence in it; otherwise the contact's own.
+        dot.set_presence(if room {crate::components::Presence::from_status(&chat.subtitle)} else {ui.contact_presence(chat)});
+        // A contact's circle follows the status privacy option; an occupant's is their room presence.
+        if !room {dot.set_dot_visible(ui.shows_contact_status());}
+        dot.upcast()
+    };
+    shown.set_halign(gtk::Align::Start);shown.set_valign(gtk::Align::End);shown.set_margin_start(12);
+    banner.add_overlay(&shown);
 }
 
 #[cfg(test)]
@@ -317,13 +333,13 @@ mod tests {
         let pump=||{let until=Instant::now()+Duration::from_millis(200);while Instant::now()<until{glib::MainContext::default().iteration(false);std::thread::sleep(Duration::from_millis(2));}};pump();
         let image:gdk::Texture=gdk::MemoryTexture::new(1,1,gdk::MemoryFormat::R8g8b8a8,&glib::Bytes::from_owned(vec![255,0,0,255]),4).upcast();
         ui.avatars.borrow_mut().cache.insert(peer.into(),(Instant::now()+Duration::from_secs(300),Some(image.clone())));
-        let mut person=Participant{nick:"Room Nick".into(),jid:Some(peer.into()),affiliation:"member".into(),role:"participant".into(),show:String::new(),own:false};
+        let mut person=Participant{nick:"Room Nick".into(),jid:Some(peer.into()),affiliation:"member".into(),role:"participant".into(),show:String::new(),own:false,hats:vec![]};
         ui.room_roster_changed(room,vec![person.clone()]);
         let row=ui.participant_chat(room,&person);assert_eq!(row.display_name(),"Room Nick");assert_eq!(row.subtitle,"Online");
         let row_avatar=ui.chat_avatar(&row,40);assert_eq!(row_avatar.custom_image().unwrap(),image.clone().upcast::<gdk::Paintable>());
         ui.participant_profile_card(&ui.title,room,&person);pump();
         let controls=ui.profile_controls.borrow();let card=controls.as_ref().unwrap();assert_eq!(card.title.label(),"Room Nick");assert_eq!(card.status.label(),"Online");
-        let avatar=card.banner.last_child().and_downcast::<adw::Avatar>().unwrap();assert_eq!(avatar.custom_image(),row_avatar.custom_image());drop(controls);
+        let avatar={fn find(w:&gtk::Widget)->Option<adw::Avatar>{if let Some(a)=w.downcast_ref::<adw::Avatar>(){return Some(a.clone());}let mut c=w.first_child();while let Some(x)=c{if let Some(a)=find(&x){return Some(a);}c=x.next_sibling();}None}find(&card.banner.last_child().unwrap()).unwrap()};assert_eq!(avatar.custom_image(),row_avatar.custom_image());drop(controls);
         ui.backend_event(ui.generation.get(),owner,crate::protocol::BackendEvent::Presence{peer:peer.into(),online:false,visible:true});
         assert_eq!(ui.profile_controls.borrow().as_ref().unwrap().status.label(),"Online","direct offline must not override known room presence");
         person.show="away".into();ui.room_roster_changed(room,vec![person.clone()]);assert_eq!(ui.profile_controls.borrow().as_ref().unwrap().status.label(),"Away");
@@ -332,5 +348,32 @@ mod tests {
         assert_eq!(ui.participant_chat(room,&person).display_name(),"Local Nick");assert_eq!(ui.profile_controls.borrow().as_ref().unwrap().title.label(),"Local Nick");
         ui.room_roster_changed(room,vec![]);assert_eq!(ui.profile_controls.borrow().as_ref().unwrap().status.label(),"Not in this room");
         ui.active_profile.borrow().as_ref().unwrap().popdown();ui.window.close();
+    }
+
+    #[test]
+    #[ignore="requires private GTK display and D-Bus"]
+    fn the_profile_avatar_has_a_status_circle_that_follows_the_room_or_the_contact() {
+        use crate::components::{Presence,PresenceAvatar};
+        adw::init().unwrap();
+        let app=adw::Application::builder().application_id("com.negzero.ProfileCircleFixture").flags(gio::ApplicationFlags::NON_UNIQUE).build();app.register(None::<&gio::Cancellable>).unwrap();
+        let ui=Ui::new(&app,true);
+        let circle=|chat:&Chat,room:bool|{
+            let banner=gtk::Overlay::new();add_avatar(&ui,&banner,chat,room);
+            let shown=banner.last_child().unwrap();
+            let Some(dot)=shown.downcast_ref::<PresenceAvatar>().cloned() else{return None};
+            Some(dot.presence())
+        };
+        let chat=|subtitle:&str,group:bool|Chat{jid:"bob@example.invalid".into(),subtitle:subtitle.into(),group,..Default::default()};
+        // In a room the circle is the occupant's presence there; anything else is grey.
+        for (text,want) in [("Online",Presence::Online),("Away",Presence::Away),("Busy",Presence::Busy),("Not in this room",Presence::Unknown),("",Presence::Unknown)] {
+            assert_eq!(circle(&chat(text,false),true),Some(want),"room {text:?}");
+        }
+        // For a contact it follows what their presence stanzas said.
+        ui.contact_status.borrow_mut().insert("bob@example.invalid".into(),crate::contact_status::Detail{show:crate::contact_status::Show::DoNotDisturb,idle_since:None});
+        assert_eq!(circle(&chat("Online",false),false),Some(Presence::Busy));
+        assert_eq!(circle(&chat("Offline",false),false),Some(Presence::Unknown));
+        assert_eq!(circle(&chat("",false),false),Some(Presence::Unknown),"presence not shared");
+        // A group has no single presence, so no circle.
+        assert_eq!(circle(&chat("Online",true),false),None);
     }
 }

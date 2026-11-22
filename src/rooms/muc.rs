@@ -242,6 +242,12 @@ impl Rooms {
             self.stable_ids.insert(room);
         }
     }
+    /// The room's service discovery advertised XEP-0317, so the hats in its presence are its own.
+    pub fn enable_hats(&mut self, room: String) {
+        if self.known(&room) {
+            self.identities.set_hats(&room, true);
+        }
+    }
     pub fn status(&self, jid: &str) -> Presence {
         let (joined, can_send, detail) = match self.membership.get(jid) {
             Some(Membership::Joined { locked: true, .. }) => {
@@ -881,3 +887,79 @@ mod retraction_tests {
         assert!(!projected.messages[0].retracted,"one participant cannot retract another participant's message");
     }
 }
+
+#[cfg(test)]
+mod hats_tests {
+    use super::*;
+
+    const OWNER: &str = "owner@example.invalid";
+    const ROOM: &str = "room@conference.example.invalid";
+
+    fn joined() -> Rooms {
+        let mut rooms = Rooms::new(OWNER.into());
+        rooms.membership.insert(ROOM.into(), Membership::Joined {
+            occupant: format!("{ROOM}/me").parse().unwrap(),
+            can_send: true,
+            locked: false,
+            created: false,
+            owner: false,
+        });
+        rooms.identities.reset(ROOM);
+        rooms
+    }
+    fn presence(rooms: &mut Rooms, nick: &str, extra: &str, own: bool) {
+        let status = if own { "<status code='110'/>" } else { "" };
+        let xml: Element = format!(
+            "<presence xmlns='jabber:client' from='{ROOM}/{nick}' to='{OWNER}'>{extra}<x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='participant'/>{status}</x></presence>"
+        )
+        .parse()
+        .unwrap();
+        rooms.presence(&xml);
+    }
+    fn titles(rooms: &mut Rooms, nick: &str) -> Vec<String> {
+        rooms
+            .take_roster_changes()
+            .pop()
+            .and_then(|(_, people)| people.into_iter().find(|p| p.nick == nick))
+            .map(|p| p.hats.into_iter().map(|h| h.title).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn hats_flow_from_presence_to_the_roster_only_for_a_room_that_advertised_them() {
+        let hat = "<hats xmlns='urn:xmpp:hats:0'><hat title='Host' uri='urn:h' hue='200'/></hats>";
+        let mut rooms = joined();
+        presence(&mut rooms, "me", "", true);
+        presence(&mut rooms, "amy", hat, false);
+        assert!(titles(&mut rooms, "amy").is_empty());
+        rooms.enable_hats(ROOM.into());
+        assert_eq!(titles(&mut rooms, "amy"), ["Host"]);
+        // The user's own hats are shown the same way.
+        presence(&mut rooms, "me", hat, true);
+        assert_eq!(titles(&mut rooms, "me"), ["Host"]);
+    }
+
+    #[test]
+    fn a_room_the_client_is_not_in_cannot_switch_hats_on() {
+        let mut rooms = Rooms::new(OWNER.into());
+        rooms.enable_hats("stranger@conference.example.invalid".into());
+        assert!(rooms.identities.take_roster_changes().is_empty());
+        rooms.disconnect();
+        // Leaving or disconnecting forgets the advertisement.
+        let mut rooms = joined();
+        rooms.enable_hats(ROOM.into());
+        rooms.disconnect();
+        rooms.membership.insert(ROOM.into(), Membership::Joined {
+            occupant: format!("{ROOM}/me").parse().unwrap(),
+            can_send: true,
+            locked: false,
+            created: false,
+            owner: false,
+        });
+        rooms.identities.reset(ROOM);
+        presence(&mut rooms, "me", "", true);
+        presence(&mut rooms, "amy", "<hats xmlns='urn:xmpp:hats:0'><hat title='Host' uri='urn:h'/></hats>", false);
+        assert!(titles(&mut rooms, "amy").is_empty());
+    }
+}
+

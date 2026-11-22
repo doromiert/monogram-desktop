@@ -667,6 +667,12 @@ pub enum BackendEvent {
         online: bool,
         visible: bool,
     },
+    /// The most reachable device's `show` and XEP-0319 idle time, or `None` when nothing is known
+    /// (offline, or presence not shared with us).
+    ContactStatus {
+        peer: String,
+        detail: Option<crate::contact_status::Detail>,
+    },
     AvatarChanged {
         peer: String,
         hint: Option<String>,
@@ -834,6 +840,10 @@ pub enum Command {
         nick: Option<String>,
     },
     RoomStableIds {
+        epoch: u64,
+        peer: String,
+    },
+    RoomHats {
         epoch: u64,
         peer: String,
     },
@@ -1272,6 +1282,9 @@ impl Session {
                         Some(Command::RoomBookmarksLoaded{..})=>{},
                         Some(Command::RoomStableIds{epoch,peer})=>{
                             if online && epoch==room_epoch { rooms.enable_stable_ids(peer); }
+                        },
+                        Some(Command::RoomHats{epoch,peer})=>{
+                            if online && epoch==room_epoch { rooms.enable_hats(peer); }
                         },
                         Some(Command::RoomMembersLoaded{epoch,peer,revision,result})=>{
                             if online && epoch==room_epoch {

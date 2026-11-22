@@ -296,14 +296,17 @@
 .pack-editor-grid > child:hover { background-color: transparent; }
 
 /* Participants panel: availability dot on a participant's avatar. */
+.hat-chip { min-height: 18px; }
 .presence-dot { min-width: 12px; min-height: 12px; border-radius: 999px; border: 2px solid @window_bg_color; background: @success_color; }
 .presence-dot.presence-away { background: @warning_color; }
 .presence-dot.presence-busy { background: @error_color; }
+.presence-dot.presence-unknown { background: mix(@window_fg_color, @window_bg_color, .5); }
 
 /* Participants panel: availability dot on a participant's avatar. */
 .presence-dot { min-width: 12px; min-height: 12px; border-radius: 999px; border: 2px solid @window_bg_color; background: @success_color; }
 .presence-dot.presence-away { background: @warning_color; }
 .presence-dot.presence-busy { background: @error_color; }
+.presence-dot.presence-unknown { background: mix(@window_fg_color, @window_bg_color, .5); }
 
 /* Audio messages: a round play button, a waveform and the duration. The button is libadwaita's
    circular suggested-action, so it follows the accent colour; the waveform takes the same colour. */

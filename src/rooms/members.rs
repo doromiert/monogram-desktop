@@ -68,6 +68,8 @@ pub struct Participant {
     /// XMPP `show` value: empty (available), away, xa or dnd.
     pub show: String,
     pub own: bool,
+    /// XEP-0317 hats. Empty unless the room advertises hats support (see [`Registry::set_hats`]).
+    pub hats: Vec<super::hats::Hat>,
 }
 
 #[derive(Default)]
@@ -76,6 +78,9 @@ pub(super) struct Registry {
     rooms: BTreeMap<String, Identities>,
     /// Rooms whose roster was cleared and not yet reported.
     gone: std::collections::BTreeSet<String>,
+    /// Rooms that advertise XEP-0317. Kept apart from the per-join state so the answer survives
+    /// the roster being reset, whichever of the two arrives first.
+    hats: std::collections::BTreeSet<String>,
 }
 #[derive(Default)]
 struct Identities {
@@ -121,13 +126,24 @@ impl Registry {
         );
     }
     pub fn remove(&mut self, room: &str) {
+        self.hats.remove(room);
         if self.rooms.remove(room).is_some() {
             self.gone.insert(room.into());
         }
     }
     pub fn clear(&mut self) {
+        self.hats.clear();
         let rooms = std::mem::take(&mut self.rooms);
         self.gone.extend(rooms.into_keys());
+    }
+    /// The room advertises (or stopped advertising) XEP-0317. Occupants already listed are
+    /// reported again so their hats appear, or disappear, at once.
+    pub fn set_hats(&mut self, room: &str, supported: bool) {
+        let changed =
+            if supported { self.hats.insert(room.into()) } else { self.hats.remove(room) };
+        if changed && let Some(state) = self.rooms.get_mut(room) {
+            state.roster_dirty = true;
+        }
     }
     /// Rosters changed since the last call, as complete lists; a cleared room reports an empty one.
     pub fn take_roster_changes(&mut self) -> Vec<(String, Vec<Participant>)> {
@@ -135,7 +151,21 @@ impl Registry {
         for (room, state) in self.rooms.iter_mut().filter(|(_, state)| state.roster_dirty) {
             state.roster_dirty = false;
             self.gone.remove(room);
-            changes.push((room.clone(), state.roster.values().cloned().collect()));
+            let shown = self.hats.contains(room);
+            changes.push((
+                room.clone(),
+                state
+                    .roster
+                    .values()
+                    .cloned()
+                    .map(|mut person| {
+                        if !shown {
+                            person.hats.clear();
+                        }
+                        person
+                    })
+                    .collect(),
+            ));
         }
         for room in std::mem::take(&mut self.gone) {
             changes.push((room, Vec::new()));
@@ -183,6 +213,8 @@ impl Registry {
                     own: user.children().any(|status| {
                         status.name() == "status" && status.attr("code") == Some("110")
                     }),
+                    // Always read, only shown once the room is known to support hats.
+                    hats: super::hats::parse(xml),
                 };
                 if state.roster.get(address) != Some(&participant) {
                     state.roster.insert(address.into(), participant);
@@ -770,5 +802,146 @@ mod tests {
             error.to_string(),
             "lurker is in this room but is not a listed member or hides their address, so the message cannot be encrypted for them"
         );
+    }
+
+    // ---- XEP-0317 hats ------------------------------------------------------------------
+
+    const ROOM: &str = "room@conference.example.org";
+    const HATS: &str = "<hats xmlns='urn:xmpp:hats:0'><hat title='Host' uri='urn:h' hue='120'/></hats>";
+
+    fn join(registry: &mut Registry, nick: &str, extra: &str) {
+        let (xml, user) = occupant_presence(ROOM, nick, extra, "", "<item affiliation='none' role='participant'/>");
+        registry.presence(ROOM, &format!("{ROOM}/{nick}"), &xml, &user);
+    }
+    fn roster(registry: &mut Registry) -> Vec<Participant> {
+        registry.take_roster_changes().pop().map(|(_, people)| people).unwrap_or_default()
+    }
+    fn hats_of(people: &[Participant], nick: &str) -> Vec<String> {
+        people.iter().find(|p| p.nick == nick).unwrap().hats.iter().map(|h| h.title.clone()).collect()
+    }
+
+    #[test]
+    fn hats_are_hidden_until_the_room_advertises_support() {
+        let mut registry = Registry::default();
+        registry.reset(ROOM);
+        registry.take_roster_changes();
+        join(&mut registry, "amy", HATS);
+        let people = roster(&mut registry);
+        assert!(hats_of(&people, "amy").is_empty(), "an unsupported room's hats are not shown");
+        // Nothing about the stanza itself was lost: it is just not trusted yet.
+        registry.set_hats(ROOM, true);
+        assert_eq!(hats_of(&roster(&mut registry), "amy"), ["Host"]);
+    }
+
+    #[test]
+    fn a_forged_hat_in_a_room_without_hats_never_reaches_the_screen() {
+        let mut registry = Registry::default();
+        registry.reset(ROOM);
+        registry.take_roster_changes();
+        // A plain occupant claims to be an administrator in their own presence.
+        join(&mut registry, "mallory", "<hats xmlns='urn:xmpp:hats:0'><hat title='Server Admin' uri='urn:admin' hue='0'/></hats>");
+        join(&mut registry, "bob", "");
+        let people = roster(&mut registry);
+        assert!(people.iter().all(|p| p.hats.is_empty()));
+        assert_eq!(people.len(), 2, "they are still listed");
+    }
+
+    #[test]
+    fn support_learned_before_or_after_the_roster_gives_the_same_result() {
+        for early in [true, false] {
+            let mut registry = Registry::default();
+            if early {
+                registry.set_hats(ROOM, true);
+            }
+            registry.reset(ROOM);
+            registry.take_roster_changes();
+            join(&mut registry, "amy", HATS);
+            if !early {
+                registry.set_hats(ROOM, true);
+            }
+            assert_eq!(hats_of(&roster(&mut registry), "amy"), ["Host"], "early: {early}");
+        }
+    }
+
+    #[test]
+    fn learning_of_support_reports_the_roster_again_and_only_once() {
+        let mut registry = Registry::default();
+        registry.reset(ROOM);
+        join(&mut registry, "amy", HATS);
+        registry.take_roster_changes();
+        assert!(registry.take_roster_changes().is_empty());
+        registry.set_hats(ROOM, true);
+        assert_eq!(roster(&mut registry).len(), 1, "reported so the hats appear");
+        registry.set_hats(ROOM, true);
+        assert!(registry.take_roster_changes().is_empty(), "same news is not repeated");
+        registry.set_hats(ROOM, false);
+        let people = roster(&mut registry);
+        assert!(hats_of(&people, "amy").is_empty(), "withdrawn support hides them again");
+    }
+
+    #[test]
+    fn support_survives_a_roster_reset_and_ends_when_the_room_does() {
+        let mut registry = Registry::default();
+        registry.set_hats(ROOM, true);
+        registry.reset(ROOM);
+        registry.reset(ROOM);
+        join(&mut registry, "amy", HATS);
+        assert_eq!(hats_of(&roster(&mut registry), "amy"), ["Host"]);
+        registry.remove(ROOM);
+        registry.reset(ROOM);
+        join(&mut registry, "amy", HATS);
+        assert!(hats_of(&roster(&mut registry), "amy").is_empty(), "leaving forgets the room's support");
+        registry.set_hats(ROOM, true);
+        registry.clear();
+        registry.reset(ROOM);
+        join(&mut registry, "amy", HATS);
+        assert!(hats_of(&roster(&mut registry), "amy").is_empty(), "disconnecting forgets all of it");
+        registry.set_hats("elsewhere@conference.example.org", true);
+        registry.reset(ROOM);
+        join(&mut registry, "amy", HATS);
+        assert!(hats_of(&roster(&mut registry), "amy").is_empty(), "support is per room");
+    }
+
+    #[test]
+    fn changing_hats_changes_the_roster_and_repeating_them_does_not() {
+        let mut registry = Registry::default();
+        registry.set_hats(ROOM, true);
+        registry.reset(ROOM);
+        registry.take_roster_changes();
+        join(&mut registry, "amy", HATS);
+        registry.take_roster_changes();
+        join(&mut registry, "amy", HATS);
+        assert!(registry.take_roster_changes().is_empty(), "an identical presence is not news");
+        join(&mut registry, "amy", "<hats xmlns='urn:xmpp:hats:0'><hat title='Host' uri='urn:h' hue='121'/></hats>");
+        assert_eq!(roster(&mut registry).len(), 1, "a different hue is");
+        join(&mut registry, "amy", "");
+        assert!(hats_of(&roster(&mut registry), "amy").is_empty(), "taking the hat off is");
+    }
+
+    #[test]
+    fn hostile_hats_are_cleaned_in_the_roster_and_cannot_flood_it() {
+        let mut registry = Registry::default();
+        registry.set_hats(ROOM, true);
+        registry.reset(ROOM);
+        registry.take_roster_changes();
+        let many: String = (0..100).map(|i| format!("<hat title='H{i}' uri='u{i}' hue='nan'/>")).collect();
+        join(&mut registry, "amy", &format!("<hats xmlns='urn:xmpp:hats:0'><hat title='\u{202e}Own\u{200b}er' uri='o'/>{many}</hats>"));
+        let people = roster(&mut registry);
+        let amy = people.iter().find(|p| p.nick == "amy").unwrap();
+        assert_eq!(amy.hats.len(), crate::rooms::hats::MAX_HATS);
+        assert_eq!(amy.hats[0].title, "Owner");
+        assert!(amy.hats.iter().all(|h| h.hue().is_none()));
+    }
+
+    #[test]
+    fn an_unavailable_presence_removes_the_person_with_their_hats() {
+        let mut registry = Registry::default();
+        registry.set_hats(ROOM, true);
+        registry.reset(ROOM);
+        join(&mut registry, "amy", HATS);
+        registry.take_roster_changes();
+        let (xml, user) = occupant_presence(ROOM, "amy", "", " type='unavailable'", "<item affiliation='none' role='none'/>");
+        registry.presence(ROOM, &format!("{ROOM}/amy"), &xml, &user);
+        assert!(roster(&mut registry).is_empty());
     }
 }

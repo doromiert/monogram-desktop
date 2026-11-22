@@ -2,6 +2,7 @@
 pub mod archive;
 mod bookmarks;
 pub mod discovery;
+pub mod hats;
 pub mod invitations;
 pub mod manage;
 pub mod members;

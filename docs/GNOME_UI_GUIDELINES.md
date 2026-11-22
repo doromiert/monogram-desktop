@@ -26,7 +26,8 @@ keys on, so views set properties rather than adding classes by hand.
 | `UtilityPane` | every right-hand utility sidebar (info, shared media, participants) | heading, `back()`, `close()`, `flat()` |
 | `MessageBubble` | a timeline message | `kind` (text, media, sticker, action), `own`, `document`, `emoji-only`, `highlighted` |
 | `ChatRow` | one conversation in the sidebar list | `title`, `time`, `preview`, `unread`, `unread-mark`, `pinned` |
-| `PresenceAvatar` | a person with an online, away or busy dot | `presence` |
+| `PresenceAvatar` | a person with a status circle: green online, yellow away, red do not disturb, grey unknown or refused; always with a tooltip and accessible name | `presence` |
+| `HatChip`, `HatStrip` | an XEP-0317 hat: outlined pill, hue-coloured text for the scheme in force | hat title, hue |
 | `StoryAvatar` | a story ring around an avatar, with an optional "add" badge | `unseen`, `add-badge` |
 | `ContactRow` | a person in a list or a multi-select (`with_check`, `pickable`) | title, address |
 | `NavRow` | a row that opens something: icon, title, subtitle, arrow | `icon`, `chevron` |

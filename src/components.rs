@@ -10,6 +10,7 @@
 //! * [`ChatRow`]: one conversation in the sidebar list.
 //! * [`PresenceAvatar`]: an avatar with a presence dot.
 //! * [`StoryAvatar`]: an avatar with the unseen/seen ring and an optional "add" badge.
+//! * [`HatChip`] and [`HatStrip`]: XEP-0317 hats, drawn as an outlined pill in the hat's own hue.
 //! * [`ContactRow`]: a list row for a person (avatar, name, optional address, optional check).
 //! * [`NavRow`]: a list row that opens something (icon, title, subtitle, chevron).
 //! * [`ReplyQuote`], [`ForwardedBanner`], [`FileCard`] and [`overlay_meta`]: the parts of a
@@ -241,7 +242,10 @@ pub enum Presence {
     #[default]
     Online,
     Away,
+    /// Do not disturb.
     Busy,
+    /// Offline, or presence we are not allowed to see (no subscription, or a refused one).
+    Unknown,
 }
 
 impl Presence {
@@ -250,6 +254,35 @@ impl Presence {
             Presence::Online => "presence-online",
             Presence::Away => "presence-away",
             Presence::Busy => "presence-busy",
+            Presence::Unknown => "presence-unknown",
+        }
+    }
+    /// What the colour means in words, for the tooltip and assistive technology.
+    pub fn meaning(self) -> &'static str {
+        match self {
+            Presence::Online => crate::contact_status::Light::Green.meaning(),
+            Presence::Away => crate::contact_status::Light::Yellow.meaning(),
+            Presence::Busy => crate::contact_status::Light::Red.meaning(),
+            Presence::Unknown => crate::contact_status::Light::Grey.meaning(),
+        }
+    }
+    /// From the status text a person has in a room or a profile ("Online", "Away", "Busy"): any
+    /// other text ("Not in this room", "Offline", nothing) is unknown, never a guess of "online".
+    pub fn from_status(status: &str) -> Self {
+        match status {
+            "Online" => Presence::Online,
+            "Away" => Presence::Away,
+            "Busy" | "Do not disturb" => Presence::Busy,
+            _ => Presence::Unknown,
+        }
+    }
+    pub fn from_light(light: crate::contact_status::Light) -> Self {
+        use crate::contact_status::Light;
+        match light {
+            Light::Green => Presence::Online,
+            Light::Yellow => Presence::Away,
+            Light::Red => Presence::Busy,
+            Light::Grey => Presence::Unknown,
         }
     }
     /// From the label `presence_label` produces ("Away", "Busy", anything else is online).
@@ -289,6 +322,7 @@ mod presence_imp {
             let dot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
             dot.add_css_class("presence-dot");
             dot.add_css_class(self.presence.get().class());
+            dot.set_tooltip_text(Some(self.presence.get().meaning()));
             dot.set_halign(gtk::Align::End);
             dot.set_valign(gtk::Align::End);
             dot.set_can_target(false);
@@ -309,7 +343,10 @@ mod presence_imp {
             if let Some(dot) = self.dot.borrow().as_ref() {
                 dot.remove_css_class(previous.class());
                 dot.add_css_class(value.class());
+                // Colour alone must not carry the meaning.
+                dot.set_tooltip_text(Some(value.meaning()));
             }
+            self.obj().update_property(&[gtk::accessible::Property::Label(&format!("Status: {}", value.meaning()))]);
             self.obj().notify_presence();
         }
     }
@@ -326,6 +363,15 @@ impl PresenceAvatar {
         let this: Self = glib::Object::new();
         this.set_avatar(avatar);
         this
+    }
+    /// Show or hide the circle (a privacy option can turn status off without changing the avatar).
+    pub fn set_dot_visible(&self, visible: bool) {
+        if let Some(dot) = self.imp().dot.borrow().as_ref() {
+            dot.set_visible(visible);
+        }
+    }
+    pub fn dot_visible(&self) -> bool {
+        self.imp().dot.borrow().as_ref().is_some_and(|dot| dot.is_visible())
     }
     /// Swap the picture (a recycled list row binds a new person) and keep the dot on top.
     pub fn set_avatar(&self, avatar: &adw::Avatar) {
@@ -566,6 +612,217 @@ impl StoryAvatar {
         imp.avatar.replace(Some(avatar.clone()));
         imp.style(avatar);
         this
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// HatChip / HatStrip
+// ---------------------------------------------------------------------------------------------
+
+mod hat_chip_imp {
+    use super::*;
+    use crate::hat_color::{self, Rgb, Scheme};
+    use gtk::{gdk, graphene, gsk};
+    use std::cell::{Cell, RefCell};
+
+    #[derive(Default)]
+    pub struct HatChip {
+        pub label: gtk::Label,
+        /// The hat's hue angle in degrees; `None` draws the chip in the normal text colour.
+        pub hue: Cell<Option<f64>>,
+        /// The colour currently applied to the text and border; `None` means "use the theme's".
+        pub color: Cell<Option<Rgb>>,
+        pub handlers: RefCell<Vec<glib::SignalHandlerId>>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for HatChip {
+        const NAME: &'static str = "MonogramHatChip";
+        type Type = super::HatChip;
+        type ParentType = adw::Bin;
+    }
+
+    impl ObjectImpl for HatChip {
+        fn constructed(&self) {
+            self.parent_constructed();
+            let obj = self.obj();
+            obj.add_css_class("hat-chip");
+            let label = &self.label;
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            label.set_max_width_chars(24);
+            label.set_single_line_mode(true);
+            label.add_css_class("caption-heading");
+            label.set_margin_start(8);
+            label.set_margin_end(8);
+            label.set_margin_top(1);
+            label.set_margin_bottom(1);
+            obj.set_child(Some(label));
+            // The colours follow the user's scheme: light or dark, and high contrast.
+            let style = adw::StyleManager::default();
+            let mut handlers = self.handlers.borrow_mut();
+            for property in ["dark", "high-contrast"] {
+                let weak = obj.downgrade();
+                handlers.push(style.connect_notify_local(Some(property), move |_, _| {
+                    if let Some(chip) = weak.upgrade() {
+                        chip.imp().recolor();
+                    }
+                }));
+            }
+        }
+        fn dispose(&self) {
+            let style = adw::StyleManager::default();
+            for id in self.handlers.take() {
+                style.disconnect(id);
+            }
+        }
+    }
+
+    impl WidgetImpl for HatChip {
+        fn snapshot(&self, snapshot: &gtk::Snapshot) {
+            self.parent_snapshot(snapshot);
+            let obj = self.obj();
+            let (width, height) = (obj.width() as f32, obj.height() as f32);
+            if width < 2.0 || height < 2.0 {
+                return;
+            }
+            // A one-pixel outline in the text colour, nothing inside it.
+            let color = match self.color.get() {
+                Some(rgb) => {
+                    let (r, g, b) = rgb.unit();
+                    gdk::RGBA::new(r, g, b, 1.0)
+                }
+                None => self.label.color(),
+            };
+            let outline = gsk::RoundedRect::from_rect(graphene::Rect::new(0.0, 0.0, width, height), height / 2.0);
+            snapshot.append_border(&outline, &[1.0; 4], &[color; 4]);
+        }
+    }
+    impl BinImpl for HatChip {}
+
+    impl HatChip {
+        /// The colour to use right now, or `None` to fall back to the theme's own text colour.
+        pub fn wanted(&self) -> Option<Rgb> {
+            let style = adw::StyleManager::default();
+            // High contrast asks for the plain foreground; a tinted colour would only weaken it.
+            if style.is_high_contrast() {
+                return None;
+            }
+            let scheme = if style.is_dark() { Scheme::Dark } else { Scheme::Light };
+            self.hue.get().map(|hue| hat_color::hat_color(hue, scheme))
+        }
+        pub fn recolor(&self) {
+            let wanted = self.wanted();
+            self.color.set(wanted);
+            let obj = self.obj();
+            match wanted {
+                Some(rgb) => {
+                    let list = gtk::pango::AttrList::new();
+                    let scale = |c: u8| u16::from(c) * 257;
+                    list.insert(gtk::pango::AttrColor::new_foreground(scale(rgb.r), scale(rgb.g), scale(rgb.b)));
+                    self.label.set_attributes(Some(&list));
+                }
+                None => self.label.set_attributes(None),
+            }
+            obj.queue_draw();
+        }
+    }
+}
+
+glib::wrapper! {
+    /// One XEP-0317 hat: the title in an outlined pill, coloured from the hat's hue.
+    ///
+    /// The colour is chosen for the user's current scheme so that the text reads at 4.5:1 or
+    /// better on every background it can sit on (see `hat_color`), and is dropped in favour of
+    /// the theme's own foreground in high-contrast mode. Nothing is filled.
+    pub struct HatChip(ObjectSubclass<hat_chip_imp::HatChip>)
+        @extends adw::Bin, gtk::Widget,
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
+}
+
+impl HatChip {
+    pub fn new(hat: &crate::rooms::hats::Hat) -> Self {
+        let this: Self = glib::Object::new();
+        this.imp().label.set_label(&hat.title);
+        this.set_tooltip_text(Some(&hat.title));
+        this.update_property(&[gtk::accessible::Property::Label(&format!("Hat: {}", hat.title))]);
+        this.imp().hue.set(hat.hue());
+        this.imp().recolor();
+        this
+    }
+    /// The title as shown.
+    pub fn title(&self) -> String {
+        self.imp().label.label().to_string()
+    }
+    /// The colour applied to text and border, `None` when the theme's own is used.
+    pub fn color(&self) -> Option<crate::hat_color::Rgb> {
+        self.imp().color.get()
+    }
+}
+
+mod hat_strip_imp {
+    use super::*;
+
+    #[derive(Default)]
+    pub struct HatStrip {
+        pub wrap: adw::WrapBox,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for HatStrip {
+        const NAME: &'static str = "MonogramHatStrip";
+        type Type = super::HatStrip;
+        type ParentType = adw::Bin;
+    }
+    impl ObjectImpl for HatStrip {
+        fn constructed(&self) {
+            self.parent_constructed();
+            self.wrap.set_child_spacing(4);
+            self.wrap.set_line_spacing(4);
+            let obj = self.obj();
+            obj.set_child(Some(&self.wrap));
+            obj.set_visible(false);
+        }
+    }
+    impl WidgetImpl for HatStrip {}
+    impl BinImpl for HatStrip {}
+}
+
+glib::wrapper! {
+    /// The hats an occupant wears, wrapping onto more lines when the space is narrow. Hidden
+    /// while there are none, so a room without hats looks exactly as it did.
+    pub struct HatStrip(ObjectSubclass<hat_strip_imp::HatStrip>)
+        @extends adw::Bin, gtk::Widget,
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
+}
+
+impl HatStrip {
+    pub fn new() -> Self {
+        glib::Object::new()
+    }
+    pub fn set_hats(&self, hats: &[crate::rooms::hats::Hat]) {
+        let wrap = &self.imp().wrap;
+        wrap.remove_all();
+        for hat in hats {
+            wrap.append(&HatChip::new(hat));
+        }
+        self.set_visible(!hats.is_empty());
+    }
+    pub fn chips(&self) -> Vec<HatChip> {
+        let mut chips = Vec::new();
+        let mut child = self.imp().wrap.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            if let Ok(chip) = widget.downcast::<HatChip>() {
+                chips.push(chip);
+            }
+        }
+        chips
+    }
+}
+
+impl Default for HatStrip {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1060,8 +1317,12 @@ mod edge_cases {
         }
         assert_eq!(Presence::default(), Presence::Online);
         assert_eq!(BubbleKind::default(), BubbleKind::Text);
-        let classes = [Presence::Online, Presence::Away, Presence::Busy].map(Presence::class);
-        assert_eq!(classes, ["presence-online", "presence-away", "presence-busy"]);
+        let classes = [Presence::Online, Presence::Away, Presence::Busy, Presence::Unknown].map(Presence::class);
+        assert_eq!(classes, ["presence-online", "presence-away", "presence-busy", "presence-unknown"]);
+        assert_eq!(
+            [Presence::Online, Presence::Away, Presence::Busy, Presence::Unknown].map(Presence::meaning),
+            ["Online", "Away", "Do not disturb", "Status unknown"]
+        );
     }
 
     #[test]
@@ -1720,5 +1981,213 @@ mod edge_cases {
         // The standard header keeps the window buttons, unlike a pane header.
         let standard = find(&page, "titlebar").or_else(|| page.first_child()).is_some();
         assert!(standard);
+    }
+
+    // ---- HatChip / HatStrip -------------------------------------------------------------
+
+    fn hat(title: &str, uri: &str, hue: Option<f64>) -> crate::rooms::hats::Hat {
+        crate::rooms::hats::Hat::new(title, uri, hue).unwrap()
+    }
+
+    /// The colour is chosen for the current scheme and follows it when the scheme changes.
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_hat_chip_is_coloured_from_its_hue_for_the_current_scheme_and_follows_changes() {
+        use crate::hat_color::{contrast, backgrounds, hat_color, Scheme, MIN_CONTRAST};
+        init();
+        let style = adw::StyleManager::default();
+        let chip = HatChip::new(&hat("Host", "urn:h", Some(327.255)));
+        assert_eq!(chip.title(), "Host");
+        assert!(chip.has_css_class("hat-chip") && chip.tooltip_text().as_deref() == Some("Host"));
+        for (forced, scheme) in [
+            (adw::ColorScheme::ForceLight, Scheme::Light),
+            (adw::ColorScheme::ForceDark, Scheme::Dark),
+            (adw::ColorScheme::ForceLight, Scheme::Light),
+        ] {
+            style.set_color_scheme(forced);
+            let color = chip.color().expect("a hue gives a colour");
+            assert_eq!(color, hat_color(327.255, scheme), "{scheme:?}");
+            for background in backgrounds(scheme) {
+                assert!(contrast(color, *background) >= MIN_CONTRAST, "{scheme:?} on {background:?}");
+            }
+        }
+        // Every hue the chip can be given is readable in the scheme in force.
+        for scheme in [(adw::ColorScheme::ForceLight, Scheme::Light), (adw::ColorScheme::ForceDark, Scheme::Dark)] {
+            style.set_color_scheme(scheme.0);
+            for hue in (0..360).step_by(15) {
+                let chip = HatChip::new(&hat("H", "u", Some(f64::from(hue))));
+                for background in backgrounds(scheme.1) {
+                    assert!(contrast(chip.color().unwrap(), *background) >= MIN_CONTRAST, "{hue}");
+                }
+            }
+        }
+        style.set_color_scheme(adw::ColorScheme::Default);
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_hat_without_a_hue_uses_the_themes_own_text_colour() {
+        init();
+        let chip = HatChip::new(&hat("Plain", "urn:p", None));
+        assert_eq!(chip.color(), None);
+        assert!(chip.imp().label.attributes().is_none(), "no colour is forced on the text");
+        let coloured = HatChip::new(&hat("Tinted", "urn:t", Some(10.0)));
+        assert!(coloured.imp().label.attributes().is_some());
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_hat_chip_never_fills_and_keeps_long_or_odd_titles_literal_and_short() {
+        init();
+        let chip = HatChip::new(&hat("<b>Boss</b> & co", "urn:x", Some(90.0)));
+        assert_eq!(chip.title(), "<b>Boss</b> & co");
+        assert!(!chip.imp().label.uses_markup(), "titles come from other people");
+        let long = HatChip::new(&hat(&"w".repeat(500), "urn:long", Some(90.0)));
+        let label = &long.imp().label;
+        assert_eq!(label.ellipsize(), gtk::pango::EllipsizeMode::End);
+        assert_eq!(label.max_width_chars(), 24);
+        let (_, natural, _, _) = long.measure(gtk::Orientation::Horizontal, -1);
+        assert!(natural < 400, "a 40-character title stays a small chip ({natural}px)");
+        // Fill is never drawn: the chip has no background class of its own.
+        for class in ["suggested-action", "destructive-action", "accent", "card"] {
+            assert!(!chip.has_css_class(class));
+        }
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_hat_strip_hides_when_empty_and_replaces_its_chips_each_time() {
+        init();
+        let strip = HatStrip::new();
+        assert!(!strip.is_visible() && strip.chips().is_empty(), "a room without hats looks unchanged");
+        strip.set_hats(&[hat("Host", "a", Some(10.0)), hat("Scribe", "b", None)]);
+        assert!(strip.is_visible());
+        assert_eq!(strip.chips().iter().map(HatChip::title).collect::<Vec<_>>(), ["Host", "Scribe"]);
+        strip.set_hats(&[hat("Only", "c", Some(200.0))]);
+        assert_eq!(strip.chips().len(), 1, "the old chips are gone, not added to");
+        let eight: Vec<_> = (0..8).map(|i| hat(&format!("H{i}"), &format!("u{i}"), Some(f64::from(i) * 40.0))).collect();
+        strip.set_hats(&eight);
+        assert_eq!(strip.chips().len(), 8);
+        strip.set_hats(&[]);
+        assert!(!strip.is_visible() && strip.chips().is_empty());
+        strip.set_hats(&[]);
+        assert!(!strip.is_visible(), "clearing twice is fine");
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_hat_strip_wraps_instead_of_widening_a_narrow_pane() {
+        init();
+        let strip = HatStrip::new();
+        let hats: Vec<_> = (0..6).map(|i| hat(&format!("A fairly long hat {i}"), &format!("u{i}"), Some(f64::from(i) * 50.0))).collect();
+        strip.set_hats(&hats);
+        let (min, _, _, _) = strip.measure(gtk::Orientation::Horizontal, -1);
+        assert!(min < 260, "the strip's minimum width must stay narrow so it can wrap ({min}px)");
+        let (_, height_wide, _, _) = strip.measure(gtk::Orientation::Vertical, 1200);
+        let (_, height_narrow, _, _) = strip.measure(gtk::Orientation::Vertical, 200);
+        assert!(height_narrow > height_wide, "narrow space means more lines ({height_wide} vs {height_narrow})");
+    }
+
+    // ---- the status circle (XEP-0319 and `show`) ----------------------------------------
+
+    #[test]
+    fn a_status_text_maps_strictly_and_anything_unrecognised_is_grey() {
+        for (text, want) in [
+            ("Online", Presence::Online),
+            ("Away", Presence::Away),
+            ("Busy", Presence::Busy),
+            ("Do not disturb", Presence::Busy),
+            ("Offline", Presence::Unknown),
+            ("Not in this room", Presence::Unknown),
+            ("Presence unavailable", Presence::Unknown),
+            ("", Presence::Unknown),
+            ("online", Presence::Unknown),
+            ("Online now", Presence::Unknown),
+            ("🟢", Presence::Unknown),
+        ] {
+            assert_eq!(Presence::from_status(text), want, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn the_four_lights_map_to_the_four_presences_and_back_to_words() {
+        use crate::contact_status::Light;
+        for (light, presence) in [
+            (Light::Green, Presence::Online),
+            (Light::Yellow, Presence::Away),
+            (Light::Red, Presence::Busy),
+            (Light::Grey, Presence::Unknown),
+        ] {
+            assert_eq!(Presence::from_light(light), presence);
+            assert_eq!(presence.meaning(), light.meaning());
+        }
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn the_status_circle_shows_each_state_with_a_word_for_those_who_cannot_see_colour() {
+        init();
+        let person = PresenceAvatar::new(&avatar());
+        let dot = find(&person, "presence-dot").unwrap();
+        for presence in [Presence::Away, Presence::Busy, Presence::Unknown, Presence::Online, Presence::Unknown] {
+            person.set_presence(presence);
+            assert!(dot.has_css_class(presence.class()), "{presence:?}");
+            assert_eq!(dot.tooltip_text().as_deref(), Some(presence.meaning()));
+            let others = [Presence::Online, Presence::Away, Presence::Busy, Presence::Unknown]
+                .into_iter()
+                .filter(|other| *other != presence && dot.has_css_class(other.class()))
+                .count();
+            assert_eq!(others, 0, "only one colour at a time");
+        }
+        assert_eq!(dot.tooltip_text().as_deref(), Some("Status unknown"));
+        // Built grey from the start (a contact whose presence is not shared).
+        let refused: PresenceAvatar = glib::Object::builder().property("presence", Presence::Unknown).build();
+        refused.set_avatar(&avatar());
+        // The property-built avatar still has its dot, and it is grey once set.
+        refused.set_presence(Presence::Online);
+        refused.set_presence(Presence::Unknown);
+        assert!(find(&refused, "presence-dot").unwrap().has_css_class("presence-unknown"));
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn the_stylesheet_parses_cleanly_and_every_circle_is_a_real_dot() {
+        init();
+        let errors = Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let provider = gtk::CssProvider::new();
+        let sink = errors.clone();
+        provider.connect_parsing_error(move |_, section, error| {
+            sink.borrow_mut().push(format!("{section}: {error}"));
+        });
+        provider.load_from_path(crate::widgets::asset("style.css"));
+        gtk::style_context_add_provider_for_display(
+            &gtk::gdk::Display::default().unwrap(),
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        assert!(errors.borrow().is_empty(), "style.css has errors: {:?}", errors.borrow());
+        let window = gtk::Window::new();
+        let row = bx(false, 8);
+        let dots: Vec<_> = [Presence::Online, Presence::Away, Presence::Busy, Presence::Unknown]
+            .into_iter()
+            .map(|presence| {
+                let person = PresenceAvatar::new(&avatar());
+                person.set_presence(presence);
+                row.append(&person);
+                find(&person, "presence-dot").unwrap()
+            })
+            .collect();
+        window.set_child(Some(&row));
+        window.present();
+        let context = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while std::time::Instant::now() < deadline {
+            context.iteration(false);
+        }
+        for dot in &dots {
+            assert!(dot.width() >= 12 && dot.height() >= 12, "{}x{}", dot.width(), dot.height());
+            assert_eq!(dot.width(), dot.height(), "a circle, not an oval");
+        }
+        window.close();
     }
 }
