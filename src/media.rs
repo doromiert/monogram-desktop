@@ -813,6 +813,13 @@ fn message_media_source(widget: &gtk::Widget, id: &str) -> Option<gtk::Widget> {
     None
 }
 
+/// Whether the gallery shows its Edit button: when signed in, unless the media is known to be
+/// something the editor never takes (a video or a sticker). When nothing is known yet, for example
+/// while the neighbouring pictures are still loading, it stays shown rather than vanishing.
+fn edit_button_shown(signed_in: bool, attachment: Option<&crate::file_share::Attachment>) -> bool {
+    signed_in && attachment.is_none_or(|file| !file.video_candidate() && !file.sticker)
+}
+
 impl MediaViewer {
     pub fn new(
         ui: &Rc<Ui>,
@@ -1351,17 +1358,14 @@ impl MediaViewer {
         a.play();
         self.animation.replace(Some(a));
     }
-    /// The Edit button is there for pictures (not videos) and always clickable: what the editor can
-    /// open is decided from the downloaded file's header when it is pressed, which can then say why
-    /// not, instead of a button greyed out for a reason nobody can see.
+    /// The Edit button is there on pictures and always clickable: what the editor can open is
+    /// decided from the downloaded file's header when it is pressed, which can then say why not,
+    /// instead of a button greyed out or missing for a reason nobody can see.
     fn refresh_edit(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
         let id = self.items.borrow().get(self.index.get()).map(|item| item.id.clone());
-        let picture = id
-            .and_then(|id| ui.store.message(&self.owner, &self.peer, &id))
-            .and_then(|message| message.attachment)
-            .is_some_and(|file| file.image_candidate() && !file.video_candidate() && !file.sticker);
-        self.edit.set_visible(!self.owner.is_empty() && picture);
+        let attachment = id.and_then(|id| ui.store.message(&self.owner, &self.peer, &id)).and_then(|message| message.attachment);
+        self.edit.set_visible(edit_button_shown(!self.owner.is_empty(), attachment.as_ref()));
         self.edit.set_sensitive(true);
         self.edit.set_tooltip_text(Some("Edit a copy and add it to your message"));
     }
@@ -1474,7 +1478,6 @@ impl MediaViewer {
     }
     fn apply_media_window(self: &Rc<Self>, window: crate::media_store::MediaWindow) {
         self.index.set(window.index);
-        self.refresh_edit();
         let items: Vec<_> = window.messages.into_iter().map(MediaItem::live).collect();
         let mut frames = vec![];
         let mut pictures = vec![];
@@ -1514,6 +1517,8 @@ impl MediaViewer {
         let old = self.frames.replace(frames);
         self.pictures.replace(pictures);
         self.items.replace(items);
+        // Only now do the index and the items agree, so only now can the button be judged.
+        self.refresh_edit();
         self.motions.borrow_mut().retain(|id,_|self.items.borrow().iter().any(|item|&item.id==id));
         for frame in old {
             if !self.frames.borrow().iter().any(|f| f == &frame) {
@@ -2504,5 +2509,45 @@ impl StoryViewer {
         gtk::Settings::default().unwrap().set_property("gtk-enable-animations",false);
         ui.open_story_item(again);let video=ui.active_story.borrow().as_ref().unwrap().clone();assert_eq!(video.card.imp().progress.get(),1.);video.pause.set_active(true);wait(||!video.loading.get());video.reply.grab_focus();video.reply.set_text("Unsent reply");
         assert!(std::process::Command::new("xdotool").args(["key","Escape"]).status().unwrap().success());wait(||ui.active_story.borrow().is_none());assert_eq!(ui.composer_text(),"Keep this draft");assert!(video.player.borrow().is_none());ui.window.close();std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod edit_button_tests {
+    use super::edit_button_shown;
+    use crate::file_share::Attachment;
+
+    fn media(name: &str, mime: &str, sticker: bool) -> Attachment {
+        Attachment {
+            wire_url: String::new(),
+            name: name.into(),
+            mime: mime.into(),
+            size: None,
+            width: None,
+            height: None,
+            hashes: Default::default(),
+            manual: false,
+            sticker,
+        }
+    }
+
+    #[test]
+    fn the_edit_button_shows_on_pictures_whatever_they_are_called() {
+        for (name, mime) in [("photo.jpg", "image/jpeg"), ("1f3c9a7e", "image/png"), ("pic", ""), ("a.gif", "image/gif"), ("a.avif", "image/avif")] {
+            assert!(edit_button_shown(true, Some(&media(name, mime, false))), "{name} {mime}");
+        }
+    }
+
+    #[test]
+    fn it_stays_while_nothing_is_known_yet_instead_of_vanishing() {
+        assert!(edit_button_shown(true, None), "the neighbours are still loading");
+    }
+
+    #[test]
+    fn it_is_not_offered_on_videos_stickers_or_when_signed_out() {
+        assert!(!edit_button_shown(true, Some(&media("clip.mp4", "video/mp4", false))));
+        assert!(!edit_button_shown(true, Some(&media("s.webp", "image/webp", true))));
+        assert!(!edit_button_shown(false, Some(&media("photo.jpg", "image/jpeg", false))));
+        assert!(!edit_button_shown(false, None));
     }
 }
