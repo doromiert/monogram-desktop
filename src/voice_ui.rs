@@ -31,8 +31,9 @@ use std::{
 pub const TAP: Duration = Duration::from_millis(500);
 /// A recording shorter than this is thrown away: it is a click, not a message.
 pub const MIN_LENGTH: Duration = Duration::from_secs(1);
-/// Sliding this far from where the press began arms "cancel".
-pub const SLIDE_TO_CANCEL: f64 = 96.0;
+/// Sliding this far from where the press began arms "cancel": the microphone turns into a trash
+/// can that follows the pointer. Any drift shorter than this leaves it in its slot.
+pub const SLIDE_TO_CANCEL: f64 = 20.0;
 
 /// How a press of the button works.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -432,17 +433,27 @@ impl VoiceUi {
         self.timer.announce("Recording voice message", gtk::AccessibleAnnouncementPriority::Medium);
     }
 
-    /// The microphone follows the pointer towards the start of the line, up to the distance that
-    /// arms "cancel".
+    /// The microphone stays in its slot until the pointer has moved far enough to arm "cancel";
+    /// from then on the trash can it became is carried under the pointer, as far as the bar goes.
     pub(crate) fn carry(&self, dx: f64, rtl: bool) {
         if !self.recording() {
             return;
         }
         let towards_start = if rtl { dx } else { -dx };
-        let travel = towards_start.clamp(0.0, SLIDE_TO_CANCEL);
+        let travel = if towards_start < SLIDE_TO_CANCEL { 0.0 } else { towards_start.min(self.room_to_carry()) };
         self.shift_chip(if rtl { travel } else { -travel });
-        // The hint makes way for the microphone as it passes over it.
-        self.hint.set_opacity(1.0 - travel / SLIDE_TO_CANCEL);
+        // The hint makes way for the trash can once it is on its way.
+        self.hint.set_opacity(if travel > 0.0 { 0.0 } else { 1.0 });
+    }
+
+    /// How far the chip can be carried towards the start of the line before it would leave the bar.
+    fn room_to_carry(&self) -> f64 {
+        let Some(bounds) = self.mic.compute_bounds(&self.bar).filter(|b| b.width() > 0.0) else {
+            return f64::MAX;
+        };
+        let centre = f64::from(bounds.x() + bounds.width() / 2.0);
+        let to_start = if self.mic.direction() == gtk::TextDirection::Rtl { f64::from(self.bar.width()) - centre } else { centre };
+        (to_start - 8.0).max(0.0)
     }
 
     /// The pointer moved far enough from the press to arm, or disarm, "cancel".
@@ -455,6 +466,14 @@ impl VoiceUi {
             self.chip.add_css_class("armed");
         } else {
             self.chip.remove_css_class("armed");
+        }
+        // The whole message box warns, and the slot the microphone left is not shown empty.
+        if let Some(composer) = self.composer() {
+            if armed {
+                composer.add_css_class("voice-cancelling");
+            } else {
+                composer.remove_css_class("voice-cancelling");
+            }
         }
         self.hint.set_label(if armed { "Release to cancel" } else { "Release to send · slide left to cancel" });
         if armed {
@@ -634,6 +653,14 @@ impl VoiceUi {
         self.hint.add_css_class("dim-label");
         self.hint.remove_css_class("error");
         self.cancel.remove_css_class("destructive-action");
+        // The hint swaps between texts of different lengths. Holding its width at the longest
+        // one, as drawn, keeps the waveform beside it from growing and shrinking as you slide.
+        let widest = ["Release to send · slide left to cancel", "Release to cancel"]
+            .iter()
+            .map(|text| self.hint.create_pango_layout(Some(text)).pixel_size().0)
+            .max()
+            .unwrap_or(-1);
+        self.hint.set_size_request(widest, -1);
         self.reset_chip();
         // While the button is held, the microphone itself becomes the way to cancel, so the trash
         // button only shows without a held button (tap to record). It keeps its place either way,
@@ -669,6 +696,9 @@ impl VoiceUi {
 
     fn reset_chip(&self) {
         self.chip.remove_css_class("armed");
+        if let Some(composer) = self.composer() {
+            composer.remove_css_class("voice-cancelling");
+        }
         self.chip_icons.set_visible_child_name("mic");
         self.shift_chip(0.0);
         self.hint.set_opacity(1.0);
@@ -1073,19 +1103,25 @@ mod tests {
         let v = voice(&ui);
         assert!(v.hint.label().contains("slide left"));
         assert_eq!(v.chip_icons.visible_child_name().as_deref(), Some("mic"));
-        drag(&ui, -40.0);
-        assert_eq!(v.chip_shift(), -40.0, "the microphone follows the pointer");
-        assert!(!v.chip.has_css_class("armed"));
+        // Drifting a little while holding leaves the microphone in its slot, hint and all.
+        drag(&ui, -SLIDE_TO_CANCEL + 5.0);
+        assert_eq!(v.chip_shift(), 0.0, "short of the cancel distance the microphone does not move");
+        assert_eq!(v.hint.opacity(), 1.0);
+        assert!(!v.chip.has_css_class("armed") && !v.composer().unwrap().has_css_class("voice-cancelling"));
         drag(&ui, -SLIDE_TO_CANCEL - 10.0);
-        assert_eq!(v.chip_shift(), -SLIDE_TO_CANCEL, "and stops at the cancel distance");
+        assert_eq!(v.chip_shift(), -SLIDE_TO_CANCEL - 10.0, "past it, the trash can is carried under the pointer");
         assert_eq!(v.chip_icons.visible_child_name().as_deref(), Some("trash"), "it became a trash can");
         assert!(v.chip.has_css_class("armed"), "on red");
+        assert!(v.composer().unwrap().has_css_class("voice-cancelling"), "the whole message box turns red");
         assert_eq!(v.hint.label(), "Release to cancel");
         assert!(v.hint.has_css_class("error") && v.cancel.has_css_class("destructive-action"));
+        drag(&ui, -60.0);
+        assert_eq!(v.chip_shift(), -60.0, "and keeps following it, beyond the cancel distance");
         // Back again: sending is possible again.
         drag(&ui, -10.0);
         assert_eq!(v.chip_icons.visible_child_name().as_deref(), Some("mic"), "the microphone returns");
-        assert!(!v.chip.has_css_class("armed"));
+        assert_eq!(v.chip_shift(), 0.0, "to its slot");
+        assert!(!v.chip.has_css_class("armed") && !v.composer().unwrap().has_css_class("voice-cancelling"));
         assert!(v.hint.label().contains("Release to send") && !v.cancel.has_css_class("destructive-action"));
         drag(&ui, -SLIDE_TO_CANCEL - 10.0);
         let_go(&ui, -SLIDE_TO_CANCEL - 10.0);
