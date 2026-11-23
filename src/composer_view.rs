@@ -17,25 +17,26 @@ mod imp {
             let measured = self.parent_measure(orientation,for_size);
             if orientation != gtk::Orientation::Vertical { return measured; }
             let view = self.obj();
+            // One fixed line height, taken from ordinary text. The first line's own height
+            // changes with what is on it (a line of emoji, a tall glyph from a fallback font),
+            // which made the whole box jump or grow for good.
+            let line = view.create_pango_layout(Some("Åg")).pixel_size().1.max(1);
             let mut iter = view.buffer().start_iter();
-            let first = view.iter_location(&iter);
-            let mut last = first;
+            let mut top = view.iter_location(&iter).y();
             let mut lines = 1;
             // Measuring a large paste only needs the first five display lines.
             for _ in 1..5 {
                 let before = iter.offset();
                 view.forward_display_line(&mut iter);
                 if iter.offset() == before { break; }
-                let next = view.iter_location(&iter);
-                if next.y() > last.y() { lines += 1; }
-                last = next;
+                // A glyph from another font (an emoji) sits a pixel or two higher or lower than
+                // text on the same line. Only a move of about a line is a new display line;
+                // comparing the raw y counted that offset as an extra line.
+                let next = view.iter_location(&iter).y();
+                if next - top >= line / 2 { lines += 1; top = next; }
                 if iter.is_end() { break; }
             }
             let padding = view.top_margin() + view.bottom_margin();
-            // One fixed line height, taken from ordinary text. The first line's own height
-            // changes with what is on it (a line of emoji, a tall glyph from a fallback font),
-            // which made the whole box jump or grow for good.
-            let line = view.create_pango_layout(Some("Åg")).pixel_size().1.max(1);
             let natural = padding + lines * line;
             (measured.0.min(natural),natural,-1,-1)
         }

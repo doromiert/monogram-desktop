@@ -3571,6 +3571,28 @@ mod composer_tests {
         settle(400);
         let height = |ui: &Rc<Ui>| ui.input_scroll.measure(gtk::Orientation::Vertical, ui.composer.width()).1;
         let row = |ui: &Rc<Ui>| ui.composer.parent().map(|p| p.height()).unwrap_or(0);
+        {
+            let b = ui.composer.buffer();
+            let pad = ui.composer.top_margin() + ui.composer.bottom_margin();
+            let mut bad = 0;
+            for n in 1..90usize {
+                for (label, make) in [("end", 0), ("mid", 1), ("two", 2)] {
+                    let base: String = "abc def ".chars().cycle().take(n).collect();
+                    let t = match make { 0 => format!("{base}😀"), 1 => { let h = base.len() / 2; format!("{}😀{}", &base[..h], &base[h..]) }, _ => format!("{base}😀😀") };
+                    b.set_text(&t); settle(40);
+                    let end = ui.composer.iter_location(&b.end_iter());
+                    let content = end.y() + end.height().max(17);
+                    let claimed = height(&ui) - pad;
+                    if claimed > content + 3 || claimed + 3 < content.min(5 * 18) {
+                        bad += 1;
+                        if bad < 12 { eprintln!("{label} n={n}: box content {claimed}px but text needs {content}px  {t:?}"); }
+                    }
+                }
+            }
+            // An emoji sits a pixel off the text around it; that must never read as a new line.
+            assert_eq!(bad, 0, "the box is not as tall as the text it holds when emoji are present");
+            b.set_text("");
+        }
         for text in ["", "hello", "hello wörld ÅgyQ"] {
             ui.composer.buffer().set_text(text);
             ui.composer.buffer().place_cursor(&ui.composer.buffer().end_iter());
