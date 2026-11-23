@@ -4,15 +4,18 @@
 #     tools/headless-gtk-test.sh <cargo test args>
 #     tools/headless-gtk-test.sh --bin monogram-desktop -- --ignored the_dialog_crops
 #
-# Nothing appears on your screen and the tests get their own private D-Bus session. Two backends:
-#   kwin      (default when installed) KWin's virtual compositor: a real Wayland compositor with no
-#             output, so GTK gets the frame clock and mapping that row rendering and animation need.
+# Nothing appears on your screen and the tests get their own private D-Bus session. Backends, in
+# the order they are auto-detected:
+#   kwin      KWin's virtual compositor: a real Wayland compositor with no output, so GTK gets the
+#             frame clock and mapping that row rendering and animation need.
+#   weston    Weston's headless backend with the pixman renderer: the same idea without KWin, and
+#             what NixOS (default.nix) uses. No GPU, no input device, no X server.
 #   broadway  GTK's in-memory Broadway display. Fine for widget-only tests, but with no viewer
 #             connected it never ticks the frame clock, so timeline rendering stalls.
 # Configuration is isolated too: HOME, XDG_* and the runtime dir point at a temp sandbox that is
 # deleted afterwards, so your real settings are never read or modified.
-# Set HEADLESS_BACKEND=broadway to force the second. Tests that need xdotool, a keyring or an X11
-# 60 Hz clock still need a real isolated X server (see default.nix).
+# Set HEADLESS_BACKEND=kwin|weston|broadway to force one. Only the tests that drive input through
+# xdotool still need X11; they are the remaining holdouts (see docs/TESTING.md).
 set -eu
 # Everything below, the compositor included, runs inside a private D-Bus session, so nothing
 # registers on or talks to your real session bus.
@@ -75,7 +78,9 @@ export HOME="$sandbox/home" XDG_CONFIG_HOME="$sandbox/config" XDG_DATA_HOME="$sa
 unset XDG_CONFIG_DIRS SSH_AUTH_SOCK GNOME_KEYRING_CONTROL KDE_FULL_SESSION KDE_SESSION_VERSION
 backend="${HEADLESS_BACKEND:-}"
 if [ -z "$backend" ]; then
-    if command -v kwin_wayland >/dev/null 2>&1; then backend=kwin; else backend=broadway; fi
+    if command -v kwin_wayland >/dev/null 2>&1; then backend=kwin
+    elif command -v weston >/dev/null 2>&1; then backend=weston
+    else backend=broadway; fi
 fi
 runtime="${XDG_RUNTIME_DIR:-/tmp}"
 case "$backend" in
@@ -88,6 +93,16 @@ kwin)
     while [ ! -S "$runtime/$socket" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
     [ -S "$runtime/$socket" ] || { echo "kwin_wayland --virtual did not start" >&2; exit 1; }
     gdk="GDK_BACKEND=wayland WAYLAND_DISPLAY=$socket"
+    ;;
+weston)
+    socket="monogram-headless-$$"
+    weston --backend=headless --renderer=pixman --socket="$socket" --width=1600 --height=1000 \
+        >/dev/null 2>&1 &
+    compositor=$!
+    i=0
+    while [ ! -S "$runtime/$socket" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+    [ -S "$runtime/$socket" ] || { echo "weston --backend=headless did not start" >&2; exit 1; }
+    gdk="GDK_BACKEND=wayland WAYLAND_DISPLAY=$socket GSK_RENDERER=cairo"
     ;;
 broadway)
     display=":${BROADWAY_TEST_DISPLAY:-47}"

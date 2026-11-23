@@ -22,6 +22,10 @@ private bus started cannot hold the caller's pipe open.
 - `HEADLESS_BACKEND=broadway` uses GTK's in-memory Broadway display instead. It is fine for
   widget-only tests, but with no viewer it does not tick the frame clock, so tests that wait for
   timeline rows to render stall.
-- Tests that need `xdotool`, a keyring, or a 60 Hz X11 clock still need a real isolated X server;
-  `default.nix` shows how CI starts one with Xvfb.
+- `HEADLESS_BACKEND=weston` uses Weston's headless backend (pixman renderer, no GPU or X server).
+  It is picked automatically when `kwin_wayland` is missing, and it is what `default.nix` starts
+  for the Nix build checks, so NixOS needs no X server at all.
+- The `#[ignore]`d tests that inject input with `xdotool` (focus, clicks, key presses) are the only
+  remaining X11 users; they need an isolated X server (for example `xvfb-run`) until they are ported
+  to a Wayland input path. Nothing in `default.nix` or the release workflow runs them.
 - The script only ever stops the compositor it started.

@@ -44,6 +44,7 @@ pub struct Ui {
     pub pages: gtk::Stack,
     pub state: RefCell<State>,
     pub(crate) folder_snapshot: RefCell<String>,
+    pub(crate) saved_rows: RefCell<crate::storage::SavedRows>,
     pub demo: RefCell<State>,
     pub store: Store,
     pub folder_bar: FolderBar,
@@ -145,7 +146,6 @@ pub struct Ui {
     pub auto_download_limit: Cell<u64>,
     pub typing: RefCell<HashMap<(String, String), Instant>>,
     pub(crate) header_subtitle: RefCell<Option<gtk::Label>>,
-    pub last_typing: Cell<Option<Instant>>,
     pub typing_input: RefCell<Option<(String, Instant, bool)>>,
     pub history_pages: RefCell<HashMap<String, (String, bool)>>,
     pub history_pending: RefCell<HashSet<String>>,
@@ -316,6 +316,7 @@ impl Ui {
                 .transition_duration(160)
                 .build(),
             folder_snapshot:RefCell::new(crate::lan_sync_ui::folder_signature(&state)),
+            saved_rows:RefCell::default(),
             state: RefCell::new(state),
             demo: RefCell::new(demo),
             store,
@@ -476,7 +477,6 @@ impl Ui {
             auto_download_limit: Cell::new(crate::downloads::DEFAULT_AUTO_MAX),
             typing: RefCell::new(HashMap::new()),
             header_subtitle: RefCell::new(None),
-            last_typing: Cell::new(None),
             typing_input: RefCell::new(None),
             history_pages: RefCell::new(HashMap::new()),
             history_pending: RefCell::new(HashSet::new()),
@@ -612,10 +612,11 @@ impl Ui {
             ui.typing
                 .borrow_mut()
                 .retain(|_, t| t.elapsed() < crate::chat_states::TIMEOUT);
-            if before != ui.typing.borrow().len()
-                && ui.pages.visible_child_name().as_deref() == Some("chat")
-            {
-                ui.update_chat_subtitle();
+            if before != ui.typing.borrow().len() {
+                if ui.pages.visible_child_name().as_deref() == Some("chat") {
+                    ui.update_chat_subtitle();
+                }
+                ui.update_typing_rows();
             }
             glib::ControlFlow::Continue
         });
@@ -878,12 +879,29 @@ impl Ui {
     pub fn persist(&self) -> bool {
         let signature=crate::lan_sync_ui::folder_signature(&self.state.borrow());
         let changed=*self.folder_snapshot.borrow()!=signature;
-        let result=if changed{self.store.save(&self.state.borrow())}else{self.store.save_chat_state(&self.state.borrow())};
+        let result=if changed{self.store.save_delta(&self.state.borrow(),&mut self.saved_rows.borrow_mut())}else{self.store.save_chat_state_delta(&self.state.borrow(),&mut self.saved_rows.borrow_mut())};
         if result.is_err() {
             self.notice("Local history could not be saved. Check free space and permissions.");
             false
         } else {
             if changed{self.folder_snapshot.replace(signature);}
+            true
+        }
+    }
+    /// Saves only the current chat's metadata and, when given, one message. Unlike `persist` the
+    /// cost does not depend on how much history is loaded, which keeps drafting, replying and
+    /// sending instant. A full `persist` later simply sees these rows as changed once more.
+    pub fn persist_current(&self, message: Option<&Message>) -> bool {
+        let state = self.state.borrow();
+        if state.account.is_empty() {
+            return true;
+        }
+        let result = self.store.save_chat_message(&state.account, state.current(), message);
+        drop(state);
+        if result.is_err() {
+            self.notice("Local history could not be saved. Check free space and permissions.");
+            false
+        } else {
             true
         }
     }
@@ -1205,7 +1223,7 @@ impl Ui {
         for chat in state.filtered(self.search.text().as_str()) {
             let latest = chat.latest_preview();
             let avatar = self.chat_avatar(&chat, 44);
-            let leading: gtk::Widget = if chat.group {
+            let leading: gtk::Widget = if !chat.has_status_circle() {
                 avatar.upcast()
             } else {
                 let dot = crate::components::PresenceAvatar::new(&avatar);
@@ -1216,15 +1234,12 @@ impl Ui {
             let row = crate::components::ChatRow::new(&chat.id, &leading);
             row.set_title(chat.display_name());
             row.set_time(latest.as_ref().map(|m| m.time.as_str()).unwrap_or("Now"));
-            let preview = if !chat.draft.is_empty() {
-                format!("Draft: {}", chat.draft.replace('\n', " "))
-            } else {
-                latest
-                    .as_ref()
-                    .map(|m| format!("{}{}", if m.own { "You: " } else { "" }, m.text.replace('\n', " ")))
-                    .unwrap_or_else(|| "No messages yet".into())
-            };
+            let typing = self.typing_text(&chat);
+            let preview = typing
+                .clone()
+                .unwrap_or_else(|| crate::typing_ui::preview_text(&chat, latest.as_ref()));
             row.set_preview(preview.as_str());
+            row.set_typing(typing.is_some());
             row.set_unread(chat.unread);
             row.set_unread_mark(chat.unread_mark);
             row.set_pinned(chat.pinned);
@@ -1641,8 +1656,9 @@ impl Ui {
         let peer=self.state.borrow().current().jid.clone();
         let changed=self.typing_input.borrow().as_ref().is_none_or(|(p,_,c)|p!=&peer || *c!=composing);
         self.typing_input.replace(Some((peer.clone(),Instant::now(),composing)));
-        if changed || self.last_typing.get().is_none_or(|t|t.elapsed()>Duration::from_secs(5)) {
-            self.last_typing.set(Some(Instant::now()));
+        // XEP-0085: say "composing" once and again only after the state has changed (the idle
+        // timer sends "paused"); repeating it while typing is noise for every recipient.
+        if changed {
             self.command(Command::Typing{peer,composing});
         }
     }
@@ -1662,7 +1678,7 @@ impl Ui {
         chat.draft_formatting=Some(formatting);
         chat.draft_reply = self.replying.borrow().clone().unwrap_or_default();
         drop(state);
-        self.persist();
+        self.persist_current(None);
     }
     pub fn select_chat(self: &Rc<Self>, id: &str) {
         if !self.state.borrow().chats.iter().any(|c| c.id == id) {
@@ -1782,7 +1798,7 @@ impl Ui {
         self.composer_placeholder
             .set_visible(self.composer_text().is_empty());
         let title = bx(false, 8);
-        if chat.group {
+        if !chat.has_status_circle() {
             self.header_presence.replace(None);
             title.append(&self.chat_avatar(chat, 28));
         } else {
@@ -1810,8 +1826,8 @@ impl Ui {
     pub(crate) fn update_chat_subtitle(&self) {
         let state = self.state.borrow();
         let chat = state.current();
-        let composing = self.typing.borrow().iter().any(|((peer, _), at)|
-            peer == &chat.jid && at.elapsed() < crate::chat_states::TIMEOUT);
+        let typing_text = self.typing_text(chat);
+        let composing = typing_text.is_some();
         if let Some(dot) = self.header_presence.borrow().as_ref() {
             dot.set_presence(self.contact_presence(chat));
             dot.set_dot_visible(self.shows_contact_status());
@@ -1822,7 +1838,8 @@ impl Ui {
             } else {
                 Some(self.status_text(&chat.jid, &chat.subtitle))
             };
-            label.set_text(if composing { "typing..." } else { shown.as_deref().unwrap_or(&chat.subtitle) });
+            label.set_text(typing_text.as_deref().unwrap_or_else(|| shown.as_deref().unwrap_or(&chat.subtitle)));
+            crate::typing_ui::animate(label, composing);
         }
     }
 
@@ -2078,7 +2095,7 @@ impl Ui {
             let message = state.message(&id).unwrap().clone();
             let peer = state.current().jid.clone();
             drop(state);
-            if !self.persist() {
+            if !self.persist_current(Some(&message)) {
                 self.state
                     .borrow_mut()
                     .current_mut()
@@ -2195,7 +2212,7 @@ impl Ui {
             drop(state);
             if !live && self.attachments.borrow().is_empty(){self.animate_sent_text(&id);}
             if live {
-                if !self.persist() {
+                if !self.persist_current(Some(&message)) {
                     self.state
                         .borrow_mut()
                         .current_mut()
@@ -2327,6 +2344,7 @@ impl Ui {
             .set_label(if error { "Try Again" } else { "Sign In" });
     }
     pub fn activate_state(self: &Rc<Self>, mut state: State) {
+        self.saved_rows.borrow_mut().clear();
         // Rosters belong to the previous account's rooms.
         self.room_rosters.borrow_mut().clear();
         self.contact_status.borrow_mut().clear();
@@ -2984,6 +3002,7 @@ impl Ui {
                     self.typing.borrow_mut().remove(&(peer, sender));
                 }
                 self.update_chat_subtitle();
+                self.update_typing_rows();
                 return;
             }
             BackendEvent::SentPartially { peer, id, skipped } => {
@@ -3551,6 +3570,28 @@ mod composer_tests {
         settle(400);
         let height = |ui: &Rc<Ui>| ui.input_scroll.measure(gtk::Orientation::Vertical, ui.composer.width()).1;
         let row = |ui: &Rc<Ui>| ui.composer.parent().map(|p| p.height()).unwrap_or(0);
+        {
+            let b = ui.composer.buffer();
+            let pad = ui.composer.top_margin() + ui.composer.bottom_margin();
+            let mut bad = 0;
+            for n in 1..90usize {
+                for (label, make) in [("end", 0), ("mid", 1), ("two", 2)] {
+                    let base: String = "abc def ".chars().cycle().take(n).collect();
+                    let t = match make { 0 => format!("{base}😀"), 1 => { let h = base.len() / 2; format!("{}😀{}", &base[..h], &base[h..]) }, _ => format!("{base}😀😀") };
+                    b.set_text(&t); settle(40);
+                    let end = ui.composer.iter_location(&b.end_iter());
+                    let content = end.y() + end.height().max(17);
+                    let claimed = height(&ui) - pad;
+                    if claimed > content + 3 || claimed + 3 < content.min(5 * 18) {
+                        bad += 1;
+                        if bad < 12 { eprintln!("{label} n={n}: box content {claimed}px but text needs {content}px  {t:?}"); }
+                    }
+                }
+            }
+            // An emoji sits a pixel off the text around it; that must never read as a new line.
+            assert_eq!(bad, 0, "the box is not as tall as the text it holds when emoji are present");
+            b.set_text("");
+        }
         for text in ["", "hello", "hello wörld ÅgyQ"] {
             ui.composer.buffer().set_text(text);
             ui.composer.buffer().place_cursor(&ui.composer.buffer().end_iter());

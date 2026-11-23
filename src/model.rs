@@ -286,6 +286,27 @@ impl Message {
         (&self.timestamp, &self.id)
     }
 }
+thread_local! {
+    static CHAT_META_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+fn serialize_messages<S: serde::Serializer>(messages: &Vec<Message>, serializer: S) -> Result<S::Ok, S::Error> {
+    use serde::Serialize;
+    if CHAT_META_ONLY.with(|flag| flag.get()) {
+        serializer.collect_seq(std::iter::empty::<&Message>())
+    } else {
+        messages.serialize(serializer)
+    }
+}
+/// A chat's stored metadata row: every field except its messages, which are saved row by row.
+/// Serializing the whole chat just to delete the message list cost time proportional to the
+/// loaded history on every save.
+pub fn chat_meta_value(chat: &Chat) -> serde_json::Value {
+    CHAT_META_ONLY.with(|flag| flag.set(true));
+    let mut value = serde_json::to_value(chat).unwrap();
+    CHAT_META_ONLY.with(|flag| flag.set(false));
+    value.as_object_mut().unwrap().remove("messages");
+    value
+}
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Chat {
@@ -311,6 +332,7 @@ pub struct Chat {
     pub room_can_send: bool,
     pub room_autojoin: Option<bool>,
     pub room_nick: Option<String>,
+    #[serde(serialize_with = "serialize_messages")]
     pub messages: Vec<Message>,
     #[serde(skip)]
     pub latest: Option<MessagePreview>,
@@ -330,6 +352,9 @@ pub struct Chat {
 }
 impl Chat {
     pub fn display_name(&self) -> &str { if self.local_name.is_empty() { &self.name } else { &self.local_name } }
+    /// Whether the avatar carries a presence circle: a person has one, a room does not, and
+    /// neither does Saved Messages, which is you.
+    pub fn has_status_circle(&self) -> bool { !self.group && self.id != "saved" }
     pub fn encryption_preference(&self) -> Preference {
         self.sending_preference.unwrap_or(if self.encryption {
             Preference::Omemo2

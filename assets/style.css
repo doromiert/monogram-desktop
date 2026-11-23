@@ -5,6 +5,7 @@
 .chat-list row:selected { background: alpha(@window_fg_color, .10); color: @window_fg_color; }
 .chat-list row:hover { background: alpha(@window_fg_color, .05); }
 .chat-preview { font-size: 12px; opacity: .65; }
+.chat-preview.typing { color: @accent_color; opacity: 1; }
 .chat-time { font-size: 11px; opacity: .55; }
 .chat-name { font-weight: 650; }
 .unread-badge { background: @accent_bg_color; color: @accent_fg_color; border-radius: 20px; padding: 2px 6px; font-size: 10px; font-weight: bold; min-width: 10px; }
@@ -299,12 +300,20 @@
 .hat-chip { min-height: 18px; }
 
 /* Voice messages: the recording bar replaces the message box while the microphone button is held. */
-.voice-button, .voice-button > fixed { overflow: visible; }
 .voice-bar { min-height: 36px; padding: 0 4px; }
 /* While recording the whole message box is the accent-coloured bar, with no focus ring. */
 .composer.voice-recording, .composer.voice-recording:focus-within { background-color: @accent_bg_color; color: white; outline-color: transparent; }
 .composer.voice-recording button { color: white; }
 .composer.voice-recording button:hover { background-color: alpha(white, 0.15); }
+/* About to cancel: the box turns red and the slot the microphone left is not drawn empty. */
+.composer.voice-recording { transition: outline-color 200ms ease, background-color 180ms ease; }
+.composer.voice-recording.voice-cancelling, .composer.voice-recording.voice-cancelling:focus-within { background-color: @destructive_bg_color; }
+.composer.voice-recording.voice-cancelling .voice-button, .composer.voice-recording.voice-cancelling .voice-button:hover, .composer.voice-recording.voice-cancelling .voice-button:active { background-color: transparent; }
+/* The padlock beside the microphone: swipe towards it while holding to lock. */
+.voice-lock { color: white; border-radius: 999px; padding: 6px; transition: background-color 150ms, opacity 150ms; }
+.voice-lock.ready { background-color: alpha(white, 0.28); }
+.composer.voice-recording .voice-send { color: white; border-radius: 999px; background-color: alpha(white, 0.2); }
+.composer.voice-recording .voice-send:hover { background-color: alpha(white, 0.32); }
 .voice-wave { color: white; }
 .voice-timer { font-weight: 600; color: white; }
 .voice-dot { color: white; }
@@ -312,7 +321,7 @@
 .voice-hint.error { color: white; opacity: 1; font-weight: 600; }
 /* The microphone, carried left while sliding to cancel, becomes white on red. */
 .voice-chip { border-radius: 999px; background-color: transparent; transition: background-color 180ms, box-shadow 180ms, color 180ms; }
-.voice-chip.armed { background-color: @destructive_bg_color; color: white; box-shadow: 0 0 0 7px @destructive_bg_color; }
+.voice-chip.armed { background-color: shade(@destructive_bg_color, 0.78); color: white; box-shadow: 0 0 0 7px shade(@destructive_bg_color, 0.78); }
 .presence-dot { min-width: 12px; min-height: 12px; border-radius: 999px; border: 2px solid @window_bg_color; background: @success_color; }
 .presence-dot.presence-away { background: @warning_color; }
 .presence-dot.presence-busy { background: @error_color; }

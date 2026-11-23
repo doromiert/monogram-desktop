@@ -172,12 +172,16 @@ impl Ui {
   send(room,"room@conference.example.invalid/Alice",true);assert_eq!(original.text(),"typing...");
   send(peer,"bob@example.invalid/laptop",true);send(peer,"bob@example.invalid/phone",false);assert_eq!(original.text(),"typing...");
   send(peer,"bob@example.invalid/laptop",false);assert_eq!(original.text(),"Online");
-  ui.select_chat(room);ui.state.borrow_mut().current_mut().subtitle="Joined".into();ui.update_chat_subtitle();assert_eq!(subtitle().text(),"typing...");
-  send(room,"room@conference.example.invalid/Bob",true);send(room,"room@conference.example.invalid/Alice",false);assert_eq!(subtitle().text(),"typing...");
+  ui.select_chat(room);ui.state.borrow_mut().current_mut().subtitle="Joined".into();ui.update_chat_subtitle();assert_eq!(subtitle().text(),"Alice is typing...","a group names who is typing");
+  send(room,"room@conference.example.invalid/Bob",true);assert_eq!(subtitle().text(),"Alice and Bob are typing...","and says it for several people, in the order they began");
+  send(room,"room@conference.example.invalid/Bob",true);assert_eq!(subtitle().text(),"Alice and Bob are typing...","a repeated composing names nobody twice");
+  send(room,"room@conference.example.invalid/Alice",false);assert_eq!(subtitle().text(),"Bob is typing...");
   send(room,"room@conference.example.invalid/Bob",false);assert_eq!(subtitle().text(),"Joined");
   send(room,"room@conference.example.invalid/Bob",true);
   ui.typing.borrow_mut().values_mut().for_each(|at|*at=Instant::now()-crate::chat_states::TIMEOUT-Duration::from_secs(1));
-  let deadline=Instant::now()+Duration::from_millis(1400);while Instant::now()<deadline{glib::MainContext::default().iteration(false);std::thread::sleep(Duration::from_millis(1));}assert_eq!(subtitle().text(),"Joined");
+  // The one-second sweep clears it. Wait for that, not for a fixed time: with software rendering a
+  // main-loop iteration can take over 100 ms, and a fixed window then misses the sweep.
+  let deadline=Instant::now()+Duration::from_secs(10);while subtitle().text()!="Joined"&&Instant::now()<deadline{glib::MainContext::default().iteration(false);std::thread::sleep(Duration::from_millis(1));}assert_eq!(subtitle().text(),"Joined");
   ui.backend_event(ui.generation.get(),"other@example.invalid",crate::protocol::BackendEvent::Typing{peer:room.into(),sender:"room@conference.example.invalid/Eve".into(),composing:true});assert_eq!(subtitle().text(),"Joined");
   ui.select_chat(peer);ui.state.borrow_mut().current_mut().subtitle="Online".into();send(peer,"bob@example.invalid/phone",true);
   // Hidden/unknown presence does not mean that the person stopped typing.
