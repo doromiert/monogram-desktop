@@ -299,7 +299,6 @@
 .hat-chip { min-height: 18px; }
 
 /* Voice messages: the recording bar replaces the message box while the microphone button is held. */
-.voice-button, .voice-button > fixed { overflow: visible; }
 .voice-bar { min-height: 36px; padding: 0 4px; }
 /* While recording the whole message box is the accent-coloured bar, with no focus ring. */
 .composer.voice-recording, .composer.voice-recording:focus-within { background-color: @accent_bg_color; color: white; outline-color: transparent; }
