@@ -34,6 +34,9 @@ pub const MIN_LENGTH: Duration = Duration::from_secs(1);
 /// Sliding this far from where the press began arms "cancel": the microphone turns into a trash
 /// can that follows the pointer. Any drift shorter than this leaves it in its slot.
 pub const SLIDE_TO_CANCEL: f64 = 20.0;
+/// The red ring around the armed trash can (`.voice-chip.armed` in style.css, in pixels). The can
+/// stops this far inside the hint so the ring ends where the waveform does.
+const CHIP_HALO: f64 = 7.0;
 
 /// How a press of the button works.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -434,7 +437,8 @@ impl VoiceUi {
     }
 
     /// The microphone stays in its slot until the pointer has moved far enough to arm "cancel";
-    /// from then on the trash can it became is carried under the pointer, as far as the bar goes.
+    /// from then on the trash can it became is carried under the pointer, as far as the start of
+    /// the hint text.
     pub(crate) fn carry(&self, dx: f64, rtl: bool) {
         if !self.recording() {
             return;
@@ -446,14 +450,23 @@ impl VoiceUi {
         self.hint.set_opacity(if travel > 0.0 { 0.0 } else { 1.0 });
     }
 
-    /// How far the chip can be carried towards the start of the line before it would leave the bar.
+    /// How far the chip can be carried towards the start of the line: to where the hint text
+    /// begins, so the trash can ends up exactly at the edge of the text it replaced and never
+    /// over the waveform.
     fn room_to_carry(&self) -> f64 {
-        let Some(bounds) = self.mic.compute_bounds(&self.bar).filter(|b| b.width() > 0.0) else {
+        let (Some(mic), Some(hint)) = (self.mic.compute_bounds(&self.bar), self.hint.compute_bounds(&self.bar)) else {
             return f64::MAX;
         };
-        let centre = f64::from(bounds.x() + bounds.width() / 2.0);
-        let to_start = if self.mic.direction() == gtk::TextDirection::Rtl { f64::from(self.bar.width()) - centre } else { centre };
-        (to_start - 8.0).max(0.0)
+        if mic.width() <= 0.0 || hint.width() <= 0.0 {
+            return f64::MAX;
+        }
+        let centre = f64::from(mic.x() + mic.width() / 2.0);
+        let reach = if self.mic.direction() == gtk::TextDirection::Rtl {
+            f64::from(hint.x() + hint.width()) - CHIP_HALO - centre
+        } else {
+            centre - (f64::from(hint.x()) + CHIP_HALO)
+        };
+        reach.max(0.0)
     }
 
     /// The pointer moved far enough from the press to arm, or disarm, "cancel".
@@ -1117,6 +1130,15 @@ mod tests {
         assert!(v.hint.has_css_class("error") && v.cancel.has_css_class("destructive-action"));
         drag(&ui, -60.0);
         assert_eq!(v.chip_shift(), -60.0, "and keeps following it, beyond the cancel distance");
+        // Far past the hint it stops where the hint text begins, clear of the waveform.
+        drag(&ui, -2000.0);
+        settle(300);
+        let (bar, chip) = (v.bar.clone(), v.chip.clone());
+        let centre = |w: &gtk::Widget| { let b = w.compute_bounds(&bar).unwrap(); f64::from(b.x() + b.width() / 2.0) };
+        let hint_start = f64::from(v.hint.compute_bounds(&bar).unwrap().x());
+        assert!((centre(chip.upcast_ref()) - hint_start - CHIP_HALO).abs() <= 1.5, "the trash can stops at the start of the hint: {} vs {hint_start}", centre(chip.upcast_ref()));
+        let wave = v.wave.compute_bounds(&bar).unwrap();
+        assert!(f64::from(chip.compute_bounds(&bar).unwrap().x()) - CHIP_HALO >= f64::from(wave.x() + wave.width()) - 1.5, "and its ring never covers the waveform");
         // Back again: sending is possible again.
         drag(&ui, -10.0);
         assert_eq!(v.chip_icons.visible_child_name().as_deref(), Some("mic"), "the microphone returns");
