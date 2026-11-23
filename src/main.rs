@@ -100,6 +100,7 @@ mod picture_editor_ui;
 mod sysinfo;
 mod message_failures;
 mod text_safety;
+mod typing_ui;
 mod toast_routing;
 mod room_members_ui;
 mod room_ui;

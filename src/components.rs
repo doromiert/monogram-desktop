@@ -529,6 +529,17 @@ impl ChatRow {
         line.prepend(leading);
         this
     }
+
+    /// Show the preview as "someone is typing": in the accent colour, its trailing dots pulsing.
+    pub fn set_typing(&self, typing: bool) {
+        let Some(snippet) = self.imp().snippet.get() else { return };
+        if typing {
+            snippet.add_css_class("typing");
+        } else {
+            snippet.remove_css_class("typing");
+        }
+        crate::typing_ui::animate(snippet, typing);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

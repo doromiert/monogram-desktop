@@ -5,6 +5,7 @@
 .chat-list row:selected { background: alpha(@window_fg_color, .10); color: @window_fg_color; }
 .chat-list row:hover { background: alpha(@window_fg_color, .05); }
 .chat-preview { font-size: 12px; opacity: .65; }
+.chat-preview.typing { color: @accent_color; opacity: 1; }
 .chat-time { font-size: 11px; opacity: .55; }
 .chat-name { font-weight: 650; }
 .unread-badge { background: @accent_bg_color; color: @accent_fg_color; border-radius: 20px; padding: 2px 6px; font-size: 10px; font-weight: bold; min-width: 10px; }

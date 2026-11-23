@@ -146,7 +146,6 @@ pub struct Ui {
     pub auto_download_limit: Cell<u64>,
     pub typing: RefCell<HashMap<(String, String), Instant>>,
     pub(crate) header_subtitle: RefCell<Option<gtk::Label>>,
-    pub last_typing: Cell<Option<Instant>>,
     pub typing_input: RefCell<Option<(String, Instant, bool)>>,
     pub history_pages: RefCell<HashMap<String, (String, bool)>>,
     pub history_pending: RefCell<HashSet<String>>,
@@ -478,7 +477,6 @@ impl Ui {
             auto_download_limit: Cell::new(crate::downloads::DEFAULT_AUTO_MAX),
             typing: RefCell::new(HashMap::new()),
             header_subtitle: RefCell::new(None),
-            last_typing: Cell::new(None),
             typing_input: RefCell::new(None),
             history_pages: RefCell::new(HashMap::new()),
             history_pending: RefCell::new(HashSet::new()),
@@ -614,10 +612,11 @@ impl Ui {
             ui.typing
                 .borrow_mut()
                 .retain(|_, t| t.elapsed() < crate::chat_states::TIMEOUT);
-            if before != ui.typing.borrow().len()
-                && ui.pages.visible_child_name().as_deref() == Some("chat")
-            {
-                ui.update_chat_subtitle();
+            if before != ui.typing.borrow().len() {
+                if ui.pages.visible_child_name().as_deref() == Some("chat") {
+                    ui.update_chat_subtitle();
+                }
+                ui.update_typing_rows();
             }
             glib::ControlFlow::Continue
         });
@@ -1235,15 +1234,12 @@ impl Ui {
             let row = crate::components::ChatRow::new(&chat.id, &leading);
             row.set_title(chat.display_name());
             row.set_time(latest.as_ref().map(|m| m.time.as_str()).unwrap_or("Now"));
-            let preview = if !chat.draft.is_empty() {
-                format!("Draft: {}", chat.draft.replace('\n', " "))
-            } else {
-                latest
-                    .as_ref()
-                    .map(|m| format!("{}{}", if m.own { "You: " } else { "" }, m.text.replace('\n', " ")))
-                    .unwrap_or_else(|| "No messages yet".into())
-            };
+            let typing = self.typing_text(&chat);
+            let preview = typing
+                .clone()
+                .unwrap_or_else(|| crate::typing_ui::preview_text(&chat, latest.as_ref()));
             row.set_preview(preview.as_str());
+            row.set_typing(typing.is_some());
             row.set_unread(chat.unread);
             row.set_unread_mark(chat.unread_mark);
             row.set_pinned(chat.pinned);
@@ -1660,8 +1656,9 @@ impl Ui {
         let peer=self.state.borrow().current().jid.clone();
         let changed=self.typing_input.borrow().as_ref().is_none_or(|(p,_,c)|p!=&peer || *c!=composing);
         self.typing_input.replace(Some((peer.clone(),Instant::now(),composing)));
-        if changed || self.last_typing.get().is_none_or(|t|t.elapsed()>Duration::from_secs(5)) {
-            self.last_typing.set(Some(Instant::now()));
+        // XEP-0085: say "composing" once and again only after the state has changed (the idle
+        // timer sends "paused"); repeating it while typing is noise for every recipient.
+        if changed {
             self.command(Command::Typing{peer,composing});
         }
     }
@@ -1829,8 +1826,8 @@ impl Ui {
     pub(crate) fn update_chat_subtitle(&self) {
         let state = self.state.borrow();
         let chat = state.current();
-        let composing = self.typing.borrow().iter().any(|((peer, _), at)|
-            peer == &chat.jid && at.elapsed() < crate::chat_states::TIMEOUT);
+        let typing_text = self.typing_text(chat);
+        let composing = typing_text.is_some();
         if let Some(dot) = self.header_presence.borrow().as_ref() {
             dot.set_presence(self.contact_presence(chat));
             dot.set_dot_visible(self.shows_contact_status());
@@ -1841,7 +1838,8 @@ impl Ui {
             } else {
                 Some(self.status_text(&chat.jid, &chat.subtitle))
             };
-            label.set_text(if composing { "typing..." } else { shown.as_deref().unwrap_or(&chat.subtitle) });
+            label.set_text(typing_text.as_deref().unwrap_or_else(|| shown.as_deref().unwrap_or(&chat.subtitle)));
+            crate::typing_ui::animate(label, composing);
         }
     }
 
@@ -3004,6 +3002,7 @@ impl Ui {
                     self.typing.borrow_mut().remove(&(peer, sender));
                 }
                 self.update_chat_subtitle();
+                self.update_typing_rows();
                 return;
             }
             BackendEvent::SentPartially { peer, id, skipped } => {
