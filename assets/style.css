@@ -309,6 +309,11 @@
 .composer.voice-recording { transition: outline-color 200ms ease, background-color 180ms ease; }
 .composer.voice-recording.voice-cancelling, .composer.voice-recording.voice-cancelling:focus-within { background-color: @destructive_bg_color; }
 .composer.voice-recording.voice-cancelling .voice-button, .composer.voice-recording.voice-cancelling .voice-button:hover, .composer.voice-recording.voice-cancelling .voice-button:active { background-color: transparent; }
+/* The padlock beside the microphone: swipe towards it while holding to lock. */
+.voice-lock { color: white; border-radius: 999px; padding: 6px; transition: background-color 150ms, opacity 150ms; }
+.voice-lock.ready { background-color: alpha(white, 0.28); }
+.composer.voice-recording .voice-send { color: white; border-radius: 999px; background-color: alpha(white, 0.2); }
+.composer.voice-recording .voice-send:hover { background-color: alpha(white, 0.32); }
 .voice-wave { color: white; }
 .voice-timer { font-weight: 600; color: white; }
 .voice-dot { color: white; }

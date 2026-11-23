@@ -38,6 +38,13 @@ pub const SLIDE_TO_CANCEL: f64 = 96.0;
 /// Once armed, the pointer may come back this far before "cancel" disarms, so it does not flicker
 /// on and off at the boundary.
 const DISARM_SLACK: f64 = 12.0;
+/// Swiping this far towards the end of the line while holding locks the recording, so it goes on
+/// hands-free after letting go. Short, because the microphone sits at the end of the bar.
+pub const LOCK_DISTANCE: f64 = 28.0;
+const HINT_HELD: &str = "Release to send · slide left to cancel";
+const HINT_CANCEL: &str = "Release to cancel";
+const HINT_TOGGLED: &str = "Press Enter to send · Esc to cancel";
+const HINT_LOCKED: &str = "Locked · Enter to send · Esc to cancel";
 /// The red ring around the armed trash can (`.voice-chip.armed` in style.css, in pixels). The can
 /// stops this far inside the hint so the ring ends where the waveform does.
 const CHIP_HALO: f64 = 7.0;
@@ -49,6 +56,9 @@ pub enum Mode {
     Held,
     /// Started from the keyboard: Enter or Space again ends it.
     Toggled,
+    /// Held, then swiped towards the end of the line and let go: it keeps recording until it is
+    /// sent or cancelled. Pressing the lock goes back to `Held`.
+    Locked,
 }
 
 /// Why a recording is not being sent as it is.
@@ -189,7 +199,7 @@ struct Session {
     chat: String,
     generation: u64,
     started: Instant,
-    mode: Mode,
+    mode: Cell<Mode>,
     outcome: Cell<Option<Outcome>>,
     last_second: Cell<u64>,
 }
@@ -212,6 +222,12 @@ pub struct VoiceUi {
     chip: gtk::Box,
     chip_host: gtk::Fixed,
     chip_icons: gtk::Stack,
+    /// Beside the microphone: a padlock to swipe towards while holding, a send button once locked.
+    side: gtk::Stack,
+    #[cfg_attr(not(test), allow(dead_code))]
+    send: gtk::Button,
+    lock_icon: gtk::Image,
+    lock_ready: Cell<bool>,
     parts: Parts,
     saved: RefCell<Vec<(gtk::Widget, bool)>>,
     current: RefCell<Option<Rc<Session>>>,
@@ -229,7 +245,7 @@ pub fn install(ui: &Rc<Ui>, row: &gtk::Box, parts: Parts) -> Rc<VoiceUi> {
     chip.add_css_class("voice-chip");
     chip_icons.set_transition_type(gtk::StackTransitionType::Crossfade);
     chip_icons.set_transition_duration(180);
-    for (icon, name) in [("audio-input-microphone-symbolic", "mic"), ("user-trash-symbolic", "trash")] {
+    for (icon, name) in [("audio-input-microphone-symbolic", "mic"), ("user-trash-symbolic", "trash"), ("changes-prevent-symbolic", "lock")] {
         let image = gtk::Image::from_icon_name(icon);
         image.set_pixel_size(16);
         chip_icons.add_named(&image, Some(name));
@@ -261,12 +277,28 @@ pub fn install(ui: &Rc<Ui>, row: &gtk::Box, parts: Parts) -> Rc<VoiceUi> {
     hint.set_valign(gtk::Align::Center);
     hint.set_ellipsize(gtk::pango::EllipsizeMode::End);
     hint.set_xalign(1.0);
+    let side = gtk::Stack::new();
+    side.set_size_request(28, 28);
+    side.set_valign(gtk::Align::Center);
+    side.add_named(&bx(false, 0), Some("blank"));
+    let lock_icon = gtk::Image::from_icon_name("changes-allow-symbolic");
+    lock_icon.set_pixel_size(16);
+    lock_icon.add_css_class("voice-lock");
+    lock_icon.set_halign(gtk::Align::Center);
+    lock_icon.set_valign(gtk::Align::Center);
+    lock_icon.set_accessible_role(gtk::AccessibleRole::Presentation);
+    side.add_named(&lock_icon, Some("lock"));
+    let send = icon_button("mail-send-symbolic", "Send voice message · Enter");
+    send.update_property(&[gtk::accessible::Property::Label("Send voice message")]);
+    send.add_css_class("voice-send");
+    side.add_named(&send, Some("send"));
+    side.set_visible_child_name("blank");
     let bar = bx(false, 8);
     bar.add_css_class("voice-bar");
     bar.set_hexpand(true);
     bar.set_valign(gtk::Align::Center);
     bar.set_visible(false);
-    for child in [cancel.upcast_ref::<gtk::Widget>(), dot.upcast_ref(), timer.upcast_ref(), wave.upcast_ref(), hint.upcast_ref()] {
+    for child in [cancel.upcast_ref::<gtk::Widget>(), dot.upcast_ref(), timer.upcast_ref(), wave.upcast_ref(), hint.upcast_ref(), side.upcast_ref()] {
         bar.append(child);
     }
     row.insert_child_after(&bar, Some(&parts.after));
@@ -282,6 +314,10 @@ pub fn install(ui: &Rc<Ui>, row: &gtk::Box, parts: Parts) -> Rc<VoiceUi> {
         chip,
         chip_host,
         chip_icons,
+        side: side.clone(),
+        send: send.clone(),
+        lock_icon: lock_icon.clone(),
+        lock_ready: Cell::new(false),
         parts,
         saved: RefCell::new(Vec::new()),
         current: RefCell::new(None),
@@ -340,6 +376,12 @@ pub fn install(ui: &Rc<Ui>, row: &gtk::Box, parts: Parts) -> Rc<VoiceUi> {
         }
     });
     let (weak_ui, weak_voice) = (Rc::downgrade(ui), Rc::downgrade(&voice));
+    send.connect_clicked(move |_| {
+        if let (Some(ui), Some(voice)) = (weak_ui.upgrade(), weak_voice.upgrade()) {
+            voice.toggle(&ui);
+        }
+    });
+    let (weak_ui, weak_voice) = (Rc::downgrade(ui), Rc::downgrade(&voice));
     cancel.connect_clicked(move |_| {
         if let (Some(ui), Some(voice)) = (weak_ui.upgrade(), weak_voice.upgrade()) {
             voice.cancel_current(&ui, Why::Cancelled);
@@ -390,6 +432,18 @@ impl VoiceUi {
 
     /// The button went down (or the key was pressed): start recording.
     pub(crate) fn press(self: &Rc<Self>, ui: &Rc<Ui>, mode: Mode) {
+        // Pressing the lock while locked unlocks: this press is now the hold, and letting go sends.
+        let locked = self.current.borrow().clone().filter(|s| s.mode.get() == Mode::Locked);
+        if let Some(session) = locked {
+            if mode == Mode::Held {
+                session.mode.set(Mode::Held);
+                self.lock_ready.set(false);
+                self.sliding.set(false);
+                self.reset_chip();
+                self.apply_mode(Mode::Held);
+            }
+            return;
+        }
         if self.recording() || !self.mic.is_sensitive() {
             return;
         }
@@ -416,7 +470,7 @@ impl VoiceUi {
             chat,
             generation,
             started: Instant::now(),
-            mode,
+            mode: Cell::new(mode),
             outcome: Cell::new(None),
             last_second: Cell::new(0),
         });
@@ -453,6 +507,39 @@ impl VoiceUi {
         let travel = if armed { self.cancel_distance() } else { 0.0 };
         self.shift_chip(if rtl { travel } else { -travel });
         self.hint.set_opacity(if armed { 0.0 } else { 1.0 });
+        self.swipe_lock(dx, rtl, armed);
+    }
+
+    /// Swiping towards the end of the line brings the padlock up and, far enough, locks on release.
+    fn swipe_lock(&self, dx: f64, rtl: bool, cancelling: bool) {
+        let held = self.current.borrow().as_ref().is_some_and(|s| s.mode.get() == Mode::Held);
+        if !held {
+            return;
+        }
+        let towards_end = if rtl { -dx } else { dx };
+        let threshold = if self.lock_ready.get() { LOCK_DISTANCE - DISARM_SLACK } else { LOCK_DISTANCE };
+        let ready = !cancelling && towards_end >= threshold;
+        self.lock_ready.set(ready);
+        let progress = (towards_end / LOCK_DISTANCE).clamp(0.0, 1.0);
+        // Not on offer while cancelling: the red bar shows only the trash can.
+        self.lock_icon.set_opacity(if cancelling { 0.0 } else if ready { 1.0 } else { 0.55 + 0.3 * progress });
+        if ready {
+            self.lock_icon.add_css_class("ready");
+            self.lock_icon.set_icon_name(Some("changes-prevent-symbolic"));
+        } else {
+            self.lock_icon.remove_css_class("ready");
+            self.lock_icon.set_icon_name(Some("changes-allow-symbolic"));
+        }
+    }
+
+    /// Locking leaves the recording running: only the controls change.
+    fn lock(&self, session: &Session) {
+        session.mode.set(Mode::Locked);
+        self.lock_ready.set(false);
+        self.sliding.set(false);
+        self.reset_chip();
+        self.apply_mode(Mode::Locked);
+        self.timer.announce("Recording locked", gtk::AccessibleAnnouncementPriority::Medium);
     }
 
     /// Whether the pointer, `dx` from the press, means "cancel" right now.
@@ -505,7 +592,7 @@ impl VoiceUi {
                 composer.remove_css_class("voice-cancelling");
             }
         }
-        self.hint.set_label(if armed { "Release to cancel" } else { "Release to send · slide left to cancel" });
+        self.hint.set_label(if armed { HINT_CANCEL } else { HINT_HELD });
         if armed {
             self.hint.remove_css_class("dim-label");
             self.hint.add_css_class("error");
@@ -520,7 +607,11 @@ impl VoiceUi {
     /// The button came up. `slid`: far enough away to mean cancel.
     pub(crate) fn release(self: &Rc<Self>, ui: &Rc<Ui>, slid: bool) {
         let Some(session) = self.current.borrow().clone() else { return };
-        if session.mode != Mode::Held {
+        if session.mode.get() != Mode::Held {
+            return;
+        }
+        if !slid && self.lock_ready.get() {
+            self.lock(&session);
             return;
         }
         let outcome = if slid {
@@ -538,7 +629,7 @@ impl VoiceUi {
         let current = self.current.borrow().clone();
         match current {
             None => self.press(ui, Mode::Toggled),
-            Some(session) if session.mode == Mode::Toggled => self.end(ui, &session, Outcome::Send),
+            Some(session) if matches!(session.mode.get(), Mode::Toggled | Mode::Locked) => self.end(ui, &session, Outcome::Send),
             Some(_) => {}
         }
     }
@@ -553,7 +644,7 @@ impl VoiceUi {
     /// The pointer was taken from us mid-press: stop, and keep the recording for review.
     fn interrupted_by_system(self: &Rc<Self>, ui: &Rc<Ui>) {
         let session = self.current.borrow().clone();
-        if let Some(session) = session.filter(|s| s.mode == Mode::Held) {
+        if let Some(session) = session.filter(|s| s.mode.get() == Mode::Held) {
             self.end(ui, &session, Outcome::Draft(Why::Interrupted));
         }
     }
@@ -676,30 +767,17 @@ impl VoiceUi {
         self.wave.clear();
         self.timer.set_label("00:00");
         self.sliding.set(false);
-        self.hint.set_label(match mode {
-            Mode::Held => "Release to send · slide left to cancel",
-            Mode::Toggled => "Press Enter to send · Esc to cancel",
-        });
-        self.hint.add_css_class("dim-label");
-        self.hint.remove_css_class("error");
-        self.cancel.remove_css_class("destructive-action");
+        self.lock_ready.set(false);
         // The hint swaps between texts of different lengths. Holding its width at the longest
         // one, as drawn, keeps the waveform beside it from growing and shrinking as you slide.
-        let widest = ["Release to send · slide left to cancel", "Release to cancel"]
+        let widest = [HINT_HELD, HINT_CANCEL, HINT_TOGGLED, HINT_LOCKED]
             .iter()
             .map(|text| self.hint.create_pango_layout(Some(text)).pixel_size().0)
             .max()
             .unwrap_or(-1);
         self.hint.set_size_request(widest, -1);
         self.reset_chip();
-        // While the button is held, the microphone itself becomes the way to cancel, so the trash
-        // button only shows without a held button (tap to record). It keeps its place either way,
-        // so the waveform never moves.
-        let shown = mode == Mode::Toggled;
-        self.cancel.set_opacity(if shown { 1.0 } else { 0.0 });
-        self.cancel.set_can_target(shown);
-        self.cancel.set_focusable(shown);
-        self.cancel.update_state(&[gtk::accessible::State::Hidden(!shown)]);
+        self.apply_mode(mode);
         {
             let mut saved = self.saved.borrow_mut();
             saved.clear();
@@ -713,10 +791,45 @@ impl VoiceUi {
         if let Some(composer) = self.composer() {
             composer.add_css_class("voice-recording");
         }
+    }
+
+    /// Everything that depends on how the recording is being held, and nothing that depends on how
+    /// long it has run: the hint, the trash button, the slot beside the microphone and its tooltip.
+    fn apply_mode(&self, mode: Mode) {
+        self.hint.set_label(match mode {
+            Mode::Held => HINT_HELD,
+            Mode::Toggled => HINT_TOGGLED,
+            Mode::Locked => HINT_LOCKED,
+        });
+        self.hint.add_css_class("dim-label");
+        self.hint.remove_css_class("error");
+        self.hint.set_opacity(1.0);
+        self.cancel.remove_css_class("destructive-action");
+        // While the button is held, the microphone itself becomes the way to cancel, so the trash
+        // button only shows without a held button (tap to record, or locked). It keeps its place
+        // either way, so the waveform never moves.
+        let shown = mode != Mode::Held;
+        self.cancel.set_opacity(if shown { 1.0 } else { 0.0 });
+        self.cancel.set_can_target(shown);
+        self.cancel.set_focusable(shown);
+        self.cancel.update_state(&[gtk::accessible::State::Hidden(!shown)]);
+        // Beside the microphone: the padlock to swipe towards while holding; a send button when
+        // locked, since the microphone slot then holds the lock that unlocks.
+        self.lock_icon.remove_css_class("ready");
+        self.lock_icon.set_icon_name(Some("changes-allow-symbolic"));
+        self.lock_icon.set_opacity(0.55);
+        self.side.set_visible_child_name(match mode {
+            Mode::Held => "lock",
+            Mode::Toggled => "blank",
+            Mode::Locked => "send",
+        });
+        self.chip_icons.set_visible_child_name(if mode == Mode::Locked { "lock" } else { "mic" });
         self.mic.set_tooltip_text(Some(match mode {
             Mode::Held => "Release to send",
             Mode::Toggled => "Send voice message",
+            Mode::Locked => "Press and hold to unlock",
         }));
+        self.mic.update_property(&[gtk::accessible::Property::Label(if mode == Mode::Locked { "Unlock recording" } else { "Record voice message" })]);
     }
 
     /// The message box the microphone button sits in.
@@ -732,6 +845,7 @@ impl VoiceUi {
         self.chip_icons.set_visible_child_name("mic");
         self.shift_chip(0.0);
         self.hint.set_opacity(1.0);
+        self.lock_ready.set(false);
     }
 
     fn shift_chip(&self, x: f64) {
@@ -754,6 +868,8 @@ impl VoiceUi {
             composer.remove_css_class("voice-recording");
         }
         self.mic.set_tooltip_text(Some("Hold to record a voice message"));
+        self.mic.update_property(&[gtk::accessible::Property::Label("Record voice message")]);
+        self.side.set_visible_child_name("blank");
         self.sliding.set(false);
     }
 }
@@ -1191,6 +1307,107 @@ mod tests {
         drag(&ui, -5.0);
         let_go(&ui, -5.0);
         assert!(wait_until(Duration::from_secs(10), || !sent(&ui).is_empty()), "sent after sliding back");
+        ui.window.close();
+    }
+
+    fn mode(v: &Rc<VoiceUi>) -> Mode {
+        v.current.borrow().as_ref().expect("a recording").mode.get()
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn swiping_right_locks_and_pressing_the_lock_unlocks_so_letting_go_sends() {
+        let ui = ui();
+        live(&ui);
+        press(&ui);
+        assert!(wait_until(Duration::from_secs(10), || timer(&ui) == "00:01"));
+        let v = voice(&ui);
+        assert_eq!(v.side.visible_child_name().as_deref(), Some("lock"), "a padlock waits beside the microphone");
+        // A short swipe is nothing; a long one lights the padlock.
+        drag(&ui, LOCK_DISTANCE - 8.0);
+        assert!(!v.lock_ready.get() && !v.lock_icon.has_css_class("ready"));
+        drag(&ui, LOCK_DISTANCE + 4.0);
+        assert!(v.lock_ready.get() && v.lock_icon.has_css_class("ready"), "far enough: it will lock");
+        assert_eq!(v.chip_shift(), 0.0, "locking does not move the microphone or turn the box red");
+        assert!(!v.composer().unwrap().has_css_class("voice-cancelling"));
+        // Letting go keeps recording, hands-free.
+        let_go(&ui, LOCK_DISTANCE + 4.0);
+        settle(700);
+        assert!(recording_ui(&ui), "still recording after letting go");
+        assert!(sent(&ui).is_empty());
+        assert_eq!(mode(&v), Mode::Locked);
+        assert_eq!(v.chip_icons.visible_child_name().as_deref(), Some("lock"), "the slot shows the lock");
+        assert_eq!(v.side.visible_child_name().as_deref(), Some("send"), "and a send button takes the padlock's place");
+        assert_eq!(v.hint.label(), HINT_LOCKED);
+        assert!(v.cancel.opacity() == 1.0 && v.cancel.can_target(), "the trash button is there without a held button");
+        let before = timer(&ui);
+        assert!(wait_until(Duration::from_secs(5), || timer(&ui) != before), "the timer keeps running");
+        // Pressing the lock unlocks: the recording goes on, as a normal hold.
+        press(&ui);
+        assert_eq!(mode(&v), Mode::Held);
+        assert_eq!(v.chip_icons.visible_child_name().as_deref(), Some("mic"), "the microphone is back");
+        assert_eq!(v.side.visible_child_name().as_deref(), Some("lock"));
+        assert_eq!(v.hint.label(), HINT_HELD);
+        assert!(recording_ui(&ui), "unlocking does not end it");
+        let_go(&ui, 0.0);
+        assert!(wait_until(Duration::from_secs(10), || !sent(&ui).is_empty()), "letting go after unlocking sends");
+        ui.window.close();
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_locked_recording_is_sent_by_the_send_button_or_cancelled_by_the_bin() {
+        let ui = ui();
+        live(&ui);
+        for send in [true, false] {
+            press(&ui);
+            assert!(wait_until(Duration::from_secs(10), || timer(&ui) == "00:01"));
+            let v = voice(&ui);
+            drag(&ui, LOCK_DISTANCE + 4.0);
+            let_go(&ui, LOCK_DISTANCE + 4.0);
+            settle(500);
+            assert_eq!(mode(&v), Mode::Locked);
+            if send {
+                v.send.emit_clicked();
+                assert!(wait_until(Duration::from_secs(10), || !sent(&ui).is_empty()), "the send button sends");
+            } else {
+                v.cancel.emit_clicked();
+                settle(600);
+                assert_eq!(sent(&ui).len(), 1, "cancelling sent nothing more");
+            }
+            assert!(wait_until(Duration::from_secs(5), || !recording_ui(&ui)), "the bar is gone");
+            assert_eq!(v.side.visible_child_name().as_deref(), Some("blank"), "and the padlock with it");
+            assert_eq!(v.chip_icons.visible_child_name().as_deref(), Some("mic"));
+        }
+        ui.window.close();
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn a_short_swipe_right_does_not_lock_and_sliding_left_still_cancels_a_locked_candidate() {
+        let ui = ui();
+        live(&ui);
+        press(&ui);
+        assert!(wait_until(Duration::from_secs(10), || timer(&ui) == "00:01"));
+        let v = voice(&ui);
+        drag(&ui, LOCK_DISTANCE - 8.0);
+        let_go(&ui, LOCK_DISTANCE - 8.0);
+        assert!(wait_until(Duration::from_secs(10), || !sent(&ui).is_empty()), "a short swipe is just a release: it sends");
+        assert!(wait_until(Duration::from_secs(5), || !recording_ui(&ui)));
+        // Swiping right and then all the way back left cancels instead of locking.
+        press(&ui);
+        assert!(wait_until(Duration::from_secs(10), || timer(&ui) == "00:01"));
+        drag(&ui, LOCK_DISTANCE + 4.0);
+        assert!(v.lock_ready.get());
+        settle(300);
+        let d = v.cancel_distance();
+        drag(&ui, -d - 2.0);
+        assert!(!v.lock_ready.get(), "cancelling and locking exclude each other");
+        assert_eq!(v.lock_icon.opacity(), 0.0, "and the padlock is not on offer while cancelling");
+        let_go(&ui, -d - 2.0);
+        settle(600);
+        assert_eq!(sent(&ui).len(), 1, "nothing more was sent");
+        assert!(!recording_ui(&ui));
         ui.window.close();
     }
 

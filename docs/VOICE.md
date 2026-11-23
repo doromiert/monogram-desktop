@@ -71,10 +71,21 @@ which the app's own player and validator accept and other apps play. The file is
 | `src/voice/wave.rs` | the waveform widget |
 | `src/voice_ui.rs` | the button, the gesture, the recording bar and what happens to a recording |
 
+## Locking
+
+While holding the microphone, a padlock waits beside it. Swiping towards the end of the line (right,
+or left in right-to-left languages) lights it up; letting go then keeps the recording running
+hands-free instead of sending it. A locked recording shows the trash button on the left, the lock in
+the microphone's place and a send button where the padlock was. Enter or Space sends, Esc and the
+trash button cancel. Pressing the lock goes back to a normal hold: the recording continues and
+letting go sends it. Sliding left across the whole hint cancels as before; cancelling and locking
+exclude each other. Locking is the keyboard's toggled recording reached from the pointer, so a locked
+recording is never lost to the pointer being taken away.
+
 ## Not included
 
-Locking a recording to keep going hands-free, pausing, previewing before sending, and a waveform
-stored with the message (the player draws its own from the file).
+Pausing, previewing before sending, and a waveform stored with the message (the player draws its own
+from the file).
 
 ## Voice intent on the wire
 
