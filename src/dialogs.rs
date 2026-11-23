@@ -1882,7 +1882,10 @@ impl Ui {
             ),
             (
                 "Messages",
-                vec![("Send", "Return"), ("New line", "<Shift>Return")],
+                vec![
+                    ("Send", "Return"), ("New line", "<Shift>Return"),
+                    ("Scroll messages up", "Page_Up"), ("Scroll messages down", "Page_Down"),
+                ],
             ),
             (
                 "Edit Picture",

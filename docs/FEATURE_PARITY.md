@@ -64,7 +64,7 @@ an in-memory interaction or surface; "planned" means it is still absent.
 | Preferences and appearance | Native live settings for style/emoji, typing, receipts and notification privacy; unsupported switches remain demo-only | Complete settings, themes/icons/layout, accessibility, translation and media/power behavior |
 | Privacy/storage/history | Encrypted OMEMO 2 state; plaintext local chat/draft history; other switches remain previews | Honest cache/history clearing, retention, local encryption and backups as actually supported by Android |
 | Developer/diagnostics/crashes | Discovery/ad-hoc form previews and message-detail dialog | Real disco/commands, sanitized diagnostics, crash handling, version updates and protocol test vectors |
-| Desktop integration | Native window/menu/clipboard, dropping files from a file manager onto a conversation stages them as attachments (local regular files only, at most 64, folders refused; `src/drop_files.rs`), About dialog, pressed reply/reaction feedback, smooth minimal reply navigation, portal-aware chooser, Nix package | Desktop sharing, search, notifications, MPRIS/media keys, accessibility/keyboard acceptance and distribution updates |
+| Desktop integration | Native window/menu/clipboard, dropping files from a file manager onto a conversation stages them as attachments (local regular files only, at most 64, folders refused; `src/drop_files.rs`), About dialog, pressed reply/reaction feedback, smooth minimal reply navigation, focused-window Page Up/Page Down timeline scrolling, portal-aware chooser, Nix package | Desktop sharing, search, notifications, MPRIS/media keys, accessibility/keyboard acceptance and distribution updates |
 
 ## Acceptance rule
 

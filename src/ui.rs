@@ -899,7 +899,7 @@ impl Ui {
     }
     fn actions(self: &Rc<Self>) {
         crate::chat_navigation::install(self);
-        self.install_reply_scroll_input();
+        self.install_message_scroll_input();
         crate::lan_sync_ui::install(self);
         self.action("search", |s| {
             s.search_toggle.set_active(!s.search_toggle.is_active())

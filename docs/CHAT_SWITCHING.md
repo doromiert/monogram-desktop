@@ -7,6 +7,12 @@ and refreshes them from local history. Older views are evicted, and account
 activation releases the entire cache. This is a UI cache, not another history
 store or a replacement for the bounded active history window.
 
+Page Up and Page Down scroll the current conversation by a native GTK page while
+the Monogram window has focus, including from the composer and sidebar controls.
+They retain keyboard focus and the draft/caret. Modified shortcuts and keys in
+dialogs, popovers or media/story viewers keep their normal behavior. Paging uses
+the existing history-window loading and retention rules.
+
 Uncached timelines still build in short batches to keep input responsive. The
 list stays transparent while being populated and becomes visible after final
 allocation and scroll placement, before paint. The existing history spinner

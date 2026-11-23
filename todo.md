@@ -179,6 +179,8 @@
 
 ## Folder selection and menu follow-up (2026-11-20)
 
+- [x] Add window-level Page Up/Page Down conversation scrolling with native paging, retained focus/drafts, modal isolation, shortcut help and a physical-key regression check.
+
 - [x] Keep the selected folder tab and its visibility synchronized after Alt-arrow navigation.
 - [x] Use Nautilus-style native context menus; compact rows and start-aligned actions everywhere.
 - [x] Remove the chat-switch top-to-bottom rebuild/loading effect, with measured responsiveness and bounded retention.
