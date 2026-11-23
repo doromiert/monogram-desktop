@@ -54,7 +54,7 @@ jobs:
             gtk4 libadwaita glycin glycin-gtk4 libclapper-gtk \
             gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav \
             libepoxy openssl sqlite protobuf-c bubblewrap fontconfig ttf-dejavu noto-fonts-emoji \
-            wget xorg-server-xvfb strace patchelf binutils file zsync desktop-file-utils
+            wget strace patchelf binutils file zsync desktop-file-utils
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:

@@ -1,4 +1,4 @@
-{ pkgs, lib, stdenv, pkg-config, protobuf, libomemo-c, openssl, gtk4, libadwaita, libepoxy, libglycin-gtk4, glycin-loaders, sqlite, wrapGAppsHook4, xorg-server, dbus, makeFontsConf, adwaita-fonts, gsettings-desktop-schemas, mesa, librsvg, prosody, cacert, python3, gnome-keyring, gst_all_1, pipewire, clapper-unwrapped, bubblewrap, monogramSrc ? lib.cleanSource ./., craneLib ? import (builtins.fetchTarball {
+{ pkgs, lib, stdenv, pkg-config, protobuf, libomemo-c, openssl, gtk4, libadwaita, libepoxy, libglycin-gtk4, glycin-loaders, sqlite, wrapGAppsHook4, weston, dbus, makeFontsConf, adwaita-fonts, gsettings-desktop-schemas, mesa, librsvg, prosody, cacert, python3, gnome-keyring, gst_all_1, pipewire, clapper-unwrapped, bubblewrap, monogramSrc ? lib.cleanSource ./., craneLib ? import (builtins.fetchTarball {
   url = "https://github.com/ipetkov/crane/archive/79fd63528501446749c09f08cad486a58c7d173e.tar.gz";
   sha256 = "sha256-TREenflwEjxOSq292FYwbc3kEm7TDRtXCZRNWEdjBmg=";
 }) { inherit pkgs; } }:
@@ -42,18 +42,23 @@ in craneLib.buildPackage (commonArgs // {
   inherit cargoArtifacts cargoVendorDir;
   cargoBuildExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-media-author --bin monogram-audio-preview";
   passthru = { inherit cargoArtifacts gtk4Fixed mathRenderer; };
-  nativeCheckInputs = [ xorg-server dbus prosody openssl python3 gnome-keyring ];
+  nativeCheckInputs = [ weston dbus prosody openssl python3 gnome-keyring ];
   postCheck = ''
     export HOME=$TMPDIR/home XDG_CACHE_HOME=$TMPDIR/cache XDG_CONFIG_HOME=$TMPDIR/config XDG_STATE_HOME=$TMPDIR/state
     mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
-    Xvfb :87 -screen 0 2000x1200x24 -nolisten tcp >xvfb.log 2>&1 &
-    xvfb_pid=$!
-    trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
+    # Headless Wayland compositor (no X server): weston with the pixman renderer needs no GPU.
+    export XDG_RUNTIME_DIR=$TMPDIR/runtime
+    mkdir -m 700 "$XDG_RUNTIME_DIR"
+    weston --backend=headless --renderer=pixman --socket=monogram-test --width=2000 --height=1200 >weston.log 2>&1 &
+    compositor_pid=$!
+    trap 'kill "$compositor_pid" 2>/dev/null || true' EXIT
+    for _ in $(seq 100); do [ -S "$XDG_RUNTIME_DIR/monogram-test" ] && break; sleep 0.1; done
+    test -S "$XDG_RUNTIME_DIR/monogram-test" || { cat weston.log; exit 1; }
     export LIBGL_ALWAYS_SOFTWARE=1
     export __EGL_VENDOR_LIBRARY_FILENAMES=${mesa}/share/glvnd/egl_vendor.d/50_mesa.json
     export LIBGL_DRIVERS_PATH=${mesa}/lib/dri
     export MONOGRAM_EPOXY_LIBRARY=${libepoxy}/lib/libepoxy.so.0
-    export DISPLAY=:87 GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=none G_DEBUG=fatal-criticals
+    export WAYLAND_DISPLAY=monogram-test GDK_BACKEND=wayland GSK_RENDERER=cairo GTK_A11Y=none G_DEBUG=fatal-criticals
     export FONTCONFIG_FILE=${fontConfig}
     export GSETTINGS_SCHEMA_DIR=${gsettings-desktop-schemas}/share/gsettings-schemas/${gsettings-desktop-schemas.name}/glib-2.0/schemas
     export XDG_DATA_DIRS=${gtk4}/share/gsettings-schemas/${gtk4.name}:''${XDG_DATA_DIRS:-}
@@ -71,7 +76,7 @@ in craneLib.buildPackage (commonArgs // {
     dbus-run-session --config-file=${dbus}/share/dbus-1/session.conf -- target/${stdenv.hostPlatform.rust.rustcTarget}/release/monogram-desktop --smoke-test --show-media
     transport_test=$(find target -path '*/release/deps/transport-*' -type f -executable | head -n 1)
     dbus-run-session --config-file=${dbus}/share/dbus-1/session.conf -- ${python3}/bin/python tests/xmpp_fixture.py --test-binary "$transport_test" --crypto-test-binary "$crypto_test" --bus-config ${dbus}/share/dbus-1/session.conf --app-binary target/${stdenv.hostPlatform.rust.rustcTarget}/release/monogram-desktop
-    kill "$xvfb_pid"
+    kill "$compositor_pid"
     trap - EXIT
   '';
   postInstall = ''
