@@ -352,6 +352,9 @@ pub struct Chat {
 }
 impl Chat {
     pub fn display_name(&self) -> &str { if self.local_name.is_empty() { &self.name } else { &self.local_name } }
+    /// Whether the avatar carries a presence circle: a person has one, a room does not, and
+    /// neither does Saved Messages, which is you.
+    pub fn has_status_circle(&self) -> bool { !self.group && self.id != "saved" }
     pub fn encryption_preference(&self) -> Preference {
         self.sending_preference.unwrap_or(if self.encryption {
             Preference::Omemo2

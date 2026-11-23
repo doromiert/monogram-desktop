@@ -1223,7 +1223,7 @@ impl Ui {
         for chat in state.filtered(self.search.text().as_str()) {
             let latest = chat.latest_preview();
             let avatar = self.chat_avatar(&chat, 44);
-            let leading: gtk::Widget = if chat.group {
+            let leading: gtk::Widget = if !chat.has_status_circle() {
                 avatar.upcast()
             } else {
                 let dot = crate::components::PresenceAvatar::new(&avatar);
@@ -1798,7 +1798,7 @@ impl Ui {
         self.composer_placeholder
             .set_visible(self.composer_text().is_empty());
         let title = bx(false, 8);
-        if chat.group {
+        if !chat.has_status_circle() {
             self.header_presence.replace(None);
             title.append(&self.chat_avatar(chat, 28));
         } else {

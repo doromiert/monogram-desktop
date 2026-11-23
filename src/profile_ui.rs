@@ -305,7 +305,7 @@ fn profile_status(chat:&Chat, room:bool)->&str {
 fn add_avatar(ui:&Ui,banner:&gtk::Overlay,chat:&Chat,room:bool) {
     let avatar=ui.chat_avatar(chat,72);
     // A person (not a room occupant or a group) gets the status circle.
-    let shown:gtk::Widget=if chat.group {avatar.upcast()} else {
+    let shown:gtk::Widget=if !chat.has_status_circle() {avatar.upcast()} else {
         let dot=crate::components::PresenceAvatar::new(&avatar);
         // In a room the status is the occupant's presence in it; otherwise the contact's own.
         dot.set_presence(if room {crate::components::Presence::from_status(&chat.subtitle)} else {ui.contact_presence(chat)});

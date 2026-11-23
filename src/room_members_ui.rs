@@ -295,7 +295,9 @@ impl Ui {
     /// roster presence cannot override the presence observed inside this room.
     pub(crate) fn participant_chat(&self,room:&str,person:&Participant)->crate::model::Chat {
         let peer=person.jid.clone().unwrap_or_else(||format!("{room}/{}",person.nick));
-        let mut chat=self.state.borrow().chats.iter().find(|chat|chat.jid==peer).cloned()
+        // Never Saved Messages: it shares your own address, so your entry would get its star
+        // icon and no picture. You are an ordinary person in the room.
+        let mut chat=self.state.borrow().chats.iter().find(|chat|chat.jid==peer&&chat.id!="saved").cloned()
             .unwrap_or_else(||crate::model::Chat{jid:peer.clone(),group:person.jid.is_none(),..Default::default()});
         chat.name=person.nick.clone();
         chat.subtitle=presence_label(&person.show).into();
@@ -746,5 +748,75 @@ mod alias_tests {
         let person=Participant{nick:"Room Nick".into(),jid:Some("person@example.invalid".into()),affiliation:"member".into(),role:"participant".into(),show:String::new(),own:false,hats:vec![]};
         let found=rows_named(&[person.clone()],"local",|_|"Local Nick".into());
         assert!(matches!(found.last(),Some(Row::Person(actual)) if actual==&person));
+    }
+
+    #[test]
+    fn only_a_person_gets_a_status_circle_not_a_room_and_not_saved_messages() {
+        use crate::model::Chat;
+        assert!(Chat { id: "friend".into(), jid: "bob@example.invalid".into(), ..Default::default() }.has_status_circle());
+        assert!(!Chat { id: "room".into(), jid: "room@conference.example.invalid".into(), group: true, ..Default::default() }.has_status_circle());
+        assert!(!Chat { id: "saved".into(), jid: "alice@example.invalid".into(), ..Default::default() }.has_status_circle());
+    }
+
+    fn descendants(root: &gtk::Widget, found: &mut Vec<gtk::Widget>) {
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            found.push(widget.clone());
+            descendants(&widget, found);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn saved_messages_has_no_status_circle_and_your_own_participant_entry_is_you_not_the_star() {
+        use crate::model::{Account, State};
+        use std::time::{Duration, Instant};
+        let app = adw::Application::builder().application_id("com.negzero.MonogramSavedCircle").flags(gio::ApplicationFlags::NON_UNIQUE).build();
+        app.register(None::<&gio::Cancellable>).unwrap();
+        let ui = Ui::new(&app, true);
+        let (owner, friend, room) = ("alice@example.invalid", "bob@example.invalid", "room@conference.example.invalid");
+        ui.store.save_account(&Account { jid: owner.into(), host: String::new(), port: 5222, direct_tls: false }).unwrap();
+        let mut state = State::live(owner, vec![]);
+        state.chat_for(friend);
+        let group = state.chat_for(room);
+        group.group = true;
+        group.room_joined = true;
+        ui.activate_state(state);
+        ui.window.set_default_size(1000, 600);
+        ui.window.present();
+        let settle = |ms: u64| {
+            let end = Instant::now() + Duration::from_millis(ms);
+            while Instant::now() < end {
+                glib::MainContext::default().iteration(false);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        settle(300);
+        // The sidebar: a contact's avatar has the circle, Saved Messages does not.
+        let list = ui.chat_stack.visible_child().and_downcast::<gtk::ListBox>().expect("the chat list");
+        let mut all = Vec::new();
+        descendants(list.upcast_ref(), &mut all);
+        let circle_in = |id: &str| {
+            let row = all.iter().find(|w| w.is::<crate::components::ChatRow>() && w.widget_name() == id).unwrap_or_else(|| panic!("no row {id}"));
+            let mut inside = Vec::new();
+            descendants(row, &mut inside);
+            inside.iter().any(|w| w.is::<crate::components::PresenceAvatar>())
+        };
+        let friend_id = ui.state.borrow().chats.iter().find(|c| c.jid == friend).unwrap().id.clone();
+        assert!(circle_in(&friend_id), "a contact keeps its status circle");
+        assert!(!circle_in("saved"), "Saved Messages has none");
+        // Your own entry in a room shares your address with Saved Messages; it must not become it.
+        let me = Participant { nick: "Alice".into(), jid: Some(owner.into()), affiliation: "member".into(), role: "participant".into(), show: String::new(), own: true, hats: vec![] };
+        let chat = ui.participant_chat(room, &me);
+        assert_ne!(chat.id, "saved", "your entry is not the Saved Messages chat");
+        assert_eq!(chat.display_name(), "Alice");
+        let plain = ui.chat_avatar(&chat, 40);
+        assert!(plain.icon_name().is_none(), "no bookmark star: {:?}", plain.icon_name());
+        // And it gets your picture the way any other person does.
+        let image: gtk::gdk::Texture = gtk::gdk::MemoryTexture::new(1, 1, gtk::gdk::MemoryFormat::R8g8b8a8, &glib::Bytes::from_owned(vec![255, 0, 0, 255]), 4).upcast();
+        ui.avatars.borrow_mut().cache.insert(owner.into(), (Instant::now() + Duration::from_secs(300), Some(image.clone())));
+        assert_eq!(ui.chat_avatar(&chat, 40).custom_image().unwrap(), image.upcast::<gtk::gdk::Paintable>());
+        ui.window.close();
     }
 }
