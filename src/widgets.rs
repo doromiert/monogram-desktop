@@ -1305,10 +1305,20 @@ pub(crate) fn context_menu(items:&[(String,String)], activate:impl Fn(&str)+'sta
     let group=gio::SimpleActionGroup::new();
     let action=gio::SimpleAction::new("activate",Some(glib::VariantTy::STRING));
     let weak=popup.downgrade();
+    let activate=Rc::new(activate);
     action.connect_activate(move|_,value| {
-        let Some(key)=value.and_then(|value|value.str()) else{return};
-        if let Some(popup)=weak.upgrade() {popup.popdown();}
-        activate(key);
+        let Some(key)=value.and_then(|value|value.str()).map(str::to_owned) else{return};
+        let popup=weak.upgrade();
+        if let Some(popup)=&popup {popup.popdown();}
+        // The callback may rebuild the very list this popover is parented to (mute, pin, archive).
+        // Run it after the popover has let go of its parent, never while it still points at a row
+        // that is about to be destroyed: the idle below is queued behind the one `connect_closed`
+        // schedules, and unparents first in case that one has not run yet.
+        let activate=activate.clone();
+        glib::idle_add_local_once(move||{
+            if let Some(popup)=&popup {if popup.parent().is_some(){popup.unparent();}}
+            activate(&key);
+        });
     });
     group.add_action(&action);popup.insert_action_group("context",Some(&group));
     popup.connect_closed(|popup| {
@@ -1326,6 +1336,23 @@ pub(crate) fn style_context_button(button:&gtk::Button) {
 #[cfg(test)]
 mod context_menu_tests {
     use super::*;
+    #[gtk::test]
+    #[ignore="requires a private GTK display and D-Bus"]
+    fn an_action_that_destroys_the_popover_parent_does_not_crash() {
+        adw::init().unwrap();
+        let list=gtk::ListBox::new();let row=gtk::ListBoxRow::new();row.set_child(Some(&gtk::Label::new(Some("Chat"))));list.append(&row);
+        let window=gtk::Window::builder().default_width(300).default_height(300).child(&list).build();window.present();
+        let pump=||{let until=std::time::Instant::now()+std::time::Duration::from_millis(300);while std::time::Instant::now()<until{glib::MainContext::default().iteration(false);std::thread::sleep(std::time::Duration::from_millis(2));}};pump();
+        let ran=Rc::new(Cell::new(false));let seen=ran.clone();let target=list.clone();
+        // Like "chat-mute": the action rebuilds the list, destroying the row the popover hangs from.
+        let popup=context_menu(&[("Mute".into(),"mute".into())],move|_|{while let Some(child)=target.first_child(){target.remove(&child);}seen.set(true);});
+        popup.set_parent(&row);popup.popup();pump();
+        popup.activate_action("context.activate",Some(&"mute".to_variant())).unwrap();
+        drop(row);pump();
+        assert!(ran.get(),"the action must still run");
+        window.close();
+    }
+
     #[test]
     #[ignore="requires private GTK display, xdotool and D-Bus"]
     fn native_context_menu_is_compact_start_aligned_and_dispatches_before_cleanup() {
