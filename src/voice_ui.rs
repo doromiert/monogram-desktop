@@ -31,9 +31,13 @@ use std::{
 pub const TAP: Duration = Duration::from_millis(500);
 /// A recording shorter than this is thrown away: it is a click, not a message.
 pub const MIN_LENGTH: Duration = Duration::from_secs(1);
-/// Sliding this far from where the press began arms "cancel": the microphone turns into a trash
-/// can that follows the pointer. Any drift shorter than this leaves it in its slot.
-pub const SLIDE_TO_CANCEL: f64 = 20.0;
+/// How far from where the press began "cancel" arms when the bar's layout cannot be measured.
+/// Normally the distance is the span from the microphone to the start of the hint text, see
+/// `VoiceUi::cancel_distance`: cancelling means sliding across the whole hint.
+pub const SLIDE_TO_CANCEL: f64 = 96.0;
+/// Once armed, the pointer may come back this far before "cancel" disarms, so it does not flicker
+/// on and off at the boundary.
+const DISARM_SLACK: f64 = 12.0;
 /// The red ring around the armed trash can (`.voice-chip.armed` in style.css, in pixels). The can
 /// stops this far inside the hint so the ring ends where the waveform does.
 const CHIP_HALO: f64 = 7.0;
@@ -119,11 +123,12 @@ pub fn voice_name(now: chrono::DateTime<chrono::Local>, unique: &str) -> String 
     format!("voice-{}-{}.ogg", now.format("%Y%m%d-%H%M%S"), &unique[..unique.len().min(6)])
 }
 
-/// Whether a drag of `dx` pixels from the press is far enough, towards the start of the line, to
-/// cancel. The start of the line is the left, or the right in right-to-left languages.
-pub fn slid_to_cancel(dx: f64, rtl: bool) -> bool {
+/// Whether a drag of `dx` pixels from the press has gone `distance` pixels or more towards the start
+/// of the line, which cancels. The start of the line is the left, or the right in right-to-left
+/// languages.
+pub fn slid_to_cancel(dx: f64, rtl: bool, distance: f64) -> bool {
     let towards_start = if rtl { dx } else { -dx };
-    towards_start >= SLIDE_TO_CANCEL
+    towards_start >= distance
 }
 
 /// The desktop's own switch for the microphone (GNOME Settings → Privacy), if there is one.
@@ -302,8 +307,7 @@ pub fn install(ui: &Rc<Ui>, row: &gtk::Box, parts: Parts) -> Rc<VoiceUi> {
         move |gesture, dx, _| {
             if let Some(voice) = weak_voice.upgrade() {
                 let rtl = gesture.widget().is_some_and(|widget| widget.direction() == gtk::TextDirection::Rtl);
-                voice.carry(dx, rtl);
-                voice.slide(slid_to_cancel(dx, rtl));
+                voice.dragged(dx, rtl);
             }
         }
     });
@@ -312,7 +316,8 @@ pub fn install(ui: &Rc<Ui>, row: &gtk::Box, parts: Parts) -> Rc<VoiceUi> {
         move |gesture, dx, _| {
             if let (Some(ui), Some(voice)) = (weak_ui.upgrade(), weak_voice.upgrade()) {
                 let rtl = gesture.widget().is_some_and(|widget| widget.direction() == gtk::TextDirection::Rtl);
-                voice.release(&ui, slid_to_cancel(dx, rtl));
+                let armed = voice.armed_at(dx, rtl);
+                voice.release(&ui, armed);
             }
         }
     });
@@ -436,18 +441,30 @@ impl VoiceUi {
         self.timer.announce("Recording voice message", gtk::AccessibleAnnouncementPriority::Medium);
     }
 
-    /// The microphone stays in its slot until the pointer has moved far enough to arm "cancel";
-    /// from then on the trash can it became is carried under the pointer, as far as the start of
-    /// the hint text.
-    pub(crate) fn carry(&self, dx: f64, rtl: bool) {
+    /// The pointer moved. The microphone does not budge, and the bar stays as it is, until the
+    /// pointer has crossed the whole hint text; there it turns into a trash can at the start of the
+    /// text, the bar turns red, and letting go cancels. Coming back out undoes all of it.
+    pub(crate) fn dragged(&self, dx: f64, rtl: bool) {
         if !self.recording() {
             return;
         }
-        let towards_start = if rtl { dx } else { -dx };
-        let travel = if towards_start < SLIDE_TO_CANCEL { 0.0 } else { towards_start.min(self.room_to_carry()) };
+        let armed = self.armed_at(dx, rtl);
+        self.slide(armed);
+        let travel = if armed { self.cancel_distance() } else { 0.0 };
         self.shift_chip(if rtl { travel } else { -travel });
-        // The hint makes way for the trash can once it is on its way.
-        self.hint.set_opacity(if travel > 0.0 { 0.0 } else { 1.0 });
+        self.hint.set_opacity(if armed { 0.0 } else { 1.0 });
+    }
+
+    /// Whether the pointer, `dx` from the press, means "cancel" right now.
+    pub(crate) fn armed_at(&self, dx: f64, rtl: bool) -> bool {
+        let distance = self.cancel_distance();
+        slid_to_cancel(dx, rtl, if self.sliding.get() { distance - DISARM_SLACK } else { distance })
+    }
+
+    /// From the microphone to the start of the hint text; a fixed distance if that cannot be measured.
+    pub(crate) fn cancel_distance(&self) -> f64 {
+        let room = self.room_to_carry();
+        if room.is_finite() && room > DISARM_SLACK && room < f64::MAX { room } else { SLIDE_TO_CANCEL }
     }
 
     /// How far the chip can be carried towards the start of the line: to where the hint text
@@ -827,15 +844,16 @@ mod tests {
 
     #[test]
     fn sliding_far_enough_towards_the_start_of_the_line_cancels() {
-        assert!(!slid_to_cancel(0.0, false));
-        assert!(!slid_to_cancel(-SLIDE_TO_CANCEL + 1.0, false));
-        assert!(slid_to_cancel(-SLIDE_TO_CANCEL, false));
-        assert!(slid_to_cancel(-500.0, false));
-        assert!(!slid_to_cancel(500.0, false), "away from the start is not a cancel");
-        // Mirrored for right-to-left languages.
-        assert!(slid_to_cancel(SLIDE_TO_CANCEL, true));
-        assert!(!slid_to_cancel(-500.0, true));
-        assert!(!slid_to_cancel(f64::NAN, false) && !slid_to_cancel(f64::NAN, true));
+        let d = 150.0;
+        assert!(!slid_to_cancel(0.0, false, d));
+        assert!(!slid_to_cancel(-d + 1.0, false, d));
+        assert!(slid_to_cancel(-d, false, d));
+        assert!(slid_to_cancel(-500.0, false, d));
+        assert!(!slid_to_cancel(500.0, false, d), "away from the start is not a cancel");
+        // Right to left: the start of the line is the right.
+        assert!(slid_to_cancel(d, true, d));
+        assert!(!slid_to_cancel(-500.0, true, d));
+        assert!(!slid_to_cancel(f64::NAN, false, d) && !slid_to_cancel(f64::NAN, true, d));
     }
 
     #[test]
@@ -1116,37 +1134,51 @@ mod tests {
         let v = voice(&ui);
         assert!(v.hint.label().contains("slide left"));
         assert_eq!(v.chip_icons.visible_child_name().as_deref(), Some("mic"));
-        // Drifting a little while holding leaves the microphone in its slot, hint and all.
-        drag(&ui, -SLIDE_TO_CANCEL + 5.0);
-        assert_eq!(v.chip_shift(), 0.0, "short of the cancel distance the microphone does not move");
-        assert_eq!(v.hint.opacity(), 1.0);
-        assert!(!v.chip.has_css_class("armed") && !v.composer().unwrap().has_css_class("voice-cancelling"));
-        drag(&ui, -SLIDE_TO_CANCEL - 10.0);
-        assert_eq!(v.chip_shift(), -SLIDE_TO_CANCEL - 10.0, "past it, the trash can is carried under the pointer");
+        settle(300);
+        let d = v.cancel_distance();
+        let (bar, chip) = (v.bar.clone(), v.chip.clone());
+        let hint_start = f64::from(v.hint.compute_bounds(&bar).unwrap().x());
+        assert!(d > 100.0, "cancelling means crossing the hint text, not a few pixels: {d}");
+        let calm = |v: &Rc<VoiceUi>| {
+            assert_eq!(v.chip_shift(), 0.0, "the microphone stays in its slot");
+            assert_eq!(v.hint.opacity(), 1.0, "with the hint beside it");
+            assert!(!v.chip.has_css_class("armed") && !v.composer().unwrap().has_css_class("voice-cancelling"), "and nothing turns red");
+            assert_eq!(v.chip_icons.visible_child_name().as_deref(), Some("mic"));
+        };
+        // A short slide, even one over the end of the hint, changes nothing.
+        for dx in [-12.0, -40.0, -d + 5.0] {
+            drag(&ui, dx);
+            calm(&v);
+        }
+        // Reaching the start of the hint: a trash can there, the whole box red, the slot not drawn.
+        drag(&ui, -d - 2.0);
+        assert_eq!(v.chip_shift(), -d, "the trash can sits at the start of the hint text");
         assert_eq!(v.chip_icons.visible_child_name().as_deref(), Some("trash"), "it became a trash can");
         assert!(v.chip.has_css_class("armed"), "on red");
         assert!(v.composer().unwrap().has_css_class("voice-cancelling"), "the whole message box turns red");
         assert_eq!(v.hint.label(), "Release to cancel");
         assert!(v.hint.has_css_class("error") && v.cancel.has_css_class("destructive-action"));
-        drag(&ui, -60.0);
-        assert_eq!(v.chip_shift(), -60.0, "and keeps following it, beyond the cancel distance");
-        // Far past the hint it stops where the hint text begins, clear of the waveform.
-        drag(&ui, -2000.0);
         settle(300);
-        let (bar, chip) = (v.bar.clone(), v.chip.clone());
-        let centre = |w: &gtk::Widget| { let b = w.compute_bounds(&bar).unwrap(); f64::from(b.x() + b.width() / 2.0) };
-        let hint_start = f64::from(v.hint.compute_bounds(&bar).unwrap().x());
-        assert!((centre(chip.upcast_ref()) - hint_start - CHIP_HALO).abs() <= 1.5, "the trash can stops at the start of the hint: {} vs {hint_start}", centre(chip.upcast_ref()));
+        let centre = f64::from({ let b = chip.compute_bounds(&bar).unwrap(); b.x() + b.width() / 2.0 });
+        assert!((centre - hint_start - CHIP_HALO).abs() <= 1.5, "at the start of the hint: {centre} vs {hint_start}");
         let wave = v.wave.compute_bounds(&bar).unwrap();
-        assert!(f64::from(chip.compute_bounds(&bar).unwrap().x()) - CHIP_HALO >= f64::from(wave.x() + wave.width()) - 1.5, "and its ring never covers the waveform");
+        assert!(f64::from(chip.compute_bounds(&bar).unwrap().x()) - CHIP_HALO >= f64::from(wave.x() + wave.width()) - 1.5, "its ring never covers the waveform");
+        // Further on it stays there, and a small step back does not flicker it off.
+        drag(&ui, -2000.0);
+        assert_eq!(v.chip_shift(), -d);
+        drag(&ui, -d + 6.0);
+        assert!(v.chip.has_css_class("armed"), "a step back inside the slack stays armed");
+        drag(&ui, -d + 30.0);
+        calm(&v);
+        drag(&ui, -d - 2.0);
         // Back again: sending is possible again.
         drag(&ui, -10.0);
         assert_eq!(v.chip_icons.visible_child_name().as_deref(), Some("mic"), "the microphone returns");
         assert_eq!(v.chip_shift(), 0.0, "to its slot");
         assert!(!v.chip.has_css_class("armed") && !v.composer().unwrap().has_css_class("voice-cancelling"));
         assert!(v.hint.label().contains("Release to send") && !v.cancel.has_css_class("destructive-action"));
-        drag(&ui, -SLIDE_TO_CANCEL - 10.0);
-        let_go(&ui, -SLIDE_TO_CANCEL - 10.0);
+        drag(&ui, -d - 10.0);
+        let_go(&ui, -d - 10.0);
         settle(600);
         assert!(sent(&ui).is_empty() && files(&ui).is_empty(), "cancelled: nothing sent, file deleted");
         assert!(!recording_ui(&ui));
@@ -1155,7 +1187,7 @@ mod tests {
         // And the other way: slid out, slid back, then let go.
         press(&ui);
         assert!(wait_until(Duration::from_secs(10), || timer(&ui) == "00:01"));
-        drag(&ui, -SLIDE_TO_CANCEL - 10.0);
+        drag(&ui, -d - 10.0);
         drag(&ui, -5.0);
         let_go(&ui, -5.0);
         assert!(wait_until(Duration::from_secs(10), || !sent(&ui).is_empty()), "sent after sliding back");
