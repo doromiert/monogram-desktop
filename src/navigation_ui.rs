@@ -82,6 +82,11 @@ impl Ui {
             ui.cancel_reply_scroll();
             ui.message_scroll.borrow_mut().take();
             ui.scroll.emit_scroll_child(scroll, false);
+            ui.history_edge(if scroll == gtk::ScrollType::PageUp {
+                crate::history_window::Side::Older
+            } else {
+                crate::history_window::Side::Newer
+            });
             gtk::glib::Propagation::Stop
         });
         self.window.add_controller(keys);
