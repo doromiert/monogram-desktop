@@ -60,3 +60,35 @@ previews fold source line breaks into spaces. The message itself and stored
 reply target/fallback stay intact. The native fixture includes the screenshot's
 line break after the parenthetical phrase and verifies it does not force a
 short line in the card.
+
+# Reply, draft and send latency — 2026-11-23
+
+`Ui::persist()` ran on the GTK main loop for every draft save (including the one `cancel_reply`
+triggers) and for every live send. It serialized each chat's whole message list into a JSON value
+only to delete it, then upserted every loaded message of every chat (about six SQL statements
+each). Fixture: `storage::tests::bench_persist_cost` (`--ignored --nocapture`), file-backed WAL
+database, 20 chats × 200 messages, median of 7, **debug build** (release was not measured).
+
+| Case | Median |
+| --- | ---: |
+| Full `save_chat_state` (before) | 2804 ms |
+| Delta save, nothing changed (`SavedRows`) | 448 ms |
+| Delta save, one message edited | 460 ms |
+| Narrow save: current chat + one message (`Ui::persist_current`) | 0.8 ms |
+
+Kept: `chat_meta_value` (no message serialization for chat rows), `SavedRows` delta saves for
+the remaining full `persist()` callers, and `persist_current` for `save_draft` and the two live
+send paths, so replying, drafting and sending no longer scale with loaded history.
+
+Ledger:
+
+| Idea | Baseline → Result | Verdict | Why |
+| --- | --- | --- | --- |
+| Skip unchanged rows by digest | 2804 ms → 712 ms | kept | The rest was serializing every chat's messages twice. |
+| Serialize chat metadata without messages | 712 ms → 448 ms | kept | Cost was proportional to loaded history. |
+| Narrow save for draft and send | 448 ms → 0.8 ms | kept | Only one chat and one message change on those paths. |
+
+Open: the remaining full `persist()` callers (chat switch, folder changes) still cost about
+450 ms at this size in a debug build, and the digest pass is still linear in loaded history.
+Not measured: end-to-end keypress-to-paint latency of replying in the real window, and release
+numbers.

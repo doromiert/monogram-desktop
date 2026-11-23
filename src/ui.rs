@@ -889,6 +889,23 @@ impl Ui {
             true
         }
     }
+    /// Saves only the current chat's metadata and, when given, one message. Unlike `persist` the
+    /// cost does not depend on how much history is loaded, which keeps drafting, replying and
+    /// sending instant. A full `persist` later simply sees these rows as changed once more.
+    pub fn persist_current(&self, message: Option<&Message>) -> bool {
+        let state = self.state.borrow();
+        if state.account.is_empty() {
+            return true;
+        }
+        let result = self.store.save_chat_message(&state.account, state.current(), message);
+        drop(state);
+        if result.is_err() {
+            self.notice("Local history could not be saved. Check free space and permissions.");
+            false
+        } else {
+            true
+        }
+    }
     pub fn action(self: &Rc<Self>, name: &str, f: impl Fn(&Rc<Self>) + 'static) {
         let action = gio::SimpleAction::new(name, None);
         let weak = Rc::downgrade(self);
@@ -1664,7 +1681,7 @@ impl Ui {
         chat.draft_formatting=Some(formatting);
         chat.draft_reply = self.replying.borrow().clone().unwrap_or_default();
         drop(state);
-        self.persist();
+        self.persist_current(None);
     }
     pub fn select_chat(self: &Rc<Self>, id: &str) {
         if !self.state.borrow().chats.iter().any(|c| c.id == id) {
@@ -2080,7 +2097,7 @@ impl Ui {
             let message = state.message(&id).unwrap().clone();
             let peer = state.current().jid.clone();
             drop(state);
-            if !self.persist() {
+            if !self.persist_current(Some(&message)) {
                 self.state
                     .borrow_mut()
                     .current_mut()
@@ -2197,7 +2214,7 @@ impl Ui {
             drop(state);
             if !live && self.attachments.borrow().is_empty(){self.animate_sent_text(&id);}
             if live {
-                if !self.persist() {
+                if !self.persist_current(Some(&message)) {
                     self.state
                         .borrow_mut()
                         .current_mut()

@@ -976,7 +976,18 @@ mod tests {
         }
         times.sort_by(|a, b| a.partial_cmp(b).unwrap());
         eprintln!("DELTA one edit: median {:.1} ms, min {:.1}, max {:.1}", times[3], times[0], times[6]);
-        assert_eq!(store.load(owner).chats.iter().find(|c| c.jid == "peer3@fixture.invalid").unwrap().messages.iter().find(|m| m.id == "m3-10").unwrap().text, "edited 6");
+        let mut times = vec![];
+        for n in 0..7 {
+            let chat = state.chats.iter().find(|c| c.jid == "peer3@fixture.invalid").unwrap();
+            let mut message = chat.messages[10].clone();
+            message.text = format!("narrow {n}");
+            let t = std::time::Instant::now();
+            store.save_chat_message(owner, chat, Some(&message)).unwrap();
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        eprintln!("NARROW chat + 1 message: median {:.2} ms, min {:.2}, max {:.2}", times[3], times[0], times[6]);
+        assert_eq!(store.load(owner).chats.iter().find(|c| c.jid == "peer3@fixture.invalid").unwrap().messages.iter().find(|m| m.id == "m3-10").unwrap().text, "narrow 6");
         let _ = std::fs::remove_dir_all(dir);
     }
     #[test]
