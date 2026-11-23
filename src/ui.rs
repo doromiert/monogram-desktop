@@ -44,6 +44,7 @@ pub struct Ui {
     pub pages: gtk::Stack,
     pub state: RefCell<State>,
     pub(crate) folder_snapshot: RefCell<String>,
+    pub(crate) saved_rows: RefCell<crate::storage::SavedRows>,
     pub demo: RefCell<State>,
     pub store: Store,
     pub folder_bar: FolderBar,
@@ -316,6 +317,7 @@ impl Ui {
                 .transition_duration(160)
                 .build(),
             folder_snapshot:RefCell::new(crate::lan_sync_ui::folder_signature(&state)),
+            saved_rows:RefCell::default(),
             state: RefCell::new(state),
             demo: RefCell::new(demo),
             store,
@@ -878,7 +880,7 @@ impl Ui {
     pub fn persist(&self) -> bool {
         let signature=crate::lan_sync_ui::folder_signature(&self.state.borrow());
         let changed=*self.folder_snapshot.borrow()!=signature;
-        let result=if changed{self.store.save(&self.state.borrow())}else{self.store.save_chat_state(&self.state.borrow())};
+        let result=if changed{self.store.save_delta(&self.state.borrow(),&mut self.saved_rows.borrow_mut())}else{self.store.save_chat_state_delta(&self.state.borrow(),&mut self.saved_rows.borrow_mut())};
         if result.is_err() {
             self.notice("Local history could not be saved. Check free space and permissions.");
             false
@@ -2327,6 +2329,7 @@ impl Ui {
             .set_label(if error { "Try Again" } else { "Sign In" });
     }
     pub fn activate_state(self: &Rc<Self>, mut state: State) {
+        self.saved_rows.borrow_mut().clear();
         // Rosters belong to the previous account's rooms.
         self.room_rosters.borrow_mut().clear();
         self.contact_status.borrow_mut().clear();

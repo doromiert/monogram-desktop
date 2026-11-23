@@ -31,6 +31,26 @@ const READY_UPLOAD_CAPTIONS: &str = "SELECT dependency.peer,caption.body
       AND COALESCE(json_extract(parent.body,'$.retracted'),0)=0
       AND COALESCE(json_type(parent.body,'$.upload'),'null')='null'
       AND json_type(parent.body,'$.attachment')='object'";
+/// Digests of the chat and message rows the last successful save wrote, so the next save can
+/// leave unchanged rows alone. Dropping it (or calling `clear`) simply makes the next save full.
+#[derive(Default)]
+pub struct SavedRows {
+    chats: std::collections::HashMap<(String, String), u64>,
+    messages: std::collections::HashMap<(String, String, String), u64>,
+}
+impl SavedRows {
+    fn digest(value: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+    pub fn clear(&mut self) {
+        self.chats.clear();
+        self.messages.clear();
+    }
+}
+
 impl Store {
     pub(crate) fn init_selection_actions(&self) -> rusqlite::Result<()> {
         self.db.execute_batch("CREATE TABLE IF NOT EXISTS local_retractions(account TEXT NOT NULL REFERENCES accounts(jid) ON DELETE CASCADE,peer TEXT NOT NULL,wire TEXT NOT NULL,attempted INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(account,peer,wire));")
@@ -177,16 +197,40 @@ impl Store {
     pub fn save(&self,s:&State)->rusqlite::Result<()>{self.save_state(s,true)}
     pub(crate)fn save_chat_state(&self,s:&State)->rusqlite::Result<()>{self.save_state(s,false)}
     fn save_state(&self, s: &State,folders_changed:bool) -> rusqlite::Result<()> {
+        self.save_state_delta(s, folders_changed, &mut SavedRows::default())
+    }
+    /// Like `save_chat_state`, but skips every chat and message whose serialized form matches
+    /// what `saved` recorded after the previous successful save. A full save costs several SQL
+    /// statements per loaded message; this keeps the hot paths (draft, reply, send) proportional
+    /// to what changed instead of to the whole loaded history.
+    pub(crate) fn save_chat_state_delta(&self, s: &State, saved: &mut SavedRows) -> rusqlite::Result<()> {
+        self.save_state_delta(s, false, saved)
+    }
+    pub(crate) fn save_delta(&self, s: &State, saved: &mut SavedRows) -> rusqlite::Result<()> {
+        self.save_state_delta(s, true, saved)
+    }
+    fn save_state_delta(&self, s: &State, folders_changed: bool, saved: &mut SavedRows) -> rusqlite::Result<()> {
         if s.account.is_empty() {
             return Ok(());
         }
+        let mut chat_updates = Vec::new();
+        let mut message_updates = Vec::new();
         let tx = self.db.unchecked_transaction()?;
         for c in &s.chats {
-            let mut body = serde_json::to_value(c).unwrap();
-            body.as_object_mut().unwrap().remove("messages");
-            tx.execute("INSERT INTO chats VALUES (?,?,?) ON CONFLICT(account,peer) DO UPDATE SET body=excluded.body",params![s.account,c.jid,body.to_string()])?;
+            let body = crate::model::chat_meta_value(c).to_string();
+            let key = (s.account.clone(), c.jid.clone());
+            let digest = SavedRows::digest(&body);
+            if saved.chats.get(&key) != Some(&digest) {
+                tx.execute("INSERT INTO chats VALUES (?,?,?) ON CONFLICT(account,peer) DO UPDATE SET body=excluded.body",params![s.account,c.jid,body])?;
+                chat_updates.push((key, digest));
+            }
             for m in &c.messages {
-                self.upsert_message(&s.account, &c.jid, m)?;
+                let digest = SavedRows::digest(&serde_json::to_string(m).unwrap());
+                let key = (s.account.clone(), c.jid.clone(), m.id.clone());
+                if saved.messages.get(&key) != Some(&digest) {
+                    self.upsert_message(&s.account, &c.jid, m)?;
+                    message_updates.push((key, digest));
+                }
             }
         }
         tx.execute(
@@ -203,7 +247,10 @@ impl Store {
             params![format!("folders:{}", s.account), folders.to_string()],
         )?;
         }
-        tx.commit()
+        tx.commit()?;
+        saved.chats.extend(chat_updates);
+        saved.messages.extend(message_updates);
+        Ok(())
     }
     pub fn save_chat_message(
         &self,
@@ -212,8 +259,7 @@ impl Store {
         message: Option<&Message>,
     ) -> rusqlite::Result<()> {
         let tx = self.db.unchecked_transaction()?;
-        let mut metadata = serde_json::to_value(chat).unwrap();
-        metadata.as_object_mut().unwrap().remove("messages");
+        let metadata = crate::model::chat_meta_value(chat);
         tx.execute("INSERT INTO chats VALUES (?,?,?) ON CONFLICT(account,peer) DO UPDATE SET body=excluded.body",
             params![account, chat.jid, metadata.to_string()])?;
         if let Some(message) = message {
@@ -886,6 +932,53 @@ pub fn same_source(old: &Message, new: &Message) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_persist_cost() {
+        let dir = std::env::temp_dir().join(format!("monogram-bench-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("XDG_STATE_HOME", &dir) };
+        let store = Store::open(false).unwrap();
+        let owner = "me@fixture.invalid";
+        store.save_account(&Account { jid: owner.into(), host: String::new(), port: 5222, direct_tls: false }).unwrap();
+        let mut state = State::live(owner, vec![]);
+        for c in 0..20 {
+            let chat = state.chat_for(&format!("peer{c}@fixture.invalid"));
+            for n in 0..200 {
+                chat.messages.push(Message { id: format!("m{c}-{n}"), wire_id: format!("m{c}-{n}"), own: n % 2 == 0, text: "hello world, a typical chat message".into(), kind: "text".into(), timestamp: format!("2026-01-01T00:{:02}:{:02}Z", n / 60, n % 60), ..Default::default() });
+            }
+        }
+        store.save(&state).unwrap();
+        let mut times = vec![];
+        for _ in 0..7 {
+            let t = std::time::Instant::now();
+            store.save_chat_state(&state).unwrap();
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        eprintln!("PERSIST 20x200 msgs: median {:.1} ms, min {:.1}, max {:.1}", times[3], times[0], times[6]);
+        let mut saved = SavedRows::default();
+        store.save_chat_state_delta(&state, &mut saved).unwrap();
+        let mut times = vec![];
+        for _ in 0..7 {
+            let t = std::time::Instant::now();
+            store.save_chat_state_delta(&state, &mut saved).unwrap();
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        eprintln!("DELTA unchanged: median {:.1} ms, min {:.1}, max {:.1}", times[3], times[0], times[6]);
+        let mut times = vec![];
+        for n in 0..7 {
+            state.chats.iter_mut().find(|c| c.jid == "peer3@fixture.invalid").unwrap().messages[10].text = format!("edited {n}");
+            let t = std::time::Instant::now();
+            store.save_chat_state_delta(&state, &mut saved).unwrap();
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        eprintln!("DELTA one edit: median {:.1} ms, min {:.1}, max {:.1}", times[3], times[0], times[6]);
+        assert_eq!(store.load(owner).chats.iter().find(|c| c.jid == "peer3@fixture.invalid").unwrap().messages.iter().find(|m| m.id == "m3-10").unwrap().text, "edited 6");
+        let _ = std::fs::remove_dir_all(dir);
+    }
     #[test]
     fn sent_encrypted_only_counts_own_encrypted_messages_to_that_peer() {
         let store = Store::open(true).unwrap();
