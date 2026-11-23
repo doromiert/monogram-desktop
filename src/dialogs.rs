@@ -1513,8 +1513,15 @@ impl Ui {
         let weak=Rc::downgrade(self);size.connect_value_notify(move|row|{if let Some(ui)=weak.upgrade(){let mb=row.value() as u64;ui.auto_download_limit.set(mb*1024*1024);ui.downloads.borrow_mut().reset_automatic();let _=ui.store.set_pref("auto_download_limit_mb",&mb.to_string());}});
         downloads.add(&enabled);downloads.add(&size);general.add(&downloads);
         let owner = self.state.borrow().account.clone();
+        let privacy_page = adw::PreferencesPage::builder()
+            .title("Privacy")
+            .icon_name("system-lock-screen-symbolic")
+            .build();
         let privacy = adw::PreferencesGroup::builder()
-            .title("Privacy and Notifications")
+            .title("Contacts and Activity")
+            .build();
+        let notifications = adw::PreferencesGroup::builder()
+            .title("Notifications")
             .build();
         if !owner.is_empty() {
             let blocked = NavRow::new(
@@ -1596,7 +1603,11 @@ impl Ui {
                     ui.presence_privacy_changed();
                 }
             });
-            privacy.add(&row)
+            if matches!(key, "notifications" | "message_previews") {
+                notifications.add(&row)
+            } else {
+                privacy.add(&row)
+            }
         }
         if !owner.is_empty() {
             let read = adw::SwitchRow::builder()
@@ -1660,9 +1671,10 @@ impl Ui {
             });
             privacy.add(&read);
         }
-        general.add(&privacy);
+        general.add(&notifications);
+        privacy_page.add(&privacy);
         if !owner.is_empty() {
-            general.add(&self.link_preview_preferences());
+            privacy_page.add(&self.link_preview_preferences());
             let gifs = adw::PreferencesGroup::builder().title("GIFs").build();
             let row = adw::ActionRow::builder()
                 .title("GIF search")
@@ -1691,6 +1703,7 @@ impl Ui {
             general.add(&gifs);
         }
         dialog.add(&general);
+        dialog.add(&privacy_page);
         let behavior = adw::PreferencesPage::builder()
             .title("Behavior")
             .icon_name("input-keyboard-symbolic")

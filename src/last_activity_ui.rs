@@ -657,6 +657,41 @@ mod tests {
 
     #[gtk::test]
     #[ignore = "requires a private GTK display and D-Bus"]
+    fn privacy_options_live_on_their_own_page_with_a_lock_icon() {
+        let ui = ui();
+        open_contact(&ui);
+        ui.preferences();
+        pump();
+        let dialog = ui.dialogs.borrow().iter().rev().find_map(|d| d.clone().downcast::<adw::PreferencesDialog>().ok()).expect("the preferences dialog");
+        let titles = |page: &str| {
+            fn pages(root: &gtk::Widget, found: &mut Vec<adw::PreferencesPage>) {
+                if let Some(page) = root.downcast_ref::<adw::PreferencesPage>() { found.push(page.clone()); }
+                let mut child = root.first_child();
+                while let Some(widget) = child { child = widget.next_sibling(); pages(&widget, found); }
+            }
+            let mut all = vec![];
+            pages(dialog.upcast_ref(), &mut all);
+            let page = all.into_iter().find(|p| p.title() == page).unwrap_or_else(|| panic!("no page {page:?}"));
+            let mut rows = vec![];
+            switches(page.upcast_ref(), &mut rows);
+            (page.icon_name().map(|n| n.to_string()), rows.iter().map(|r| r.title().to_string()).collect::<Vec<_>>())
+        };
+        let (icon, privacy) = titles("Privacy");
+        assert_eq!(icon.as_deref(), Some("system-lock-screen-symbolic"));
+        for title in ["Share typing status", "Send delivery receipts", "Offer Send Anyway"] {
+            assert!(privacy.iter().any(|t| t == title), "{title:?} belongs on the Privacy page: {privacy:?}");
+        }
+        let (_, general) = titles("General");
+        for title in ["Share typing status", "Send delivery receipts"] {
+            assert!(!general.iter().any(|t| t == title), "{title:?} must not stay on General");
+        }
+        for title in ["Desktop notifications", "Message previews"] {
+            assert!(general.iter().any(|t| t == title), "{title:?} stays on General");
+        }
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
     fn preferences_lists_the_three_options_and_flipping_them_takes_effect_and_is_saved() {
         let ui = ui();
         open_contact(&ui);
