@@ -180,6 +180,7 @@
 ## Folder selection and menu follow-up (2026-11-20)
 
 - [x] Add window-level Page Up/Page Down conversation scrolling with native paging, retained focus/drafts, modal isolation, shortcut help and a physical-key regression check.
+- [x] Add End to jump to the actual latest message, including when newer messages are outside the currently loaded history window.
 
 - [x] Keep the selected folder tab and its visibility synchronized after Alt-arrow navigation.
 - [x] Use Nautilus-style native context menus; compact rows and start-aligned actions everywhere.

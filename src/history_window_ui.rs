@@ -547,9 +547,10 @@ mod tests {
         ui.window.close();
     }
 
-    #[test]
-    #[ignore = "requires a private GTK display and D-Bus"]
+    #[gtk::test]
+    #[ignore = "requires private X11, xdotool and D-Bus"]
     fn live_viewport_keeps_archive_reply_and_incoming_updates() {
+        adw::init().unwrap();
         const OWNER: &str = "alice@fixture.invalid";
         const PEER: &str = "bob@fixture.invalid";
         let application = adw::Application::builder()
@@ -707,10 +708,15 @@ mod tests {
                 .get("window-01")
                 .is_some_and(|row| row.has_css_class("reply-target"))
         });
-        ui.load_timeline(None);
+        ui.composer.grab_focus();
+        let windows = std::process::Command::new("xdotool").args(["search", "--name", "^Monogram$"]).output().unwrap();
+        let window = String::from_utf8(windows.stdout).unwrap().lines().last().unwrap().to_owned();
+        assert!(std::process::Command::new("xdotool").args(["windowfocus", "--sync", &window]).status().unwrap().success());
+        assert!(std::process::Command::new("xdotool").args(["key", "--clearmodifiers", "End"]).status().unwrap().success());
         wait(&ui, || {
             ui.at_message_end() && !ui.history_window.busy() && ui.message_scroll.borrow().is_none()
         });
+        assert!(ui.bubbles.borrow().contains_key("window-24"));
         ui.select_message("window-24", false);
         ui.highlight("window-01");
         wait(&ui, || {

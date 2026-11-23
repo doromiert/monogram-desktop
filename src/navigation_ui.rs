@@ -66,6 +66,7 @@ impl Ui {
             let scroll = match key {
                 gtk::gdk::Key::Page_Up | gtk::gdk::Key::KP_Page_Up => gtk::ScrollType::PageUp,
                 gtk::gdk::Key::Page_Down | gtk::gdk::Key::KP_Page_Down => gtk::ScrollType::PageDown,
+                gtk::gdk::Key::End | gtk::gdk::Key::KP_End => gtk::ScrollType::End,
                 _ => return gtk::glib::Propagation::Proceed,
             };
             if modifiers.intersects(gtk::gdk::ModifierType::SHIFT_MASK | gtk::gdk::ModifierType::CONTROL_MASK
@@ -81,12 +82,20 @@ impl Ui {
             }
             ui.cancel_reply_scroll();
             ui.message_scroll.borrow_mut().take();
-            ui.scroll.emit_scroll_child(scroll, false);
-            ui.history_edge(if scroll == gtk::ScrollType::PageUp {
-                crate::history_window::Side::Older
+            if scroll == gtk::ScrollType::End {
+                if ui.history_window.newest() {
+                    ui.queue_message_scroll(crate::messages::ScrollTarget::Bottom);
+                } else {
+                    ui.load_timeline(None);
+                }
             } else {
-                crate::history_window::Side::Newer
-            });
+                ui.scroll.emit_scroll_child(scroll, false);
+                ui.history_edge(if scroll == gtk::ScrollType::PageUp {
+                    crate::history_window::Side::Older
+                } else {
+                    crate::history_window::Side::Newer
+                });
+            }
             gtk::glib::Propagation::Stop
         });
         self.window.add_controller(keys);
@@ -183,6 +192,13 @@ mod native_tests {
         assert_eq!(ui.composer_text(), "draft\nwith several\nunchanged lines");
         key("Next");
         assert!((adjustment.value() - before).abs() < 2.);
+        ui.history_window.reset(true);
+        adjustment.set_value(1200.);
+        key("End");
+        assert!((adjustment.value() - (adjustment.upper() - adjustment.page_size())).abs() < 2.);
+        assert_eq!(gtk::prelude::GtkWindowExt::focus(&ui.window), focus);
+        assert_eq!(ui.composer.buffer().cursor_position(), 3);
+        adjustment.set_value(before);
         key("shift+Prior");
         assert!((adjustment.value() - before).abs() < 2., "modified keys retain text selection behavior");
         ui.search_toggle.set_active(true);
@@ -198,6 +214,8 @@ mod native_tests {
         let before = adjustment.value();
         key("Next");
         assert_eq!(adjustment.value(), before, "dialogs must not page the conversation behind them");
+        key("End");
+        assert_eq!(adjustment.value(), before);
         ui.window.visible_dialog().unwrap().close();
         pump(120);
         adjustment.set_value(adjustment.lower());

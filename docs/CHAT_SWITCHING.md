@@ -9,7 +9,8 @@ store or a replacement for the bounded active history window.
 
 Page Up and Page Down scroll the current conversation by a native GTK page while
 the Monogram window has focus, including from the composer and sidebar controls.
-They retain keyboard focus and the draft/caret. Modified shortcuts and keys in
+End jumps to the latest message, loading the newest history window if needed.
+These keys retain keyboard focus and the draft/caret. Modified shortcuts and keys in
 dialogs, popovers or media/story viewers keep their normal behavior. Paging uses
 the existing history-window loading and retention rules.
 
