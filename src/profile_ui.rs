@@ -27,12 +27,13 @@ impl Ui {
         }
         let mut chat = self.state.borrow().chats.iter().find(|chat| chat.jid == peer).cloned()
             .unwrap_or_else(||Chat { name:name.into(),jid:peer.into(),group:peer.contains('/'),..Default::default() });
+        if chat.id=="saved" {chat.id=peer.into();chat.name=name.into();}
         if let Some(local) = self.local_contacts.borrow().get(peer) { chat.local_name=local.nickname.clone(); }
         if room.is_some() { chat.name=name.into();chat.subtitle="Not in this room".into(); }
         chat
     }
     pub(crate) fn participant_profile_card(self: &Rc<Self>, anchor:&impl IsA<gtk::Widget>, room:&str, person:&crate::rooms::members::Participant) {
-        let peer=person.jid.clone().unwrap_or_else(||format!("{room}/{}",person.nick));
+        let peer=self.participant_chat(room,person).jid;
         self.profile_card_context(anchor,&peer,&person.nick,Some((room.into(),person.nick.clone())));
     }
     pub(crate) fn refresh_profile_card(&self) {
@@ -322,6 +323,37 @@ mod tests {
     use super::*;
     use crate::{model::{Account,State},rooms::members::Participant};
     use gtk::{gdk,gio};
+    #[test]
+    #[ignore="requires private GTK display and D-Bus"]
+    fn own_room_profile_uses_public_avatar_and_saved_chat_keeps_bookmark() {
+        let app=adw::Application::builder().application_id("com.negzero.OwnRoomProfileFixture").flags(gio::ApplicationFlags::NON_UNIQUE).build();app.register(None::<&gio::Cancellable>).unwrap();
+        let ui=Ui::new(&app,true);let owner="owner@example.invalid";let room="room@conference.example.invalid";
+        ui.store.save_account(&Account{jid:owner.into(),host:String::new(),port:5222,direct_tls:false}).unwrap();
+        ui.activate_state(State::live(owner,vec![]));ui.window.present();
+        let image:gdk::Texture=gdk::MemoryTexture::new(1,1,gdk::MemoryFormat::R8g8b8a8,&glib::Bytes::from_owned(vec![255,0,0,255]),4).upcast();
+        ui.avatars.borrow_mut().cache.insert(owner.into(),(Instant::now()+Duration::from_secs(300),Some(image.clone())));
+        let saved=ui.state.borrow().chats.iter().find(|chat|chat.id=="saved").unwrap().clone();
+        let bookmark=ui.chat_avatar(&saved,40);assert_eq!(bookmark.icon_name().as_deref(),Some("user-bookmarks-symbolic"));assert!(bookmark.custom_image().is_none());
+        let mut person=Participant{nick:"Room Nick".into(),jid:Some(owner.into()),affiliation:"owner".into(),role:"moderator".into(),show:String::new(),own:true,hats:vec![]};
+        let check=|chat:&Chat|{
+            assert_ne!(chat.id,"saved");assert_eq!(chat.jid,owner);assert!(!chat.group);
+            let avatar=ui.chat_avatar(chat,40);assert_ne!(avatar.icon_name().as_deref(),Some("user-bookmarks-symbolic"));assert_eq!(avatar.custom_image().unwrap(),image.clone().upcast::<gdk::Paintable>());
+        };
+        // Both public-JID and anonymous rooms know the local user's account.
+        for hidden in [false,true] {
+            if hidden {person.jid=None;}
+            ui.room_roster_changed(room,vec![person.clone()]);check(&ui.participant_chat(room,&person));
+            ui.participant_profile_card(&ui.title,room,&person);
+            let controls=ui.profile_controls.borrow();let card=controls.as_ref().unwrap();assert_eq!(card.peer,owner);assert_eq!(card.title.label(),"Room Nick");
+            let shown=card.banner.last_child().unwrap().downcast::<crate::components::PresenceAvatar>().unwrap();
+            let avatar=shown.child().unwrap().downcast::<gtk::Overlay>().unwrap().child().unwrap().downcast::<adw::Avatar>().unwrap();
+            assert_eq!(avatar.custom_image().unwrap(),image.clone().upcast::<gdk::Paintable>());drop(controls);
+            ui.room_roster_changed(room,vec![]);
+            check(&ui.profile_chat(owner,&person.nick,Some(&(room.into(),person.nick.clone()))));
+        }
+        assert_eq!(ui.state.borrow().chats.iter().find(|chat|chat.jid==owner).unwrap().id,"saved");
+        ui.active_profile.borrow().as_ref().unwrap().popdown();ui.window.close();
+    }
     #[test]
     #[ignore="requires private GTK display and D-Bus"]
     fn room_profile_matches_row_name_avatar_and_live_room_presence() {

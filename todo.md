@@ -198,3 +198,8 @@
 
 - [x] Route Ctrl+V/Shift+Insert text paste from non-text window focus into an empty composer; keep native search/editor paste and existing drafts.
 - [x] Verify actual Ctrl+V/Shift+Insert clipboard input, native search paste with an empty composer, draft preservation and image-paste regression (private GTK fixture, 1.99s).
+
+## Own MUC avatar (2026-11-24)
+
+- [x] Resolve own participant/profile avatars through the public account identity instead of the Saved Messages bookmark, including anonymous rooms.
+- [x] Verify cached public-avatar row/card for public and anonymous rooms, roster departure fallback, and unchanged Saved Messages bookmark (native GTK fixture, 0.49s).

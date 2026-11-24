@@ -294,9 +294,15 @@ impl Ui {
     /// Shared presentation for a room occupant's row and profile card. Direct
     /// roster presence cannot override the presence observed inside this room.
     pub(crate) fn participant_chat(&self,room:&str,person:&Participant)->crate::model::Chat {
-        let peer=person.jid.clone().unwrap_or_else(||format!("{room}/{}",person.nick));
+        let peer=if person.own {self.state.borrow().account.clone()} else {
+            person.jid.clone().unwrap_or_else(||format!("{room}/{}",person.nick))
+        };
         let mut chat=self.state.borrow().chats.iter().find(|chat|chat.jid==peer).cloned()
             .unwrap_or_else(||crate::model::Chat{jid:peer.clone(),group:person.jid.is_none(),..Default::default()});
+        // A room occupant is a person, even when their account also backs the
+        // Saved Messages conversation. Its synthetic icon must stay in that chat.
+        if chat.id=="saved" {chat.id=peer.clone();}
+        if person.own {chat.group=false;}
         chat.name=person.nick.clone();
         chat.subtitle=presence_label(&person.show).into();
         if let Some(local)=self.local_contacts.borrow().get(&peer) {chat.local_name=local.nickname.clone();}
