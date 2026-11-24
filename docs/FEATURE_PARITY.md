@@ -351,3 +351,24 @@ for scope, limits and measured private GTK verification.
 Both clients send/receive the unsubmitted `urn:monogram:voice-message:0` file-metadata marker. Android sends it only for native voice attributes and receives into native voice controls, declared duration and worker-generated waveform. Desktop marks the supplied PR4 recorder's clean sends and retained recordings, persists intent through the outbox and stored SFS descriptions, and uses voice labels/previews with the existing sandboxed audio player. Ordinary imported audio stays ordinary audio; no filename, codec or artist heuristics. See [VOICE.md](VOICE.md).
 
 The marker stays inside authenticated modern encrypted content. Legacy URI-only OMEMO intentionally degrades to ordinary remote audio; it never leaks an unencrypted hint or changes encryption. Shared16-case vectors cover malformed/lookalike/duplicate hints, file binding, protected content, storage and legacy outer-forgery rejection. Independent implementation interoperability, real microphone acceptance and playback speed remain open.
+
+
+### Desktop message click ownership and sender hover
+
+The desktop brush selector arms only on the first primary press in GTK's native
+click sequence. Multi-clicks cancel the pending brush, and starting a brush also
+requires real surface-space pointer movement past GTK's drag threshold. A reply
+or editor changing message geometry during a double-click therefore cannot turn
+into a cross-row selection. Deliberate cross-row dragging and Ctrl/Shift selection
+remain available. Handled double-click sequences also retain ownership of later
+clicks instead of passing them into native label selection. Disabled actions keep
+native text selection.
+
+Message sender profile buttons have a transparent background and underline their
+text on hover or visible keyboard focus. Pango attributes change only decoration;
+button semantics, profile activation, padding and measured message dimensions
+stay intact. Native X11 checks cover the failing second-click drag, repeated
+clicks, incoming reply/outgoing edit, deliberate drag, Ctrl/Shift selection,
+disabled-action text selection, and unchanged hover dimensions/profile activation
+in dark and light themes. This is platform-specific desktop pointer behavior;
+Android's native touch actions and the pending -0 room reply failure are unchanged.

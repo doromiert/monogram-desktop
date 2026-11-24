@@ -7,6 +7,7 @@ use crate::{
 use adw::prelude::*;
 use gtk::{gio, glib};
 use std::{
+    collections::HashSet,
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -66,6 +67,11 @@ fn app() -> Rc<Ui> {
     ui
 }
 fn physical(ui: &Ui, widget: &gtk::Widget, args: &[&str]) {
+    let settle = Instant::now();
+    wait(|| settle.elapsed() >= Duration::from_millis(350));
+    physical_at(ui, widget, widget.width() as f32 / 2., widget.height() as f32 / 2., args);
+}
+fn physical_at(ui: &Ui, widget: &gtk::Widget, dx: f32, dy: f32, args: &[&str]) {
     let out = std::process::Command::new("xdotool")
         .args([
             "search",
@@ -86,8 +92,8 @@ fn physical(ui: &Ui, widget: &gtk::Widget, args: &[&str]) {
     let bounds = widget.compute_bounds(&ui.window).unwrap();
     assert!(bounds.width() > 0. && bounds.height() > 0.);
     let (tx, ty) = ui.window.surface_transform();
-    let x = (bounds.x() + bounds.width() / 2. - tx as f32) as i32;
-    let y = (bounds.y() + bounds.height() / 2. - ty as f32) as i32;
+    let x = (bounds.x() + dx + tx as f32) as i32;
+    let y = (bounds.y() + dy + ty as f32) as i32;
     let args = args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     let task = std::thread::spawn(move || {
         assert!(
@@ -101,6 +107,15 @@ fn physical(ui: &Ui, widget: &gtk::Widget, args: &[&str]) {
     });
     wait(|| task.is_finished());
     task.join().unwrap();
+}
+fn physical_text(ui: &Ui, label: &gtk::Label, args: &[&str]) {
+    let settle = Instant::now();
+    wait(|| settle.elapsed() >= Duration::from_millis(350));
+    let rect = label.layout().index_to_pos(3);
+    let (x, y) = label.layout_offsets();
+    let scale = gtk::pango::SCALE as f32;
+    physical_at(ui, label.upcast_ref(), x as f32 + (rect.x() + rect.width()/2) as f32 / scale,
+        y as f32 + (rect.y() + rect.height()/2) as f32 / scale, args);
 }
 fn drag_between(ui:&Ui,source:&gtk::Widget,target:&gtk::Widget){
     // AdwDialog scales its contents while opening; screen coordinates need settled bounds.
@@ -140,13 +155,35 @@ fn double_click_defaults_and_preferences_apply_to_real_messages() {
             .get("incoming")
             .is_some_and(|b| b.is_mapped() && b.width() > 0)
     });
-    physical(
+    let incoming_text = find::<gtk::Label>(&ui.bubbles.borrow()["incoming"], &|label| {
+        label.has_css_class("formatted-message-text")
+    }).unwrap();
+    physical_text(
         &ui,
-        &ui.bubbles.borrow()["incoming"],
+        &incoming_text,
         ["click", "--repeat", "2", "--delay", "90", "1"].as_slice(),
     );
     wait(|| ui.replying.borrow().as_deref() == Some("incoming"));
+    assert!(incoming_text.selection_bounds().is_none(), "double-click action also selected message text");
     ui.cancel_reply();
+    physical_text(&ui, &incoming_text, &["click", "--repeat", "4", "--delay", "90", "1"]);
+    assert!(incoming_text.selection_bounds().is_none(), "repeated double-clicks selected message text");
+    assert!(ui.selected.borrow().is_empty(), "double-click entered message selection mode");
+    ui.cancel_reply();
+    physical_text(&ui, &incoming_text, &["click", "1", "mousedown", "1", "sleep", "0.1",
+        "mousemove_relative", "--sync", "0", "45", "mouseup", "1"]);
+    assert!(ui.selected.borrow().is_empty(), "second click armed bulk selection while the pointer moved");
+    ui.cancel_reply();
+    physical_text(&ui, &incoming_text, &["mousedown", "1", "sleep", "0.1",
+        "mousemove_relative", "--sync", "0", "45", "mouseup", "1"]);
+    assert!(ui.selected.borrow().contains("incoming") && ui.selected.borrow().contains("outgoing"),
+        "intentional drag across message rows stopped selecting messages");
+    ui.clear_selection();
+    physical_text(&ui, &incoming_text, &["keydown", "ctrl", "click", "1", "keyup", "ctrl"]);
+    assert_eq!(*ui.selected.borrow(), HashSet::from(["incoming".into()]));
+    physical(&ui, &ui.bubbles.borrow()["outgoing"], &["keydown", "shift", "click", "1", "keyup", "shift"]);
+    assert_eq!(*ui.selected.borrow(), HashSet::from(["incoming".into(), "outgoing".into()]));
+    ui.clear_selection();
     physical(
         &ui,
         &ui.bubbles.borrow()["outgoing"],
@@ -162,8 +199,70 @@ fn double_click_defaults_and_preferences_apply_to_real_messages() {
     row.set_selected(0);
     assert_eq!(ui.store.pref("double_click_incoming", ""), "none");
     assert!(!ui.double_click_message("incoming"));
+    physical_text(&ui, &incoming_text, &["click", "--repeat", "2", "--delay", "90", "1"]);
+    assert!(incoming_text.selection_bounds().is_some(), "fixture must hit selectable text when the action is disabled");
+    incoming_text.select_region(0, 0);
     row.set_selected(3);
     assert!(ui.double_click_message("incoming"));
+    ui.window.close();
+}
+
+#[test]
+#[ignore = "requires private display, xdotool and Secret Service"]
+fn message_author_hover_underlines_without_reflow_and_opens_profile() {
+    let ui = app();
+    {
+        let mut state = ui.state.borrow_mut();
+        state.account.clear();
+        let chat = state.current_mut();
+        chat.group = true;
+        chat.messages = vec![Message {
+            id: "author-hover".into(),
+            author: "Fixture sender".into(),
+            sender: "sender@fixture.invalid".into(),
+            text: "Message dimensions stay the same when the name is hovered.".into(),
+            kind: "text".into(),
+            ..Default::default()
+        }];
+    }
+    ui.render_messages(true);
+    wait(|| ui.bubbles.borrow().get("author-hover").is_some_and(|bubble| bubble.is_mapped()));
+    let bubble = ui.bubbles.borrow()["author-hover"].clone();
+    let name = find::<gtk::Label>(&bubble, &|label| label.has_css_class("message-author")).unwrap();
+    let button = name.parent().unwrap().downcast::<gtk::Button>().unwrap();
+    assert!(button.has_css_class("message-author-target"));
+    let capture = |widget: &gtk::Widget| {
+        let paintable = gtk::WidgetPaintable::new(Some(widget));
+        let snapshot = gtk::Snapshot::new();
+        paintable.snapshot(&snapshot, paintable.intrinsic_width() as f64, paintable.intrinsic_height() as f64);
+        ui.window.renderer().unwrap().render_texture(&snapshot.to_node().unwrap(), None)
+    };
+    let paint = || {
+        let start = Instant::now();
+        wait(|| start.elapsed() >= Duration::from_millis(80));
+    };
+    for (scheme, suffix) in [(adw::ColorScheme::ForceDark,"dark"), (adw::ColorScheme::ForceLight,"light")] {
+        adw::StyleManager::default().set_color_scheme(scheme);
+        physical(&ui, ui.composer.upcast_ref(), &[]);
+        wait(|| !button.state_flags().contains(gtk::StateFlags::PRELIGHT));
+        paint();
+        let plain = capture(name.upcast_ref()).save_to_png_bytes();
+        let size = (bubble.width(), bubble.height());
+        physical_text(&ui, &name, &[]);
+        wait(|| button.state_flags().contains(gtk::StateFlags::PRELIGHT));
+        paint();
+        assert_ne!(capture(name.upcast_ref()).save_to_png_bytes(), plain, "hover did not change the name's rendered text");
+        assert_eq!((bubble.width(), bubble.height()), size, "hover changed message size");
+        if let Some(directory) = std::env::var_os("MONOGRAM_HOVER_REPORT_DIR") {
+            let snapshot = gtk::Snapshot::new();
+            gtk::WidgetPaintable::new(Some(&ui.window)).snapshot(&snapshot, ui.window.width() as f64, ui.window.height() as f64);
+            ui.window.renderer().unwrap().render_texture(&snapshot.to_node().unwrap(), None)
+                .save_to_png(std::path::PathBuf::from(directory).join(format!("author-hover-{suffix}.png"))).unwrap();
+        }
+    }
+    physical_text(&ui, &name, &["click", "1"]);
+    wait(|| ui.active_profile.borrow().as_ref().is_some_and(|popup| popup.is_visible()));
+    assert!(ui.replying.borrow().is_none(), "profile click triggered a message action");
     ui.window.close();
 }
 #[test]

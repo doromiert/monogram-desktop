@@ -333,6 +333,7 @@
 .audio-bubble .audio-time { font-variant-numeric: tabular-nums; }
 
 .profile-target { padding: 0; min-width: 0; min-height: 0; }
+.message-author-target { background: transparent; box-shadow: none; }
 .profile-card-banner { background: color-mix(in srgb, var(--accent-bg-color) 60%, var(--window-bg-color)); border-radius: 6px; }
 
 .profile-card, .profile-card > contents { padding: 0; border: none; background: transparent; box-shadow: none; }

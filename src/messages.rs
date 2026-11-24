@@ -789,7 +789,24 @@ impl Ui {
             if m.pinned {
                 heading.append(&gtk::Image::from_icon_name("view-pin-symbolic"))
             }
-            if !m.sender.is_empty(){heading.append(&self.profile_button(&author,&m.sender,&m.author));}else{heading.append(&author);}
+            if !m.sender.is_empty() {
+                let profile = self.profile_button(&author, &m.sender, &m.author);
+                profile.add_css_class("message-author-target");
+                let name = author.downgrade();
+                profile.connect_state_flags_changed(move |button, _| {
+                    if let Some(name) = name.upgrade() {
+                        let attrs = name.attributes().and_then(|attrs| attrs.copy()).unwrap_or_default();
+                        let underline = if button.state_flags().intersects(gtk::StateFlags::PRELIGHT | gtk::StateFlags::FOCUS_VISIBLE) {
+                            gtk::pango::Underline::Single
+                        } else { gtk::pango::Underline::None };
+                        attrs.change(gtk::pango::AttrInt::new_underline(underline));
+                        name.set_attributes(Some(&attrs));
+                    }
+                });
+                heading.append(&profile);
+            } else {
+                heading.append(&author);
+            }
             let hats = crate::components::HatStrip::new();
             hats.set_halign(gtk::Align::Start);
             hats.set_valign(gtk::Align::Center);
@@ -1096,12 +1113,26 @@ impl Ui {
                 click.set_propagation_phase(gtk::PropagationPhase::Capture);
                 let id = m.id.clone();
                 let weak = Rc::downgrade(self);
+                let handled = Cell::new(false);
                 click.connect_pressed(move |g, presses, x, y| {
+                    if presses == 1 { handled.set(false); }
                     if let Some(ui) = weak.upgrade() {
                         let flags = g.current_event_state();
-                        if presses==2 && !flags.intersects(gdk::ModifierType::CONTROL_MASK|gdk::ModifierType::SHIFT_MASK|gdk::ModifierType::ALT_MASK) {
+                        if presses>=2 && !flags.intersects(gdk::ModifierType::CONTROL_MASK|gdk::ModifierType::SHIFT_MASK|gdk::ModifierType::ALT_MASK) {
                             let interactive=g.widget().and_then(|row|row.pick(x,y,gtk::PickFlags::DEFAULT)).is_some_and(|mut widget|{loop{if widget.is::<gtk::Button>()||widget.is::<gtk::TextView>()||widget.is::<gtk::Scale>(){return true;}let Some(parent)=widget.parent()else{return false;};if parent.has_css_class("message-row"){return false;}widget=parent;}});
-                            if !interactive && ui.double_click_message(&id) {g.set_state(gtk::EventSequenceState::Claimed);return;}
+                            if !interactive {
+                                // GTK keeps counting beyond two; do not hand later clicks to text selection.
+                                if handled.get() {
+                                    g.set_state(gtk::EventSequenceState::Claimed);
+                                    if presses % 2 == 0 { ui.double_click_message(&id); }
+                                    return;
+                                }
+                                if presses % 2 == 0 && ui.double_click_message(&id) {
+                                    handled.set(true);
+                                    g.set_state(gtk::EventSequenceState::Claimed);
+                                    return;
+                                }
+                            }
                         }
                         if flags.intersects(
                             gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK,

@@ -11,6 +11,7 @@ use std::{
 
 struct Brush {
     start: String,
+    start_pointer: (f64, f64),
     last_y: f64,
     pointer: Option<gtk::graphene::Point>,
     add: bool,
@@ -57,6 +58,7 @@ impl Ui {
                 || widget.has_css_class("poll-answer")
                 || widget.has_css_class("link-preview")
                 || widget.has_css_class("suggested-action")
+                || widget.has_css_class("profile-target")
             {
                 return true;
             }
@@ -105,7 +107,7 @@ impl Ui {
         let (dx, dy) = native.surface_transform();
         native.dynamic_cast::<gtk::Widget>().ok()?.compute_point(
             &self.timeline,
-            &gtk::graphene::Point::new((x + dx) as f32, (y + dy) as f32),
+            &gtk::graphene::Point::new((x - dx) as f32, (y - dy) as f32),
         )
     }
     fn hide_brush_text_drag(&self, id: &str) -> Option<gdk::Drag> {
@@ -147,6 +149,32 @@ impl Ui {
     pub(super) fn install_brush_selection(self: &Rc<Self>) {
         let state = Rc::new(RefCell::new(None::<Brush>));
         let end_state = state.clone();
+        let press = gtk::GestureClick::new();
+        press.set_button(gdk::BUTTON_PRIMARY);
+        press.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let pressed = state.clone();
+        let weak = Rc::downgrade(self);
+        press.connect_pressed(move |gesture, count, x, y| {
+            // A double-click action can move rows while its button is still down.
+            pressed.borrow_mut().take();
+            let Some(ui) = weak.upgrade() else { return };
+            if count != 1 || ui.brush_control(x, y) { return; }
+            let Some(id) = ui.brush_row(y) else { return };
+            let Some(start_pointer) = gesture.current_event().and_then(|event| event.position()) else { return };
+            let add = !ui.selected.borrow().contains(&id);
+            pressed.replace(Some(Brush {
+                start: id,
+                start_pointer,
+                last_y: y,
+                pointer: None,
+                add,
+                active: false,
+                pressed_at: Instant::now(),
+                visited: HashSet::new(),
+                timer: None,
+            }));
+        });
+        self.timeline.add_controller(press);
         let input = gtk::EventControllerLegacy::new();
         input.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = Rc::downgrade(self);
@@ -187,28 +215,6 @@ impl Ui {
             if std::env::var_os("MONOGRAM_SELECTION_TRACE").is_some() {
                 eprintln!("Brush timeline={x},{y} row={:?}", ui.brush_row(y));
             }
-            if event.event_type() == gdk::EventType::ButtonPress
-                && button == Some(gdk::BUTTON_PRIMARY)
-            {
-                if ui.brush_control(x, y) {
-                    return glib::Propagation::Proceed;
-                }
-                let Some(id) = ui.brush_row(y) else {
-                    return glib::Propagation::Proceed;
-                };
-                let add = !ui.selected.borrow().contains(&id);
-                state.replace(Some(Brush {
-                    start: id,
-                    last_y: y,
-                    pointer: None,
-                    add,
-                    active: false,
-                    pressed_at: Instant::now(),
-                    visited: HashSet::new(),
-                    timer: None,
-                }));
-                return glib::Propagation::Proceed;
-            }
             let drag_motion = event.event_type() == gdk::EventType::DragMotion;
             if event.event_type() != gdk::EventType::MotionNotify && !drag_motion
                 || !drag_motion
@@ -224,6 +230,11 @@ impl Ui {
             };
             let crossed = ui.brush_row(y).is_some_and(|id| id != current.start);
             if !current.active && crossed {
+                let Some((px, py)) = event.position() else { return glib::Propagation::Proceed };
+                if !ui.timeline.drag_check_threshold(current.start_pointer.0 as i32,
+                    current.start_pointer.1 as i32, px as i32, py as i32) {
+                    return glib::Propagation::Proceed;
+                }
                 current.active = true;
                 ui.anchor.replace(Some(current.start.clone()));
                 if std::env::var_os("MONOGRAM_SELECTION_TRACE").is_some() {

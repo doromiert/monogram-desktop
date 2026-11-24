@@ -185,3 +185,11 @@
 - [x] Keep the selected folder tab and its visibility synchronized after Alt-arrow navigation.
 - [x] Use Nautilus-style native context menus; compact rows and start-aligned actions everywhere.
 - [x] Remove the chat-switch top-to-bottom rebuild/loading effect, with measured responsiveness and bounded retention.
+
+
+## Message pointer feedback (2026-11-24)
+- [x] Prevent double-click/reflow from arming bulk message selection; require GTK's physical drag threshold.
+- [x] Retain handled multi-click ownership, deliberate brush dragging, Ctrl/Shift selection and disabled-action text selection.
+- [x] Underline sender names on hover/visible keyboard focus with no hover background or added padding.
+- [x] Verify physical input and profile activation/unchanged bubble dimensions in both themes.
+- [ ] Diagnose mobile replies failing to one participant in the -0 room; waiting for the current phone ADB endpoint/error detail.
