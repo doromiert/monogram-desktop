@@ -159,7 +159,24 @@ pub fn attach(ui: &Rc<Ui>) {
     window_keys.connect_key_pressed(move |_,key,_,state|{
         let paste=(matches!(key,gdk::Key::v|gdk::Key::V)&&state.contains(gdk::ModifierType::CONTROL_MASK)&&!state.intersects(gdk::ModifierType::ALT_MASK|gdk::ModifierType::SUPER_MASK))
             || key==gdk::Key::Insert&&state.contains(gdk::ModifierType::SHIFT_MASK)&&!state.intersects(gdk::ModifierType::CONTROL_MASK|gdk::ModifierType::ALT_MASK|gdk::ModifierType::SUPER_MASK);
-        let Some(ui)=weak.upgrade().filter(|ui|paste&&ui.composer.is_mapped()&&ui.window.visible_dialog().is_none()&&has_media(&ui.window.clipboard()))else{return glib::Propagation::Proceed;};
+        let Some(ui)=weak.upgrade().filter(|ui|paste&&ui.composer.is_mapped()&&ui.window.visible_dialog().is_none())else{return glib::Propagation::Proceed;};
+        if !has_media(&ui.window.clipboard()) {
+            if ui.composer.buffer().char_count()!=0 || !ui.composer.is_editable()
+                || ui.active_media.borrow().is_some() || ui.active_story.borrow().is_some()
+                || !ui.window.clipboard().formats().contains_type(String::static_type()) {
+                return glib::Propagation::Proceed;
+            }
+            // Entries have an internal GtkText child; walk ancestors so search,
+            // inline editing and other text fields keep their native paste.
+            let mut focus=gtk::prelude::GtkWindowExt::focus(&ui.window);
+            while let Some(widget)=focus {
+                if widget.is::<gtk::Editable>() || widget.is::<gtk::TextView>() {
+                    return glib::Propagation::Proceed;
+                }
+                focus=widget.parent();
+            }
+            ui.composer.grab_focus();
+        }
         ui.composer.emit_by_name::<()>("paste-clipboard",&[]);
         glib::Propagation::Stop
     });
@@ -373,6 +390,29 @@ mod window_paste_tests {
             ui.window.clipboard().set_texture(&texture);
             assert!(std::process::Command::new("xdotool").args(["key","shift+Insert"]).status().unwrap().success());
             wait(||ui.attachments.borrow().len()==2).await;assert_eq!(ui.composer_text(),"Keep text draft");
+            ui.composer.buffer().set_text("");
+            ui.timeline.set_focusable(true);
+            assert!(ui.timeline.grab_focus());
+            ui.window.clipboard().set_text("Window paste\nsecond line");
+            assert!(std::process::Command::new("xdotool").args(["key","ctrl+v"]).status().unwrap().success());
+            wait(||ui.composer_text()=="Window paste\nsecond line").await;
+            assert!(ui.composer.has_focus());
+            assert_eq!(ui.media_search.text(),"search paste");
+            assert!(ui.timeline.grab_focus());
+            ui.window.clipboard().set_text("Do not overwrite a draft");
+            assert!(std::process::Command::new("xdotool").args(["key","ctrl+v"]).status().unwrap().success());
+            glib::timeout_future(Duration::from_millis(150)).await;
+            assert_eq!(ui.composer_text(),"Window paste\nsecond line");
+            ui.composer.buffer().set_text("");
+            ui.media_search.grab_focus();ui.media_search.set_text("");
+            ui.window.clipboard().set_text("Search only");
+            assert!(std::process::Command::new("xdotool").args(["key","ctrl+v"]).status().unwrap().success());
+            wait(||ui.media_search.text()=="Search only").await;
+            assert!(ui.composer_text().is_empty());
+            assert!(ui.timeline.grab_focus());
+            ui.window.clipboard().set_text("Shift insert");
+            assert!(std::process::Command::new("xdotool").args(["key","shift+Insert"]).status().unwrap().success());
+            wait(||ui.composer_text()=="Shift insert").await;
             ui.window.close();
         });
     }

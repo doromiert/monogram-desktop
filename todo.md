@@ -193,3 +193,8 @@
 - [x] Underline sender names on hover/visible keyboard focus with no hover background or added padding.
 - [x] Verify physical input and profile activation/unchanged bubble dimensions in both themes.
 - [ ] Diagnose mobile replies failing to one participant in the -0 room; waiting for the current phone ADB endpoint/error detail.
+
+## Focused-window text paste (2026-11-24)
+
+- [x] Route Ctrl+V/Shift+Insert text paste from non-text window focus into an empty composer; keep native search/editor paste and existing drafts.
+- [x] Verify actual Ctrl+V/Shift+Insert clipboard input, native search paste with an empty composer, draft preservation and image-paste regression (private GTK fixture, 1.99s).
