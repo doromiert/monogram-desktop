@@ -170,7 +170,7 @@ impl Ui {
         let legacy = !protected_original && (current.mode() == crate::encryption_policy::Mode::Legacy
             || self.sending_mode(self.state.borrow().current())
                 == Some(crate::encryption_policy::Mode::Legacy));
-        if legacy && (kind == "correct" || self.state.borrow().current().group) {
+        if legacy && kind != "correct" && self.state.borrow().current().group {
             self.notice("Legacy OMEMO does not support protected message actions here");
             return false;
         }
@@ -193,8 +193,14 @@ impl Ui {
             base.mode()
         } else if public_reaction {
             crate::encryption_policy::Mode::Plain
+        } else if kind == "correct" && current.mode() == crate::encryption_policy::Mode::Pq {
+            current.mode()
         } else if protected_original {
             base.mode()
+        } else if kind == "correct" && current.mode() == crate::encryption_policy::Mode::Omemo2 {
+            current.mode()
+        } else if legacy && kind == "correct" {
+            crate::encryption_policy::Mode::Legacy
         } else if encrypted {
             crate::encryption_policy::Mode::Pq
         } else {

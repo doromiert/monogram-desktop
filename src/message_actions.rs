@@ -299,7 +299,7 @@ fn match_wire(message: &Message, target: &str) -> bool {
             .iter()
             .any(|v| v.strip_prefix("wire:") == Some(target))
 }
-fn same_retraction_author(base: &Message, event: &Message, account: &str, peer: &str) -> bool {
+fn same_action_author(base: &Message, event: &Message, account: &str, peer: &str) -> bool {
     if base.own != event.own { return false; }
     match (&base.legacy_room_sender, &event.legacy_room_sender) {
         (Some(a), Some(b)) => a.room == peer && b.room == peer && a.author == b.author,
@@ -344,8 +344,8 @@ pub fn project(
             .cmp(&b.message.timestamp)
             .then(a.row.cmp(&b.row))
     });
-    let mut floors: BTreeMap<String, bool> =
-        bases.iter().map(|m| (m.id.clone(), m.encrypted)).collect();
+    let mut floors: BTreeMap<String, crate::encryption_policy::Mode> =
+        bases.iter().map(|m| (m.id.clone(), m.mode())).collect();
     let mut rendered: BTreeMap<String, Message> =
         bases.iter().cloned().map(|m| (m.id.clone(), m)).collect();
     for event in &mut events {
@@ -359,7 +359,7 @@ pub fn project(
         };
         let candidates: Vec<_> = bases
             .iter()
-            .filter(|base| base.own == m.own && match_wire(base, target) && !base.unavailable)
+            .filter(|base| same_action_author(base, m, owner, peer) && match_wire(base, target) && !base.unavailable)
             .collect();
         if candidates.len() != 1 {
             continue;
@@ -369,7 +369,10 @@ pub fn project(
         if base.attachment.is_some() || m.attachment.is_some() {
             continue;
         }
-        if *floors.get(&base.id).unwrap() && !m.encrypted {
+        let floor = floors[&base.id];
+        if floor.encrypted() && !m.encrypted
+            || matches!(floor, crate::encryption_policy::Mode::Omemo2 | crate::encryption_policy::Mode::Pq)
+                && m.mode() == crate::encryption_policy::Mode::Legacy {
             continue;
         }
         match (&base.poll, &m.poll) {
@@ -386,7 +389,7 @@ pub fn project(
         if base.retracted {
             continue;
         }
-        floors.insert(base.id.clone(), m.encrypted);
+        floors.insert(base.id.clone(), m.mode());
         let value = rendered.get_mut(&base.id).unwrap();
         if !value.edited {
             value.edit_history.push(value.content_text());
@@ -410,6 +413,7 @@ pub fn project(
         value.reply_id = m.reply_id.clone();
         value.reply_to = m.reply_to.clone();
         value.encrypted = m.encrypted;
+        value.encryption_mode = Some(m.mode());
         value.fingerprint = m.fingerprint.clone();
         value.edited = true;
         value.edit_history.push(m.content_text());
@@ -425,7 +429,7 @@ pub fn project(
         let candidates: Vec<_> = bases
             .iter()
             .filter(|base| {
-                same_retraction_author(base, m, owner, peer)
+                same_action_author(base, m, owner, peer)
                     && !base.unavailable
                     && if *legacy {
                         base.aliases

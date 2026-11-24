@@ -1,7 +1,7 @@
-# Live direct-message actions
+# Live message actions
 
 Native inline editing, replacement-set reactions and best-effort retraction are
-connected to live direct chats, in plaintext or explicit OMEMO 2. Mobile reference:
+connected to live direct chats, with text corrections in plaintext, Legacy OMEMO, OMEMO 2 and PQ OMEMO. Legacy text corrections also work in MUCs. Mobile reference:
 `be6876c045163e32fe07a84416621770b0964b30` / 0.2.195,
 `MessageCorrection`, `MessageReactions`, `MessageRetraction`, `MonogramStore`,
 `MonogramReactions` and `MonogramRetractions`.
@@ -128,3 +128,19 @@ scroll list and returns on collapse; its inner x/width remain10/300 px. Native
 pointer activation, search, wheel-to-bottom and favorite drag reorder pass, with
 button identity retained. Only the actual emoji button draws keyboard focus,
 not a second surrounding section-row outline.
+
+## Legacy OMEMO text corrections
+
+Desktop follows mobile `XmppSession.correct` / `XmppRooms.send` and XEP-0308:
+the corrected text stays inside the Legacy encrypted body, while the standard
+`replace` reference remains outer metadata. It uses the original client message
+ID for every edit, never a room-assigned archive ID. The reference has Legacy's
+ordinary outer-metadata limitations; it is not an authenticated SCE control.
+No plaintext resend or automatic conversion to another OMEMO version is used.
+
+Receiving and cached-history repair retain the authenticated Legacy sender and
+room author context. Projection scopes corrections by author, resolves room
+client-ID collisions per author, preserves immutable originals, and rejects
+plaintext or Legacy downgrades of modern protected originals/previous edits.
+Legacy media-caption corrections remain unsupported because Legacy file bodies
+carry only the encrypted URI; their media identity must not be replaced by text.

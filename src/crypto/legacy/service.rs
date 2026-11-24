@@ -76,13 +76,18 @@ fn empty(element: &Element) -> bool {
 fn reply_fallback(element: &Element) -> bool {
     element.is("fallback", FALLBACK) && element.attr("for") == Some(REPLY)
 }
-fn recovered_retraction(
+fn legacy_action(outer: &Element, room: bool) -> Result<Option<crate::message_actions::Action>> {
+    Ok(crate::message_actions::parse(outer)
+        .map_err(|_| Error::Invalid("legacy message action"))?
+        .filter(|action| matches!(action, crate::message_actions::Action::Correct { .. })
+            || !room && matches!(action, crate::message_actions::Action::Retract { .. })))
+}
+fn recovered_action(
     outer: &Element,
     stored: &Message,
     metadata: &Message,
 ) -> Result<Option<Message>> {
-    let Some(action @ crate::message_actions::Action::Retract { .. }) =
-        crate::message_actions::parse(outer).map_err(|_| Error::Invalid("legacy retraction"))?
+    let Some(action) = legacy_action(outer, metadata.legacy_room_sender.is_some())?
     else {
         return Ok(None);
     };
@@ -91,20 +96,29 @@ fn recovered_retraction(
         || stored.fingerprint.is_empty()
         || stored.own != metadata.own
         || stored.sender.split('/').next() != metadata.sender.split('/').next()
+        || match (&stored.legacy_room_sender, &metadata.legacy_room_sender) {
+            (Some(a), Some(b)) => a.room != b.room || a.author != b.author,
+            (None, None) => false,
+            _ => true,
+        }
     {
         return Ok(None);
     }
-    let mut message = Message {
-        action: Some(action),
-        id: stored.id.clone(),
-        wire_id: stored.wire_id.clone(),
-        sender: stored.sender.clone(),
-        own: stored.own,
-        timestamp: stored.timestamp.clone(),
-        delivery: stored.delivery.clone(),
-        aliases: stored.aliases.clone(),
-        ..Default::default()
+    let mut message = if matches!(action, crate::message_actions::Action::Correct { .. }) {
+        stored.clone()
+    } else {
+        Message {
+            id: stored.id.clone(),
+            wire_id: stored.wire_id.clone(),
+            sender: stored.sender.clone(),
+            own: stored.own,
+            timestamp: stored.timestamp.clone(),
+            delivery: stored.delivery.clone(),
+            aliases: stored.aliases.clone(),
+            ..Default::default()
+        }
     };
+    message.action = Some(action);
     message.aliases.extend(metadata.aliases.clone());
     message.set_encryption(Mode::Legacy, stored.fingerprint.clone());
     Ok(Some(message))
@@ -147,7 +161,7 @@ fn outgoing_content(peer: &str, message: &Message, quote: &str) -> Result<Elemen
         || message
             .action
             .as_ref()
-            .is_some_and(|action| !matches!(action, crate::message_actions::Action::Retract { .. }))
+            .is_some_and(|action| matches!(action, crate::message_actions::Action::React { .. }))
         || message.action.is_some() && message.attachment.is_some()
     {
         return Err(Error::Unavailable(
@@ -171,7 +185,7 @@ fn outgoing_content(peer: &str, message: &Message, quote: &str) -> Result<Elemen
     }
 }
 fn decorate_outgoing(xml: &mut Element, clear: &Element, message: &Message) {
-    if let Some(action @ crate::message_actions::Action::Retract { .. }) = &message.action {
+    if let Some(action) = &message.action {
         crate::message_actions::decorate(xml, action);
     }
     for child in clear
@@ -814,13 +828,11 @@ impl Worker {
                         .message(&self.owner, peer, &id)
                         .filter(|m| !m.unavailable)
                     {
-                        if room.is_none()
-                            && let Some(retraction) =
-                                recovered_retraction(&frame.xml, &stored, message)?
+                        if let Some(control) = recovered_action(&frame.xml, &stored, message)?
                         {
                             self.emit(BackendEvent::Message {
                                 peer: peer.clone(),
-                                message: retraction,
+                                message: control,
                                 historical: true,
                                 receipt_to: None,
                             });
@@ -987,12 +999,8 @@ impl Worker {
             };
             let (peer, metadata, historical) = outer_metadata(&self.owner, &metadata_frame, room)
                 .ok_or(Error::Invalid("legacy envelope metadata"))?;
-            // Mobile Legacy OMEMO encrypts the body and keeps XEP-0424 outside it.
-            // Projection still requires the original author's exact protocol and fingerprint.
-            if room.is_none()
-                && let Some(action @ crate::message_actions::Action::Retract { .. }) =
-                    crate::message_actions::parse(outer)
-                        .map_err(|_| Error::Invalid("legacy retraction"))?
+            // Legacy encrypts the body; XEP-0308 references remain outer metadata, as on mobile.
+            if let Some(action) = legacy_action(outer, room.is_some())?
             {
                 crate::message_actions::decorate(&mut content, &action);
             }
@@ -1436,6 +1444,74 @@ mod tests {
     }
 
     #[test]
+    fn legacy_corrections_encrypt_body_and_reconcile_direct_and_room_authors() {
+        use super::super::{encrypt_for_kind,receive_for,tests::{approve,device,fixture},wire::{attr,Envelope}};
+        use crate::message_actions::{self as actions,Action,Event};
+        let owner="owner@example.org";let author="author@example.org";let room="room@conference.example.org";
+        let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        for group in [false,true] {
+            let peer=if group {room} else {author};
+            let (mut sender,_,sender_bundle)=fixture(author,101);
+            let (mut receiver,journal,receiver_bundle)=fixture(owner,202);
+            approve(&mut sender,owner,202,&receiver_bundle);approve(&mut receiver,author,101,&sender_bundle);
+            let room_sender=RoomSender{room:room.into(),occupant:format!("{room}/Author"),author:author.into()};
+            let mut correction=Message{id:"correction".into(),wire_id:"correction-wire".into(),sender:author.into(),text:"corrected 💔".into(),action:Some(Action::Correct{target:"original-wire".into()}),..Default::default()};
+            correction.set_encryption(Mode::Legacy,lifecycle::hex(&sender_bundle.identity));
+            let clear=outgoing_content(if group {room} else {owner},&correction,"").unwrap();
+            let body=clear.get_child("body",payload::CLIENT).unwrap().text();
+            let mut outer=encrypt_for_kind(&mut sender,if group {room} else {owner},&body,&correction.wire_id,&[(device(owner,202,&receiver_bundle),Some(receiver_bundle.clone()))],group).unwrap();
+            decorate_outgoing(&mut outer,&clear,&correction);
+            assert_eq!(actions::parse(&outer).unwrap(),correction.action);
+            assert!(!String::from_utf8(bundle::xml(&outer,MAX_WIRE).unwrap()).unwrap().contains("corrected"));
+            let context=if group {
+                outer=attr(attr(outer,"from",&room_sender.occupant),"to",owner);
+                Some(Context{archive:None,historical:false,receipt_to:None,room:Some(RoomContext{sender:room_sender.clone(),metadata:Message{id:"correction".into(),wire_id:correction.wire_id.clone(),..Default::default()}})})
+            } else {None};
+            let envelope=if group {Envelope::parse_room(&outer,owner,202,&room_sender)} else {Envelope::parse(&outer,owner,202)}.unwrap();
+            let received=receive_for(&mut receiver,&journal,&outer,&envelope,1795555200000,context).unwrap();
+            let (events,result)=mpsc::channel();let (network,_requests)=channel::unbounded_channel();
+            let mut worker=Worker{owner:owner.into(),generation:1,network,events,root:PathBuf::new(),local:None,online:false,ready:false,repair_tx:None};
+            runtime.block_on(worker.deliver(received,None,alias(envelope.digest))).unwrap();
+            let (_,_,BackendEvent::LegacyEncryptedMessage{message:control,..})=result.recv().unwrap() else {panic!("missing decrypted correction")};
+            assert_eq!(control.text,correction.text);assert_eq!(control.action,correction.action);assert_eq!(control.mode(),Mode::Legacy);
+            assert_eq!(control.fingerprint,lifecycle::hex(&sender_bundle.identity));
+            let db=crate::storage::Store::open(true).unwrap();db.save_account(&crate::model::Account{jid:owner.into(),host:String::new(),port:5222,direct_tls:false}).unwrap();
+            let mut original=Message{id:"original".into(),wire_id:"original-wire".into(),sender:if group {room_sender.occupant.clone()} else {author.into()},text:"before correction".into(),legacy_room_sender:group.then(||room_sender.clone()),..Default::default()};
+            original.set_encryption(Mode::Legacy,"original-device-key".into());
+            let chat=crate::model::Chat{jid:peer.into(),group,..Default::default()};db.save_chat_message(owner,&chat,Some(&original)).unwrap();
+            // Cached bodies saved by the old decoder can recover the missing correction metadata.
+            let mut fallback=control.clone();fallback.action=None;db.save_chat_message(owner,&chat,Some(&fallback)).unwrap();
+            let recovered=recovered_action(&outer,&fallback,&control).unwrap().unwrap();
+            assert_eq!(recovered.text,correction.text);
+            for _ in 0..2 {db.record_action(owner,peer,&recovered,"received").unwrap();db.reconcile_actions(owner,peer).unwrap();}
+            let edited=db.message(owner,peer,&original.id).unwrap();assert_eq!(edited.text,correction.text);assert!(edited.edited);assert_eq!(edited.mode(),Mode::Legacy);
+            assert!(db.message(owner,peer,&fallback.id).is_none());
+            assert_eq!(db.action_base(owner,peer,&original.id).unwrap().text,"before correction");
+            let project=|base:Message,edit:Message|actions::project(vec![base],vec![Event{row:1,message:edit,failed:false,resolved:None}],owner,peer);
+            let original_after=|projection:actions::Projection|projection.messages.into_iter().find(|message|message.id=="original").unwrap();
+            if group {
+                let mut foreign=control.clone();foreign.legacy_room_sender.as_mut().unwrap().author="other@example.org".into();
+                assert!(!original_after(project(original.clone(),foreign)).edited,"another room author cannot edit this message");
+                let mut collision=original.clone();collision.id="other-original".into();collision.legacy_room_sender.as_mut().unwrap().author="other@example.org".into();
+                let result=actions::project(vec![original.clone(),collision],vec![Event{row:1,message:control.clone(),failed:false,resolved:None}],owner,peer);
+                assert_eq!(result.events[0].resolved.as_deref(),Some("original"),"room wire IDs are author-scoped");
+            }
+            for mode in [Mode::Omemo2,Mode::Pq] {
+                let mut modern=original.clone();modern.set_encryption(mode,"modern-key".into());
+                assert!(!original_after(project(modern,control.clone())).edited,"Legacy cannot replace a modern protected original");
+            }
+            let mut plain_base=original.clone();plain_base.set_encryption(Mode::Plain,String::new());
+            let mut modern_edit=control.clone();modern_edit.set_encryption(Mode::Pq,"modern-key".into());modern_edit.text="protected correction".into();
+            let upgraded=actions::project(vec![plain_base],vec![Event{row:1,message:modern_edit,failed:false,resolved:None},Event{row:2,message:control.clone(),failed:false,resolved:None}],owner,peer);
+            assert_eq!(original_after(upgraded).text,"protected correction","a previous protected edit also raises the floor");
+            let mut plain=control.clone();plain.set_encryption(Mode::Plain,String::new());
+            assert!(!original_after(project(original.clone(),plain)).edited,"no plaintext downgrade");
+            correction.attachment=crate::file_share::Attachment::bare(&format!("aesgcm://files.example.org/x#{}","01".repeat(44)));
+            assert!(outgoing_content(owner,&correction,"").is_err(),"Legacy caption edits remain unsupported");
+        }
+    }
+
+    #[test]
     fn mobile_legacy_retraction_send_receive_and_cached_mam_repair() {
         use super::super::{
             encrypt_for, receive_for,
@@ -1564,7 +1640,7 @@ mod tests {
             fallback.action = None;
             fallback.text = "A previous message was retracted.".into();
             db.save_chat_message(owner, &chat, Some(&fallback)).unwrap();
-            let recovered = recovered_retraction(&outer, &fallback, &control)
+            let recovered = recovered_action(&outer, &fallback, &control)
                 .unwrap()
                 .unwrap();
             for (mode, key, own) in [
@@ -1634,7 +1710,7 @@ mod tests {
             }
             let plain_text: Element = format!("<message xmlns='jabber:client' from='{peer}' to='{owner}' type='chat'><body>A previous message was retracted.</body></message>").parse().unwrap();
             assert!(
-                recovered_retraction(&plain_text, &fallback, &control)
+                recovered_action(&plain_text, &fallback, &control)
                     .unwrap()
                     .is_none()
             );

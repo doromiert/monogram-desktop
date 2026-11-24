@@ -372,3 +372,13 @@ clicks, incoming reply/outgoing edit, deliberate drag, Ctrl/Shift selection,
 disabled-action text selection, and unchanged hover dimensions/profile activation
 in dark and light themes. This is platform-specific desktop pointer behavior;
 Android's native touch actions and the pending -0 room reply failure are unchanged.
+
+### Legacy correction compatibility
+
+Desktop Legacy OMEMO text editing follows mobile's existing encrypted-body /
+outer XEP-0308 reference path in direct chats and rooms. The standard reference
+uses the original client ID, retained across repeated edits. Room corrections
+use captured author identity, including same-ID messages by different authors;
+stronger protected edits cannot be downgraded. Cached Legacy fallback bodies
+can recover their correction metadata on replay. Legacy media captions remain
+unsupported on both clients. See [message actions](MESSAGE_ACTIONS.md).

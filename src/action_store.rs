@@ -86,7 +86,7 @@ impl Store {
             sender.room == peer && sender.occupant == m.sender
                 && crate::protocol::bare(&sender.author).ok().as_deref() == Some(sender.author.as_str())
                 && m.own == (sender.author == a)
-                && matches!(m.action, Some(Action::Retract { .. }))
+                && matches!(m.action, Some(Action::Correct { .. } | Action::Retract { .. }))
         });
         if (!verified_room && m.sender.split('/').next() != Some(if m.own { a } else { peer }))
             || !actions::valid_id(action.target())

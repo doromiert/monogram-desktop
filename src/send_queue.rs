@@ -1198,6 +1198,45 @@ mod tests {
         ui.window.close();
     }
 
+    #[test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn legacy_room_inline_save_sends_encrypted_correction() {
+        let (ui, _) = room_with_failed_message("com.negzero.LegacyEditFixture", "unused", false);
+        ui.legacy_crypto.borrow_mut().fingerprint="fixture-key".into();
+        ui.state.borrow_mut().current_mut().sending_preference=Some(crate::encryption_policy::Preference::Legacy);
+        let mut original=Message{id:"legacy-edit".into(),wire_id:"legacy-original".into(),sender:OWNER.into(),text:"original text".into(),own:true,delivery:"sent".into(),timestamp:crate::model::now(),..Default::default()};
+        original.set_encryption(Mode::Legacy,"fixture-key".into());
+        ui.state.borrow_mut().current_mut().messages.push(original.clone());
+        let chat=ui.state.borrow().current().clone();ui.store.save_chat_message(OWNER,&chat,Some(&original)).unwrap();
+        ui.composer.buffer().set_text("keep composer draft");
+        ui.render_messages(true);settle(200);
+        let mut commands=capture(&ui);
+        for body in ["💔","second correction"] {
+            ui.edit_message(&original.id);
+            let bubble=ui.bubbles.borrow().get(&original.id).unwrap().clone().downcast::<gtk::Box>().unwrap();
+            let editor=bubble.first_child().unwrap().downcast::<gtk::ScrolledWindow>().unwrap().child().unwrap().downcast::<gtk::TextView>().unwrap();
+            editor.buffer().set_text(body);
+            find_button(bubble.upcast_ref(),"Save").unwrap().emit_clicked();
+            let sent=drain(&mut commands).into_iter().find_map(|command|match command {Command::Send{peer,message,..} if peer==ROOM=>Some(message),_=>None}).expect("Save queued a correction");
+            assert_eq!(sent.mode(),Mode::Legacy);assert_eq!(sent.text,body);
+            assert_eq!(sent.action,Some(crate::message_actions::Action::Correct{target:original.wire_id.clone()}));
+            assert_eq!(ui.store.message(OWNER,ROOM,&original.id).unwrap().text,body);
+            assert_eq!(ui.composer_text(),"keep composer draft");
+            ui.store.action_delivery(OWNER,ROOM,&sent.wire_id,"sent").unwrap();
+            ui.sync_actions(OWNER,ROOM);ui.render_messages(false);settle(100);
+        }
+        assert_eq!(ui.store.action_base(OWNER,ROOM,&original.id).unwrap().text,"original text");
+        // A previous modern edit raises the floor even if the room preference is still Legacy.
+        ui.pq_crypto.borrow_mut().ready=true;ui.pq_crypto.borrow_mut().fingerprint="modern-key".into();
+        let mut upgrade=original.clone();upgrade.id="upgrade".into();upgrade.wire_id="upgrade-wire".into();upgrade.text="protected correction".into();upgrade.timestamp=crate::model::now();
+        upgrade.action=Some(crate::message_actions::Action::Correct{target:original.wire_id.clone()});upgrade.set_encryption(Mode::Pq,"modern-key".into());
+        ui.store.record_action(OWNER,ROOM,&upgrade,"sent").unwrap();ui.store.reconcile_actions(OWNER,ROOM).unwrap();ui.sync_actions(OWNER,ROOM);ui.render_messages(false);
+        assert!(ui.send_formatted_action(&original.id,crate::message_actions::Action::Correct{target:original.wire_id.clone()},crate::formatting::Markup::plain("still protected")));
+        let sent=drain(&mut commands).into_iter().find_map(|command|match command {Command::Send{message,..}=>Some(message),_=>None}).unwrap();
+        assert_eq!(sent.mode(),Mode::Pq,"do not downgrade a prior protected edit");
+        ui.window.close();
+    }
+
     /// Reacting in a room keeps working after Send Anyway. It used to lock the room to Legacy OMEMO,
     /// which has no protected message actions, so every reaction was refused. A reaction sent while
     /// some members' keys are unusable now goes out like the messages do.
