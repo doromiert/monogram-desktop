@@ -203,3 +203,7 @@
 
 - [x] Resolve own participant/profile avatars through the public account identity instead of the Saved Messages bookmark, including anonymous rooms.
 - [x] Verify cached public-avatar row/card for public and anonymous rooms, roster departure fallback, and unchanged Saved Messages bookmark (native GTK fixture, 0.49s).
+
+## Startup responsiveness follow-up (2026-11-24)
+
+- [ ] Profile and remove the existing live-profile startup pause: deployed e64e502 shows initial feedback at274ms but a1125ms frame gap; a9ed286 also showed a1021ms gap. Under substantial system load, identical private broad smoke measured483ms on a9ed286 and481ms on e64e502, exceeding the400ms budget. Avatar-specific/profile regressions pass; the general performance budget is not satisfied. Evidence: ~/.private/State/monogram-message-hover/avatar-delivery.json and avatar-*-smoke*.log.
