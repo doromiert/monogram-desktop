@@ -9,4 +9,3 @@ export MONOGRAM_BWRAP="$APPDIR/bin/bwrap"
 export MONOGRAM_EPOXY_LIBRARY=libepoxy.so.0
 export GTK_USE_PORTAL=1
 
-export GDK_DEBUG="${GDK_DEBUG:+$GDK_DEBUG,}color-mgmt"

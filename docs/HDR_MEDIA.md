@@ -64,3 +64,5 @@ with an initial449ms outlier retained. The existing actual-profile startup gap
 remains838ms and is tracked separately. Android0.2.240 keeps the established
 beta signer, identity and8 unchanged JNI libraries; its exact final APK runs
 62.90s with61 stable process samples and no crash. The phone was not accessed.
+
+Correction: do not force experimental GDK_DEBUG=color-mgmt globally. It changed the whole desktop window appearance on the user’s HDR display (bright emojis and desaturated UI). Original HDR data, decoding and color-tagged media remain preserved; physical HDR presentation is deferred until it can avoid changing ordinary UI colors. Users explicitly enabling experimental GTK color management retain their choice.

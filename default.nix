@@ -100,7 +100,6 @@ in craneLib.buildPackage (commonArgs // {
       --prefix XDG_DATA_DIRS : $out/share
       --set MONOGRAM_ASSET_DIR $out/share/monogram-desktop
       --set MONOGRAM_EPOXY_LIBRARY ${libepoxy}/lib/libepoxy.so.0
-      --suffix GDK_DEBUG , color-mgmt
       --set GTK_USE_PORTAL 1
       --set-default SSL_CERT_FILE ${cacert}/etc/ssl/certs/ca-bundle.crt
     )
