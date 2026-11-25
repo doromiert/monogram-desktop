@@ -266,4 +266,4 @@ Encryption recovery delivery: source19570e6, ZenPkgs ed72e0d2, packagehkcxzgn02b
 - [x] Replace the pre-layout80-character quote cutoff with the existing4096-character shaping bound.
 - [x] Restore saved short text previews asynchronously from locally resolved reply targets, preserving spoiler handling and existing two-line layout.
 - [x] Verify normal/long Unicode quotes and native two-line rendering, including restoring a previously shortened quote (385px full row width).
-- [ ] Include the reply cutoff fix in the next installed desktop build.
+- [x] Install the reply cutoff fix through ZenPkgs a357500d and normal ZenOS rebuild (exit0); restart managed Monogram and verify Connected/all3 local identities. Packaged smoke339ms.
