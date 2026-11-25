@@ -55,3 +55,12 @@ References: [Android Ultra HDR](https://developer.android.com/media/grow/ultra-h
 [Glycin](https://gnome.pages.gitlab.gnome.org/glycin/),
 [libultrahdr](https://github.com/google/libultrahdr),
 [GTK video sink](https://gstreamer.freedesktop.org/documentation/gtk4/index.html).
+
+Delivery evidence (2026-11-25): source198869e and ZenPkgs230a045a are installed
+through the normal ZenOS lock/rebuild path. Native tests against the shipped
+GTK4.22.4/GStreamer1.26.11/gtk4 sink0.14.4 also retain P010 PQ/HLG. HDR upload
+feedback45ms/max loop gap240ms; isolated packaged smoke380ms (old build364ms),
+with an initial449ms outlier retained. The existing actual-profile startup gap
+remains838ms and is tracked separately. Android0.2.240 keeps the established
+beta signer, identity and8 unchanged JNI libraries; its exact final APK runs
+62.90s with61 stable process samples and no crash. The phone was not accessed.
