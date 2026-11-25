@@ -416,3 +416,10 @@ open/switch/close semantics verified from the focused composer. Desktop wallet
 rendering now retains extended reflections in an independently tagged RGBA16F
 texture (see HDR_MEDIA.md); the Android wallet-renderer equivalent and physical
 media-only HDR output remain unverified gaps. No global HDR switch is enabled.
+
+Desktop crypto startup recovery: all3 workers now retry temporary local keyring
+loading failures, without replacing device identities or disabling encryption.
+Classic/Legacy incoming decryption uses loaded local-key availability rather
+than outgoing publication readiness. Private Secret Service stop/restart test
+proves automatic recovery with unchanged pinned identity. Android's separate
+Keystore lifecycle is unchanged; this correction is desktop-specific.

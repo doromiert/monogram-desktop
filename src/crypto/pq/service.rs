@@ -110,7 +110,9 @@ impl Handle {
                 let mut worker = Worker { owner, generation, network, events, root: lifecycle::root(), local: None,
                     online: false, ready: false, publication_pending: false, bundles: BTreeMap::new(), lists: BTreeMap::new() };
                 tokio::select! { _ = stopped => {}, _ = async move {
+                    let mut recovery = crate::crypto::keyring_recovery_timer();
                     loop { tokio::select! { biased;
+                        _ = recovery.tick(), if worker.online && worker.local.is_none() => { if crate::crypto::vault::unlocked().await { worker.process(Request::Online(true)).await; } },
                         request = requests.recv() => { let Some(request) = request else { break }; worker.process(request).await; },
                         frame = frames.recv() => { let Some(frame) = frame else { break }; worker.process(frame).await; },
                         request = preview.recv() => { let Some(request) = request else { break }; worker.process(request).await; },

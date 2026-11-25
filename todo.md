@@ -248,3 +248,11 @@ HDR delivery: desktop198869e / ZenPkgs230a045a installed by normal ZenOS rebuild
 - [ ] Physical media/card-only HDR output and Android wallet-renderer parity remain open; float data does not establish display luminance.
 
 Panel/card delivery: source7adae40/16584b7, ZenPkgs ca8c5fb0, normal ZenOS rebuild exit0; package84brfs09... running asPID276610, connected and D-Bus3.4ms. Packaged smoke343ms; native card108ms/highlight1.2890625 and real composer keyboard checks pass. Whole-window HDR remains off and physical HDR acceptance remains open. Actual-profile startup gap1025ms remains the existing separate responsiveness follow-up.
+
+
+## Encryption startup recovery (2026-11-25)
+- [x] Confirm real keyring unlocked and all3 existing account record keys readable without logging contents.
+- [x] Retry local identity loading on crypto workers after temporary keyring startup failure, preserving device IDs/pins and avoiding repeated known-locked default-keyring prompts.
+- [x] Allow authenticated incoming decryption once local keys are loaded, independently of outgoing PEP publication readiness; replace misleading review-device placeholder.
+- [x] Verify private Secret Service stop/restart recovery in5.47s with the pinned profile unchanged, plus key-vault/lifecycle guards and68 crypto tests.
+- [ ] Publish/install and verify the managed build.

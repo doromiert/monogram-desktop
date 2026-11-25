@@ -142,3 +142,12 @@ pub fn random<const N: usize>() -> Result<[u8; N]> {
 }
 #[cfg(test)]
 mod tests;
+
+// Keyrings can become available after login/auto-start. Retry local loading on
+// crypto workers; existing profile/pin checks still forbid replacing identities.
+pub(super) fn keyring_recovery_timer() -> tokio::time::Interval {
+    let delay = std::time::Duration::from_secs(5);
+    let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + delay, delay);
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    timer
+}

@@ -99,7 +99,9 @@ impl Handle {
             let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().expect("crypto runtime");
             runtime.block_on(async move{tokio::select!{_=stopped=>{},_=async move {
                 let mut worker=Worker{root:lifecycle::root(),owner,generation,network,events,local:None,online:false,ready:false,reviews:BTreeMap::new()};
-                loop {tokio::select! {biased;request=rx.recv()=>{let Some(request)=request else{break};worker.process(request).await;},frame=incoming.recv()=>{let Some(frame)=frame else{break};worker.process(Request::Incoming(frame)).await;},request=preview_frames.recv()=>{let Some(request)=request else{break};worker.process(request).await;}}}
+                let mut recovery = super::keyring_recovery_timer();
+                loop {tokio::select! {biased;
+                    _ = recovery.tick(), if worker.online && worker.local.is_none() => { if crate::crypto::vault::unlocked().await { worker.process(Request::Enable).await; } },request=rx.recv()=>{let Some(request)=request else{break};worker.process(request).await;},frame=incoming.recv()=>{let Some(frame)=frame else{break};worker.process(Request::Incoming(frame)).await;},request=preview_frames.recv()=>{let Some(request)=request else{break};worker.process(request).await;}}}
             }=>{}}});
         }).expect("crypto thread");
         Self {
@@ -614,10 +616,10 @@ impl Worker {
         self.incoming_mode(frame, false).await
     }
     async fn incoming_mode(&mut self, frame: Frame, preview: bool) -> Result<()> {
-        if !self.ready && !preview {
+        if self.local.is_none() && !preview {
             self.placeholder(
                 &frame,
-                "Encrypted message — enable OMEMO 2 and review the sender's devices",
+                "Encrypted message — local encryption keys are not ready yet. Retrying automatically.",
             );
             return Ok(());
         }
@@ -1481,5 +1483,73 @@ mod tests {
         );
         drop(alice);
         drop(bob);
+    }
+}
+
+#[cfg(test)]
+mod keyring_recovery_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires a private Secret Service fixture"]
+    fn local_keyring_startup_failure_recovers_without_device_review() {
+        assert_eq!(std::env::var("MONOGRAM_KEYRING_FIXTURE").as_deref(), Ok("1"));
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let owner = "keyring-recovery@fixture.invalid";
+            let root = lifecycle::root();
+            let local = Local::open(&root, owner, true).await.unwrap();
+            drop(local);
+            let profile = root.join("crypto").join(lifecycle::hex(&openssl::sha::sha256(owner.as_bytes()))).join("device.json");
+            let before:serde_json::Value = serde_json::from_slice(&std::fs::read(&profile).unwrap()).unwrap();
+            assert!(!before["identity"].is_null());
+            let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+            let run = std::path::PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap());
+            assert_eq!(home.parent(),run.parent(),"fixture must own its private HOME and bus roots");
+            assert!(home.ends_with("home"));
+            let pid = std::env::var("MONOGRAM_FIXTURE_KEYRING_PID").unwrap();
+            let owner_pid = std::process::Command::new("gdbus").args(["call","--session","--dest","org.freedesktop.DBus","--object-path","/org/freedesktop/DBus","--method","org.freedesktop.DBus.GetConnectionUnixProcessID","org.freedesktop.secrets"]).output().unwrap();
+            assert_eq!(String::from_utf8(owner_pid.stdout).unwrap().trim(),format!("(uint32 {pid},)"));
+            assert!(std::process::Command::new("kill").args(["-TERM",&pid]).status().unwrap().success());
+            for _ in 0..100 {
+                if !std::path::Path::new(&format!("/proc/{pid}")).exists(){break;}
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let (network, mut wire) = channel::unbounded_channel();
+            let (events, received) = mpsc::channel();
+            let handle = Handle::start(owner.into(), 1, network, events);
+            handle.send(Request::Online(true));
+            let deadline = std::time::Instant::now()+std::time::Duration::from_secs(10);
+            let mut failed = false;
+            let mut statuses = Vec::new();
+            while std::time::Instant::now()<deadline {
+                if let Ok((_,_,BackendEvent::CryptoStatus(s))) = received.try_recv() {
+                    statuses.push(s.text.clone());
+                    if s.text == Error::Vault.to_string() {failed=true;break;}
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(failed,"fixture must reproduce unavailable local key storage: {statuses:?}");
+            struct Stop(std::process::Child);
+            impl Drop for Stop {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
+            let control = std::path::PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap()).join("keyring-restarted");
+            std::fs::create_dir_all(&control).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&control,std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut daemon = Stop(std::process::Command::new("gnome-keyring-daemon")
+                .args(["--foreground","--unlock","--components=secrets","--control-directory"]).arg(control)
+                .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap());
+            use std::io::Write;
+            daemon.0.stdin.take().unwrap().write_all(b"fictional fixture password").unwrap();
+            // Publication proves the existing worker resumed initialization without Enable/reconnect.
+            let recovered = tokio::time::timeout(std::time::Duration::from_secs(12), async {
+                loop { if matches!(wire.recv().await.unwrap(), Command::Iq { .. }) { break; } }
+            }).await;
+            if recovered.is_err() {
+                while let Ok((_,_,BackendEvent::CryptoStatus(s)))=received.try_recv(){statuses.push(s.text);}
+                panic!("recovery timed out: {statuses:?}; daemon={:?}",daemon.0.try_wait());
+            }
+            let after:serde_json::Value = serde_json::from_slice(&std::fs::read(&profile).unwrap()).unwrap();
+            assert_eq!(before, after, "recovery must preserve the pinned device and identity");
+            drop(handle);
+        });
     }
 }

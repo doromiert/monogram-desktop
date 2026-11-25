@@ -14,6 +14,13 @@ fn purpose(legacy: bool, pin: bool) -> &'static str {
 fn name(legacy: bool) -> &'static str {
     if legacy { "Legacy OMEMO" } else { "OMEMO 2" }
 }
+/// Background recovery checks availability without opening an unlock prompt.
+pub(super) async fn unlocked() -> bool {
+    let Ok(service) = SecretService::connect(EncryptionType::Dh).await else { return false; };
+    // Default aliases are optional; existing keys may live in another collection.
+    let Ok(collection) = service.get_default_collection().await else { return true; };
+    collection.is_locked().await.is_ok_and(|locked| !locked)
+}
 pub(super) async fn existing_devices(account: &str, legacy: bool) -> Result<Vec<u32>> {
     address(account, 1)?;
     let service = SecretService::connect(EncryptionType::Dh)

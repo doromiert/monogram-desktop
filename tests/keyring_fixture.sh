@@ -31,6 +31,7 @@ env HOME="$fixture_root/home" XDG_CONFIG_HOME="$fixture_root/config" \
     unset GNOME_KEYRING_CONTROL GNOME_KEYRING_PID SSH_AUTH_SOCK
     printf "%s" "fictional fixture password" | gnome-keyring-daemon --foreground --unlock --components=secrets --control-directory="$XDG_RUNTIME_DIR/keyring" >"$XDG_RUNTIME_DIR/keyring.log" 2>&1 &
     fixture_daemon=$!
+    export MONOGRAM_FIXTURE_KEYRING_PID="$fixture_daemon"
     trap '\''kill "$fixture_daemon" 2>/dev/null || true; wait "$fixture_daemon" 2>/dev/null || true'\'' EXIT
     for _ in {1..100}; do
       if dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner string:org.freedesktop.secrets | grep -q "boolean true"; then break; fi

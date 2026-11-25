@@ -322,9 +322,11 @@ impl Handle {
                 tokio::select! {
                     _ = stopped => {},
                     _ = async {
+                        let mut recovery = crate::crypto::keyring_recovery_timer();
                         loop {
                             tokio::select! {
                                 biased;
+                                _ = recovery.tick(), if worker.online && worker.local.is_none() => { if crate::crypto::vault::unlocked().await { worker.process(Request::Enable).await; } },
                                 next = requests.recv() => match next { Some(request) => worker.process(request).await, None => break },
                                 next = frames.recv() => match next { Some(request) => worker.process(request).await, None => break },
                                 next = preview_frames.recv() => match next { Some(request) => worker.process(request).await, None => break },
@@ -776,8 +778,8 @@ impl Worker {
         room: Option<&RoomContext>,
         preview: bool,
     ) -> Result<()> {
-        if !self.ready && !preview {
-            return Err(Error::Unavailable("Legacy OMEMO is not ready"));
+        if self.local.is_none() && !preview {
+            return Err(Error::Unavailable("Local encryption keys are not ready yet. Retrying automatically."));
         }
         let outer = outer_metadata(&self.owner, frame, room);
         if preview
