@@ -244,5 +244,7 @@ HDR delivery: desktop198869e / ZenPkgs230a045a installed by normal ZenOS rebuild
 - [x] Ctrl+E/S/G open emoji/sticker/GIF tabs, switch between them, and toggle the current tab closed; list them in shortcut help.
 - [x] Verify actual keyboard events while composer focused, including tab selection and closing.
 - [x] Retain card reflections above SDR white in a private RGBA16F GPU texture, with fenced rendering and context-safe cleanup; keep global HDR off. Native max1.2890625, initial gap139ms.
-- [ ] Publish/install the updated desktop package.
+- [x] Publish/install the updated desktop package.
 - [ ] Physical media/card-only HDR output and Android wallet-renderer parity remain open; float data does not establish display luminance.
+
+Panel/card delivery: source7adae40/16584b7, ZenPkgs ca8c5fb0, normal ZenOS rebuild exit0; package84brfs09... running asPID276610, connected and D-Bus3.4ms. Packaged smoke343ms; native card108ms/highlight1.2890625 and real composer keyboard checks pass. Whole-window HDR remains off and physical HDR acceptance remains open. Actual-profile startup gap1025ms remains the existing separate responsiveness follow-up.
