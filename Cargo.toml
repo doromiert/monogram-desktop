@@ -8,6 +8,11 @@ autotests = false
 license = "GPL-3.0-or-later"
 description = "Native GTK/libadwaita Monogram client"
 
+[features]
+# Decodes Ultra HDR JPEG stills with libultrahdr. Disable with --no-default-features on systems without it.
+default = ["hdr"]
+hdr = []
+
 [[test]]
 name = "transport"
 path = "tests/transport.rs"

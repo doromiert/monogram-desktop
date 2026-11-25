@@ -85,23 +85,39 @@ fn main() {
         .cargo_metadata(false)
         .probe("gio-unix-2.0")
         .expect("GIO Unix streams");
-    let hdr=pkg_config::Config::new().cargo_metadata(false).atleast_version("1.4").probe("libuhdr").expect("libultrahdr 1.4 or newer");
+    // The `hdr` feature is on by default. Without libultrahdr, the build warns and links a stub
+    // that reports "no HDR", so ordinary stills take the normal decode path.
+    let hdr = std::env::var_os("CARGO_FEATURE_HDR").is_some().then(|| {
+        match pkg_config::Config::new().cargo_metadata(false).atleast_version("1.4").probe("libuhdr") {
+            Ok(library) => Some(library),
+            Err(error) => {
+                println!("cargo:warning=building without HDR still images: libultrahdr 1.4 not found ({error})");
+                None
+            }
+        }
+    }).flatten();
+    let (hdr_include, hdr_link, hdr_libs): (Vec<std::path::PathBuf>, Vec<std::path::PathBuf>, Vec<String>) = match &hdr {
+        Some(library) => (library.include_paths.clone(), library.link_paths.clone(), library.libs.clone()),
+        None => Default::default(),
+    };
     let mut bridge = cc::Build::new();
-    bridge.opt_level(2).file("native/image_loader.c").file("native/hdr_image.c");
-    for path in &hdr.include_paths {bridge.include(path);}
+    bridge.opt_level(2).file("native/image_loader.c");
+    bridge.file(if hdr.is_some() { "native/hdr_image.c" } else { "native/hdr_image_disabled.c" });
+    for path in &hdr_include {bridge.include(path);}
     for path in image.include_paths.iter().chain(&unix.include_paths) {
         bridge.include(path);
     }
     bridge.compile("monogram_image_loader");
     // --as-needed requires the shared providers after the archive that references them.
-    for path in image.link_paths.iter().chain(&unix.link_paths).chain(&hdr.link_paths) {
+    for path in image.link_paths.iter().chain(&unix.link_paths).chain(&hdr_link) {
         println!("cargo:rustc-link-search=native={}", path.display());
     }
-    for library in image.libs.iter().chain(&unix.libs).chain(&hdr.libs) {
+    for library in image.libs.iter().chain(&unix.libs).chain(&hdr_libs) {
         println!("cargo:rustc-link-lib={library}");
     }
     println!("cargo:rerun-if-changed=native/image_loader.c");
     println!("cargo:rerun-if-changed=native/hdr_image.c");
+    println!("cargo:rerun-if-changed=native/hdr_image_disabled.c");
     let app = pkg_config::Config::new()
         .cargo_metadata(false)
         .probe("gstreamer-app-1.0")
