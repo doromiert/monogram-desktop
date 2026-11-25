@@ -1259,6 +1259,10 @@ impl Ui {
         (self.state.borrow().account.is_empty() || self.history_window.newest())
             && adjustment.upper() - adjustment.page_size() - adjustment.value() < 24.
     }
+    pub(crate) fn deletion_scroll_target(&self, removed: &[String]) -> ScrollTarget {
+        if self.at_message_end() { ScrollTarget::Bottom }
+        else { self.capture_scroll_position_excluding(removed) }
+    }
     pub fn queue_message_scroll(self: &Rc<Self>, target: ScrollTarget) {
         let pending = self.message_scroll.borrow().is_some();
         // A receipt or an archive response may rebuild the rows in the same frame.
@@ -1518,11 +1522,7 @@ impl Ui {
         });
     }
     pub fn delete_messages(self: &Rc<Self>, ids: &[String]) {
-        let position = if self.at_message_end() {
-            ScrollTarget::Bottom
-        } else {
-            self.capture_scroll_position_excluding(ids)
-        };
+        let position = self.deletion_scroll_target(ids);
         let mut s = self.state.borrow_mut();
         let peer = s.current().jid.clone();
         let Ok(ids) = self.store.deletion_targets(&s.account, &peer, ids) else {

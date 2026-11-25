@@ -407,3 +407,36 @@ fn deletion_preserves_bottom_and_surviving_visible_anchor() {
         });
     });app.run_with_args(&["delete-scroll-test"]);assert!(passed.get());
 }
+
+#[test]
+#[ignore = "requires private GTK display"]
+fn signed_in_confirmation_deletion_preserves_the_live_viewport() {
+    let app=adw::Application::builder().application_id("com.negzero.SignedInDeleteScrollTest").flags(gio::ApplicationFlags::NON_UNIQUE).build();
+    app.register(None::<&gio::Cancellable>).unwrap();
+    let ui=ui::Ui::new(&app,true);let owner="owner@fixture.invalid";let peer="peer@fixture.invalid";
+    ui.store.save_account(&model::Account{jid:owner.into(),host:String::new(),port:5222,direct_tls:false}).unwrap();
+    let mut state=model::State::live(owner,vec![]);
+    for n in 0..50 {state.chat_for(peer).messages.push(model::Message{id:format!("live-delete-{n:02}"),wire_id:format!("live-wire-{n}"),sender:owner.into(),own:true,delivery:"sent".into(),text:format!("Message{n}\n{}","A line\n".repeat(5)),timestamp:format!("2026-11-15T10:{n:02}:00Z"),..Default::default()});}
+    state.active=state.chat_for(peer).id.clone();ui.store.save(&state).unwrap();ui.activate_state(state);ui.window.set_default_size(1000,700);ui.window.present();
+    glib::MainContext::default().block_on(async {
+        settle(&ui).await;ui.queue_message_scroll(ScrollTarget::Bottom);settle(&ui).await;
+        for bottom in [true,false] {
+            if !bottom {let a=ui.scroll.vadjustment();a.set_value((a.upper()-a.page_size())*0.5);settle(&ui).await;}
+            let a=ui.scroll.vadjustment();let value=a.value();
+            let removed=if bottom {"live-delete-49".into()} else {ui.timeline.row_at_y(value as i32).unwrap().widget_name().to_string()};
+            let anchor=ui.bubbles.borrow().iter().filter(|(id,_)|**id!=removed).filter_map(|(id,w)|w.compute_bounds(&ui.timeline).map(|b|(id.clone(),b.y() as f64-value))).filter(|(_,y)|*y>=0.).min_by(|a,b|a.1.total_cmp(&b.1)).map(|v|v.0);
+            let before=anchor.as_ref().map(|id|position(&ui,id));
+            ui.delete_confirmation(vec![removed.clone()]);
+            let deadline=Instant::now()+Duration::from_secs(5);
+            while ui.window.visible_dialog().is_none(){assert!(Instant::now()<deadline);glib::timeout_future(Duration::from_millis(10)).await;}
+            let dialog=ui.window.visible_dialog().unwrap().downcast::<adw::AlertDialog>().unwrap();
+            dialog.emit_by_name::<()>("response",&[&"delete"]);dialog.close();
+            while ui.state.borrow().message(&removed).is_some(){assert!(Instant::now()<deadline);glib::timeout_future(Duration::from_millis(10)).await;}
+            settle(&ui).await;glib::timeout_future(Duration::from_millis(250)).await;
+            if bottom {assert!(ui.at_message_end(),"signed-in deletion must stay at latest message");}
+            else {let anchor=anchor.unwrap();assert!((position(&ui,&anchor)-before.unwrap()).abs()<3.,"signed-in delete moved anchor: before={before:?}, after={}",position(&ui,&anchor));}
+            assert!(ui.store.message(owner,peer,&removed).is_none());
+        }
+        ui.window.close();
+    });
+}

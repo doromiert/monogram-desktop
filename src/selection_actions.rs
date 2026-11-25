@@ -758,6 +758,10 @@ impl Ui {
                 }
             }
             if ui.state.borrow().account==prep.owner {
+                // Capture after the worker returns: the user may have scrolled while it ran.
+                let position=(ui.state.borrow().current().jid==prep.peer).then(||{
+                    ui.deletion_scroll_target(&rows.iter().map(|row|row.id.clone()).collect::<Vec<_>>())
+                });
                 let removed:HashSet<_>=rows.iter().map(|m|m.id.as_str()).collect();
                 let mut state=ui.state.borrow_mut();
                 let exists=if let Some(chat)=state.chats.iter_mut().find(|chat|chat.jid==prep.peer) {
@@ -766,8 +770,8 @@ impl Ui {
                 drop(state);
                 if !exists {ui.flush_local_retractions();return;}
                 ui.sync_latest_preview(&prep.owner,&prep.peer);
-                if ui.state.borrow().current().jid==prep.peer {
-                    ui.history_window.content_changed();ui.clear_selection();ui.render_messages(false);
+                if let Some(position)=position {
+                    ui.history_window.content_changed();ui.clear_selection();ui.render_messages_at(position);
                 }
                 ui.refresh_chats(None);
                 if request_own && prep.ineligible_own_count>0 {ui.notice("Deleted locally. Only eligible sent messages have removal requests; unsent or unsupported messages were removed locally.");}
