@@ -41,5 +41,5 @@ void main() {
             * (0.34 * shine + 0.055 * broadShine + 0.10 * fresnel);
     // Fade premultiplied RGB and coverage together, preserving the card beneath.
     float alpha = sampleColor.a * uDiamondAlpha;
-    fragmentColor = vec4(min(color, vec3(1.0)) * alpha, alpha);
+    fragmentColor = vec4(max(color, vec3(0.0)) * alpha, alpha);
 }

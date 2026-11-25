@@ -66,3 +66,19 @@ beta signer, identity and8 unchanged JNI libraries; its exact final APK runs
 62.90s with61 stable process samples and no crash. The phone was not accessed.
 
 Correction: do not force experimental GDK_DEBUG=color-mgmt globally. It changed the whole desktop window appearance on the user’s HDR display (bright emojis and desaturated UI). Original HDR data, decoding and color-tagged media remain preserved; physical HDR presentation is deferred until it can avoid changing ordinary UI colors. Users explicitly enabling experimental GTK color management retain their choice.
+
+## Wallet card
+
+The desktop 3D wallet card resolves its multisampled rendering to a separate
+RGBA16F texture with an explicit sRGB color state. Extended floating values retain
+reflection headroom; diffuse artwork keeps its existing grade. The texture stays
+on the GPU, with a fence for GDK and deferred resource deletion on its owning
+GTK thread. It bypasses GtkGLArea's 8-bit presentation buffer. This does not
+change window/display color negotiation or brighten other widgets.
+
+A native rendered-card test reads the actual float texture, verifies highlights
+above1 (observed1.2890625), and verifies the color state/precision. Its initial
+maximum UI gap was139ms. The card image orientation/text was inspected. These
+checks establish retained HDR data, not physical HDR output: process-wide GTK
+color-management remains disabled pending the media-only output follow-up.
+Android's separate wallet renderer has not been changed or verified for HDR.

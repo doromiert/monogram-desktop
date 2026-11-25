@@ -238,3 +238,11 @@ HDR delivery: desktop198869e / ZenPkgs230a045a installed by normal ZenOS rebuild
 
 - [x] Remove forced process-wide experimental color management after the user reported bright emojis and desaturated UI.
 - [ ] Reintroduce HDR screen output only after validating ordinary UI/emoji color appearance on the actual display; retaining HDR data/decoding is separate from this acceptance.
+
+
+## Panel shortcuts and HDR card (2026-11-25)
+- [x] Ctrl+E/S/G open emoji/sticker/GIF tabs, switch between them, and toggle the current tab closed; list them in shortcut help.
+- [x] Verify actual keyboard events while composer focused, including tab selection and closing.
+- [x] Retain card reflections above SDR white in a private RGBA16F GPU texture, with fenced rendering and context-safe cleanup; keep global HDR off. Native max1.2890625, initial gap139ms.
+- [ ] Publish/install the updated desktop package.
+- [ ] Physical media/card-only HDR output and Android wallet-renderer parity remain open; float data does not establish display luminance.

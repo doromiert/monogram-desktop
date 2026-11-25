@@ -3,6 +3,7 @@ use crate::widgets::*;
 use glam::{Mat4, Vec3, Vec4};
 use glow::HasContext;
 use gtk::{cairo, gdk, glib, prelude::*, subclass::prelude::*};
+use glib::translate::{ToGlibPtr, from_glib_full};
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -525,7 +526,7 @@ impl Renderer {
         gl.viewport(viewport[0], viewport[1], viewport[2], viewport[3]);
         Ok(())
     }
-    pub unsafe fn draw(&mut self, area: &gtk::GLArea, data: &CardData, x: f32, y: f32) {
+    pub unsafe fn draw(&mut self, area: &gtk::GLArea, data: &CardData, x: f32, y: f32) -> Result<gdk::Texture, String> {
         let gl = &self.gl;
         let mut viewport = [0; 4];
         gl.get_parameter_i32_slice(glow::VIEWPORT, &mut viewport);
@@ -539,7 +540,7 @@ impl Renderer {
         if self.size != (w, h) {
             let samples = gl.get_parameter_i32(glow::MAX_SAMPLES).min(4);
             for (buffer, format, attachment) in [
-                (self.color, glow::RGBA8, glow::COLOR_ATTACHMENT0),
+                (self.color, glow::RGBA16F, glow::COLOR_ATTACHMENT0),
                 (self.depth, glow::DEPTH_COMPONENT24, glow::DEPTH_ATTACHMENT),
             ] {
                 gl.bind_renderbuffer(glow::RENDERBUFFER, Some(buffer));
@@ -550,6 +551,10 @@ impl Renderer {
                     glow::RENDERBUFFER,
                     Some(buffer),
                 )
+            }
+            if gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, target);
+                return Err("High-precision card rendering is unavailable on this graphics driver".into());
             }
             self.size = (w, h)
         }
@@ -682,22 +687,48 @@ impl Renderer {
         gl.depth_mask(true);
         gl.disable(glow::BLEND);
         gl.bind_vertex_array(None);
+        // Resolve to a separately owned float texture: GtkGLArea's default buffer is 8-bit.
+        let texture = gl.create_texture()?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.tex_storage_2d(glow::TEXTURE_2D, 1, glow::RGBA16F, w, h);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+        let resolve = match gl.create_framebuffer() { Ok(frame) => frame, Err(error) => { gl.delete_texture(texture); return Err(error); } };
+        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(resolve));
+        gl.framebuffer_texture_2d(glow::DRAW_FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(texture), 0);
         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.ms));
-        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, target);
-        gl.blit_framebuffer(
-            0,
-            0,
-            w,
-            h,
-            0,
-            0,
-            w,
-            h,
-            glow::COLOR_BUFFER_BIT,
-            glow::NEAREST,
-        );
+        gl.blit_framebuffer(0, 0, w, h, 0, h, w, 0, glow::COLOR_BUFFER_BIT, glow::NEAREST);
         gl.bind_framebuffer(glow::FRAMEBUFFER, target);
+        gl.delete_framebuffer(resolve);
+        // The fence allows GDK's renderer to wait on the GPU without blocking the UI thread.
+        let fence = match gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) { Ok(fence) => fence, Err(error) => { gl.delete_texture(texture); return Err(error); } };
+        gl.flush();
+        let context = area.context().expect("realized card context");
+        // Retain the context until deletion runs on its creating GTK thread,
+        // including when the card is unrealized before GDK releases the texture.
+        let retained: *mut gdk::ffi::GdkGLContext = context.to_glib_full();
+        let context_address = retained as usize;
+        let fence_address = fence.0 as usize;
+        let output = gdk::GLTextureBuilder::new().set_context(Some(&context))
+            .set_id(texture.0.get()).set_width(w).set_height(h)
+            .set_format(gdk::MemoryFormat::R16g16b16a16FloatPremultiplied)
+            .set_color_state(&gdk::ColorState::srgb())
+            .set_sync(Some(fence.0.cast())).build_with_release_func(move || {
+                glib::idle_add_once(move || {
+                    {
+                        let context: gdk::GLContext = from_glib_full(context_address as *mut gdk::ffi::GdkGLContext);
+                        let previous = gdk::GLContext::current();
+                        context.make_current();
+                        let delete: unsafe extern "C" fn(i32, *const u32) = std::mem::transmute(proc_address("glDeleteTextures"));
+                        let delete_sync: unsafe extern "C" fn(*const c_void) = std::mem::transmute(proc_address("glDeleteSync"));
+                        delete(1, &texture.0.get());
+                        delete_sync(fence_address as *const c_void);
+                        if let Some(previous) = previous { previous.make_current(); } else { gdk::GLContext::clear_current(); }
+                    }
+                });
+            });
         self.rendered += 1;
+        Ok(output)
     }
 }
 impl Drop for Renderer {
@@ -727,6 +758,7 @@ mod imp {
     #[derive(Default)]
     pub struct CardArea {
         pub renderer: RefCell<Option<Renderer>>,
+        pub texture: RefCell<Option<gdk::Texture>>,
         pub data: RefCell<CardData>,
         pub rx: Cell<f32>,
         pub ry: Cell<f32>,
@@ -739,6 +771,12 @@ mod imp {
     }
     impl ObjectImpl for CardArea {}
     impl WidgetImpl for CardArea {
+        fn snapshot(&self, snapshot: &gtk::Snapshot) {
+            self.parent_snapshot(&gtk::Snapshot::new());
+            if let Some(texture) = self.texture.borrow().as_ref() {
+                snapshot.append_texture(texture, &gtk::graphene::Rect::new(0., 0., self.obj().width() as f32, self.obj().height() as f32));
+            }
+        }
         fn request_mode(&self) -> gtk::SizeRequestMode {
             gtk::SizeRequestMode::HeightForWidth
         }
@@ -777,6 +815,7 @@ mod imp {
         }
         fn unrealize(&self) {
             self.obj().make_current();
+            self.texture.borrow_mut().take();
             self.renderer.borrow_mut().take();
             self.parent_unrealize()
         }
@@ -785,12 +824,16 @@ mod imp {
         fn render(&self, _: &gdk::GLContext) -> glib::Propagation {
             if let Some(ref mut renderer) = *self.renderer.borrow_mut() {
                 unsafe {
-                    renderer.draw(
+                    let texture = renderer.draw(
                         self.obj().upcast_ref(),
                         &self.data.borrow(),
                         self.rx.get(),
                         self.ry.get(),
-                    )
+                    );
+                    match texture {
+                        Ok(texture) => { self.texture.replace(Some(texture)); }
+                        Err(error) => self.obj().set_error(Some(&glib::Error::new(gdk::GLError::NotAvailable, &error))),
+                    }
                 }
             }
             glib::Propagation::Stop
@@ -952,5 +995,46 @@ mod tests {
             }
         }
         assert_eq!(mesh("card_back.binobj").len() % 18, 0);
+    }
+}
+
+#[cfg(test)]
+mod hdr_card_tests {
+    use super::*;
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and OpenGL"]
+    fn card_retains_float_highlights_without_enabling_window_hdr() {
+        adw::init().unwrap();
+        let card = WalletCard::new("HDR fixture", "—", false, || {});
+        let window = gtk::Window::builder().default_width(600).default_height(420).child(&card.root).build();
+        let last = Rc::new(Cell::new(std::time::Instant::now()));
+        let maximum = Rc::new(Cell::new(std::time::Duration::ZERO));
+        let (tick, gap) = (last.clone(), maximum.clone());
+        let timer = glib::timeout_add_local(std::time::Duration::from_millis(8), move || {
+            gap.set(gap.get().max(tick.replace(std::time::Instant::now()).elapsed()));
+            glib::ControlFlow::Continue
+        });
+        window.present();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while card.area.imp().texture.borrow().is_none() && std::time::Instant::now() < until {
+            for _ in 0..100 { if !glib::MainContext::default().pending() { break; } glib::MainContext::default().iteration(false); }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        for _ in 0..100 { if !glib::MainContext::default().pending() { break; } glib::MainContext::default().iteration(false); }
+        timer.remove();
+        eprintln!("Card maximum UI gap: {}ms", maximum.get().as_millis());
+        assert!(maximum.get() < std::time::Duration::from_millis(400));
+        assert!(card.area.error().is_none(), "{:?}", card.area.error());
+        let texture = card.area.imp().texture.borrow().clone().expect("rendered card texture");
+        assert_eq!(texture.format(), gdk::MemoryFormat::R16g16b16a16FloatPremultiplied);
+        assert_eq!(texture.color_state(), gdk::ColorState::srgb());
+        let mut download = gdk::TextureDownloader::new(&texture);
+        download.set_format(gdk::MemoryFormat::R32g32b32a32FloatPremultiplied);
+        let (bytes, _) = download.download_bytes();
+        let max = bytes.chunks_exact(16).flat_map(|pixel| pixel[..12].chunks_exact(4)).map(|v|f32::from_ne_bytes(v.try_into().unwrap())).fold(0f32, f32::max);
+        assert!(max > 1., "card reflections were clipped to SDR: {max}");
+        eprintln!("Card float highlight maximum: {max}");
+        texture.save_to_png("/tmp/monogram-hdr-card.png").unwrap();
+        window.close();
     }
 }

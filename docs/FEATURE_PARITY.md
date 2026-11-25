@@ -410,3 +410,9 @@ native gain-map/HDR bitmap rendering with temporary window ownership, keeps HDR
 photo originals/MIME and avoids needless unedited HDR video conversion. Existing
 editors can produce SDR exports; HDR authoring and physical brightness validation
 remain explicit limits. No unencrypted protocol hints are introduced.
+
+Desktop keyboard additions: Ctrl+E emoji, Ctrl+S stickers, Ctrl+G GIFs, with
+open/switch/close semantics verified from the focused composer. Desktop wallet
+rendering now retains extended reflections in an independently tagged RGBA16F
+texture (see HDR_MEDIA.md); the Android wallet-renderer equivalent and physical
+media-only HDR output remain unverified gaps. No global HDR switch is enabled.

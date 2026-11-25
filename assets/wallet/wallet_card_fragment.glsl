@@ -1059,7 +1059,9 @@ void main() {
 
 #endif
 
-    color = acesToneMap(color * EXPOSURE);
+    // Keep the existing diffuse grade, with bounded HDR reflection headroom.
+    vec3 exposed = max(color * EXPOSURE, vec3(0.0));
+    color = acesToneMap(exposed) + min(max(exposed - vec3(1.0), vec3(0.0)), vec3(3.0)) * 0.25;
     color = pow(color, vec3(1.0 / 2.2));
     fragmentColor = vec4(color, 1.0);
 #endif
