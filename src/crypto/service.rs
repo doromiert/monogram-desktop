@@ -307,13 +307,17 @@ impl Worker {
         self.status(Some("Preparing OMEMO 2…".into()));
         if self.local.is_none() {
             self.local = Some(Local::open(&self.root, &self.owner, true).await?);
+            eprintln!("Monogram encryption: Classic OMEMO2 local keys loaded");
         }
         let local = self.local.as_mut().unwrap();
         let bundle = device::prepare(
             &mut local.engine.store,
             chrono::Utc::now().timestamp_millis() as u64,
         )?;
-        self.pep()?.initialize(&bundle).await?;
+        if let Err(error) = self.pep()?.initialize(&bundle).await {
+            self.retry().await;
+            return Err(error.into());
+        }
         self.recover().await?;
         self.ready = true;
         self.status(None);
@@ -871,7 +875,7 @@ impl Worker {
             let Some(history) = self.history()? else {
                 return Ok(vec![]);
             };
-            let mut query=history.db.prepare("SELECT body FROM messages WHERE account=? AND json_extract(body,'$.unavailable')=1 AND length(json_extract(body,'$.ciphertext'))>0 LIMIT 128")?;
+            let mut query=history.db.prepare("SELECT body FROM messages WHERE account=? AND json_extract(body,'$.unavailable')=1 AND json_extract(body,'$.encrypted')=1 AND COALESCE(json_extract(body,'$.encryption_mode'),'Omemo2') NOT IN ('Pq','Legacy') AND length(json_extract(body,'$.ciphertext'))>0 LIMIT 128")?;
             let rows = query
                 .query_map([&self.owner], |r| r.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -881,7 +885,10 @@ impl Worker {
                 .collect())
         })();
         if let Ok(rows) = rows {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
             for message in rows {
+                if message.mode() != crate::encryption_policy::Mode::Omemo2 { continue; }
+                if tokio::time::Instant::now() >= deadline { break; }
                 if let Ok(mut xml) = bundle::document(&message.ciphertext, 1024 * 1024) {
                     if xml.get_child("delay", "urn:xmpp:delay").is_none() {
                         xml.append_child(
@@ -896,7 +903,7 @@ impl Worker {
                         historical: true,
                         receipt_to: None,
                     };
-                    if let Err(error) = Box::pin(self.incoming(frame.clone())).await {
+                    if let Ok(Err(error)) = tokio::time::timeout_at(deadline, Box::pin(self.incoming(frame.clone()))).await {
                         self.placeholder(&frame, &error.to_string());
                     }
                 }
@@ -1489,6 +1496,33 @@ mod tests {
 #[cfg(test)]
 mod keyring_recovery_tests {
     use super::*;
+    #[test]
+    fn replay_never_reclassifies_other_encryption_protocols() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let owner="receiver@fixture.invalid";
+            let root=std::env::temp_dir().join(format!("monogram-replay-{}",crate::model::new_id()));
+            std::fs::create_dir_all(&root).unwrap();
+            let db=rusqlite::Connection::open(root.join("history.sqlite3")).unwrap();
+            db.execute_batch("CREATE TABLE messages(account TEXT,body TEXT)").unwrap();
+            let mut cases=vec![("pq",crate::encryption_policy::Mode::Pq);129];
+            cases.extend([("legacy",crate::encryption_policy::Mode::Legacy),("classic",crate::encryption_policy::Mode::Omemo2)]);
+            for (id,mode) in cases {
+                let xml=format!("<message xmlns='jabber:client' from='sender@fixture.invalid' to='{owner}' id='{id}'><encrypted xmlns='{NS}'><header sid='202'/><payload>AA==</payload></encrypted></message>");
+                let frame=Frame{xml:bundle::document(&xml,4096).unwrap(),archive:None,historical:true,receipt_to:None};
+                assert!(unavailable(owner,&frame,"fixture").is_some());
+                let mut message=Message{unavailable:true,ciphertext:xml,..Default::default()};
+                message.set_encryption(mode,String::new());
+                db.execute("INSERT INTO messages VALUES(?1,?2)",rusqlite::params![owner,serde_json::to_string(&message).unwrap()]).unwrap();
+            }
+            drop(db);
+            let (network,_)=channel::unbounded_channel();let (events,received)=mpsc::channel();
+            let mut worker=Worker{root:root.clone(),owner:owner.into(),generation:1,network,events,local:None,online:false,ready:false,reviews:BTreeMap::new()};
+            worker.retry().await;
+            let events=received.try_iter().collect::<Vec<_>>();assert_eq!(events.len(),1);
+            assert!(matches!(&events[0].2,BackendEvent::Message{message,..} if message.wire_id=="classic"));
+            std::fs::remove_dir_all(root).unwrap();
+        });
+    }
     #[test]
     #[ignore = "requires a private Secret Service fixture"]
     fn local_keyring_startup_failure_recovers_without_device_review() {

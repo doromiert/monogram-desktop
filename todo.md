@@ -256,3 +256,5 @@ Panel/card delivery: source7adae40/16584b7, ZenPkgs ca8c5fb0, normal ZenOS rebui
 - [x] Allow authenticated incoming decryption once local keys are loaded, independently of outgoing PEP publication readiness; replace misleading review-device placeholder.
 - [x] Verify private Secret Service stop/restart recovery in5.47s with the pinned profile unchanged, plus key-vault/lifecycle guards and68 crypto tests.
 - [ ] Publish/install and verify the managed build.
+
+Keyring recovery final checks:69 crypto unit tests +3 private Secret Service/lifecycle checks pass. Existing pinned identity survives provider stop/restart; recovery5.29s. Classic/Legacy can replay after publication failure; PQ retries a bounded cross-contact ciphertext batch. Classic replay excludes other protocols before the128-row limit, with a regression containing129 PQ placeholders ahead of a Classic message. Replay batches have2s deadlines.

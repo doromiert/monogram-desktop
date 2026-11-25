@@ -378,6 +378,7 @@ impl Worker {
     async fn local(&mut self, create: bool) -> Result<()> {
         if self.local.is_none() {
             self.local = Some(Device::open(&self.root, &self.owner, create).await?);
+            eprintln!("Monogram encryption: PQ OMEMO local keys loaded");
         }
         Ok(())
     }
@@ -391,11 +392,15 @@ impl Worker {
         self.status(Some("Preparing OMEMO 2…".into()));
         self.local(true).await?;
         let bundle = Bundle::from_parts(self.local.as_mut().unwrap().prepare()?)?;
-        self.pep()?.initialize(&bundle).await.map_err(pep_error)?;
+        if let Err(error) = self.pep()?.initialize(&bundle).await {
+            self.retry("").await;
+            return Err(pep_error(error));
+        }
         self.publication_pending = false;
         self.ready = true;
         self.status(None);
         self.recover().await?;
+        self.retry("").await;
         Ok(())
     }
     async fn devices(&mut self, peer: &str, force: bool) -> Result<BTreeSet<u32>> {
@@ -866,7 +871,7 @@ impl Worker {
             return;
         };
         let rows = (|| -> Result<Vec<Message>> {
-            let mut query = history.db.prepare("SELECT body FROM (SELECT body,timestamp FROM messages WHERE account=?1 AND (peer=?2 OR (?3=1 AND json_extract(body,'$.own')=1)) AND json_extract(body,'$.unavailable')=1 AND json_extract(body,'$.encryption_mode')='Pq' AND length(json_extract(body,'$.ciphertext'))>0 ORDER BY timestamp DESC LIMIT 128) ORDER BY timestamp ASC")?;
+            let mut query = history.db.prepare("SELECT body FROM (SELECT body,timestamp FROM messages WHERE account=?1 AND (?2='' OR peer=?2 OR (?3=1 AND json_extract(body,'$.own')=1)) AND json_extract(body,'$.unavailable')=1 AND json_extract(body,'$.encryption_mode')='Pq' AND length(json_extract(body,'$.ciphertext'))>0 ORDER BY timestamp DESC LIMIT 128) ORDER BY timestamp ASC")?;
             let bodies = query
                 .query_map(
                     rusqlite::params![self.owner, peer, peer == self.owner],
@@ -881,7 +886,9 @@ impl Worker {
         let Ok(messages) = rows else {
             return;
         };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         for message in messages {
+            if tokio::time::Instant::now() >= deadline { break; }
             let Ok(mut xml) = bundle::document(&message.ciphertext, wire::MAX_WIRE) else {
                 continue;
             };
@@ -911,7 +918,7 @@ impl Worker {
                     metadata,
                 }
             });
-            let _ = self.incoming(frame, room).await;
+            let _ = tokio::time::timeout_at(deadline, self.incoming(frame, room)).await;
         }
     }
     async fn process(&mut self, request: Request) {

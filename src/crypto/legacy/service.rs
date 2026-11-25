@@ -571,8 +571,12 @@ impl Worker {
                 )
                 .await?,
             );
+            eprintln!("Monogram encryption: Legacy OMEMO local keys loaded");
         }
-        self.local.as_mut().unwrap().initialize().await?;
+        if let Err(error) = self.local.as_mut().unwrap().initialize().await {
+            self.retry().await;
+            return Err(error);
+        }
         self.ready = true;
         self.status(None);
         self.recover().await?;
