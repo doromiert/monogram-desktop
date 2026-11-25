@@ -166,6 +166,8 @@ fn unavailable(owner: &str, frame: &Frame, text: &str) -> Option<BackendEvent> {
             .map(|(id, stamp)| (id.as_str(), stamp.as_str())),
     )?;
     message.text = text.into();
+    message.set_encryption(crate::encryption_policy::Mode::Omemo2, String::new());
+    message.unavailable = true;
     if let Some(header) = frame
         .xml
         .get_child("encrypted", NS)
@@ -875,9 +877,9 @@ impl Worker {
             let Some(history) = self.history()? else {
                 return Ok(vec![]);
             };
-            let mut query=history.db.prepare("SELECT body FROM (SELECT body,timestamp FROM messages WHERE account=? AND json_extract(body,'$.unavailable')=1 AND json_extract(body,'$.encrypted')=1 AND COALESCE(json_extract(body,'$.encryption_mode'),'Omemo2') NOT IN ('Pq','Legacy') AND length(json_extract(body,'$.ciphertext'))>0 ORDER BY timestamp DESC LIMIT 128) ORDER BY timestamp ASC")?;
+            let mut query=history.db.prepare("SELECT body FROM (SELECT body,timestamp FROM messages WHERE account=? AND json_extract(body,'$.unavailable')=1 AND COALESCE(json_extract(body,'$.encryption_mode'),'Omemo2') NOT IN ('Pq','Legacy') AND instr(json_extract(body,'$.ciphertext'),?2)>0 ORDER BY timestamp DESC LIMIT 128) ORDER BY timestamp ASC")?;
             let rows = query
-                .query_map([&self.owner], |r| r.get::<_, String>(0))?
+                .query_map([self.owner.as_str(), NS], |r| r.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             Ok(rows
                 .into_iter()
@@ -887,9 +889,9 @@ impl Worker {
         if let Ok(rows) = rows {
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
             for message in rows {
-                if message.mode() != crate::encryption_policy::Mode::Omemo2 { continue; }
                 if tokio::time::Instant::now() >= deadline { break; }
                 if let Ok(mut xml) = bundle::document(&message.ciphertext, 1024 * 1024) {
+                    if xml.get_child("encrypted", NS).is_none() { continue; }
                     if xml.get_child("delay", "urn:xmpp:delay").is_none() {
                         xml.append_child(
                             Element::builder("delay", "urn:xmpp:delay")
@@ -1512,6 +1514,7 @@ mod keyring_recovery_tests {
                 assert!(unavailable(owner,&frame,"fixture").is_some());
                 let mut message=Message{unavailable:true,ciphertext:xml,..Default::default()};
                 message.set_encryption(mode,String::new());
+                if id=="classic" {message.encrypted=false;message.encryption_mode=None;}
                 db.execute("INSERT INTO messages VALUES(?1,?2,'2026-11-25T00:00:00Z')",rusqlite::params![owner,serde_json::to_string(&message).unwrap()]).unwrap();
             }
             drop(db);
@@ -1519,7 +1522,7 @@ mod keyring_recovery_tests {
             let mut worker=Worker{root:root.clone(),owner:owner.into(),generation:1,network,events,local:None,online:false,ready:false,reviews:BTreeMap::new()};
             worker.retry().await;
             let events=received.try_iter().collect::<Vec<_>>();assert_eq!(events.len(),1);
-            assert!(matches!(&events[0].2,BackendEvent::Message{message,..} if message.wire_id=="classic"));
+            assert!(matches!(&events[0].2,BackendEvent::Message{message,..} if message.wire_id=="classic" && message.encrypted && message.unavailable && message.mode()==crate::encryption_policy::Mode::Omemo2));
             std::fs::remove_dir_all(root).unwrap();
         });
     }
