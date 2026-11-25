@@ -1878,7 +1878,9 @@ impl Ui {
             ),
             (
                 "View",
-                vec![("Media sidebar", "F9"), ("Preferences", "<Control>comma")],
+                vec![("Media sidebar", "F9"), ("Emoji panel", "<Control>e"),
+                    ("Sticker panel", "<Control>s"), ("GIF panel", "<Control>g"),
+                    ("Preferences", "<Control>comma")],
             ),
             (
                 "Messages",

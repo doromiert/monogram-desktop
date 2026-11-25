@@ -131,6 +131,19 @@ impl Ui {
         }
         self.update_mode();
     }
+    pub fn toggle_media_tab(&self, name: &str) {
+        let selected = self.media_mode.borrow().as_str() == "media"
+            && self.utility.shows_sidebar()
+            && self.media_stack.visible_child_name().as_deref() == Some(name);
+        self.media_tabs.set_active_name(Some(name));
+        if selected {
+            self.utility.set_show_sidebar(false);
+        } else {
+            if self.media_mode.borrow().as_str() != "media" || !self.utility.shows_sidebar() {
+                self.toggle_media();
+            }
+        }
+    }
     pub fn toggle_media(&self) {
         if self.media_mode.borrow().as_str() != "media" {
             self.utility.set_sidebar(gtk::Widget::NONE);
@@ -2519,5 +2532,33 @@ mod edit_button_tests {
         assert!(!edit_button_shown(true, Some(&media("s.webp", "image/webp", true))));
         assert!(!edit_button_shown(false, Some(&media("photo.jpg", "image/jpeg", false))));
         assert!(!edit_button_shown(false, None));
+    }
+}
+
+#[cfg(test)]
+mod panel_shortcut_tests {
+    use super::*;
+    #[gtk::test]
+    #[ignore = "requires a private GTK display, keyring and xdotool"]
+    fn media_keys_switch_and_toggle_from_the_composer() {
+        let app = adw::Application::builder().application_id("com.negzero.MediaKeysFixture")
+            .flags(gio::ApplicationFlags::NON_UNIQUE).build();
+        app.register(None::<&gio::Cancellable>).unwrap();
+        let ui = Ui::new(&app, true);
+        ui.window.set_title(Some("Monogram media keys fixture"));
+        ui.window.present();ui.composer.grab_focus();
+        let pump = || { let until=Instant::now()+Duration::from_millis(220);while Instant::now()<until {for _ in 0..100 {if !glib::MainContext::default().pending(){break;}glib::MainContext::default().iteration(false);}std::thread::sleep(Duration::from_millis(2));}};
+        pump();
+        let result=std::process::Command::new("xdotool").args(["search","--name","^Monogram media keys fixture$"]).output().unwrap();
+        let id=String::from_utf8(result.stdout).unwrap().lines().last().unwrap().to_owned();
+        assert!(std::process::Command::new("xdotool").args(["windowfocus","--sync",&id]).status().unwrap().success());
+        for (key, tab, shown) in [("ctrl+e","emoji",true),("ctrl+s","stickers",true),("ctrl+g","gifs",true),("ctrl+g","gifs",false),("ctrl+e","emoji",true)] {
+            ui.composer.grab_focus();
+            assert!(std::process::Command::new("xdotool").args(["key","--clearmodifiers",key]).status().unwrap().success());pump();
+            assert_eq!(ui.media_tabs.active_name().as_deref(),Some(tab),"{key}");
+            assert_eq!(ui.media_stack.visible_child_name().as_deref(),Some(tab),"{key}");
+            assert_eq!(ui.utility.shows_sidebar(),shown,"{key}");
+        }
+        ui.window.close();
     }
 }

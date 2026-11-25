@@ -909,6 +909,9 @@ impl Ui {
             s.search_toggle.set_active(!s.search_toggle.is_active())
         });
         self.action("media", |s| s.toggle_media());
+        self.action("emoji-panel", |s| s.toggle_media_tab("emoji"));
+        self.action("sticker-panel", |s| s.toggle_media_tab("stickers"));
+        self.action("gif-panel", |s| s.toggle_media_tab("gifs"));
         self.action("shared-media", |s| s.shared_media());
         self.action("new-chat", |s| s.new_chat());
         self.action("accounts", |s| s.accounts_dialog());
@@ -973,6 +976,9 @@ impl Ui {
             for (name, keys) in [
                 ("search", vec!["<Control>f"]),
                 ("media", vec!["F9"]),
+                ("emoji-panel", vec!["<Control>e"]),
+                ("sticker-panel", vec!["<Control>s"]),
+                ("gif-panel", vec!["<Control>g"]),
                 ("new-chat", vec!["<Control>n"]),
                 ("attach-file", vec!["<Control>o"]),
                 ("preferences", vec!["<Control>comma"]),
