@@ -398,3 +398,15 @@ Desktop upload HTTP deadlines now distinguish healthy body transmission from
 waiting for server acknowledgement; see [transfers](FILE_TRANSFERS.md). Android's
 HttpURLConnection transport already has separate body/response recovery and is
 unchanged. Local tests do not establish remote server/network reliability.
+
+
+### HDR media (2026-11-25)
+
+[HDR originals and playback](HDR_MEDIA.md) preserve embedded metadata through
+ordinary encrypted attachments on both clients. Desktop retains precision/CICP
+through decode, thumbnails and video posters, uses the upstream color-managed
+video sink, and reconstructs JPEG gain maps in a hardened helper. Android uses
+native gain-map/HDR bitmap rendering with temporary window ownership, keeps HDR
+photo originals/MIME and avoids needless unedited HDR video conversion. Existing
+editors can produce SDR exports; HDR authoring and physical brightness validation
+remain explicit limits. No unencrypted protocol hints are introduced.

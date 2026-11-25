@@ -7,4 +7,5 @@ export MONOGRAM_MATH_HELPER=/usr/lib/monogram-desktop/monogram-math-renderer
 export MONOGRAM_BWRAP=/usr/bin/bwrap
 export MONOGRAM_EPOXY_LIBRARY=libepoxy.so.0
 export GTK_USE_PORTAL=1
+export GDK_DEBUG="${GDK_DEBUG:+$GDK_DEBUG,}color-mgmt"
 exec /usr/lib/monogram-desktop/monogram-desktop "$@"

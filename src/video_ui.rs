@@ -1048,3 +1048,7 @@ mod video_audio_tests {
         });
     }
 }
+
+#[cfg(test)]
+#[path="../tests/hdr_video_native.rs"]
+mod hdr_video_native;

@@ -223,3 +223,13 @@
 - [x] Verify local HTTPS and native GTK regressions; publish source89084d9 and ZenPkgs994e5657, rebuild ZenOS normally and restart the verified managed package. Retain the separate startup/RoomRoster responsiveness follow-up.
 
 Verification:7 local HTTPS transport tests,2 pure feedback tests and6 native checks pass. Signed-in deletion2.46s; media feedback40ms/max UI gap255ms. Packaged smoke passes134ms initial feedback/354ms heartbeat; actual profile startup still has an810ms gap and remains open. No real-contact upload was sent for testing; user retry remains the acceptance check.
+
+
+## HDR media on both clients (2026-11-25)
+
+- [x] Desktop: preserve high-bit-depth color states through decode, resizing and cached previews; enable GTK Wayland color management and a color-managed video sink.
+- [x] Support Android Ultra HDR gain-map photos without reducing them to their SDR base image on upload or display; preserve original HDR video when no actual edits require conversion.
+- [x] Desktop: handle Ultra HDR gain maps in the existing sandbox boundary, preserving HDR10/HLG playback and safe SDR fallback.
+- [ ] Verify HDR/SDR decoding, warm caches, original transfer integrity, lifecycle/power restoration, responsive feedback and emulator startup; deliver a same-ID/same-key APK and updated desktop package.
+
+HDR verification: native JPEG gain-map/EXIF, PQ/HLG/P3 resize and warm-cache checks pass; actual playback delivers 10-bit PQ/HLG. Native upload preview feedback45ms/max gap240ms; SDR/alpha poster and avatar regressions pass. Android API35 retains gain maps and PQ RGBA_F16, all4 lifecycle/edit/config tests pass, and the final same-ID/same-signer APK survives62.90s with unchanged JNI. Hardware luminance and HDR edited exports remain unverified/unsupported as detailed in docs/HDR_MEDIA.md.

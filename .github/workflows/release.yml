@@ -51,8 +51,8 @@ jobs:
         run: |
           pacman -Syu --noconfirm --needed \
             base-devel git curl rust cargo pkgconf protobuf cmake ninja glib2-devel \
-            gtk4 libadwaita glycin glycin-gtk4 libclapper-gtk \
-            gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav \
+            gtk4 libadwaita glycin glycin-gtk4 libclapper-gtk libultrahdr \
+            gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav gst-plugin-gtk4 \
             libepoxy openssl sqlite protobuf-c bubblewrap fontconfig ttf-dejavu noto-fonts-emoji \
             wget xorg-server-xvfb strace patchelf binutils file zsync desktop-file-utils
 

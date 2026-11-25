@@ -137,15 +137,17 @@ fn execute(
     input: &[u8],
     cancel: &dyn Fn() -> bool,
 ) -> Result<Vec<u8>, Error> {
-    let (Some(helper), Some(bwrap)) = (helper(), bwrap()) else {
-        return Err(Error::Unavailable);
-    };
     let source = source.canonicalize().map_err(|_| Error::Unavailable)?;
     if !source.is_file() {
         return Err(Error::Unavailable);
     }
-    let plugins = plugin_files(&plugin_dirs());
-    let mut child = sandbox_command(&bwrap, &helper, &source, out_dir, &plugins, mode)
+    execute_input(crate::confined::Input::Path(&source),out_dir,mode,input,cancel)
+}
+
+fn execute_input(source:crate::confined::Input<'_>,out_dir:&Path,mode:&str,input:&[u8],cancel:&dyn Fn()->bool)->Result<Vec<u8>,Error> {
+    let (Some(helper),Some(bwrap))=(helper(),bwrap()) else{return Err(Error::Unavailable)};
+    let plugins = if mode=="hdr" {vec![]} else {plugin_files(&plugin_dirs())};
+    let mut child = crate::confined::sandbox_command(&bwrap,&helper,source,Some(out_dir),&plugins,&[mode])
         .spawn()
         .map_err(|_| Error::Unavailable)?;
     // A request with text bitmaps can be larger than the pipe buffer, so it is written from its own
@@ -173,6 +175,24 @@ fn execute(
         }
     }
     reader.join().map_err(|_| Error::Failed)
+}
+
+/// Reconstruct a JPEG gain map only inside the existing hardened helper.
+pub(crate) fn hdr_image(input:&crate::downloads::VerifiedFile,cancel:&gtk::gio::Cancellable)->Result<Option<(Vec<u8>,u32,u32)>,Error> {
+    use std::os::fd::AsRawFd;
+    use gtk::prelude::CancellableExt;
+    let scratch=tempdir()?;let input=input.reopen().map_err(|_|Error::Unavailable)?;
+    let reply=execute_input(crate::confined::Input::Fd(input.0.as_raw_fd()),&scratch.0,"hdr",b"",&||cancel.is_cancelled())?;
+    let reply:serde_json::Value=serde_json::from_slice(&reply).map_err(|_|Error::BadOutput)?;
+    if reply["hdr"].as_bool()==Some(false){return Ok(None);}
+    let (w,h)=(reply["width"].as_u64().ok_or(Error::BadOutput)?,reply["height"].as_u64().ok_or(Error::BadOutput)?);
+    if w==0 || h==0 || w>65535 || h>65535 || w*h>64000000 {return Err(Error::BadOutput);}
+    let path=scratch.0.join("result.png");let metadata=std::fs::symlink_metadata(&path).map_err(|_|Error::BadOutput)?;
+    if !metadata.is_file() || metadata.len()==0 || metadata.len()>128*1024*1024 {return Err(Error::BadOutput);}
+    let bytes=std::fs::read(path).map_err(|_|Error::BadOutput)?;
+    let (format,pw,ph)=media_authoring::sniff_image(&bytes[..bytes.len().min(media_authoring::SNIFF_BYTES)]).map_err(|_|Error::BadOutput)?;
+    if format!=Format::Png || pw>4096 || ph>4096 || pw==0 || ph==0 {return Err(Error::BadOutput);}
+    Ok(Some((bytes,w as u32,h as u32)))
 }
 
 /// Describe a picture without decoding it outside the sandbox.

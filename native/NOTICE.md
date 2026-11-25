@@ -76,3 +76,14 @@ its resources. Font-specific notices remain in `res/fonts/licences`,
 
 The test-only Java/JNI comparison sources were moved to the mobile repository's
 `tests/desktop-reference`; generated JSON reference vectors stay here.
+
+
+## HDR media
+
+`native/hdr_image.c` is original GPL-3.0-or-later adapter code using the system's
+[Google libultrahdr](https://github.com/google/libultrahdr)1.4 public API
+(Apache-2.0); no upstream implementation is copied into this repository. It runs
+only in the existing hardened media helper. The GTK GStreamer paintable sink is
+provided by upstream gst-plugins-rs (MPL-2.0). Native color API findings were
+independently verified against generated fixtures; Galeria's HDR audit informed
+the component choice, with no Galeria implementation copied here.

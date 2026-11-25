@@ -3,6 +3,7 @@
 use gtk::{cairo, gdk, gio, glib, glib::translate::*, prelude::*};
 use std::{ffi::CStr, os::fd::IntoRawFd, time::Duration};
 unsafe extern "C" {
+    fn monogram_texture_fit_color(texture:*mut gdk::ffi::GdkTexture, edge:u32)->*mut gdk::ffi::GdkTexture;
     fn monogram_verified_stream_new(fd: i32) -> *mut gio::ffi::GInputStream;
     fn monogram_image_open(
         stream: *mut gio::ffi::GInputStream,
@@ -53,6 +54,15 @@ impl Decoder {
         input: crate::downloads::VerifiedFile,
         cancel: &gio::Cancellable,
     ) -> Result<Self, &'static str> {
+        use std::io::Read;
+        let mut probe=input.reopen()?;let mut magic=[0;3];
+        if probe.0.read_exact(&mut magic).is_ok() && magic==[0xff,0xd8,0xff] {
+            if let Ok(Some((bytes,width,height)))=crate::media_author_run::hdr_image(&input,cancel) {
+                let mut image=Self::open_bytes(&glib::Bytes::from_owned(bytes),cancel)?;
+                image.mime="image/jpeg".into();image.width=width;image.height=height;
+                return Ok(image);
+            }
+        }
         Self::open_stream(&input_stream(input), cancel)
     }
     /// Only authenticated sticker attachments may interpret gzip as TGS.
@@ -233,16 +243,16 @@ fn cached_preview(
     let mut bytes = Vec::new();
     std::fs::File::open(path)
         .ok()?
-        .take(12 * 1024 * 1024 + 1)
+        .take(32 * 1024 * 1024 + 1)
         .read_to_end(&mut bytes)
         .ok()?;
-    if bytes.len() > 12 * 1024 * 1024 {
+    if bytes.len() > 32 * 1024 * 1024 {
         return None;
     }
     let split = bytes.iter().take(2048).position(|byte| *byte == b'\n')?;
     let metadata: PreviewMetadata = serde_json::from_slice(&bytes[..split]).ok()?;
     let png = &bytes[split + 1..];
-    if metadata.format != 2 || &metadata.source != source
+    if metadata.format != 3 || &metadata.source != source
         || metadata.width == 0
         || metadata.height == 0
         || !(metadata.mime.starts_with("image/")
@@ -278,7 +288,7 @@ fn save_preview(
     }
     let png = image.texture.save_to_png_bytes();
     let metadata = PreviewMetadata {
-        format: 2,
+        format: 3,
         motion: image.motion,
         source,
         mime: image.mime.clone(),
@@ -769,6 +779,11 @@ fn fit(texture: gdk::Texture, edge: u32) -> Result<gdk::Texture, &'static str> {
     if w <= edge as i32 && h <= edge as i32 {
         return Ok(texture);
     }
+    let floating=matches!(texture.format(),gdk::MemoryFormat::R16g16b16Float|gdk::MemoryFormat::R16g16b16a16Float|gdk::MemoryFormat::R16g16b16a16FloatPremultiplied|gdk::MemoryFormat::R32g32b32Float|gdk::MemoryFormat::R32g32b32a32Float|gdk::MemoryFormat::R32g32b32a32FloatPremultiplied);
+    if floating || texture.color_state() != unsafe { from_glib_none(gdk::ffi::gdk_color_state_get_srgb()) } {
+        let raw=unsafe{monogram_texture_fit_color(texture.to_glib_none().0,edge)};
+        return if raw.is_null(){Err("Image resize unavailable")}else{Ok(unsafe{from_glib_full(raw)})};
+    }
     let ratio = edge as f64 / w.max(h) as f64;
     let (nw, nh) = (
         (w as f64 * ratio).round().max(1.) as i32,
@@ -812,6 +827,7 @@ fn fit(texture: gdk::Texture, edge: u32) -> Result<gdk::Texture, &'static str> {
 
 #[cfg(test)]
 mod tests {
+    include!("../tests/hdr_media_native.rs");
     use super::*;
     use std::{
         fs,

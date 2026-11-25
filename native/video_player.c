@@ -199,25 +199,6 @@ static void monogram_video_class_init (MonogramVideoClass *klass) {
 }
 static void monogram_video_init (MonogramVideo *self) { self->gtk_volume = 1; }
 
-static GtkWidget *sink_widget (GstElement *sink) {
-  GtkWidget *widget = NULL;
-  if (g_object_class_find_property (G_OBJECT_GET_CLASS (sink), "widget"))
-    g_object_get (sink, "widget", &widget, NULL);
-  if (!widget && GST_IS_BIN (sink)) {
-    GstIterator *iterator = gst_bin_iterate_recurse (GST_BIN (sink));
-    GValue value = G_VALUE_INIT;
-    while (gst_iterator_next (iterator, &value) == GST_ITERATOR_OK) {
-      GstElement *child = g_value_get_object (&value);
-      if (g_object_class_find_property (G_OBJECT_GET_CLASS (child), "widget"))
-        g_object_get (child, "widget", &widget, NULL);
-      g_value_unset (&value);
-      if (widget) break;
-    }
-    gst_iterator_free (iterator);
-  }
-  return widget;
-}
-
 static void replay_clicked (GtkButton *button, MonogramVideo *self) {
   gtk_widget_set_visible (self->replay, FALSE);
   clapper_player_seek (self->player, 0);
@@ -300,17 +281,16 @@ GtkMediaStream *monogram_video_new (const char *uri, GtkWidget **controls, GtkWi
   gtk_widget_add_css_class (self->replay, "osd");
   gtk_widget_add_css_class (self->replay, "pill");
   g_signal_connect_object (self->replay, "clicked", G_CALLBACK (replay_clicked), self, 0);
-  /* Obtain only the sink picture, excluding Clapper's status/icon paintables. */
-  GstElement *sink = clapper_player_get_video_sink (self->player);
-  GtkWidget *picture = sink ? sink_widget (sink) : NULL;
-  if (picture && GTK_IS_PICTURE (picture)) {
-    GdkPaintable *paintable = gtk_picture_get_paintable (GTK_PICTURE (picture));
-    if (paintable) self->paintable = g_object_ref (paintable);
-    gtk_picture_set_can_shrink (GTK_PICTURE (picture), TRUE);
-    gtk_widget_set_opacity (picture, 0);
+  /* Clapper 0.10's own sink tags HDR pixels as sRGB. This upstream GTK
+   * sink retains negotiated high-bit-depth formats and CICP color states. */
+  GstElement *sink=gst_element_factory_make("gtk4paintablesink",NULL);
+  if (sink) {
+    gst_object_ref_sink(sink);
+    /* Its GTK paintable must be created on this UI thread, before preroll. */
+    g_object_get(sink,"paintable",&self->paintable,NULL);
+    clapper_player_set_video_sink(self->player,sink);
+    gst_object_unref(sink);
   }
-  g_clear_object (&picture);
-  g_clear_object (&sink);
   if (!self->paintable) {
     g_object_unref (self);
     return NULL;

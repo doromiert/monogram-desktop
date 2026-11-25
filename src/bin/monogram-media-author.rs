@@ -249,6 +249,7 @@ fn run(limits: &Limits) -> Result<(), i32> {
     Ok(())
 }
 
+unsafe extern "C" {fn monogram_hdr_image(width:*mut u32,height:*mut u32)->i32;}
 fn main() {
     const MIB: libc::rlim_t = 1024 * 1024;
     let limits = Limits::default();
@@ -264,6 +265,14 @@ fn main() {
     };
     if std::env::args().nth(1).as_deref() == Some("selftest") {
         std::process::exit(helper_hardening::selftest().err().unwrap_or(0));
+    }
+    if std::env::args().nth(1).as_deref()==Some("hdr") {
+        let (mut width,mut height)=(0,0);
+        let result=unsafe{monogram_hdr_image(&mut width,&mut height)};
+        if result==1 {println!("{{\"hdr\":true,\"width\":{width},\"height\":{height}}}");}
+        else if result==0 {println!("{{\"hdr\":false}}");}
+        else {std::process::exit(4);}
+        return;
     }
     if gst::init().is_err() {
         std::process::exit(5);

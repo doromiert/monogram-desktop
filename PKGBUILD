@@ -14,9 +14,9 @@ pkgdesc='Native GTK/libadwaita Monogram XMPP client'
 arch=('x86_64' 'aarch64')
 url='https://github.com/doromiert/monogram-desktop'
 license=('GPL-3.0-or-later' 'GPL-3.0-only' 'AGPL-3.0-only' 'LGPL-2.1-or-later' 'NAPL-1.1')
-depends=('gtk4>=1:4.20' 'libadwaita>=1:1.9' 'glycin-gtk4>=2.1' 'glycin'
+depends=('gtk4>=1:4.20' 'libadwaita>=1:1.9' 'glycin-gtk4>=2.1' 'glycin' 'libultrahdr'
          'libclapper-gtk>=0.10' 'gst-plugins-base' 'gst-plugins-good' 'gst-plugins-bad'
-         'gst-plugins-ugly' 'gst-libav' 'libepoxy' 'openssl' 'sqlite' 'protobuf-c'
+         'gst-plugins-ugly' 'gst-libav' 'gst-plugin-gtk4' 'libepoxy' 'openssl' 'sqlite' 'protobuf-c'
          'bubblewrap' 'fontconfig' 'ttf-dejavu' 'noto-fonts-emoji' 'pangomm-2.48' 'cairomm-1.16' 'tinyxml2')
 makedepends=('git' 'rust' 'cargo' 'pkgconf' 'protobuf' 'cmake' 'ninja' 'glib2-devel')
 optdepends=('keepassxc: fill and save XMPP passwords' 'xdg-desktop-portal: ask for permission to use the camera' 'gst-plugin-pipewire: take photos with the camera' 'gnome-keyring: Secret Service provider (or another compatible keyring)')

@@ -140,6 +140,13 @@ mod runtime_guard;
 mod widgets;
 thread_local! {static SMOKE_TICK: std::cell::Cell<std::time::Instant> = std::cell::Cell::new(std::time::Instant::now()); static SMOKE_MAX_GAP: std::cell::Cell<u128> = const{std::cell::Cell::new(0)};}
 fn main() -> gtk::glib::ExitCode {
+    // GTK 4.22 gates Wayland color negotiation behind this process-local opt-in.
+    // This is before GTK, the runtime, or worker threads have been started.
+    let debug=std::env::var("GDK_DEBUG").unwrap_or_default();
+    if !debug.split(',').any(|flag|flag=="color-mgmt") {
+        unsafe {std::env::set_var("GDK_DEBUG",if debug.is_empty(){"color-mgmt".into()}else{format!("{debug},color-mgmt")});}
+    }
+
     if std::env::args().any(|a|a=="--smoke-test") {
     gtk::glib::timeout_add_local(std::time::Duration::from_millis(4),||{let now=std::time::Instant::now();let gap=SMOKE_TICK.with(|t|now.duration_since(t.replace(now)).as_millis());SMOKE_MAX_GAP.with(|m|m.set(m.get().max(gap)));gtk::glib::ControlFlow::Continue});
     }

@@ -154,7 +154,7 @@ fn native_media_upload_previews_progress_cancel_and_retry() {
     let chat = ui.state.borrow_mut().chat_for(peer).id.clone();
     ui.select_chat(&chat);
     wait(|| !ui.history_window.busy());
-    let uri = gio::File::for_path(asset("icons/mobile-emoji/msg_emoji_cat.png"))
+    let uri = gio::File::for_path(asset("../tests/fixtures/hdr/gainmap.jpg"))
         .uri()
         .to_string();
     let photo = Message {
@@ -166,7 +166,7 @@ fn native_media_upload_previews_progress_cancel_and_retry() {
         time: "12:00".into(),
         upload: Some(Draft {
             uri: uri.clone(),
-            name: "photo.png".into(),
+            name: "photo.jpg".into(),
             error: None,
             sticker: false,
             voice: false,
@@ -228,6 +228,9 @@ fn native_media_upload_previews_progress_cancel_and_retry() {
         "upload feedback must be immediate"
     );
     wait(|| find::<AspectImage>(&bubble, &|p| p.paintable().is_some()).is_some());
+    let image = find::<AspectImage>(&bubble, &|p| p.paintable().is_some()).unwrap();
+    let texture = image.paintable().unwrap().downcast::<gtk::gdk::Texture>().unwrap();
+    assert_eq!(texture.color_state().create_cicp_params().unwrap().transfer_function(),16, "upload preview flattened the HDR original");
     wait(|| {
         find::<gtk::Label>(&bubble, &|l| {
             l.text().contains("512") && l.text().contains("1.0")
