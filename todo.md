@@ -220,6 +220,6 @@
 - [x] Add native Connecting/Reconnecting/Disconnected feedback with Reconnect, replace stale states even across dialogs, coalesce repeated error bursts and retain bounded sanitized diagnostics.
 - [x] Preserve the current bottom or surviving visible anchor through signed-in asynchronous confirmed deletion, including scrolling while preparation runs.
 - [x] Remove the download response-header deadline from uploads; retain bounded body-stall/acknowledgement recovery and show pending preflight as preparation rather than interruption.
-- [ ] Verify local HTTPS and native GTK regressions, publish/install the package and retain the existing startup/RoomRoster responsiveness follow-up.
+- [x] Verify local HTTPS and native GTK regressions; publish source89084d9 and ZenPkgs994e5657, rebuild ZenOS normally and restart the verified managed package. Retain the separate startup/RoomRoster responsiveness follow-up.
 
-Verification:7 local HTTPS transport tests,2 pure feedback tests and6 native checks pass. Signed-in deletion2.46s; media feedback40ms/max UI gap255ms. Publication/installation still pending.
+Verification:7 local HTTPS transport tests,2 pure feedback tests and6 native checks pass. Signed-in deletion2.46s; media feedback40ms/max UI gap255ms. Packaged smoke passes134ms initial feedback/354ms heartbeat; actual profile startup still has an810ms gap and remains open. No real-contact upload was sent for testing; user retry remains the acceptance check.
