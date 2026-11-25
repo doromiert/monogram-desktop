@@ -153,6 +153,18 @@ impl Uploads {
     }
 }
 impl Ui {
+    fn upload_idle_status(&self,id:&str)->(bool,String) {
+        let state=self.state.borrow();
+        let message=state.chats.iter().flat_map(|chat|chat.messages.iter()).find(|message|message.id==id);
+        let Some(message)=message else{return (false,"Upload interrupted. Retry to send.".into())};
+        if message.outbox_pending && matches!(message.delivery.as_str(),"queued"|"preparing-encryption") {
+            return (true,"Preparing encryption…".into());
+        }
+        let Some(draft)=message.upload.as_ref() else{return (false,"Sending message…".into())};
+        if let Some(error)=&draft.error {return (false,error.clone());}
+        if message.delivery=="sending" {return (true,"Preparing upload…".into());}
+        (false,"Upload interrupted. Retry to send.".into())
+    }
     pub fn release_upload_captions(self: &Rc<Self>) {
         if !self.online.get() || !self.legacy_crypto.borrow().ready {
             return;
@@ -763,7 +775,7 @@ impl Ui {
             }) else {
                 return;
             };
-            if ui.uploads.borrow().phase(&target).is_some() {
+            if ui.uploads.borrow().phase(&target).is_some() || ui.upload_idle_status(&target).0 {
                 ui.uploads.borrow_mut().cancel(&target);
                 ui.fail_upload(
                     &account,
@@ -774,7 +786,7 @@ impl Ui {
                 if ui.state.borrow().current().jid == destination {
                     ui.render_messages(false);
                 }
-            } else {
+            } else if !ui.retry_queued_message(&target) {
                 ui.start_upload(&destination, &target);
             }
         });
@@ -784,10 +796,6 @@ impl Ui {
         let disk = ring.downgrade();
         let running = Rc::new(Cell::new(false));
         let animate = Rc::new(Cell::new(false));
-        let fallback = draft
-            .error
-            .clone()
-            .unwrap_or_else(|| "Upload interrupted. Retry to send.".into());
         glib::timeout_add_local(Duration::from_millis(80), move || {
             let (Some(ui), Some(button), Some(label), Some(ring)) = (
                 weak.upgrade(),
@@ -801,7 +809,8 @@ impl Ui {
                 return glib::ControlFlow::Break;
             }
             let phase = ui.uploads.borrow().phase(&id);
-            let active = phase.is_some();
+            let (preparing,fallback)=ui.upload_idle_status(&id);
+            let active = phase.is_some() || preparing;
             let (progress, detail) = match phase {
                 Some(Phase::Uploading { bytes, total }) => (
                     Some((bytes as f64 / total.max(1) as f64).clamp(0., 1.)),
@@ -815,7 +824,7 @@ impl Ui {
                 Some(Phase::Discovering) => (None, "Finding upload service…".into()),
                 Some(Phase::Preparing) => (None, "Preparing upload…".into()),
                 Some(Phase::Reconnecting) => (None, "Reconnecting upload…".into()),
-                None => (Some(0.), fallback.clone()),
+                None => (if preparing {None} else {Some(0.)}, fallback),
             };
             button.set_icon_name(if active {
                 "process-stop-symbolic"
@@ -898,11 +907,11 @@ impl Ui {
             else {
                 return;
             };
-            let active = ui.uploads.borrow().phase(&target).is_some();
+            let active = ui.uploads.borrow().phase(&target).is_some() || ui.upload_idle_status(&target).0;
             if active {
                 ui.uploads.borrow_mut().cancel(&target);
                 ui.fail_upload(&account, &dest, &target, "Upload cancelled. Retry to send.");
-            } else {
+            } else if !ui.retry_queued_message(&target) {
                 ui.start_upload(&dest, &target);
             }
         });
@@ -920,8 +929,9 @@ impl Ui {
                 return glib::ControlFlow::Break;
             }
             let phase = ui.uploads.borrow().phase(&id);
-            progress.set_visible(phase.is_some());
-            action.set_label(if phase.is_some() { "Cancel" } else { "Retry" });
+            let (preparing,idle)=ui.upload_idle_status(&id);
+            progress.set_visible(phase.is_some() || preparing);
+            action.set_label(if phase.is_some() || preparing { "Cancel" } else { "Retry" });
             match phase {
                 Some(Phase::Discovering) => {
                     progress.pulse();
@@ -948,13 +958,8 @@ impl Ui {
                     ));
                 }
                 None => {
-                    let reason = ui
-                        .store
-                        .message(&owner, &peer, &id)
-                        .and_then(|m| m.upload)
-                        .and_then(|d| d.error)
-                        .unwrap_or_else(|| "Upload interrupted. Retry to send.".into());
-                    detail.set_text(&reason);
+                    if preparing {progress.pulse();}
+                    detail.set_text(&idle);
                 }
             }
             glib::ControlFlow::Continue

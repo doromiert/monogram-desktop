@@ -382,3 +382,19 @@ use captured author identity, including same-ID messages by different authors;
 stronger protected edits cannot be downgraded. Cached Legacy fallback bodies
 can recover their correction metadata on replay. Legacy media captions remain
 unsupported on both clients. See [message actions](MESSAGE_ACTIONS.md).
+
+
+### Desktop connection and upload feedback (2026-11-25)
+
+Desktop uses native connection toasts for connecting, reconnecting, disconnected
+and recovered states; fatal disconnection offers Reconnect. Replaced states do
+not replay after alerts close. Repeated errors are coalesced for30seconds and
+bounded, sanitized diagnostics make subsequently dismissed failures inspectable.
+The signed-in asynchronous deletion path retains the current viewport, matching
+the earlier demo-path behavior. These are desktop UI fixes; Android retains its
+existing native connection/deletion presentation.
+
+Desktop upload HTTP deadlines now distinguish healthy body transmission from
+waiting for server acknowledgement; see [transfers](FILE_TRANSFERS.md). Android's
+HttpURLConnection transport already has separate body/response recovery and is
+unchanged. Local tests do not establish remote server/network reliability.

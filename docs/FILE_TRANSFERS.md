@@ -16,6 +16,21 @@ never means the file must be selected again. The isolated native test
 `approved_pq_upload_submits_after_snapshot_staging_without_a_cached_choice`
 drives a completed upload through caching to a fake `Command::Send` receiver.
 
+Upload requests use the shared HTTPS security policy without the downloader's
+30-second response-header read deadline: in reqwest 0.13.5 that timer also runs
+while the request body is being sent. Uploads instead watch for 30 seconds with
+no body progress and start their separate acknowledgement deadline only after
+the body is consumed. A timeout never counts as server acceptance; the existing
+single fresh-slot retry and immutable snapshot remain. Local HTTPS regressions
+reproduce the former deadline on a healthy slow body and verify the upload
+client finishes it, plus missing acknowledgements, rejection and cancellation.
+Saved HTTP diagnostics distinguish body completion from a body stall.
+
+Pending encryption preflight and worker startup keep the final media-style tile
+in a cancellable preparation state. The absence of a worker alone is not an
+interruption. The tile follows current retry/error state instead of retaining an
+old error captured when the widget was built.
+
 Message Details shows local failure history before routine message metadata,
 including stage, UTC time, safe HTTP PUT status/transport category, encryption
 validation reason and XMPP condition/type/code when supplied. Up to eight records

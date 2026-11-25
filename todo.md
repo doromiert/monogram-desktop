@@ -213,3 +213,13 @@
 - [x] Remove the desktop text-edit refusal and retain Legacy encryption, following the existing mobile XEP-0308 path.
 - [x] Decode and repair Legacy direct/room corrections with captured room author identity and no encryption downgrade.
 - [x] Verify real Legacy cryptographic round trips, immutable history/replay, author collisions and encryption floors; 49 core checks (34 Legacy plus 15 projection/storage), native repeated inline Save and protection of a prior modern edit (1.87s) pass.
+
+
+## Connection feedback, deletion and video uploads (2026-11-25)
+
+- [x] Add native Connecting/Reconnecting/Disconnected feedback with Reconnect, replace stale states even across dialogs, coalesce repeated error bursts and retain bounded sanitized diagnostics.
+- [x] Preserve the current bottom or surviving visible anchor through signed-in asynchronous confirmed deletion, including scrolling while preparation runs.
+- [x] Remove the download response-header deadline from uploads; retain bounded body-stall/acknowledgement recovery and show pending preflight as preparation rather than interruption.
+- [ ] Verify local HTTPS and native GTK regressions, publish/install the package and retain the existing startup/RoomRoster responsiveness follow-up.
+
+Verification:7 local HTTPS transport tests,2 pure feedback tests and6 native checks pass. Signed-in deletion2.46s; media feedback40ms/max UI gap255ms. Publication/installation still pending.

@@ -609,8 +609,21 @@ async fn put_wire(
         .body(reqwest::Body::wrap_stream(stream))
         .send();
     tokio::pin!(response);
+    // Reqwest's response-header read timeout also runs while the body is being
+    // uploaded. Watch upload progress here; start the acknowledgement clock later.
+    let stalled=async {
+        let mut timer=tokio::time::interval(Duration::from_secs(1));
+        let mut previous=0;let mut changed=std::time::Instant::now();
+        loop {
+            timer.tick().await;
+            let bytes=match *job.phase.lock().unwrap(){Phase::Uploading{bytes,..}=>bytes,Phase::Waiting=>wire.size,_=>0};
+            if bytes!=previous {previous=bytes;changed=std::time::Instant::now();}
+            if job.cancel.load(Ordering::Acquire) || changed.elapsed()>=Duration::from_secs(30){break;}
+        }
+    };
     let result = tokio::select! {
         result = &mut response => Some(result),
+        _ = stalled => None,
         consumed = consumed => {
             if consumed.is_ok() {
                 tokio::time::timeout(ack_timeout, &mut response).await.ok()
@@ -621,7 +634,7 @@ async fn put_wire(
     *job.diagnostic.lock().unwrap() = Some(match &result {
         Some(Ok(response)) => format!("HTTP PUT status={}; body_complete={}", response.status().as_u16(), done.load(Ordering::Acquire)),
         Some(Err(error)) => {
-            let mut detail = format!("HTTP PUT response; timeout={}; connect={}; body={}; request={}", error.is_timeout(), error.is_connect(), error.is_body(), error.is_request());
+            let mut detail = format!("HTTP PUT response; timeout={}; connect={}; body={}; request={}; body_complete={}", error.is_timeout(), error.is_connect(), error.is_body(), error.is_request(),done.load(Ordering::Acquire));
             let mut cause = std::error::Error::source(error);
             for _ in 0..4 {
                 let Some(error) = cause else { break };
@@ -631,7 +644,8 @@ async fn put_wire(
             }
             detail
         },
-        None => "HTTP PUT acknowledgement deadline exceeded after body transmission".into(),
+        None if done.load(Ordering::Acquire) => "HTTP PUT acknowledgement deadline exceeded after body transmission".into(),
+        None => "HTTP PUT body stalled without upload progress".into(),
     });
     match result {
         Some(Ok(response)) if response.status().as_u16() == 409 => Err("Upload slot conflict"),
@@ -741,7 +755,7 @@ pub async fn run(
     if wire.size != wire_size {
         return Err("Upload size mismatch");
     }
-    let client = crate::downloads::client_builder()
+    let client = crate::downloads::https_client_builder()
         .build()
         .map_err(|_| "HTTPS unavailable")?;
     let slot = put_with_slots(
@@ -905,7 +919,7 @@ mod tests {
                     workers.push(std::thread::spawn(move||{
                         let Ok(mut socket)=tls.accept(socket) else{return;};let mut header=Vec::new();let mut byte=[0];
                         while header.len()<16384 && !header.ends_with(b"\r\n\r\n"){if socket.read(&mut byte).ok()!=Some(1){return;}header.push(byte[0]);}
-                        let header=String::from_utf8(header).unwrap();let length=header.lines().find_map(|line|line.to_ascii_lowercase().strip_prefix("content-length:").map(|v|v.trim().parse::<usize>().unwrap())).unwrap();if header.starts_with("PUT /slow-body "){std::thread::sleep(Duration::from_millis(250));}let mut body=vec![0;length];socket.read_exact(&mut body).unwrap();
+                        let header=String::from_utf8(header).unwrap();let length=header.lines().find_map(|line|line.to_ascii_lowercase().strip_prefix("content-length:").map(|v|v.trim().parse::<usize>().unwrap())).unwrap();if header.starts_with("PUT /slow-body "){std::thread::sleep(Duration::from_millis(250));}let mut body=vec![0;length];if socket.read_exact(&mut body).is_err(){return;}
                         let attempt={let mut requests=seen.lock().unwrap();requests.push((header.clone(),body));requests.len()};
                         if header.starts_with("PUT /reject "){let _=write!(socket,"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");}
                         else if header.starts_with("PUT /conflict-0 "){let _=write!(socket,"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");}
@@ -926,7 +940,7 @@ mod tests {
             }
         }
         fn client(&self) -> reqwest::Client {
-            crate::downloads::client_builder()
+            crate::downloads::https_client_builder()
                 .no_proxy()
                 .add_root_certificate(reqwest::Certificate::from_pem(&self.cert).unwrap())
                 .build()
@@ -1160,6 +1174,15 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
+        // The shared download timeout used to expire while a healthy upload
+        // was still producing its body, before the acknowledgement clock began.
+        {
+            let old=Https::new();
+            let client=crate::downloads::client_builder().no_proxy()
+                .add_root_certificate(reqwest::Certificate::from_pem(&old.cert).unwrap())
+                .read_timeout(Duration::from_millis(80)).build().unwrap();
+            assert_eq!(runtime.block_on(put_wire(&client,&old.slot("/slow-body"),"application/octet-stream",&wire,Arc::new(Job::default()),Duration::from_millis(80))),Err("Upload response interrupted"));
+        }
         let start = std::time::Instant::now();
         runtime
             .block_on(put_wire(

@@ -219,6 +219,9 @@ fn client() -> Result<reqwest::Client, &'static str> {
     client_builder().build().map_err(|_| "HTTPS unavailable")
 }
 pub(crate) fn client_builder() -> reqwest::ClientBuilder {
+    https_client_builder().read_timeout(Duration::from_secs(30))
+}
+pub(crate) fn https_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
@@ -228,7 +231,6 @@ pub(crate) fn client_builder() -> reqwest::ClientBuilder {
         .no_deflate()
         .no_zstd()
         .connect_timeout(Duration::from_secs(15))
-        .read_timeout(Duration::from_secs(30))
 }
 fn transfer_error(error: &reqwest::Error, body: bool) -> &'static str {
     // Match mobile's safe exception categories; private URLs and keys stay out of logs.

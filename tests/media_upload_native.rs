@@ -310,6 +310,23 @@ fn native_media_upload_previews_progress_cancel_and_retry() {
     let video_bubble = ui.bubbles.borrow()[&video.id].clone();
     wait(|| find::<AspectImage>(&video_bubble, &|p| p.paintable().is_some()).is_some());
     assert!(find::<gtk::Label>(&video_bubble, &|l| l.text().starts_with("Video caption")).is_some());
+    // Before a worker exists, queued encryption preparation is ongoing work,
+    // not an interrupted upload. A previous retry error must not leak back in.
+    {
+        let mut state=ui.state.borrow_mut();let message=&mut state.chat_for(peer).messages[0];
+        message.delivery="preparing-encryption".into();message.outbox_pending=true;
+        message.upload.as_mut().unwrap().error=Some("Previous attempt failed".into());
+    }
+    wait(||find::<gtk::Label>(&video_bubble,&|l|l.text()=="Preparing encryption…").is_some());
+    assert!(find::<gtk::Button>(&video_bubble,&|b|b.icon_name().as_deref()==Some("process-stop-symbolic")).is_some());
+    assert!(find::<gtk::Label>(&video_bubble,&|l|l.text().contains("interrupted") || l.text().contains("Previous attempt")).is_none());
+    // A current error is shown without retaining the old captured fallback.
+    {
+        let mut state=ui.state.borrow_mut();let message=&mut state.chat_for(peer).messages[0];
+        message.delivery="failed".into();message.outbox_pending=false;
+        message.upload.as_mut().unwrap().error=Some("Upload response interrupted".into());
+    }
+    wait(||find::<gtk::Label>(&video_bubble,&|l|l.text()=="Upload response interrupted").is_some());
     timer.remove();
     eprintln!(
         "media upload feedback={}ms maximum UI gap={}ms",
