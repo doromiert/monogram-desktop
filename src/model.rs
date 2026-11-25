@@ -127,7 +127,8 @@ impl Default for Message {
 impl Message {
     pub fn reply_preview(&self) -> String {
         let preview = self.preview();
-        let Some((end, _)) = preview.char_indices().nth(80) else {
+        // Leave visible truncation to the width-aware two-line widget.
+        let Some((end, _)) = preview.char_indices().nth(4096) else {
             return preview;
         };
         let prefix = &preview[..end];
@@ -142,7 +143,7 @@ impl Message {
         let word_end = preview[end..]
             .find(char::is_whitespace)
             .map_or(preview.len(), |index| end + index);
-        let long_word = preview[word_start..word_end].chars().count() > 80;
+        let long_word = preview[word_start..word_end].chars().count() > 4096;
         let keep = if at_boundary || long_word {
             prefix
         } else {
@@ -840,7 +841,9 @@ mod reply_preview_tests {
             ..Default::default()
         };
         assert_eq!(short.reply_preview(), "already complete");
-        let source = (0..30)
+        let medium = Message { text: "An ordinary quoted message with more than eighty characters should fill the available two lines instead of being shortened before layout.".into(), ..Default::default() };
+        assert_eq!(medium.reply_preview(), medium.text);
+        let source = (0..1200)
             .map(|i| format!("word{i}"))
             .collect::<Vec<_>>()
             .join(" ");
@@ -854,11 +857,11 @@ mod reply_preview_tests {
         assert!(source.starts_with(kept));
         assert!(source[kept.len()..].starts_with(' '));
         let long = Message {
-            text: "é".repeat(120),
+            text: "é".repeat(5000),
             ..Default::default()
         };
         let preview = long.reply_preview();
-        assert_eq!(preview.chars().count(), 81);
+        assert_eq!(preview.chars().count(), 4097);
         assert!(preview.ends_with('…'));
     }
 }

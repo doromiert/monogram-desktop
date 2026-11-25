@@ -261,3 +261,9 @@ Panel/card delivery: source7adae40/16584b7, ZenPkgs ca8c5fb0, normal ZenOS rebui
 Keyring recovery final checks:69 crypto unit tests +3 private Secret Service/lifecycle checks pass. Existing pinned identity survives provider stop/restart; recovery5.29s. Classic/Legacy can replay after publication failure; PQ retries a bounded cross-contact ciphertext batch. Classic replay excludes other protocols before the128-row limit, with a regression containing129 PQ placeholders ahead of a Classic message. Replay batches have2s deadlines.
 
 Encryption recovery delivery: source19570e6, ZenPkgs ed72e0d2, packagehkcxzgn02b3z0syhw8ghh1pab0w5nd2b. Packaged smoke352ms heartbeat; managed PID1175019 loaded all3 local identities and connected. Old Classic placeholders with missing mode/false encryption flags are classified from retained wire namespace. Read-only saved unavailable count452→437 after restart. No identity reset or manual device review. Normal system rebuild awaits concurrent HDR session activation release; fixed app is already running.
+
+## Reply preview cutoff (2026-11-25)
+- [x] Replace the pre-layout80-character quote cutoff with the existing4096-character shaping bound.
+- [x] Restore saved short text previews asynchronously from locally resolved reply targets, preserving spoiler handling and existing two-line layout.
+- [x] Verify normal/long Unicode quotes and native two-line rendering, including restoring a previously shortened quote (385px full row width).
+- [ ] Include the reply cutoff fix in the next installed desktop build.

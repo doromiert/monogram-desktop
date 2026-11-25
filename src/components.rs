@@ -1025,7 +1025,7 @@ glib::wrapper! {
 }
 
 /// The quoted text as one line: reply markers (`> `) dropped, line breaks turned into spaces.
-fn quote_preview(quote: &str) -> String {
+pub(crate) fn quote_preview(quote: &str) -> String {
     quote
         .lines()
         .map(|line| line.strip_prefix("> ").unwrap_or(line))

@@ -72,6 +72,15 @@ mod snippet_imp {
 }
 glib::wrapper! {pub struct Snippet(ObjectSubclass<snippet_imp::Snippet>) @extends gtk::Widget,@implements gtk::Accessible,gtk::Buildable,gtk::ConstraintTarget;}
 impl Snippet {
+    fn set_source(&self, source: &str) {
+        use gtk::subclass::prelude::*;
+        let preview = crate::components::quote_preview(source);
+        let mut preview: String = preview.chars().take(4096).collect();
+        if source.chars().count() > 4096 { preview.push_str("..."); }
+        self.imp().source.replace(preview);
+        self.imp().width.set(-1);
+        self.queue_resize();
+    }
     pub fn new(source:&str)->Self {
         use gtk::subclass::prelude::*;
         let widget:Self=glib::Object::new();
@@ -113,6 +122,7 @@ pub fn attach(ui: &Rc<Ui>, reply: &Message, row: &gtk::Grid) {
         (state.account.clone(), state.current().jid.clone())
     };
     let generation = ui.generation.get();
+    let row = row.downgrade();
     let target = reply.reply_id.clone();
     let author = reply.reply_to.clone();
     let ui = Rc::downgrade(ui);
@@ -142,9 +152,18 @@ pub fn attach(ui: &Rc<Ui>, reply: &Message, row: &gtk::Grid) {
         let Some(source) = cached else {
             return;
         };
-        let Some(file) = image(&source) else {
-            return;
-        };
+        if ui.generation.get() != generation
+            || ui.state.borrow().account != owner
+            || ui.state.borrow().current().jid != peer
+        { return; }
+        if !source.retracted && !source.unavailable
+            && let Some(snippet) = row.upgrade().and_then(|r| r.child_at(1, 0))
+                .and_then(|contents| contents.last_child())
+                .and_then(|w| w.downcast::<Snippet>().ok())
+        {
+            snippet.set_source(&source.preview());
+        }
+        let Some(file) = image(&source) else { return; };
         let (Some(slot), Some(picture), Some(pending)) =
             (slot.upgrade(), picture.upgrade(), pending.upgrade())
         else {
@@ -265,8 +284,10 @@ mod tests {
         let app=adw::Application::builder().application_id("com.negzero.MonogramQuoteWidth").flags(gio::ApplicationFlags::NON_UNIQUE).build();app.register(None::<&gio::Cancellable>).unwrap();
         let css=gtk::CssProvider::new();css.load_from_path(crate::widgets::asset("style.css"));gtk::style_context_add_provider_for_display(&gdk::Display::default().unwrap(),&css,gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
         let ui=Ui::new(&app,true);
-        let message=Message{id:"wide-reply".into(),text:"i did".into(),own:true,reply:"ralu · btw install github-cli (as known as gh)\nand let your GPT talk to claude in PR and describe the changes".into(),..Default::default()};
-        ui.state.borrow_mut().current_mut().group=false;ui.state.borrow_mut().current_mut().messages=vec![message];
+        let original=Message{id:"original-quote".into(),author:"ralu".into(),text:"btw install github-cli (as known as gh)\nand let your GPT talk to claude in PR and describe the changes".into(),..Default::default()};
+        let message=Message{id:"wide-reply".into(),text:"i did".into(),own:true,reply:"ralu · btw install github-cli...".into(),reply_id:original.id.clone(),..Default::default()};
+        ui.state.borrow_mut().account.clear();
+        ui.state.borrow_mut().current_mut().group=false;ui.state.borrow_mut().current_mut().messages=vec![original.clone(),message];
         ui.window.set_default_size(1400,800);ui.window.present();ui.render_messages(true);
         let context=glib::MainContext::default();let deadline=Instant::now()+Duration::from_millis(350);while Instant::now()<deadline{context.iteration(false);std::thread::sleep(Duration::from_millis(1));}
         fn quote(widget:&gtk::Widget)->Option<gtk::Label>{if let Some(label)=widget.downcast_ref::<gtk::Label>().filter(|w|w.has_css_class("reply-preview")){return Some(label.clone());}let mut c=widget.first_child();while let Some(w)=c{c=w.next_sibling();if let Some(found)=quote(&w){return Some(found);}}None}
@@ -274,6 +295,8 @@ mod tests {
         eprintln!("Reply quote: text={}px, content={}px, row={}px",snippet.width(),contents.width(),row.width());
         assert!(snippet.width()>=row.width()-2,"Quote left {}px unused",row.width()-snippet.width());
         assert!(snippet.layout().line_count()<=2);
+        assert_eq!(snippet.text(), elide(&snippet, &crate::components::quote_preview(&original.preview()), snippet.width()), "Saved short quotes must be restored from the original before layout");
+        assert!(snippet.text().chars().count()>80, "Quote still cut off at the old character limit");
         assert!(!snippet.text().contains('\n'),"Reply previews should flow across original line breaks, like mobile");
         let ordinary="hello world some fairly ordinary words that should be cut at a whole word instead of halfway through one";
         let clipped=elide(&snippet,ordinary,140);assert!(clipped.ends_with("..."));let prefix=clipped.strip_suffix("...").unwrap();assert!(ordinary[prefix.len()..].starts_with(char::is_whitespace),"Mid-word cut: {clipped}");
