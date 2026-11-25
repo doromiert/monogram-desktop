@@ -28,6 +28,7 @@ pub struct Ui {
     pub downloads: RefCell<crate::downloads::Downloads>,
     pub window: adw::ApplicationWindow,
     pub toast: adw::ToastOverlay,
+    pub(crate) feedback: RefCell<crate::toast_routing::Feedback>,
     pub overlay: gtk::Overlay,
     pub(crate) picker_zoom: Rc<crate::picker_zoom::PickerZoom>,
     pub(crate) send_animation: crate::send_animation::SendAnimation,
@@ -296,6 +297,7 @@ impl Ui {
             downloads: RefCell::new(Default::default()),
             window,
             toast,
+            feedback: RefCell::new(crate::toast_routing::Feedback::default()),
             overlay,
             send_animation,
             picker_zoom,
@@ -861,6 +863,8 @@ impl Ui {
     }
     /// Show a toast where it is visible: above any open dialog rather than behind it.
     pub fn show_toast(&self, toast: adw::Toast) {
+        let Some(dismissed)=self.feedback.borrow_mut().admit(toast.title().as_deref().unwrap_or_default(), toast.button_label().as_deref()) else {return};
+        toast.connect_dismissed(move |_|dismissed.set(true));
         crate::toast_routing::show(&self.window, &self.toast, toast);
     }
     pub(crate) fn queue_chat_refresh(self: &Rc<Self>) {
@@ -2584,6 +2588,7 @@ impl Ui {
                 error,
                 text,
             } => {
+                self.connection_feedback(owner,online,error,&text);
                 if !online {
                     self.encryption_checks.borrow_mut().clear();
                     self.update_encryption_check();
@@ -2647,7 +2652,6 @@ impl Ui {
                     self.refresh_live_stories(None);
                 } else if error {
                     self.login_secret.borrow_mut().take();
-                    self.notice(&text)
                 }
             }
             BackendEvent::Roster(update) => {

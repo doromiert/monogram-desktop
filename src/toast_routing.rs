@@ -6,7 +6,86 @@
 //! demand), the preferences dialog's native toast, and, for dialogs with fixed content such as
 //! alerts, the moment the dialog closes.
 use adw::prelude::*;
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::{Cell,RefCell}, collections::VecDeque, rc::Rc, time::{Duration,Instant}};
+
+#[derive(Clone,Copy,Default,PartialEq,Eq,Debug)]
+enum ConnectionState { #[default] Idle, Connecting, Online, Reconnecting, Disconnected }
+
+struct Notice {
+    key: [u8;32],
+    when: Instant,
+    dismissed: Rc<Cell<bool>>,
+}
+#[derive(Default)]
+pub(crate) struct Feedback {
+    recent: VecDeque<Notice>,
+    owner: String,
+    state: ConnectionState,
+    was_online: bool,
+    connection: Option<adw::Toast>,
+}
+fn error_notice(title:&str)->bool {
+    let title=title.to_lowercase();
+    ["could not","cannot","failed","unavailable","unsupported","not ready","not sent","error","invalid","denied","forbidden","reconnect","disconnected"].iter().any(|word|title.contains(word))
+}
+pub(crate) fn diagnostic(title:&str)->String {
+    crate::message_failures::safe_log_detail(title)
+}
+impl Feedback {
+    pub(crate) fn admit(&mut self,title:&str,button:Option<&str>)->Option<Rc<Cell<bool>>> {
+        let now=Instant::now();let error=error_notice(title);let key=openssl::sha::sha256(format!("{title}\0{}",button.unwrap_or_default()).as_bytes());
+        self.recent.retain(|notice|now.duration_since(notice.when)<Duration::from_secs(30));
+        if self.recent.iter().any(|notice|notice.key==key && (error || !notice.dismissed.get())) {return None;}
+        self.recent.retain(|notice|notice.key!=key);
+        if self.recent.len()>=64 {self.recent.pop_front();}
+        let dismissed=Rc::new(Cell::new(false));
+        self.recent.push_back(Notice{key,when:now,dismissed:dismissed.clone()});
+        if error {eprintln!("Monogram toast: {}",diagnostic(title));}
+        Some(dismissed)
+    }
+    fn transition(&mut self,owner:&str,online:bool,error:bool,text:&str)->bool {
+        if self.owner!=owner {
+            self.owner=owner.into();self.state=ConnectionState::Idle;self.was_online=false;
+        }
+        let next=if online {ConnectionState::Online} else if error {ConnectionState::Disconnected}
+            else if self.was_online || text.contains("Reconnecting") {ConnectionState::Reconnecting} else {ConnectionState::Connecting};
+        self.was_online|=online;
+        if next==self.state {return false;}
+        self.state=next;true
+    }
+}
+
+impl crate::ui::Ui {
+    pub(crate) fn connection_feedback(self:&Rc<Self>,owner:&str,online:bool,error:bool,text:&str) {
+        let (previous,state)={
+            let mut feedback=self.feedback.borrow_mut();
+            if !feedback.transition(owner,online,error,text){return;}
+            (feedback.connection.take(),feedback.state)
+        };
+        if let Some(previous)=previous {previous.dismiss();}
+        let title=match state {
+            ConnectionState::Connecting=>"Connecting…".into(),
+            ConnectionState::Reconnecting=>"Disconnected. Reconnecting…".into(),
+            ConnectionState::Disconnected=>format!("Disconnected. {text}"),
+            ConnectionState::Online=>"Connected".into(),
+            ConnectionState::Idle=>return,
+        };
+        eprintln!("Monogram connection: {}",diagnostic(&title));
+        let toast=adw::Toast::builder().title(title).timeout(if online {3} else {0}).priority(adw::ToastPriority::High).build();
+        if state==ConnectionState::Disconnected {
+            toast.set_button_label(Some("Reconnect"));
+            let weak=Rc::downgrade(self);let owner=owner.to_owned();let generation=self.generation.get();
+            toast.connect_button_clicked(move |_|{
+                if let Some(ui)=weak.upgrade().filter(|ui|ui.generation.get()==generation && ui.state.borrow().account==owner && !ui.online.get()) {ui.reconnect_saved();}
+            });
+        }
+        self.feedback.borrow_mut().connection=Some(toast.clone());
+        let weak=Rc::downgrade(self);let current=toast.downgrade();
+        show_when(&self.window,&self.toast,toast,Rc::new(move ||{
+            weak.upgrade().is_some_and(|ui|ui.feedback.borrow().connection.as_ref()==current.upgrade().as_ref())
+        }));
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Route {
@@ -64,6 +143,11 @@ pub fn plain_text(toast: &adw::Toast) {
 }
 
 pub fn show(window: &adw::ApplicationWindow, fallback: &adw::ToastOverlay, toast: adw::Toast) {
+    show_when(window, fallback, toast, Rc::new(||true));
+}
+
+fn show_when(window: &adw::ApplicationWindow, fallback: &adw::ToastOverlay, toast: adw::Toast, current: Rc<dyn Fn()->bool>) {
+    if !current(){return;}
     plain_text(&toast);
     let dialog = window.visible_dialog();
     match route(dialog.as_ref()) {
@@ -75,14 +159,14 @@ pub fn show(window: &adw::ApplicationWindow, fallback: &adw::ToastOverlay, toast
         }
         Route::Overlay => match dialog.as_ref().and_then(overlay_in) {
             Some(overlay) => overlay.add_toast(toast),
-            None => defer(window, fallback, dialog.as_ref(), toast),
+            None => defer(window, fallback, dialog.as_ref(), toast, current),
         },
-        Route::AfterClose => defer(window, fallback, dialog.as_ref(), toast),
+        Route::AfterClose => defer(window, fallback, dialog.as_ref(), toast, current),
     }
 }
 
 /// Show `toast` again once `dialog` has closed (through `show`, in case another dialog opened).
-fn defer(window: &adw::ApplicationWindow, fallback: &adw::ToastOverlay, dialog: Option<&adw::Dialog>, toast: adw::Toast) {
+fn defer(window: &adw::ApplicationWindow, fallback: &adw::ToastOverlay, dialog: Option<&adw::Dialog>, toast: adw::Toast, current: Rc<dyn Fn()->bool>) {
     let Some(dialog) = dialog else {
         fallback.add_toast(toast);
         return;
@@ -91,7 +175,7 @@ fn defer(window: &adw::ApplicationWindow, fallback: &adw::ToastOverlay, dialog: 
     let (window, fallback) = (window.downgrade(), fallback.downgrade());
     dialog.connect_closed(move |_| {
         if let (Some(toast), Some(window), Some(fallback)) = (pending.borrow_mut().take(), window.upgrade(), fallback.upgrade()) {
-            show(&window, &fallback, toast);
+            show_when(&window, &fallback, toast, current.clone());
         }
     });
 }
@@ -99,6 +183,34 @@ fn defer(window: &adw::ApplicationWindow, fallback: &adw::ToastOverlay, dialog: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_bursts_are_bounded_and_private_details_are_not_logged() {
+        let mut feedback=Feedback::default();
+        let dismissed=feedback.admit("Server history unavailable",None).unwrap();dismissed.set(true);
+        assert!(feedback.admit("Server history unavailable",None).is_none());
+        assert!(feedback.admit("Upload failed",None).is_some(),"different failures stay visible");
+        let dismissed=feedback.admit("Copied",None).unwrap();dismissed.set(true);
+        assert!(feedback.admit("Copied",None).is_some(),"another completed user action still gets feedback");
+        for n in 0..100 {feedback.admit(&format!("error {n}"),None);}
+        assert_eq!(feedback.recent.len(),64);
+        let safe=diagnostic("HTTP 403 forbidden person@private.invalid /private/file https://private.invalid/object?token=hidden Authorization: Bearer hidden");
+        assert!(safe.contains("HTTP 403 forbidden"));assert!(!safe.contains("private")&&!safe.contains("hidden"));
+        assert!(diagnostic(&"error ".repeat(1000)).chars().count()<=512);
+    }
+
+    #[test]
+    fn connection_transitions_do_not_repeat_and_reset_for_another_account() {
+        let mut feedback=Feedback::default();
+        assert!(feedback.transition("one",false,false,"Connecting…"));assert_eq!(feedback.state,ConnectionState::Connecting);
+        assert!(!feedback.transition("one",false,false,"Connecting…"));
+        assert!(feedback.transition("one",true,false,"Connected"));
+        assert!(feedback.transition("one",false,false,"Disconnected. Reconnecting…"));assert_eq!(feedback.state,ConnectionState::Reconnecting);
+        assert!(!feedback.transition("one",false,false,"Disconnected. Reconnecting…"));
+        assert!(feedback.transition("one",false,true,"Timed out"));assert_eq!(feedback.state,ConnectionState::Disconnected);
+        assert!(feedback.transition("one",true,false,"Connected"));
+        assert!(feedback.transition("two",false,false,"Connecting…"));assert_eq!(feedback.state,ConnectionState::Connecting);
+    }
 
     #[gtk::test]
     #[ignore = "requires a native display"]
@@ -129,6 +241,35 @@ mod tests {
             while context.iteration(false) {}
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
+    }
+
+    #[gtk::test]
+    #[ignore = "requires a private GTK display and D-Bus"]
+    fn connection_feedback_replaces_stale_states_even_after_an_alert() {
+        adw::init().unwrap();
+        let app=adw::Application::builder().application_id("com.negzero.ConnectionToastFixture")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE).build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let ui=crate::ui::Ui::new(&app,true);ui.window.present();settle(300);
+        let owner=ui.state.borrow().account.clone();
+        ui.connection_feedback(&owner,true,false,"Connected");settle(150);
+        ui.connection_feedback(&owner,false,false,"Reconnecting…");settle(250);
+        assert!(shows_text(ui.toast.upcast_ref(),"Disconnected. Reconnecting…"));
+        let reconnecting=ui.feedback.borrow().connection.clone().unwrap();
+        assert_eq!(reconnecting.timeout(),0);assert_eq!(reconnecting.priority(),adw::ToastPriority::High);
+        ui.connection_feedback(&owner,false,false,"Reconnecting…");
+        assert_eq!(ui.feedback.borrow().connection.as_ref(),Some(&reconnecting));
+        ui.connection_feedback(&owner,false,true,"Sign in again");settle(250);
+        assert!(find_button(ui.toast.upcast_ref(),"Reconnect").is_some());
+        let alert=adw::AlertDialog::new(Some("Confirm"),Some("Fixture"));
+        alert.add_response("ok","OK");alert.present(Some(&ui.window));settle(150);
+        ui.connection_feedback(&owner,false,false,"Reconnecting…");
+        ui.connection_feedback(&owner,true,false,"Connected");
+        alert.force_close();settle(300);
+        assert!(shows_text(ui.toast.upcast_ref(),"Connected"));
+        assert!(!shows_text(ui.toast.upcast_ref(),"Disconnected. Reconnecting…"));
+        assert_eq!(ui.feedback.borrow().connection.as_ref().unwrap().timeout(),3);
+        ui.window.close();
     }
 
     /// The real thing: a toast raised through `Ui::notice` while a dialog covers the window must

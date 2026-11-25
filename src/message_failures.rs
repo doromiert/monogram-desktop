@@ -8,6 +8,12 @@ pub struct Failure {
     pub detail: String,
 }
 
+pub(crate) fn safe_log_detail(value:&str)->String {
+    safe_detail(value).split_whitespace().map(|word|{
+        if word.contains('@') {"[address]"} else if word.contains('/') || word.starts_with('~') {"[path]"} else {word}
+    }).collect::<Vec<_>>().join(" ").chars().take(512).collect()
+}
+
 pub fn safe_detail(value: &str) -> String {
     let bounded: String = value.chars().take(4096).collect();
     let visible = crate::text_safety::visible(&bounded, 2048);
