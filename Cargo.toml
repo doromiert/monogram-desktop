@@ -17,6 +17,10 @@ hdr = []
 name = "transport"
 path = "tests/transport.rs"
 
+[[test]]
+name = "system_dependencies"
+path = "tests/system_dependencies.rs"
+
 [dependencies]
 monogram-sync = {path="sync-core"}
 quircs = "=0.10.3"
