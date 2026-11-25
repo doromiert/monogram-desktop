@@ -1149,7 +1149,7 @@ impl Worker {
             let Some(history) = self.history()? else {
                 return Ok(vec![]);
             };
-            let mut query = history.db.prepare("SELECT body FROM messages WHERE account=? AND json_extract(body,'$.unavailable')=1 AND instr(json_extract(body,'$.ciphertext'),?)>0 LIMIT 128")?;
+            let mut query = history.db.prepare("SELECT body FROM (SELECT body,timestamp FROM messages WHERE account=? AND json_extract(body,'$.unavailable')=1 AND instr(json_extract(body,'$.ciphertext'),?)>0 ORDER BY timestamp DESC LIMIT 128) ORDER BY timestamp ASC")?;
             let rows = query
                 .query_map([&self.owner, NS], |r| r.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;

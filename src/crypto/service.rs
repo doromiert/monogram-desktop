@@ -875,7 +875,7 @@ impl Worker {
             let Some(history) = self.history()? else {
                 return Ok(vec![]);
             };
-            let mut query=history.db.prepare("SELECT body FROM messages WHERE account=? AND json_extract(body,'$.unavailable')=1 AND json_extract(body,'$.encrypted')=1 AND COALESCE(json_extract(body,'$.encryption_mode'),'Omemo2') NOT IN ('Pq','Legacy') AND length(json_extract(body,'$.ciphertext'))>0 LIMIT 128")?;
+            let mut query=history.db.prepare("SELECT body FROM (SELECT body,timestamp FROM messages WHERE account=? AND json_extract(body,'$.unavailable')=1 AND json_extract(body,'$.encrypted')=1 AND COALESCE(json_extract(body,'$.encryption_mode'),'Omemo2') NOT IN ('Pq','Legacy') AND length(json_extract(body,'$.ciphertext'))>0 ORDER BY timestamp DESC LIMIT 128) ORDER BY timestamp ASC")?;
             let rows = query
                 .query_map([&self.owner], |r| r.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1503,7 +1503,7 @@ mod keyring_recovery_tests {
             let root=std::env::temp_dir().join(format!("monogram-replay-{}",crate::model::new_id()));
             std::fs::create_dir_all(&root).unwrap();
             let db=rusqlite::Connection::open(root.join("history.sqlite3")).unwrap();
-            db.execute_batch("CREATE TABLE messages(account TEXT,body TEXT)").unwrap();
+            db.execute_batch("CREATE TABLE messages(account TEXT,body TEXT,timestamp TEXT)").unwrap();
             let mut cases=vec![("pq",crate::encryption_policy::Mode::Pq);129];
             cases.extend([("legacy",crate::encryption_policy::Mode::Legacy),("classic",crate::encryption_policy::Mode::Omemo2)]);
             for (id,mode) in cases {
@@ -1512,7 +1512,7 @@ mod keyring_recovery_tests {
                 assert!(unavailable(owner,&frame,"fixture").is_some());
                 let mut message=Message{unavailable:true,ciphertext:xml,..Default::default()};
                 message.set_encryption(mode,String::new());
-                db.execute("INSERT INTO messages VALUES(?1,?2)",rusqlite::params![owner,serde_json::to_string(&message).unwrap()]).unwrap();
+                db.execute("INSERT INTO messages VALUES(?1,?2,'2026-11-25T00:00:00Z')",rusqlite::params![owner,serde_json::to_string(&message).unwrap()]).unwrap();
             }
             drop(db);
             let (network,_)=channel::unbounded_channel();let (events,received)=mpsc::channel();
