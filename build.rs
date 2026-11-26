@@ -90,8 +90,8 @@ fn main() {
     let hdr = std::env::var_os("CARGO_FEATURE_HDR").is_some().then(|| {
         match pkg_config::Config::new().cargo_metadata(false).atleast_version("1.4").probe("libuhdr") {
             Ok(library) => Some(library),
-            Err(error) => {
-                println!("cargo:warning=building without HDR still images: libultrahdr 1.4 not found ({error})");
+            Err(_) => {
+                println!("cargo:warning=building without HDR still images: libultrahdr 1.4 not found (pass --no-default-features to silence this warning)");
                 None
             }
         }
