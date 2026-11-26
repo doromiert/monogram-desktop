@@ -267,3 +267,9 @@ Encryption recovery delivery: source19570e6, ZenPkgs ed72e0d2, packagehkcxzgn02b
 - [x] Restore saved short text previews asynchronously from locally resolved reply targets, preserving spoiler handling and existing two-line layout.
 - [x] Verify normal/long Unicode quotes and native two-line rendering, including restoring a previously shortened quote (385px full row width).
 - [x] Install the reply cutoff fix through ZenPkgs a357500d and normal ZenOS rebuild (exit0); restart managed Monogram and verify Connected/all3 local identities. Packaged smoke339ms.
+
+## Sync error diagnostics (2026-11-26)
+- [x] Confirm running desktop matches the latest functional source; observed failure is local rusqlite, not proven version incompatibility.
+- [x] Replace blanket upgrade advice with safe cause-specific SQLite/retry messages; log numeric SQLite codes without SQL, paths or account data.
+- [x] Five focused sync/error/privacy tests pass; production history quick_check passes. Existing log lacks the specific SQLite code.
+- [ ] Include corrected diagnostics in an installed build and capture the next sync failure code if it recurs.

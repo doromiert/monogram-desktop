@@ -27,13 +27,25 @@ type Result<T> = std::result::Result<T, String>;
 fn error(reason: impl std::fmt::Debug + 'static) -> String {
     // Types identify the failing layer without logging JSON, keys or passwords.
     eprintln!("Monogram sync settings operation failed: {}",std::any::type_name_of_val(&reason));
+    if let Some(rusqlite::Error::SqliteFailure(code, _)) = (&reason as &dyn std::any::Any).downcast_ref::<rusqlite::Error>() {
+        eprintln!("Monogram sync SQLite failure: {:?}, extended code {}", code.code, code.extended_code);
+    }
     user_message(&reason)
 }
 /// The text shown in the sync status row. Only `packs::Error` is expanded: it holds a fixed
 /// `&'static str` (its `From` impls drop io/zip/json sources), so it cannot carry paths, JIDs,
-/// names or JSON. Every other error type may carry user data and stays generic.
+/// names or JSON. SQLite codes are safe; never show their optional SQL/error text.
 fn user_message(reason: &dyn std::any::Any) -> String {
-    const ADVICE: &str = "Update Monogram on both devices, then retry.";
+    const ADVICE: &str = "Sync will retry automatically.";
+    if let Some(database) = reason.downcast_ref::<rusqlite::Error>() {
+        use rusqlite::ErrorCode;
+        return match database.sqlite_error_code() {
+            Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => "Device sync is waiting for the local database. It will retry automatically.",
+            Some(ErrorCode::DiskFull) => "Device sync could not save settings because the disk is full. Free some space; sync will retry automatically.",
+            Some(ErrorCode::ReadOnly | ErrorCode::PermissionDenied) => "Device sync cannot write to its local database. Check its file permissions; sync will retry automatically.",
+            _ => "Device sync could not read or save local settings. It will retry automatically.",
+        }.into();
+    }
     match reason.downcast_ref::<crate::packs::Error>() {
         Some(pack)=>format!("Could not apply synced settings: {}. {ADVICE}",pack.0.trim_end_matches('.')),
         None=>format!("Could not apply synced settings. {ADVICE}"),
@@ -532,14 +544,29 @@ pub fn public_records(store: &Store, prefix: &str) -> Vec<Value> {
 #[cfg(test)]
 mod native_tests {
     use super::*;
-    const GENERIC: &str = "Could not apply synced settings. Update Monogram on both devices, then retry.";
+    const GENERIC: &str = "Could not apply synced settings. Sync will retry automatically.";
     #[test]
     fn pack_error_reason_is_shown_to_the_user() {
         let text=user_message(&crate::packs::Error("Invalid pack artwork metadata."));
-        assert_eq!(text,"Could not apply synced settings: Invalid pack artwork metadata. Update Monogram on both devices, then retry.");
+        assert_eq!(text,"Could not apply synced settings: Invalid pack artwork metadata. Sync will retry automatically.");
         assert!(!text.contains(".."));
         // Messages without a trailing period read the same way.
-        assert!(user_message(&crate::packs::Error("Invalid pack metadata identity")).contains("identity. Update"));
+        assert!(user_message(&crate::packs::Error("Invalid pack metadata identity")).contains("identity. Sync"));
+    }
+    #[test]
+    fn sqlite_failures_report_local_causes_without_private_details() {
+        for (code, expected) in [
+            (rusqlite::ffi::SQLITE_BUSY, "waiting for the local database"),
+            (rusqlite::ffi::SQLITE_LOCKED, "waiting for the local database"),
+            (rusqlite::ffi::SQLITE_FULL, "disk is full"),
+            (rusqlite::ffi::SQLITE_READONLY, "file permissions"),
+            (rusqlite::ffi::SQLITE_ERROR, "read or save local settings"),
+        ] {
+            let failure = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), Some("fictional-private-account /private/path SQL".into()));
+            let text = user_message(&failure);
+            assert!(text.contains(expected) && text.contains("retry automatically"), "{text}");
+            assert!(!text.contains("Update") && !text.contains("fictional") && !text.contains("/private") && !text.contains("SQL"));
+        }
     }
     #[test]
     fn non_pack_errors_never_leak_their_content() {
