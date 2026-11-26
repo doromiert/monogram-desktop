@@ -288,6 +288,10 @@ GtkMediaStream *monogram_video_new (const char *uri, GtkWidget **controls, GtkWi
     gst_object_ref_sink(sink);
     /* Its GTK paintable must be created on this UI thread, before preroll. */
     g_object_get(sink,"paintable",&self->paintable,NULL);
+    /* NULL->READY makes the sink call back into this UI thread and wait. Done later, from a
+     * streaming thread while playbin holds its lock, that deadlocks with Clapper's UI-thread
+     * notify handler, which reads playbin's video-sink under the same lock. Do it here instead. */
+    gst_element_set_state(sink,GST_STATE_READY);
     clapper_player_set_video_sink(self->player,sink);
     gst_object_unref(sink);
   }

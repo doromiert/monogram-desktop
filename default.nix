@@ -1,4 +1,4 @@
-{ pkgs, lib, stdenv, pkg-config, protobuf, libomemo-c, openssl, gtk4, libadwaita, libepoxy, libglycin-gtk4, glycin-loaders, libultrahdr, sqlite, wrapGAppsHook4, xorg-server, dbus, makeFontsConf, adwaita-fonts, gsettings-desktop-schemas, mesa, librsvg, prosody, cacert, python3, gnome-keyring, gst_all_1, pipewire, clapper-unwrapped, bubblewrap, monogramSrc ? lib.cleanSource ./., craneLib ? import (builtins.fetchTarball {
+{ pkgs, lib, stdenv, pkg-config, protobuf, libomemo-c, openssl, gtk4, libadwaita, libepoxy, libglycin-gtk4, glycin-loaders, libultrahdr, withHdr ? true, sqlite, wrapGAppsHook4, xorg-server, dbus, makeFontsConf, adwaita-fonts, gsettings-desktop-schemas, mesa, librsvg, prosody, cacert, python3, gnome-keyring, gst_all_1, pipewire, clapper-unwrapped, bubblewrap, monogramSrc ? lib.cleanSource ./., craneLib ? import (builtins.fetchTarball {
   url = "https://github.com/ipetkov/crane/archive/79fd63528501446749c09f08cad486a58c7d173e.tar.gz";
   sha256 = "sha256-TREenflwEjxOSq292FYwbc3kEm7TDRtXCZRNWEdjBmg=";
 }) { inherit pkgs; } }:
@@ -9,6 +9,8 @@ let
     patches = (old.patches or []) ++ [ ./native/gtk-gpu-clip-restore.patch ];
   });
   fontConfig = makeFontsConf { fontDirectories = [ adwaita-fonts ]; };
+  # HDR still decoding needs libultrahdr; pass withHdr = false on systems without it.
+  hdrFeatureArgs = lib.optionalString (!withHdr) " --no-default-features";
   mathRenderer = pkgs.callPackage ./native/math { };
   commonArgs = {
     pname = "monogram-desktop";
@@ -33,16 +35,16 @@ let
   cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
   cargoArtifacts = craneLib.buildDepsOnly ((builtins.removeAttrs commonArgs [ "src" ]) // {
     inherit dummySrc cargoVendorDir;
-    cargoCheckExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-media-author --bin monogram-audio-preview";
-    cargoBuildExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-media-author --bin monogram-audio-preview";
+    cargoCheckExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-media-author --bin monogram-audio-preview${hdrFeatureArgs}";
+    cargoBuildExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-media-author --bin monogram-audio-preview${hdrFeatureArgs}";
   });
 in craneLib.buildPackage (commonArgs // {
   # Decoder/sink additions do not invalidate the unchanged Rust dependency build.
-  buildInputs = commonArgs.buildInputs ++ [ libultrahdr gst_all_1.gst-plugins-rs ];
+  buildInputs = commonArgs.buildInputs ++ lib.optional withHdr libultrahdr ++ [ gst_all_1.gst-plugins-rs ];
   MONOGRAM_MATH_HELPER = "${mathRenderer}/bin/monogram-math-renderer";
   MONOGRAM_BWRAP = "${bubblewrap}/bin/bwrap";
   inherit cargoArtifacts cargoVendorDir;
-  cargoBuildExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-media-author --bin monogram-audio-preview";
+  cargoBuildExtraArgs = "--bin monogram-desktop --bin monogram-sticker-renderer --bin monogram-media-author --bin monogram-audio-preview${hdrFeatureArgs}";
   passthru = { inherit cargoArtifacts gtk4Fixed mathRenderer; };
   nativeCheckInputs = [ xorg-server dbus prosody openssl python3 gnome-keyring ];
   postCheck = ''

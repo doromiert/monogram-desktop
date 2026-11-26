@@ -865,6 +865,26 @@ mod cold_playback_tests {
             assert!(player.media.error().is_none(),"Native media pipeline failed: {:?}",player.media.error());
         });
     }
+    #[test]
+    #[ignore = "requires isolated native display and media plugins"]
+    /// Ten simultaneous players once deadlocked the UI thread against playbin's lock
+    /// (gtk4paintablesink waiting for the UI thread while Clapper read video-sink on it).
+    fn many_simultaneous_players_do_not_deadlock() {
+        gtk::init().unwrap();
+        let path=std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reaction-video.mp4");
+        glib::MainContext::default().block_on(async {
+            assert!(gio::spawn_blocking(initialize).await.unwrap());
+            let mut players=Vec::new();
+            for _ in 0..10 {
+                let input=VerifiedFile(std::fs::File::open(&path).unwrap());
+                let player=Playback::new(input).expect("player");
+                player.media.set_playing(true);
+                players.push(player);
+            }
+            for _ in 0..40 { glib::timeout_future(Duration::from_millis(100)).await; }
+            for p in &players { assert!(p.media.error().is_none(), "{:?}", p.media.error()); }
+        });
+    }
 }
 
 #[cfg(test)]

@@ -13,7 +13,10 @@ on workers. Cached preview reads allow32MiB for1536px high-precision thumbnails,
 with the existing128MiB/256-file cache bounds.
 
 Ultra HDR JPEG gain maps are reconstructed by libultrahdr1.4 inside the existing
-network-free, resource-limited media-author sandbox. The input is a copied verified
+network-free, resource-limited media-author sandbox. This is optional: the `hdr`
+Cargo feature (on by default) enables it. If libultrahdr is missing, the build warns
+and still images decode normally without HDR. Build with `--no-default-features`
+(or Nix `withHdr = false`) to skip the library entirely. The input is a copied verified
 file descriptor; dimensions are checked before decode, output is bounded to4096px,
 EXIF orientation is applied, and derived files are removed with the private scratch
 directory. Original files are never rewritten. Ordinary JPEGs and unsupported or
