@@ -161,3 +161,23 @@ geometry is rounded to even values. Trims apply to the source timeline and must 
    hold a list of attachments. Doing that, and a grid to show it, is the remaining work, with the
    same behaviour needed in mobile.
 6. ~~Camera capture through the desktop camera portal.~~ Done for photos: see [CAMERA.md](CAMERA.md). Video capture and choosing between cameras remain.
+
+## Video viewer controls regression
+
+The viewer renders the shared stream paintable once. Its controls use
+`ClapperGtkAudio` as a controls-only AV container, with video streams explicitly
+enabled. Mounting `ClapperGtkVideo` here creates a second video viewport inside
+the bottom toolbar. The viewer owns fading and its separate fullscreen action.
+
+Compile the focused native check in the development shell:
+
+```sh
+cc -o /tmp/monogram-video-controls tests/video_controls_native.c $(pkg-config --cflags --libs clapper-gtk-0.0 gtk4)
+```
+
+Run it on a private GTK display with temporary HOME/XDG directories, passing
+absolute paths to `tests/fixtures/audio/video-only.webm`, `tests/fixtures/hdr/pq.mp4`
+and `tests/fixtures/hdr/hlg.mp4`. It checks decoded frames, a compact controls bar
+without another video widget, and the play/pause/seek actions. SDR, HDR10 and HLG
+passed with Clapper 0.10.0, GTK 4.22.4 and GStreamer 1.28.7; toolbar height was 44px.
+This headless check does not establish physical HDR output or fullscreen transitions.

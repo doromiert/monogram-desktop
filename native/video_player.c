@@ -1,4 +1,4 @@
-/* Galeria's ClapperGtk.Video + SimpleControls, adapted to the shared GTK paintable.
+/* Clapper SimpleControls, adapted to the shared GTK paintable.
  * Clapper remains the only decoder; GTK's stream interface preserves inline/arc/zoom rendering. */
 #include <clapper-gtk/clapper-gtk.h>
 #include <clapper/clapper.h>
@@ -6,7 +6,7 @@
 
 typedef struct {
   GtkMediaStream parent;
-  GtkWidget *video;
+  GtkWidget *controls;
   ClapperPlayer *player;
   GdkPaintable *paintable;
   GtkWidget *replay;
@@ -187,7 +187,7 @@ static void dispose (GObject *object) {
   G_OBJECT_CLASS (monogram_video_parent_class)->dispose (object);
   if (self->player) clapper_player_stop (self->player);
   g_clear_object (&self->paintable);
-  g_clear_object (&self->video);
+  g_clear_object (&self->controls);
   g_clear_object (&self->player);
 }
 static void monogram_video_class_init (MonogramVideoClass *klass) {
@@ -266,14 +266,18 @@ gboolean monogram_playback_init (void) {
 
 GtkMediaStream *monogram_video_new (const char *uri, GtkWidget **controls, GtkWidget **replay) {
   MonogramVideo *self = g_object_new (monogram_video_get_type (), NULL);
-  self->video = g_object_ref_sink (clapper_gtk_video_new ());
-  self->player = g_object_ref (clapper_gtk_av_get_player (CLAPPER_GTK_AV (self->video)));
+  /* The picture renders the stream; this owner must never render another video. */
+  self->controls = g_object_ref_sink (clapper_gtk_audio_new ());
+  self->player = g_object_ref (clapper_gtk_av_get_player (CLAPPER_GTK_AV (self->controls)));
   clapper_player_set_autoplay (self->player, FALSE);
-  clapper_gtk_video_set_fade_delay (CLAPPER_GTK_VIDEO (self->video), 3000);
+  /* Audio is the public controls-only AV container; restore its video streams. */
+  clapper_player_set_video_enabled (self->player, TRUE);
+  clapper_player_set_subtitles_enabled (self->player, TRUE);
   GtkWidget *simple = clapper_gtk_simple_controls_new ();
   gtk_widget_set_valign (simple, GTK_ALIGN_END);
-  clapper_gtk_video_add_overlay (CLAPPER_GTK_VIDEO (self->video), simple);
-  gtk_widget_add_css_class (self->video, "galeria-video");
+  clapper_gtk_simple_controls_set_fullscreenable (CLAPPER_GTK_SIMPLE_CONTROLS (simple), FALSE);
+  clapper_gtk_audio_set_child (CLAPPER_GTK_AUDIO (self->controls), simple);
+  gtk_widget_add_css_class (self->controls, "galeria-video");
   self->replay = g_object_ref_sink (gtk_button_new_with_label ("Replay"));
   gtk_widget_set_halign (self->replay, GTK_ALIGN_CENTER);
   gtk_widget_set_valign (self->replay, GTK_ALIGN_CENTER);
@@ -310,7 +314,7 @@ GtkMediaStream *monogram_video_new (const char *uri, GtkWidget **controls, GtkWi
   g_object_unref (item);
   /* Preroll off-thread in Clapper's own player thread; UI feedback stays immediate. */
   clapper_player_pause (self->player);
-  *controls = self->video;
+  *controls = self->controls;
   *replay = self->replay;
   return GTK_MEDIA_STREAM (self);
 }

@@ -915,7 +915,7 @@ impl MediaViewer {
         next.set_halign(gtk::Align::End);
         let next_revealer = reveal(next.upcast_ref(), gtk::Align::End, gtk::Align::Center);
         root.add_overlay(&next_revealer);
-        // Galeria keeps Clapper's real SimpleControls inside its owning Video widget.
+        // Keep the controls owner separate from the viewer's single video paintable.
         let controls_mount = bx(true, 0);
         controls_mount.add_css_class("galeria-video-controls");
         controls_mount.add_css_class("galeria-video");
